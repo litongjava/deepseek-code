@@ -61,7 +61,11 @@ async fn live_mode_change_applies_to_tool_after_inflight_model_request() {
     assert_eq!(completed(&paths.data_dir,&id).await.status,"completed");
     assert!(!workspace.join("must-not-exist.txt").exists());
     let (_,_,events)=jobs::events_since(&paths.data_dir,&id,&session,0).unwrap();
-    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]=="mode-write" && event["is_error"]==true));
+    let started = events.iter().find(|event| event["type"] == "tool_start" && event["name"] == "Write")
+        .expect("the denied Write call starts");
+    let occurrence = started["id"].as_str().unwrap();
+    assert!(!occurrence.is_empty());
+    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]==occurrence && event["is_error"]==true));
     worker::shutdown(&paths.data_dir,&session).await.unwrap();
     server.abort();
 }
@@ -801,7 +805,6 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
             .unwrap();
     }
     assert_eq!(completed(&paths.data_dir, &crash).await.status, "failed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let recovered = worker::ensure_worker(&paths.data_dir, executable, &session, &workspace)
         .await
         .unwrap();

@@ -71,8 +71,6 @@ fn the_request_carries_only_the_core_tools_by_default() {
         "AskUserQuestion",
         "EnterPlanMode",
         "ExitPlanMode",
-        "plan_mode",
-        "TaskOutput",
         "TaskStop",
     ] {
         assert!(
@@ -325,6 +323,286 @@ async fn removed_git_tools_cannot_be_restored_configured_or_called() {
         assert!(failed, "{name}: {output}");
         assert!(output.contains("Unknown tool"), "{name}: {output}");
     }
+}
+
+#[tokio::test]
+async fn retired_task_output_is_not_advertised_searched_or_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut probe = executor(temp.path());
+    let names = names(&probe);
+    assert!(!names.contains(&"TaskGet".to_owned()), "{names:?}");
+    assert!(!names.contains(&"TaskOutput".to_owned()), "{names:?}");
+    assert!(crate::tools::get_tool_definitions()
+        .iter()
+        .all(|tool| tool.name != "TaskOutput"));
+    let exposed: std::collections::HashSet<String> = names.into_iter().collect();
+    probe.exposed_tools = Some(exposed);
+    let (_, output, failed) = probe
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"select:TaskOutput"}),
+            "search",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["loaded_tools"], json!([]), "{output}");
+    assert_eq!(value["tools"], json!([]), "{output}");
+
+    // TaskGet itself is deferred, but the same search still loads it.
+    let (_, output, failed) = probe
+        .execute_tool_call("ToolSearch", &json!({"query":"select:TaskGet"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["loaded_tools"], json!(["TaskGet"]), "{output}");
+    assert_eq!(value["tools"].as_array().map(Vec::len), Some(1), "{output}");
+
+    // A stored search result from before the consolidation cannot restore the
+    // retired name either.
+    let mut restored = executor(temp.path());
+    restored.messages = vec![
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"a1","name":"ToolSearch","input":{}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":json!({"success":true,"loaded_tools":["TaskOutput","WebSearch"],"tools":[]}).to_string()}]}),
+    ];
+    restored.restore_loaded_tools();
+    assert!(!restored.loaded_tools.contains("TaskOutput"));
+    assert!(restored.loaded_tools.contains("WebSearch"));
+}
+
+#[tokio::test]
+async fn a_legacy_task_output_call_follows_task_get_switches() {
+    let id = uuid::Uuid::new_v4().to_string();
+    // Both switches off: the alias must be refused before any dispatch.
+    let temp = tempfile::tempdir().unwrap();
+    write_switches(temp.path(), &[("TaskGet", false, false)]);
+    let mut disabled = executor(temp.path());
+    let (_, output, failed) = disabled
+        .execute_tool_call("TaskOutput", &json!({"task_id":id}), "alias-off")
+        .await;
+    assert!(failed, "{output}");
+    assert!(output.contains("TaskGet is turned off"), "{output}");
+
+    // On demand but never searched: the alias cannot skip the loading gate.
+    let temp = tempfile::tempdir().unwrap();
+    write_switches(temp.path(), &[("TaskGet", false, true)]);
+    let mut unloaded = executor(temp.path());
+    let (_, output, failed) = unloaded
+        .execute_tool_call("TaskOutput", &json!({"task_id":id}), "alias-unloaded")
+        .await;
+    assert!(failed, "{output}");
+    assert!(output.contains("TaskGet is not loaded"), "{output}");
+}
+
+#[tokio::test]
+async fn task_get_can_be_discovered_on_demand_and_invoked() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    write_switches(temp.path(), &[("TaskGet", false, true)]);
+    let mut executor = executor(temp.path()).with_conv_id(session.clone());
+    let initial = names(&executor);
+    assert!(!initial.contains(&"TaskGet".to_owned()), "{initial:?}");
+    executor.exposed_tools = Some(initial.into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"select:TaskGet"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let loaded: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(loaded["success"], true, "{output}");
+    assert_eq!(loaded["loaded_tools"], json!(["TaskGet"]), "{output}");
+
+    let task = crate::tools::tasks::execute_for_session(
+        "TaskCreate",
+        json!({"subject":"hidden task"}),
+        temp.path(),
+        &session,
+    )
+    .unwrap();
+    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+    assert!(next.contains("TaskGet"), "{next:?}");
+    executor.exposed_tools = Some(next);
+    let (_, output, failed) = executor
+        .execute_tool_call("TaskGet", &json!({"id":task["id"]}), "get")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["subject"], "hidden task");
+}
+
+#[tokio::test]
+async fn task_get_is_deferred_and_loadable() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut executor = executor(temp.path()).with_conv_id(session.clone());
+    let initial = names(&executor);
+    assert!(!initial.contains(&"TaskGet".to_owned()), "{initial:?}");
+    executor.exposed_tools = Some(initial.into_iter().collect());
+
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"select:TaskGet"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let loaded: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(loaded["success"], true, "{output}");
+    assert_eq!(loaded["loaded_tools"], json!(["TaskGet"]), "{output}");
+
+    let task = crate::tools::tasks::execute_for_session(
+        "TaskCreate",
+        json!({"subject":"deferred task"}),
+        temp.path(),
+        &session,
+    )
+    .unwrap();
+    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+    assert!(next.contains("TaskGet"), "{next:?}");
+    executor.exposed_tools = Some(next);
+    let (_, output, failed) = executor
+        .execute_tool_call("TaskGet", &json!({"id":task["id"]}), "get")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["subject"], "deferred task");
+}
+
+#[test]
+fn the_catalog_carries_each_task_builtin_once_and_no_retired_entries() {
+    let catalog = crate::tools::get_tool_definitions();
+    for name in ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"] {
+        assert_eq!(
+            catalog.iter().filter(|tool| tool.name == name).count(),
+            1,
+            "{name} must be one real builtin"
+        );
+    }
+    for name in ["TaskOutput", "plan_mode"] {
+        assert!(
+            catalog.iter().all(|tool| tool.name != name),
+            "{name} must stay retired"
+        );
+    }
+    // The retained task capabilities are part of the advertised schemas.
+    let update = catalog
+        .iter()
+        .find(|tool| tool.name == "TaskUpdate")
+        .unwrap();
+    assert_eq!(
+        update.input_schema["properties"]["setBlockedBy"]["type"],
+        "array"
+    );
+    let get = catalog.iter().find(|tool| tool.name == "TaskGet").unwrap();
+    assert_eq!(get.input_schema["properties"]["block"]["type"], "boolean");
+    assert_eq!(
+        get.input_schema["properties"]["timeout"]["maximum"],
+        600_000
+    );
+    // Enter/Exit stay real builtins with their own definitions.
+    for name in ["EnterPlanMode", "ExitPlanMode"] {
+        assert_eq!(
+            catalog.iter().filter(|tool| tool.name == name).count(),
+            1,
+            "{name} must stay advertised"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retired_plan_mode_cannot_be_resurrected_by_settings_loaded_names_or_a_direct_call() {
+    let temp = tempfile::tempdir().unwrap();
+    // A settings file written before the retirement still says "on".
+    write_switches(temp.path(), &[("plan_mode", true, true)]);
+    let mut probe = executor(temp.path());
+    let names = names(&probe);
+    assert!(!names.contains(&"plan_mode".to_owned()), "{names:?}");
+    assert!(crate::tools::get_tool_definitions()
+        .iter()
+        .all(|tool| tool.name != "plan_mode"));
+
+    // It is not searchable either.
+    probe.exposed_tools = Some(names.into_iter().collect());
+    let (_, output, failed) = probe
+        .execute_tool_call("ToolSearch", &json!({"query":"select:plan_mode"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["loaded_tools"], json!([]), "{output}");
+    assert_eq!(value["tools"], json!([]), "{output}");
+
+    // An old stored ToolSearch result cannot restore it.
+    let mut restored = executor(temp.path());
+    restored.messages = vec![
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"a1","name":"ToolSearch","input":{}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":json!({"success":true,"loaded_tools":["plan_mode","TaskGet"],"tools":[]}).to_string()}]}),
+    ];
+    restored.restore_loaded_tools();
+    assert!(!restored.loaded_tools.contains("plan_mode"));
+    assert!(restored.loaded_tools.contains("TaskGet"));
+
+    // A direct call fails before any legacy plan storage is created, even
+    // though this executor has a settings file that enabled the old name.
+    std::fs::create_dir_all(temp.path().join("work")).unwrap();
+    let mut direct = executor(&temp.path().join("work"));
+    let (_, output, failed) = direct
+        .execute_tool_call(
+            "plan_mode",
+            &json!({"operation":"create","task":"legacy","steps":[]}),
+            "retired",
+        )
+        .await;
+    assert!(failed, "{output}");
+    assert!(output.contains("Unknown tool: plan_mode"), "{output}");
+    assert!(!temp.path().join("work/.claude").exists());
+    assert_eq!(
+        crate::tools::execute_tool(
+            "plan_mode",
+            json!({"operation":"list"}),
+            &temp.path().to_string_lossy()
+        )
+        .unwrap_err()
+        .to_string(),
+        "Unknown tool: plan_mode"
+    );
+}
+
+#[tokio::test]
+async fn retired_plan_mode_never_reaches_hooks_or_permission_prompts() {
+    let temp = tempfile::tempdir().unwrap();
+    let _ = crate::config::OrchestrationConfig::init_global();
+    let (tx, mut rx) = mpsc::channel(16);
+    let manager = crate::runtime::default_permissions();
+    manager.set_mode(crate::permissions::PermissionMode::AskPermissions);
+    manager.set_session_rules(
+        "tool-loading-fixture",
+        std::collections::HashMap::from([(
+            "plan_mode".into(),
+            crate::permissions::rules::PermissionAction::Confirm,
+        )]),
+    );
+    let mut executor = ToolLoopExecutor::new(
+        provider(),
+        vec![],
+        None,
+        128,
+        tx,
+        temp.path().to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_conv_id("tool-loading-fixture".into())
+    .with_permission_manager(manager)
+    .with_search_config_path(temp.path().join("config.json"));
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "plan_mode",
+            &json!({"operation":"create","task":"legacy","steps":[]}),
+            "retired",
+        )
+        .await;
+    assert!(failed, "{output}");
+    assert!(output.contains("Unknown tool: plan_mode"), "{output}");
+    assert!(
+        rx.try_recv().is_err(),
+        "a retired tool must not request permission"
+    );
+    assert!(!temp.path().join(".claude").exists());
 }
 
 /// The probe states from the second audit: a call from the wrong role, a result
@@ -2393,4 +2671,27 @@ async fn complete_name_selection_preserves_loading_restrictions() {
         assert!(!error, "{restriction}: {output}");
         assert_eq!(value["loaded_tools"], json!(["WebFetch"]), "{restriction}");
     }
+}
+
+#[tokio::test]
+async fn monitor_is_deferred_and_loadable() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor =
+        executor(temp.path()).with_conv_id(uuid::Uuid::new_v4().to_string());
+    let initial = names(&executor);
+    assert!(
+        !initial.contains(&"Monitor".to_owned()),
+        "Monitor must not be in the default request: {initial:?}"
+    );
+    executor.exposed_tools = Some(initial.into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"select:Monitor"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let loaded: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(loaded["success"], true, "{output}");
+    assert_eq!(loaded["loaded_tools"], json!(["Monitor"]), "{output}");
+
+    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+    assert!(next.contains("Monitor"), "{next:?}");
 }

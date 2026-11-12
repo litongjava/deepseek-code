@@ -28,6 +28,29 @@ pub fn terminal_input() -> TerminalInput {
     TerminalInput::new()
 }
 
+/// A direct print/json owner that died cannot run its own `Drop` guard, so its
+/// execution turn stays `running` forever. Settle it only after proving that no
+/// process holds the execution lease, and never replay the request.
+///
+/// The lease is taken for the settlement itself only, so two resumed terminals
+/// cannot settle concurrently; it is dropped before the caller displays
+/// anything and is not observation.
+fn settle_abandoned_turns(paths: &RuntimePaths, store: &SessionStore, id: &str) -> Vec<deepseek_code_core::db::turn_repo::TurnRecord> {
+    use deepseek_code_core::services::session_messages;
+    if session_messages::execution_active(&paths.data_dir, id).unwrap_or(true) {
+        return Vec::new();
+    }
+    let Ok(Some(_lease)) = session_messages::ExecutionLease::acquire(&paths.data_dir, id) else {
+        return Vec::new();
+    };
+    store
+        .db
+        .with_conn(|conn| deepseek_code_core::db::turn_repo::settle_interrupted(conn, id))
+        .ok()
+        .and_then(|settled| settled.ok())
+        .unwrap_or_default()
+}
+
 pub struct Session {
     /// Restored sessions wait for explicit input before allowing idle model work.
     waiting_for_continue: std::sync::atomic::AtomicBool,
@@ -36,6 +59,10 @@ pub struct Session {
     pub(crate) sdk_permissions: Option<Arc<crate::sdk::Permissions>>,
     pub(crate) sdk_interrupt: Option<tokio::sync::watch::Receiver<bool>>,
     pub(crate) sdk_content: Option<Value>,
+    /// Stream-json user frames steered into the running turn, keyed by their
+    /// handoff message id, replayed when the engine delivers them.
+    pub(crate) sdk_steered_replays:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
     pub(crate) initial_hook_message: Option<String>,
     pub(crate) sdk_overrides: crate::sdk_initialization::Overrides,
     pub(crate) sdk_hooks: Option<crate::sdk_hooks::Runtime>,
@@ -415,6 +442,16 @@ impl Session {
         let explicit_mode = cli.permission_mode_explicit || cli.dangerously_skip_permissions || !matches!(cli.permission_mode, PermissionModeArg::Ask);
         // Clear what exited processes left behind, so a crash cannot block this resume.
         let settled = if internal_worker { None } else { deepseek_code_core::services::session_worker::settle_session(&paths.data_dir, &id).ok() };
+        // A direct print/json run leaves no worker job; settle its abandoned turn
+        // so the resumed screen reports an interruption instead of a live turn.
+        if resumed_id.is_some() && !internal_worker {
+            let interrupted = settle_abandoned_turns(paths, &store, &id);
+            if !interrupted.is_empty() {
+                eprintln!(
+                    "Recovered interrupted turn state; the previous request was not replayed and will not be rerun automatically."
+                );
+            }
+        }
         let active_job = if internal_worker { None } else if let Some(settled) = settled { settled.active } else { deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?.into_iter().find(|job|job.session_id == id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) };
         if let Some(job) = &active_job {
             anyhow::ensure!(cli.allowed_tools.is_empty() && cli.disallowed_tools.is_empty(), "This session has active background work; attach without launch tool rules, or stop the worker before changing them");
@@ -481,6 +518,7 @@ impl Session {
             sdk_permissions: None,
             sdk_interrupt: None,
             sdk_content: None,
+            sdk_steered_replays: Default::default(),
             sdk_overrides: Default::default(),
             sdk_hooks: None,
             sdk_mcp,
@@ -979,12 +1017,24 @@ impl Session {
         initial_hook: bool,
         publish: bool,
     ) -> Result<()> {
+        // Own the session before the turn becomes visible, and keep that
+        // ownership until the turn is persisted. The engine only borrows a clone
+        // while it runs, so a terminal that resumes during compaction, hooks or
+        // finalization cannot mistake the turn for an abandoned one.
+        //
+        // This is exclusive admission: a second top-level turn - from another
+        // Session object, another thread or another process - is rejected here,
+        // before any turn record, queued input or model request.
+        let turn_lease = match deepseek_code_core::services::session_messages::ExecutionLease::acquire(&self.paths.data_dir, &self.id) {
+            Ok(lease) => lease.map(std::sync::Arc::new),
+            Err(error) => return Err(error).context("This session is already executing in another process; observe or stop that turn first"),
+        };
         let mut turn =
             deepseek_code_core::db::turn_repo::TurnTimer::start(self.store.db.clone(), &self.id)?;
         let mut completion = TurnCompletion::default();
         let mut recovery_requests = Vec::new();
         let mut result = async {
-            let first = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion).await;
+            let first = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion, turn_lease.clone()).await;
             match first {
                 Err(error) if !hook_wake && !initial_hook && crate::session_commands::is_context_overflow(&error) => {
                     recovery_requests.extend(completion.requests.iter().cloned());
@@ -1012,7 +1062,10 @@ impl Session {
                         Ok(true) => {
                             let previous = completion.sdk_result.take();
                             completion = TurnCompletion::default();
-                            let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion).await;
+                            // Retrying after compaction stays inside this turn and
+                            // keeps its ownership; a failure here would mean the
+                            // lease was lost, so it must not be ignored.
+                            let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion, turn_lease.clone()).await;
                             completion.sdk_result = Some(merge_attempt_results(previous, completion.sdk_result.take()));
                             result
                         }
@@ -1110,6 +1163,7 @@ impl Session {
         publish: bool,
         turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
         completion: &mut TurnCompletion,
+        execution_lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
     ) -> Result<()> {
         self.sdk_cancellable(deepseek_code_core::services::lifecycle_events::check_configuration(
             &self.hook_service_context(), &self.workspace, &self.id,
@@ -1245,11 +1299,15 @@ impl Session {
         };
         let request = Box::pin(async {
             if hook_wake {
-                self.engine.send_hook_wake(chat_request, false).await
+                match execution_lease {
+                    Some(lease) => self.engine.send_hook_wake_with_lease(chat_request, false, lease).await,
+                    None => self.engine.send_hook_wake(chat_request, false).await,
+                }
             } else {
-                self.engine
-                    .send_message_with_history(chat_request, false)
-                    .await
+                match execution_lease {
+                    Some(lease) => self.engine.send_message_with_lease(chat_request, false, lease).await,
+                    None => self.engine.send_message_with_history(chat_request, false).await,
+                }
             }
         });
         let worker_cancel = deepseek_code_core::services::background_sessions::wait_for_cancellation();
@@ -1291,7 +1349,7 @@ impl Session {
         let mut completed = false;
         let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
-        crate::session_commands::save_live_requests(self, &[])?;
+        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tool_started = std::collections::HashMap::<String, std::time::Instant>::new();
@@ -1311,7 +1369,12 @@ impl Session {
         });
         // num_turns and permission_denials for the json result, as stream-json reports them.
         let (mut model_rounds, mut round_open, mut denials) = (0u32, false, Vec::<Value>::new());
-        let background_transcript = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some();
+        // A worker publishes progress for its frontend. A direct print/json owner
+        // does too, so a resumed terminal can observe the turn while it runs;
+        // only an interactive terminal turn has its own live display.
+        let background_transcript = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some()
+            || input.is_none()
+            || cli.output_format != OutputFormat::Text;
         let mut live_transcript = BackgroundTranscript::default();
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1328,7 +1391,7 @@ impl Session {
                     _ = refresh.tick() => {
                         progress.tick();
                         if background_transcript {
-                            live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                            best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                         }
                         if interactive_display {
                             for notice in crate::background_commands::collect_completed(self)? { progress.notice(&notice); }
@@ -1414,7 +1477,7 @@ impl Session {
                 if background_transcript {
                     live_transcript.observe(&event, &mut tools);
                     if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
-                        live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                        best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                     }
                 }
                 match event {
@@ -1652,23 +1715,43 @@ impl Session {
                         progress.set_activity("Composing");
                     },
                     EngineEvent::QueuedInput(delivered) => {
-                        // Kept separate from approval notes and their authorization semantics.
-                        if let Some(tool) = tools.last() {
-                            let inputs = queued_inputs_by_tool.entry(tool.id.clone()).or_default();
-                            inputs.push(delivered.clone());
-                            self.store.db.with_conn(|conn| -> Result<()> {
-                                let tx = deepseek_code_core::db::write_transaction(conn)?;
-                                let call_id = format!("{assistant_id}:{}", tool.id);
-                                message_repo::update_message_content(&tx, &assistant_id, &text)?;
-                                message_repo::insert_tool_call(&tx, &call_id, &assistant_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
-                                deepseek_code_core::services::input_queue::save_delivered(&tx, &call_id, inputs)?;
-                                tx.commit()?;
-                                Ok(())
-                            })??;
+                        // A stream-json host frame steered into this turn is
+                        // replayed with its UUID when the model receives it,
+                        // rather than when the host sent it.
+                        let replay = self
+                            .sdk_steered_replays
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .remove(&delivered.origin);
+                        if cli.replay_user_messages {
+                            if let Some(mut envelope) = replay {
+                                envelope["session_id"] = json!(self.id);
+                                emit_json(&envelope)?;
+                            }
                         }
-                        let text = delivered.text;
-                        if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
-                        progress.queued_delivered(&text);
+                        // Kept separate from approval notes and their authorization semantics.
+                        // A durable steer item already has its own transcript row,
+                        // saved by the handoff, and the stream-json `queued_input`
+                        // event reports its delivery; only input with no row of its
+                        // own is attached to the preceding tool result.
+                        if !delivered.origin.starts_with("queue-input-") {
+                            if let Some(tool) = tools.last() {
+                                let inputs = queued_inputs_by_tool.entry(tool.id.clone()).or_default();
+                                inputs.push(delivered.clone());
+                                self.store.db.with_conn(|conn| -> Result<()> {
+                                    let tx = deepseek_code_core::db::write_transaction(conn)?;
+                                    let call_id = format!("{assistant_id}:{}", tool.id);
+                                    message_repo::update_message_content(&tx, &assistant_id, &text)?;
+                                    message_repo::insert_tool_call(&tx, &call_id, &assistant_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
+                                    deepseek_code_core::services::input_queue::save_delivered(&tx, &call_id, inputs)?;
+                                    tx.commit()?;
+                                    Ok(())
+                                })??;
+                            }
+                            let text = delivered.text;
+                            if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
+                            progress.queued_delivered(&text);
+                        }
                     },
                     EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, display_title, .. } => {
                         tool_started.entry(tool_use_id.clone()).or_insert_with(std::time::Instant::now);
@@ -1706,14 +1789,26 @@ impl Session {
                             }
                         }
                         let position = tools.iter().position(|tool| tool.id == tool_use_id);
-                        let row = message_repo::ToolCallRow { id: tool_use_id, message_id: String::new(), name: tool_name, input: Some(tool_input.to_string()), output: Some(output), is_error, sort_order: position.unwrap_or(tools.len()) as i64 };
+                        // A legacy/mirrored completion can omit the input. Keep
+                        // the richer input already seen for this occurrence
+                        // instead of erasing the command/path.
+                        let incoming = tool_input.to_string();
+                        let input = if tool_input.as_object().is_none_or(|fields| fields.is_empty()) {
+                            position
+                                .and_then(|position| tools[position].input.clone())
+                                .filter(|input| input != "{}" && input != "null")
+                                .unwrap_or(incoming)
+                        } else {
+                            incoming
+                        };
+                        let row = message_repo::ToolCallRow { id: tool_use_id, message_id: String::new(), name: tool_name, input: Some(input), output: Some(output), is_error, sort_order: position.unwrap_or(tools.len()) as i64 };
                         if let Some(position) = position { tools[position] = row; } else { tools.push(row); }
                     },
                     EngineEvent::RequestSnapshot(snapshot) => {
                         request_usage.observe(&snapshot);
                         goal_requests.observe(&snapshot);
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
-                        crate::session_commands::save_live_requests(self, &snapshots)?;
+                        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &snapshots));
                     },
                     EngineEvent::RequestAttempt(event) => {
                         if let Err(error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &event) {
@@ -1765,14 +1860,17 @@ impl Session {
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
                     }
                     EngineEvent::QueuedInput(delivered) => {
-                        if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                        // Durable deliveries already have their own transcript row.
+                        if !delivered.origin.starts_with("queue-input-") {
+                            if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                        }
                     }
                     _ => {}
                 }
             }
             if background_transcript {
                 live_transcript.dirty = true;
-                live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
             }
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
@@ -1846,7 +1944,7 @@ impl Session {
                 )
             })??;
         }
-        crate::session_commands::save_live_requests(self, &[])?;
+        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
         if let Some(goal) = turn_goal {
             let (tokens, requests, unreported) = goal_requests.usage();
             deepseek_code_core::services::session_goals::record_turn(
@@ -1930,6 +2028,22 @@ impl Session {
             if let Err(error) = crate::repl::save_completion(self) {
                 eprintln!("Could not save turn completion status: {error}");
             }
+        }
+        // The engine emits its public completion from inside the executor task.
+        // Wait for that task to stop before this turn releases the session, so
+        // the next turn cannot race the tail of the previous one. A pending
+        // result is not completion: the executor still owns the session and a
+        // new attempt remains refused until it actually ends.
+        match self
+            .engine
+            .wait_for_executor(&self.id, std::time::Duration::from_secs(30))
+            .await
+        {
+            deepseek_code_core::native_engine::ExecutorWait::Completed => {}
+            deepseek_code_core::native_engine::ExecutorWait::Pending => eprintln!(
+                "Executor for session {} is still cleaning up; the session remains owned.",
+                self.id
+            ),
         }
         if let Some(error) = error {
             if cli.output_format != OutputFormat::Text {
@@ -2079,6 +2193,15 @@ pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> R
     Ok(())
 }
 
+/// A live copy (request accounting or the streaming transcript) is best effort:
+/// the turn's final `write_tx` persists the authoritative rows with retries, so a
+/// busy or failed live write is logged and skipped instead of ending the turn.
+fn best_effort_live_write(what: &str, result: Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!("Skipped live {what} write: {error:#}");
+    }
+}
+
 /// Uses the turn's existing rows and IDs; only workers publish intermediate snapshots.
 #[derive(Default)]
 struct BackgroundTranscript {
@@ -2114,8 +2237,19 @@ impl BackgroundTranscript {
         });
         let row = &mut tools[index];
         if let Some(name) = name { row.name = name.clone(); }
-        // Late start/delta events must not overwrite a completed call's input.
-        if row.output.is_none() || result.is_some() { row.input = Some(input); }
+        // Late start/delta events must not overwrite a completed call's input,
+        // and a legacy completion without input must not erase the richer
+        // input already seen for this occurrence.
+        let rich = |text: &str| {
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .is_some_and(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
+        };
+        let incoming_rich = rich(&input);
+        let existing_rich = row.input.as_deref().is_some_and(rich);
+        if (row.output.is_none() || result.is_some()) && (incoming_rich || !existing_rich) {
+            row.input = Some(input);
+        }
         if let Some((output, is_error)) = result {
             row.output = Some(output.clone());
             row.is_error = is_error;
@@ -2176,6 +2310,179 @@ mod background_transcript_tests {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, format!("{assistant}:call"));
             assert_eq!(calls[0].output.as_deref(), Some("complete"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn five_occurrences_persist_five_rows_and_a_mirror_updates_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        for index in 0..5 {
+            let (name, input) = if index < 3 {
+                ("Bash", json!({"command":format!("printf 'RESULT_{index}'")}))
+            } else {
+                ("Read", json!({"file_path":format!("file-{index}.txt")}))
+            };
+            live.observe(
+                &EngineEvent::ToolUseDone {
+                    tool_use_id: format!("inv-scope-{index}"),
+                    tool_name: name.into(),
+                    tool_input: input,
+                    output: format!("OUT_{index}"),
+                    is_error: false,
+                },
+                &mut tools,
+            );
+        }
+        // A mirrored completion of the same occurrence is not a new execution.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-0".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RESULT_0'"}),
+                output: "OUT_0".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        // A changed completion updates its own row without adding one.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RESULT_1'"}),
+                output: "UPDATED_1".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 5);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RESULT_0'"}"#));
+            assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
+            assert_eq!(calls[3].input.as_deref(), Some(r#"{"file_path":"file-3.txt"}"#));
+        }).unwrap();
+    }
+
+    #[test]
+    fn legacy_missing_input_completion_keeps_the_start_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(
+            &EngineEvent::ToolUseStart {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RICH_INPUT'"}),
+                text_before: String::new(),
+                display_title: None,
+            },
+            &mut tools,
+        );
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({}),
+                output: "RICH_INPUT".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RICH_INPUT'"}"#));
+        }).unwrap();
+    }
+
+    #[test]
+    fn mirrored_pipeline_completion_updates_one_row_with_the_changed_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'ORIGINAL'"}),
+                output: "ORIGINAL".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        // Desktop mirrors the same execution through PipelineToolResult.
+        live.observe(
+            &EngineEvent::PipelineToolResult {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'ORIGINAL'"}),
+                output: "ORIGINAL".into(),
+                is_error: false,
+                completed_count: 1,
+                total_count: 1,
+            },
+            &mut tools,
+        );
+        // A changed completion updates the same occurrence instead of adding one.
+        live.observe(
+            &EngineEvent::PipelineToolResult {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'REVISED'"}),
+                output: "REVISED".into(),
+                is_error: false,
+                completed_count: 1,
+                total_count: 1,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'REVISED'"}"#));
+            assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn flush_keeps_dirty_when_the_database_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(&EngineEvent::Text("streamed".into()), &mut tools);
+        // Hold the writer like another process mid-checkpoint would.
+        let blocker = rusqlite::Connection::open(temp.path().join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(live.flush(&context.db, &session, &assistant, "streamed", "", &tools).is_err());
+        assert!(live.dirty, "a failed flush must retry on the next tick");
+        blocker.execute_batch("COMMIT").unwrap();
+        live.flush(&context.db, &session, &assistant, "streamed", "", &tools).unwrap();
+        assert!(!live.dirty);
+        context.db.with_conn(|conn| {
+            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
+            assert_eq!(message.content, "streamed");
         }).unwrap();
     }
 }
@@ -2244,6 +2551,7 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
         EngineEvent::ToolUseDone {
             tool_use_id,
             tool_name,
+            tool_input,
             output,
             is_error,
             ..
@@ -2251,11 +2559,14 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
         | EngineEvent::PipelineToolResult {
             tool_use_id,
             tool_name,
+            tool_input,
             output,
             is_error,
             ..
         } => {
-            json!({"type":"tool_result","id":tool_use_id,"name":tool_name,"output":output,"is_error":is_error})
+            // The completion carries the authoritative post-hook input. Without
+            // it a mirrored/worker completion renders a bare tool name.
+            json!({"type":"tool_result","id":tool_use_id,"name":tool_name,"input":tool_input,"output":output,"is_error":is_error})
         }
         EngineEvent::AskUser {
             request_id,
@@ -2383,6 +2694,36 @@ mod event_tests {
         ));
     }
 
+    #[test]
+    fn tool_result_json_carries_the_authoritative_input() {
+        let done = EngineEvent::ToolUseDone {
+            tool_use_id: "inv-scope-1".into(),
+            tool_name: "Bash".into(),
+            tool_input: json!({"command":"printf 'hello'"}),
+            output: "hello".into(),
+            is_error: false,
+        };
+        let value = super::event_json(&done).unwrap();
+        assert_eq!(value["type"], "tool_result");
+        assert_eq!(value["id"], "inv-scope-1");
+        assert_eq!(value["input"]["command"], "printf 'hello'");
+        // The worker frontend reads `input` from this exact JSON transport.
+        assert_eq!(value["input"], json!({"command":"printf 'hello'"}));
+        let pipeline = EngineEvent::PipelineToolResult {
+            tool_use_id: "inv-scope-2".into(),
+            tool_name: "Read".into(),
+            tool_input: json!({"file_path":"file.txt"}),
+            output: "content".into(),
+            is_error: false,
+            completed_count: 1,
+            total_count: 1,
+        };
+        assert_eq!(
+            super::event_json(&pipeline).unwrap()["input"]["file_path"],
+            "file.txt"
+        );
+    }
+
     #[tokio::test]
     async fn persisted_permission_mode_restores_unless_explicit_cli_overrides() {
         let root = tempfile::tempdir().unwrap();
@@ -2479,6 +2820,224 @@ mod event_tests {
         session.sdk_set_model("flash[1m]").await.unwrap();assert_eq!(session.model,"flash[1m]");
         session.resume_saved(&paths,&saved).await.unwrap();assert_eq!(session.context_window().await,Some(1_000_000));
         assert_eq!(session.store.resume(&saved).unwrap().model.as_deref(),Some("flash[1m]"));
+    }
+
+    /// A second top-level turn for the same session must be rejected at
+    /// admission, before it creates a turn record or sends a model request,
+    /// even when both turns live in one process as separate Session objects.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_top_level_turn_is_rejected_before_any_record_or_request() {
+        use clap::Parser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        #[derive(Clone)]
+        struct Gate {
+            streams: Arc<AtomicUsize>,
+            release: Arc<tokio::sync::Semaphore>,
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(directory.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let gate = Gate {
+            streams: Arc::default(),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let state = gate.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let state = state.clone();
+                async move {
+                    if body["stream"] == true {
+                        state.streams.fetch_add(1, Ordering::SeqCst);
+                        // Held until the test has proved the second turn was rejected.
+                        let _permit = state.release.acquire().await.unwrap();
+                    }
+                    (
+                        [("content-type", "text/event-stream")],
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider_json = json!({"id":"fixture","name":"Fixture","base_url":format!("http://{address}/v1"),"api_key":"fixture-only","api_format":"openai","enabled":true,"web_search_strategy":null,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":64,"supports_vision":false,"supports_web_search":false}]});
+        let cli = Cli::try_parse_from(["dcl", "--print"]).unwrap();
+        let first = Session::open(
+            &cli,
+            &paths,
+            Selection {
+                providers: vec![serde_json::from_value(provider_json.clone()).unwrap()],
+                provider_id: "fixture".into(),
+                model: "fixture-model".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let id = first.id.clone();
+        // A separate Session object for the same saved session, as a second
+        // top-level caller inside this process.
+        let second = Session::open(
+            &cli,
+            &paths,
+            Selection {
+                providers: vec![serde_json::from_value(provider_json.clone()).unwrap()],
+                provider_id: "fixture".into(),
+                model: "fixture-model".into(),
+            },
+            Some(&id),
+        )
+        .await
+        .unwrap();
+        let cli_first = Cli::try_parse_from(["dcl", "--print"]).unwrap();
+        let mut blocked = Some(first);
+        let turn = tokio::spawn(async move {
+            blocked
+                .as_mut()
+                .unwrap()
+                .run_turn(&cli_first, "first task", &mut None)
+                .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while gate.streams.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first turn never reached the provider"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let turn_count = || {
+            second
+                .store
+                .db
+                .with_conn(|conn| -> Result<i64> {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM execution_turns WHERE conversation_id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?)
+                })
+                .unwrap()
+                .unwrap()
+        };
+        let turns_before = turn_count();
+        let error = second
+            .run_turn(&cli, "second task", &mut None)
+            .await
+            .expect_err("a concurrent top-level turn must be rejected");
+        assert!(
+            format!("{error:#}").contains("already executing"),
+            "unexpected rejection: {error:#}"
+        );
+        assert_eq!(
+            gate.streams.load(Ordering::SeqCst),
+            1,
+            "the rejected turn must not request the model"
+        );
+        let turns_after = turn_count();
+        assert_eq!(
+            turns_before, turns_after,
+            "the rejected turn must not create a turn record"
+        );
+        assert!(
+            !deepseek_code_core::services::input_queue::any(&second.store.db, &id, |text| {
+                text == "second task"
+            })
+            .unwrap(),
+            "the rejected turn persisted its input"
+        );
+        gate.release.add_permits(1);
+        turn.await.unwrap().unwrap();
+        // The rejected turn never owned the session; the admitted one released
+        // it when it returned.
+        deepseek_code_core::services::session_messages::ExecutionLease::acquire(
+            &paths.data_dir,
+            &id,
+        )
+        .expect("the session is free after the admitted turn")
+        .expect("a real session id");
+        second.close().await.unwrap();
+        server.abort();
+    }
+
+    /// Rapid sequential turns must each run exactly once and release the
+    /// session before the next one starts: no turn races the executor's tail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rapid_sequential_turns_each_run_once_and_release_the_session() {
+        use clap::Parser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(directory.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let streams = Arc::new(AtomicUsize::new(0));
+        let state = streams.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let state = state.clone();
+                async move {
+                    if body["stream"] == true {
+                        state.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (
+                        [("content-type", "text/event-stream")],
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":format!("http://{address}/v1"),"api_key":"fixture-only","api_format":"openai","enabled":true,"web_search_strategy":null,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":64,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+        let selection = Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::try_parse_from(["dcl", "--print"]).unwrap();
+        let session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let id = session.id.clone();
+        for index in 0..6 {
+            session
+                .run_turn(&cli, &format!("task {index}"), &mut None)
+                .await
+                .unwrap_or_else(|error| panic!("turn {index} failed: {error:#}"));
+            // The lease is released by the completed turn itself, so the next
+            // turn is admitted immediately without waiting or retrying.
+            assert!(
+                !deepseek_code_core::services::session_messages::execution_active(
+                    &paths.data_dir,
+                    &id
+                )
+                .unwrap(),
+                "turn {index} returned while the session was still owned"
+            );
+            assert_eq!(
+                streams.load(Ordering::SeqCst),
+                index + 1,
+                "each turn must send exactly one model request"
+            );
+        }
+        let completed = session
+            .store
+            .db
+            .with_conn(|conn| -> Result<i64> {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM execution_turns WHERE conversation_id=?1 AND status='completed'",
+                    [&id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed, 6, "every sequential turn is measured");
+        session.close().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]

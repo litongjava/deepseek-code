@@ -2,13 +2,8 @@
 use super::discovery::SkillCommand;
 use std::{collections::BTreeMap, path::Path};
 
-pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
+pub fn commands() -> BTreeMap<String, SkillCommand> {
     let definitions = [
-        (
-            "claude-api",
-            "Build apps with the Claude API or Anthropic SDK. Use for anthropic / @anthropic-ai/sdk imports or explicit Claude API requests; not OpenAI or unrelated programming tasks.",
-            include_str!("bundled/claude-api.md"),
-        ),
         (
             "code-review",
             "Review a diff for actionable correctness and security issues",
@@ -31,7 +26,7 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
         ),
         (
             "doctor",
-            "Inspect local CLI configuration and diagnose failures",
+            "Inspect local CLI configuration and diagnose failures; /doctor prompt-audit audits the instruction files loaded into sessions",
             include_str!("bundled/doctor.md"),
         ),
         // The reference CLI's bundled workflow commands.
@@ -66,39 +61,32 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
             include_str!("bundled/run-skill-generator.md"),
         ),
         (
+            super::skill_creator::NAME,
+            super::skill_creator::DESCRIPTION,
+            include_str!("bundled/skill-creator.md"),
+        ),
+        (
             "auto-mode-setup",
             "Prepare auto mode for your environment, plus permission rules",
             include_str!("bundled/auto-mode-setup.md"),
+        ),
+        // User-only by default (see `states::default_state`): hidden from the
+        // model listing until the user changes their state to `user`.
+        (
+            "translate-zh-en",
+            "Translate Chinese text into English",
+            include_str!("bundled/translate-zh-en.md"),
+        ),
+        (
+            "translate-en-zh",
+            "Translate English text into Chinese",
+            include_str!("bundled/translate-en-zh.md"),
         ),
     ];
     definitions
         .into_iter()
         .map(|(name, description, body)| {
-            let mut content = body.to_owned();
-            if name == "claude-api" {
-                let detected: Vec<_> = [
-                    ("Cargo.toml", "Rust (HTTP API)"),
-                    ("package.json", "TypeScript/JavaScript"),
-                    ("pyproject.toml", "Python"),
-                    ("requirements.txt", "Python"),
-                    ("go.mod", "Go"),
-                    ("pom.xml", "Java"),
-                    ("Gemfile", "Ruby"),
-                    ("composer.json", "PHP"),
-                ]
-                .into_iter()
-                .filter(|(file, _)| workspace.join(file).is_file())
-                .map(|(_, language)| language)
-                .collect();
-                content.push_str(&format!(
-                    "\nDetected manifest languages (confirm with Read): {}\n",
-                    if detected.is_empty() {
-                        "undetermined".into()
-                    } else {
-                        detected.join(", ")
-                    }
-                ));
-            }
+            let content = body.to_owned();
             // Discovery runs during SDK turns while the input reader owns stdin.
             // Keep diagnostics lazy: terminal probing here can block on that lock
             // until the SDK client closes its stream. /doctor runs the checks.
@@ -110,7 +98,12 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
                     path: Path::new("__embedded_cli_skills__").join(name),
                     content,
                     user_invocable: true,
-                    disable_model_invocation: !super::bundled_resources::supports(name),
+                    // The translation skills restrict model invocation through
+                    // their default state instead, so switching them to `user`
+                    // really makes them listable and invocable.
+                    disable_model_invocation: !super::bundled_resources::supports(name)
+                        && !matches!(name, "translate-zh-en" | "translate-en-zh"),
+                    listing_name_only: false,
                     context: None,
                     shell: None,
                     agent: None,
@@ -128,12 +121,12 @@ mod tests {
         std::fs::write(temp.path().join("Cargo.toml"), "[package]").unwrap();
         let commands = super::super::discovery::discover_from(None, temp.path()).unwrap();
         for name in [
-            "claude-api",
             "code-review",
             "dataviz",
             "deep-research",
             "doctor",
             "security-review",
+            "skill-creator",
         ] {
             let command = &commands[name];
             let rendered = command
@@ -143,9 +136,39 @@ mod tests {
             assert!(!rendered.contains("__embedded_cli_skills__"));
             assert_eq!(command.disable_model_invocation, !super::super::bundled_resources::supports(name));
         }
-        assert!(commands["claude-api"].content.contains("Rust (HTTP API)"));
+        assert!(!commands.contains_key("claude-api"));
         assert!(!commands["doctor"].content.contains("Read-only local diagnostic snapshot:"));
     }
+    #[test]
+    fn translation_skills_discover_as_user_only_until_set_to_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+
+        let (commands, invalid) =
+            super::super::discovery::discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        for name in ["translate-zh-en", "translate-en-zh"] {
+            let command = &commands[name];
+            assert!(command.disable_model_invocation, "{name}");
+            assert!(command.user_invocable, "{name}");
+        }
+
+        crate::skills::states::set(
+            &data,
+            "translate-zh-en",
+            crate::skills::states::SkillState::User,
+        )
+        .unwrap();
+        let (commands, invalid) =
+            super::super::discovery::discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        assert!(!commands["translate-zh-en"].disable_model_invocation);
+        assert!(commands["translate-zh-en"].user_invocable);
+        assert!(commands["translate-en-zh"].disable_model_invocation);
+    }
+
     #[test]
     fn project_workflow_overrides_embedded_default() {
         let temp = tempfile::tempdir().unwrap();

@@ -443,6 +443,46 @@ mod tests {
         assert!(language_servers(&context).unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn plugin_skills_honor_stored_states() {
+        use crate::skills::states::{self, SkillState};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(source.join("skills/check")).unwrap();
+        manifest(&source, json!({"name":"stated","version":"1.0.0"}));
+        std::fs::write(
+            source.join("skills/check/SKILL.md"),
+            "---\ndescription: Check files\n---\nCheck the project",
+        )
+        .unwrap();
+        let context = ServiceContext::open(
+            crate::runtime::RuntimePaths::new(dir.path().join("data")).unwrap(),
+            std::sync::Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        install(&context, source.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        let data = &context.paths.data_dir;
+        assert!(skill_commands(&context).unwrap().contains_key("stated:check"));
+
+        states::set(data, "stated:check", SkillState::Off).unwrap();
+        assert!(!skill_commands(&context).unwrap().contains_key("stated:check"));
+
+        states::set(data, "stated:check", SkillState::UserOnly).unwrap();
+        let commands = skill_commands(&context).unwrap();
+        assert!(commands["stated:check"].disable_model_invocation);
+        assert!(commands["stated:check"].user_invocable);
+
+        states::set(data, "stated:check", SkillState::NameOnly).unwrap();
+        assert!(skill_commands(&context).unwrap()["stated:check"].listing_name_only);
+
+        states::set(data, "stated:check", SkillState::User).unwrap();
+        let commands = skill_commands(&context).unwrap();
+        assert!(!commands["stated:check"].disable_model_invocation);
+        assert!(!commands["stated:check"].listing_name_only);
+    }
+
     #[test]
     fn unsupported_mcp_transport_and_symbolic_links_are_rejected() {
         let dir = tempfile::tempdir().unwrap();

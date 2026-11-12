@@ -119,6 +119,10 @@ pub fn skill_commands(
             &bundle.command_paths,
         )?);
     }
+    crate::skills::states::apply(
+        &mut skills,
+        &crate::skills::states::load(&context.paths.data_dir),
+    );
     Ok(skills)
 }
 

@@ -249,7 +249,11 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
                 .collect::<Vec<_>>();
             assert_eq!(records.len(), 1);
             let event = &records[0];
-            assert_eq!(event["tool_use_id"], "write-0");
+            // The denial hook sees the call's occurrence id, not the provider
+            // raw id ("write-0" is only protocol provenance).
+            let denied_id = event["tool_use_id"].as_str().unwrap();
+            assert!(denied_id.starts_with("inv-"), "{denied_id}");
+            assert_ne!(denied_id, "write-0");
             assert_eq!(event["tool_name"], "Write");
             assert_eq!(event["tool_input"]["content"], "EXACT_FINAL_INPUT");
             assert_eq!(event["reason"], "outside_scope");

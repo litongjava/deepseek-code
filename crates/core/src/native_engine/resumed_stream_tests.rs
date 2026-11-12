@@ -52,7 +52,9 @@ async fn empty_stream_retry_keeps_completed_tool_results_without_reexecuting_too
                     ..
                 } = event
                 {
-                    assert_eq!(tool_use_id, "read-once");
+                    // The event carries the occurrence identity; the provider
+                    // protocol below still pairs on the raw id.
+                    assert!(!tool_use_id.is_empty());
                     assert!(!is_error);
                     completed_tools += 1;
                 }
@@ -83,6 +85,8 @@ async fn empty_stream_retry_keeps_completed_tool_results_without_reexecuting_too
         assert!(requests[2]["messages"]
             .to_string()
             .contains("ALREADY_EXECUTED_TOOL_RESULT"));
+        // Raw provider provenance stays paired in the outgoing protocol.
+        assert!(requests[2]["messages"].to_string().contains("read-once"));
         server.abort();
     }
 }

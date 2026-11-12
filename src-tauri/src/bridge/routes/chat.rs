@@ -76,8 +76,10 @@ pub(super) async fn start_chat(
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Could not validate conversation project"}))).into_response(),
     }
 
+    // The backend keeps this lease for the whole turn; the engine shares it
+    // without retaining a second reference that could outlive this release.
     let execution_lease = match super::input_queue::execution_lease(&state.db_manager, &req.conversation_id) {
-        Ok(lease) => lease,
+        Ok(lease) => std::sync::Arc::new(lease),
         Err(error) => return (StatusCode::CONFLICT, Json(serde_json::json!({"error":error.to_string()}))).into_response(),
     };
     let native_engine = state.native_engine.clone();
@@ -209,7 +211,7 @@ pub(super) async fn start_chat(
             tracing::info!(module = "Chat", "[6/7] Calling engine.send_message...");
 
             let result = tokio::select! {
-                result = engine.send_message_with_lease(chat_req, false, execution_lease) => result,
+                result = engine.send_message_with_lease(chat_req, false, execution_lease.clone()) => result,
                 _ = run.stop_requested() => Err(anyhow::anyhow!("Turn cancelled before model request")),
             };
             match result {
@@ -238,6 +240,8 @@ pub(super) async fn start_chat(
     let db_for_stream = state.db_manager.clone();
     crate::metrics::ACTIVE_SSE_CONNECTIONS.inc();
     let stream = async_stream::stream! {
+        // Keep the session owned until this stream has persisted the turn.
+        let _turn_lease = execution_lease;
         let db_clone = db_for_stream;
         yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":turn.record(),"assistant_id":first_assistant_id}).to_string()));
         let mut rx = match started {
@@ -654,6 +658,7 @@ pub(super) async fn start_chat(
         }
         // Report idle only once the trajectory above is persisted.
         drop(run);
+        drop(_turn_lease);
         super::input_queue::kick(lifecycle_state, lifecycle_id);
         if let Some(event) = terminal_event {
             yield Ok::<Event, Infallible>(Event::default().data(event.to_string()));

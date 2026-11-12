@@ -659,7 +659,12 @@ async fn owned_child_permission_hooks_keep_exact_invocation_and_session_on_both_
             &std::fs::read(root.path().join("permission-payload.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(payload["tool_use_id"], "child-exact-id");
+        assert!(
+            payload["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inv-")),
+            "{payload}"
+        );
         assert_eq!(payload["session_id"], result["session_id"]);
         assert_ne!(payload["session_id"], parent);
         server.abort();

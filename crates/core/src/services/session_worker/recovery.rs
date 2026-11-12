@@ -683,6 +683,35 @@ mod tests {
         assert_eq!(read_worker(&directory(&worker)).unwrap().status, "stopped");
     }
 
+    // A lock released just before this call can stay held briefly by a child
+    // process between fork and exec; startup must wait for it instead of failing.
+    #[cfg(unix)]
+    #[test]
+    fn startup_lock_survives_concurrent_process_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let mut failures = 0;
+        for _ in 0..40 {
+            let first = startup_lock(dir.path()).unwrap();
+            drop(first);
+            match startup_lock(dir.path()) {
+                Ok(second) => drop(second),
+                Err(_) => failures += 1,
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(failures, 0, "startup locks failed {failures} times");
+    }
+
     #[tokio::test]
     async fn concurrent_recovery_does_not_change_owner() {
         let root = tempfile::tempdir().unwrap();

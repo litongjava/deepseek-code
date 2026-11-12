@@ -61,21 +61,31 @@ impl RuntimePaths {
         // Keep one initialized pool per data directory while any host owns it.
         // Status polling must not create pool threads or rerun migrations.
         static DATABASES: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<DbManager>>>,
+            std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<std::sync::Weak<DbManager>>>>>,
         > = std::sync::OnceLock::new();
         std::fs::create_dir_all(&self.data_dir)?;
         let path = self.data_dir.canonicalize()?.join(DATABASE_FILE);
-        let mut databases = DATABASES
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(db) = databases.get(&path).and_then(std::sync::Weak::upgrade) {
+        let slot = {
+            let mut databases = DATABASES
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // Drop slots nobody else holds whose pool is gone. Checking the Arc count
+            // first means a slot being initialized by another thread is never locked here.
+            databases.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot.lock().map(|db| db.strong_count() > 0).unwrap_or(true)
+            });
+            databases.entry(path.clone()).or_default().clone()
+        };
+        // Only callers of this same directory wait for its creation and migrations.
+        let mut cached = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(db) = cached.upgrade() {
             return Ok(db);
         }
-        databases.retain(|_, db| db.strong_count() > 0);
-        let db = Arc::new(DbManager::new(path.clone()).context("Opening shared database pool")?);
+        let db = Arc::new(DbManager::new(path).context("Opening shared database pool")?);
         db.init().context("Initializing shared database schema")?;
-        databases.insert(path, Arc::downgrade(&db));
+        *cached = Arc::downgrade(&db);
         Ok(db)
     }
 
@@ -166,6 +176,12 @@ pub fn default_permissions() -> Arc<PermissionManager> {
     Arc::new(PermissionManager::new(Arc::new(AuditLogger::new(1000))))
 }
 
+/// Whole-transaction retry budget for session writes, matching turn writes.
+///
+/// The pooled connection keeps its 5 s `busy_timeout`; this deadline only bounds
+/// how long the boundary keeps retrying a typed writer conflict after that.
+const SESSION_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Sessions use the same project trust, Code prompt and SQLite schema as Desktop.
 pub struct SessionStore {
     pub db: Arc<DbManager>,
@@ -206,58 +222,70 @@ impl SessionStore {
         ensure!(workspace.is_dir(), "Project path must be a directory");
         let path = workspace.to_string_lossy().into_owned();
         self.db.with_conn(|conn| -> Result<()> {
-            // Acquire the writer before reading project state, avoiding a stale WAL snapshot upgrade.
-            let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-            ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1)", [&id], |row| row.get::<_,bool>(0))?, "Session ID already exists; use --resume to continue it");
-            let project = project_repo::list_projects(&tx)?.into_iter().find(|p| {
-                !p.is_archived
-                    && p.workspace_path
-                        .as_deref()
-                        .and_then(|s| std::fs::canonicalize(s).ok())
-                        .as_ref()
-                        == Some(&workspace)
-                    && p.folders.iter().all(|f| f.trusted)
-            });
-            let now = chrono::Utc::now().to_rfc3339();
-            let project_id = if let Some(project) = project {
-                project.id
-            } else {
-                let project_id = uuid::Uuid::new_v4().to_string();
-                let name = workspace.file_name().unwrap_or_default().to_string_lossy();
-                project_repo::insert_project(
-                    &tx,
-                    &project_id,
-                    &name,
-                    None,
-                    None,
+            // Acquire the writer before reading project state, avoiding a stale WAL
+            // snapshot upgrade. A competing host can hold the writer longer than the
+            // pool's busy_timeout, so the whole unit retries with a bounded deadline
+            // instead of turning one contention window into a failed session.
+            crate::db::write_tx(conn, "session create", SESSION_WRITE_DEADLINE, |tx| {
+                ensure!(
+                    !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1)",
+                        [&id],
+                        |row| row.get::<_, bool>(0)
+                    )?,
+                    "Session ID already exists; use --resume to continue it"
+                );
+                // Reuse only a single-folder project; per-session --add-dir projects stay private to their session.
+                let project = project_repo::list_projects(tx)?.into_iter().find(|p| {
+                    !p.is_archived
+                        && p.workspace_path
+                            .as_deref()
+                            .and_then(|s| std::fs::canonicalize(s).ok())
+                            .as_ref()
+                            == Some(&workspace)
+                        && p.folders.len() == 1
+                        && p.folders.iter().all(|f| f.trusted)
+                });
+                let now = chrono::Utc::now().to_rfc3339();
+                let project_id = if let Some(project) = project {
+                    project.id
+                } else {
+                    let project_id = uuid::Uuid::new_v4().to_string();
+                    let name = workspace.file_name().unwrap_or_default().to_string_lossy();
+                    project_repo::insert_project(
+                        tx,
+                        &project_id,
+                        &name,
+                        None,
+                        None,
+                        Some(&path),
+                        false,
+                        &now,
+                        &now,
+                    )?;
+                    project_repo::set_folders(tx, &project_id, &[path.clone()])?;
+                    // Invoking CLI in this directory (or passing --path) selects this project.
+                    project_repo::trust_folders(tx, &project_id, &[path.clone()])?;
+                    project_id
+                };
+                conversation_repo::insert_conversation(
+                    tx,
+                    &id,
+                    Some("CLI session"),
+                    Some(model),
+                    Some(provider),
                     Some(&path),
+                    Some(&project_id),
+                    false,
+                    false,
                     false,
                     &now,
                     &now,
+                    0,
                 )?;
-                project_repo::set_folders(&tx, &project_id, &[path.clone()])?;
-                // Invoking CLI in this directory (or passing --path) selects this project.
-                project_repo::trust_folders(&tx, &project_id, &[path.clone()])?;
-                project_id
-            };
-            conversation_repo::insert_conversation(
-                &tx,
-                &id,
-                Some("CLI session"),
-                Some(model),
-                Some(provider),
-                Some(&path),
-                Some(&project_id),
-                false,
-                false,
-                false,
-                &now,
-                &now,
-                0,
-            )?;
-            conversation_repo::set_workspace_mode(&tx, &id, "code")?;
-            tx.commit()?;
-            Ok(())
+                conversation_repo::set_workspace_mode(tx, &id, "code")?;
+                Ok(())
+            })
         })??;
         Ok(id)
     }
@@ -480,44 +508,46 @@ impl SessionStore {
     ) -> Result<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
         self.db.with_conn(|conn| -> Result<()> {
-            // Message ordering is a read/modify/write operation shared by CLI and Desktop hosts.
-            let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-            let order: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?1",
-                [id],
-                |row| row.get(0),
-            )?;
-            let now = chrono::Utc::now().to_rfc3339();
-            message_repo::insert_message(
-                &tx,
-                &message_id,
-                id,
-                role,
-                text,
-                None,
-                &now,
-                false,
-                order,
-            )?;
-            if initial_hook {
-                tx.execute(
-                    "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
-                    rusqlite::params![
-                        format!("message-origin:{message_id}"),
-                        r#"{"type":"hook","hookEvent":"SessionStart"}"#
-                    ],
+            // Message ordering is a read/modify/write operation shared by CLI and
+            // Desktop hosts. Retry the whole unit on writer contention so a short
+            // busy window does not drop the message or half of its counters.
+            crate::db::write_tx(conn, "session append", SESSION_WRITE_DEADLINE, |tx| {
+                let order: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?1",
+                    [id],
+                    |row| row.get(0),
                 )?;
-            }
-            conversation_repo::increment_message_count(&tx, id)?;
-            if let Some(content) = content {
-                tx.execute(
-                    "INSERT INTO message_user_content (message_id,content_json) VALUES (?1,?2)",
-                    rusqlite::params![message_id, serde_json::to_string(content)?],
+                let now = chrono::Utc::now().to_rfc3339();
+                message_repo::insert_message(
+                    tx,
+                    &message_id,
+                    id,
+                    role,
+                    text,
+                    None,
+                    &now,
+                    false,
+                    order,
                 )?;
-            }
-            conversation_repo::update_conversation_timestamp(&tx, id, &now)?;
-            tx.commit()?;
-            Ok(())
+                if initial_hook {
+                    tx.execute(
+                        "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
+                        rusqlite::params![
+                            format!("message-origin:{message_id}"),
+                            r#"{"type":"hook","hookEvent":"SessionStart"}"#
+                        ],
+                    )?;
+                }
+                conversation_repo::increment_message_count(tx, id)?;
+                if let Some(content) = content {
+                    tx.execute(
+                        "INSERT INTO message_user_content (message_id,content_json) VALUES (?1,?2)",
+                        rusqlite::params![message_id, serde_json::to_string(content)?],
+                    )?;
+                }
+                conversation_repo::update_conversation_timestamp(tx, id, &now)?;
+                Ok(())
+            })
         })??;
         Ok(message_id)
     }
@@ -556,6 +586,53 @@ mod pool_reuse_tests {
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &other));
         drop(first);
+        assert!(paths.open_database().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod database_cache_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn slow_initialization_does_not_block_other_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let data_a = root.path().join("a");
+        std::fs::create_dir_all(&data_a).unwrap();
+        // Hold the write lock so opening directory A stays busy for a while.
+        let blocker = rusqlite::Connection::open(data_a.join(DATABASE_FILE)).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let began = Instant::now();
+        let slow = {
+            let data_a = data_a.clone();
+            std::thread::spawn(move || RuntimePaths::new(data_a).unwrap().open_database())
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let other = RuntimePaths::new(root.path().join("b")).unwrap();
+        let started = Instant::now();
+        other.open_database().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "opening another directory took {elapsed:?} while A was initializing"
+        );
+        std::thread::sleep(Duration::from_secs(2).saturating_sub(began.elapsed()));
+        blocker.execute_batch("COMMIT").unwrap();
+        assert!(slow.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn same_directory_returns_one_pool() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let first = paths.open_database().unwrap();
+        let again = paths.open_database().unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let cached = Arc::downgrade(&first);
+        drop(first);
+        drop(again);
+        assert!(cached.upgrade().is_none());
         assert!(paths.open_database().is_ok());
     }
 }

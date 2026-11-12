@@ -419,7 +419,7 @@ impl Scrollback {
         let Some((root, session, task)) = &entry.background else { return; };
         // Use the session-owned task API, never paths supplied by tool output.
         let result = deepseek_code_core::tools::tasks::execute_for_session(
-            "TaskOutput", serde_json::json!({"task_id": task, "block": false}), root, session,
+            "TaskGet", serde_json::json!({"task_id": task, "block": false}), root, session,
         );
         let mut full = entry.full[..1].to_vec();
         match result {

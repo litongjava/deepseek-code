@@ -7,12 +7,13 @@ use std::path::Path;
 pub(super) fn definitions() -> Vec<super::ToolDefinition> {
     [
         ("TaskCreate", "Create a durable session task.", json!({"name":{"type":"string"},"priority":{"type":"string"},"subject":{"type":"string"},"description":{"type":"string"},"activeForm":{"type":"string"},"metadata":{"type":"object"}}), vec![]),
-        ("TaskGet", "Read a durable session task by ID.", json!({"id":{"type":"string"},"taskId":{"type":"string"}}),vec![]),
+        ("TaskGet", "Read a durable session task by ID, including its available output and owner/dependency fields. For a managed background shell, subagent or workflow, set block:true to wait for it to finish; timeout is milliseconds (default 30000 when waiting, maximum 600000) and timeout:0 returns immediately. Without block:true the call returns the current snapshot immediately. retrieval_status reports whether this read completed (success/not_ready/timeout); it does not replace the task's own status, exit_code or error, and a timeout never stops the underlying process. Use TaskStop to cancel one.", json!({"id":{"type":"string","description":"Task ID."},"task_id":{"type":"string","description":"Alias for id."},"taskId":{"type":"string","description":"Alias for id."},"block":{"type":"boolean","default":false,"description":"Wait for a running managed background task to reach a terminal status."},"timeout":{"type":"integer","minimum":0,"maximum":600000,"description":"Wait limit in milliseconds when block is true; default 30000."}}),vec![]),
         ("TaskList", "List durable session tasks.", json!({}),vec![]),
-        ("TaskUpdate", "Update a durable session task. Dependencies must exist and cannot form cycles.", json!({"id":{"type":"string"},"taskId":{"type":"string"},"name":{"type":"string"},"priority":{"type":"string"},"subject":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","running","completed","failed","cancelled","deleted"]},"output":{"type":"string"},"owner":{"type":"string"},"activeForm":{"type":"string"},"metadata":{"type":"object"},"addBlockedBy":{"type":"array","items":{"type":"string"}},"addBlocks":{"type":"array","items":{"type":"string"}}}),vec![]),
+        ("TaskUpdate", "Update a durable session task. Dependencies must exist and cannot form cycles. setBlockedBy atomically replaces the task's direct dependencies ([] clears them) and cannot be combined with addBlockedBy, addBlocks or deleting the task.", json!({"id":{"type":"string"},"taskId":{"type":"string"},"name":{"type":"string"},"priority":{"type":"string"},"subject":{"type":"string"},"description":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","running","completed","failed","cancelled","deleted"]},"output":{"type":"string"},"owner":{"type":"string"},"activeForm":{"type":"string"},"metadata":{"type":"object"},"addBlockedBy":{"type":"array","items":{"type":"string"}},"addBlocks":{"type":"array","items":{"type":"string"}},"setBlockedBy":{"type":"array","items":{"type":"string"}}}),vec![]),
         ("TodoWrite", "Replace the session's durable todo list.", json!({"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"activeForm":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}}),vec!["todos"]),
         ("TodoRead", "Read the session's durable todo list.",json!({}),vec![]),
-        ("TaskOutput", "Read managed background shell logs and status. block defaults to true; timeout is milliseconds (default 30000, maximum 600000). Use block:false for an immediate snapshot. Saved non-process task records return their saved output.",json!({"id":{"type":"string"},"task_id":{"type":"string"},"block":{"type":"boolean","default":true},"timeout":{"type":"integer","minimum":0,"maximum":600000,"default":30000}}),vec![]),
+        // `TaskOutput` is not advertised. Its dispatch alias remains below for
+        // old transcripts and is not discoverable through ToolSearch.
         ("TaskStop", "\n- Stops a running background task by its ID\n- Takes a task_id parameter identifying the task to stop\n- Stops a background shell together with its descendant processes; for other task records it marks the record cancelled\n- Returns a success or failure status\n- Use this tool when you need to terminate a long-running task\n",json!({"task_id":{"description":"The ID of the background task to stop.","type":"string"},"shell_id":{"description":"Deprecated: use task_id instead","type":"string"}}),vec![]),
     ].into_iter().map(|(name,description,properties,required)| super::ToolDefinition {name:name.into(),description:description.into(),input_schema:json!({"type":"object","properties":properties,"required":required})}).collect()
 }
@@ -97,6 +98,11 @@ pub async fn execute_for_session_async(
     session: &str,
 ) -> Result<Value> {
     uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
+    // The legacy TaskOutput name kept its old default: wait for completion.
+    let mut input = input;
+    if name == "TaskOutput" && input.get("block").is_none() {
+        input["block"] = json!(true);
+    }
     if matches!(name, "TaskGet" | "TaskOutput" | "TaskStop") {
         if let Some(id) = input["task_id"]
             .as_str()
@@ -111,74 +117,98 @@ pub async fn execute_for_session_async(
                     .exists()
             {
                 use crate::services::background_sessions;
-                let mut job = background_sessions::get(root, id)?;
+                let (read_root, read_id) = (root.to_owned(), id.to_owned());
+                let mut job = tokio::task::spawn_blocking(move || {
+                    background_sessions::get(&read_root, &read_id)
+                })
+                .await??;
                 ensure!(
                     job.parent_session_id == session,
                     "Task belongs to another session"
                 );
-                if name == "TaskOutput" {
-                    let block = input
-                        .get("block")
-                        .map(|value| value.as_bool().context("block must be boolean"))
-                        .transpose()?
-                        .unwrap_or(true);
-                    let timeout = input
-                        .get("timeout")
-                        .map(|value| {
-                            value.as_u64().context(
-                                "TaskOutput timeout must be an integer number of milliseconds",
-                            )
-                        })
-                        .transpose()?
-                        .unwrap_or(30_000);
-                    ensure!(
-                        timeout <= 600_000,
-                        "TaskOutput timeout must be 0..600000 milliseconds"
-                    );
-                    let deadline =
-                        tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-                    while block
-                        && matches!(job.status.as_str(), "starting" | "running")
-                        && tokio::time::Instant::now() < deadline
-                    {
+                if name == "TaskStop" {
+                    let (root, id) = (root.to_owned(), id.to_owned());
+                    let mut value = tokio::task::spawn_blocking(move || {
+                        background_sessions::cancel(&root, &id)?;
+                        job_snapshot(&root, &id)
+                    })
+                    .await??;
+                    let status = value["status"].as_str().unwrap_or_default();
+                    value["retrieval_status"] = json!(if terminal_status(status) {
+                        "success"
+                    } else {
+                        "not_ready"
+                    });
+                    return Ok(value);
+                }
+                let (block, timeout) = super::background_shell::wait_policy(&input)?;
+                let deadline = tokio::time::Instant::now() + timeout;
+                let mut timed_out = false;
+                if block {
+                    loop {
+                        if !matches!(job.status.as_str(), "starting" | "running") {
+                            break;
+                        }
+                        let now = tokio::time::Instant::now();
+                        if now >= deadline {
+                            timed_out = true;
+                            break;
+                        }
                         tokio::time::sleep_until(
-                            (tokio::time::Instant::now() + std::time::Duration::from_millis(100))
-                                .min(deadline),
+                            (now + std::time::Duration::from_millis(100)).min(deadline),
                         )
                         .await;
-                        job = background_sessions::get(root, id)?;
+                        let (root, id) = (root.to_owned(), id.to_owned());
+                        job = tokio::task::spawn_blocking(move || {
+                            background_sessions::get(&root, &id)
+                        })
+                        .await??;
                     }
                 }
-                if name == "TaskStop" {
-                    job = background_sessions::cancel(root, id)?;
-                }
-                let (stdout, stderr) = background_sessions::output(root, id)?;
-                let mut stdout = stdout
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .filter_map(|event| {
-                        event["result"]
-                            .as_str()
-                            .or_else(|| event["delta"].as_str())
-                            .map(str::to_owned)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if root.join(crate::runtime::DATABASE_FILE).exists() {
-                    let execution =
-                        crate::services::session_worker::job_execution_session(root, &job)?;
-                    let conn = rusqlite::Connection::open_with_flags(
-                        root.join(crate::runtime::DATABASE_FILE),
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    )?;
-                    let report: Option<String> = conn.query_row("SELECT content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1", [&execution], |row| row.get(0)).optional()?;
-                    if let Some(report) = report {
-                        stdout = report;
+                // The output files and the optional SQLite report are read on
+                // the blocking pool. An explicit wait deadline bounds the whole
+                // retrieval, so a slow disk or busy database cannot outlive it.
+                // A wait that used its whole deadline still gets a short bounded
+                // read, so the caller sees output already written; a busy disk or
+                // database still cannot hold the call open for long.
+                let (read_root, read_id) = (root.to_owned(), id.to_owned());
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    job_snapshot(&read_root, &read_id)
+                });
+                let snapshot = if block {
+                    let read_deadline = deadline
+                        .max(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                    match tokio::time::timeout_at(read_deadline, snapshot).await {
+                        Ok(result) => Some(result??),
+                        Err(_) => {
+                            timed_out = true;
+                            None
+                        }
                     }
-                }
-                return Ok(
-                    json!({"task_id":job.id,"subject":job.title,"status":job.status,"stdout":stdout,"stderr":stderr,"exit_code":job.exit_code,"error":job.error,"retrieval_status":if matches!(job.status.as_str(),"completed"|"failed"|"cancelled") {"success"} else {"not_ready"}}),
-                );
+                } else {
+                    Some(snapshot.await??)
+                };
+                let (status, mut value) = match snapshot {
+                    Some(value) => {
+                        let status = value["status"].as_str().unwrap_or_default().to_owned();
+                        (status, value)
+                    }
+                    None => (
+                        job.status.clone(),
+                        json!({"task_id":job.id,"subject":job.title,"status":job.status,"stdout":"","stderr":"","exit_code":job.exit_code,"error":job.error}),
+                    ),
+                };
+                // Retrieval success only says the read completed. The job's
+                // own status/exit_code/error stay separate and unchanged.
+                let retrieval_status = if timed_out {
+                    "timeout"
+                } else if terminal_status(&status) {
+                    "success"
+                } else {
+                    "not_ready"
+                };
+                value["retrieval_status"] = json!(retrieval_status);
+                return Ok(value);
             }
         }
     }
@@ -189,6 +219,60 @@ pub async fn execute_for_session_async(
     }
     let (name, root, session) = (name.to_owned(), root.to_owned(), session.to_owned());
     tokio::task::spawn_blocking(move || execute_for_session(&name, input, &root, &session)).await?
+}
+
+/// Read a detached worker job's current output. The assistant report is
+/// supplementary: a locked or damaged database must not fail the retrieval.
+fn job_snapshot(root: &Path, id: &str) -> Result<Value> {
+    use crate::services::background_sessions;
+    let job = background_sessions::get(root, id)?;
+    let (stdout, stderr) = background_sessions::output(root, id)?;
+    let mut stdout = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| {
+            event["result"]
+                .as_str()
+                .or_else(|| event["delta"].as_str())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if root.join(crate::runtime::DATABASE_FILE).exists() {
+        if let Ok(execution) = crate::services::session_worker::job_execution_session(root, &job) {
+            if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                root.join(crate::runtime::DATABASE_FILE),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                let report: Option<String> = conn
+                    .query_row("SELECT content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1", [&execution], |row| row.get(0))
+                    .optional()
+                    .unwrap_or(None);
+                if let Some(report) = report {
+                    stdout = report;
+                }
+            }
+        }
+    }
+    let id = job.id.clone();
+    Ok(
+        json!({"id":id,"task_id":job.id,"subject":job.title,"status":job.status,"stdout":stdout,"stderr":stderr,"exit_code":job.exit_code,"error":job.error}),
+    )
+}
+
+fn terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// Read one stored session task without dispatching background controls.
+/// Callers that own a managed shell use this to avoid re-entering `control`.
+pub(crate) fn read_for_session(id: &str, root: &Path, session: &str) -> Result<Value> {
+    let session = uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
+    execute_at(
+        "TaskGet",
+        json!({"id":id}),
+        &root.join("tasks").join(format!("{session}.sqlite3")),
+    )
 }
 
 pub fn read_legacy(name: &str, input: Value, cwd: &str) -> Result<Value> {
@@ -241,6 +325,19 @@ fn execute_at(name: &str, input: Value, path: &Path) -> Result<Value> {
     execute_at_owned(name, input, path, false)
 }
 fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool) -> Result<Value> {
+    // `TaskOutput` was folded into `TaskGet`. Old transcripts may still
+    // dispatch it; it goes through the same validation, storage and session
+    // path and is not advertised or loadable through ToolSearch.
+    let name = if name == "TaskOutput" {
+        "TaskGet"
+    } else {
+        name
+    };
+    if name == "TaskGet" {
+        // Validate block/timeout even for plain records so a bad wait request
+        // is reported instead of silently ignored.
+        super::background_shell::wait_policy(&input)?;
+    }
     if !shell_owner {
         ensure!(
             input
@@ -336,11 +433,10 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
             )?;
             task
         }
+        // An ordinary record has no live process. Return it exactly as stored
+        // so existing task readers keep their field set; managed jobs add
+        // retrieval_status on their own snapshot path.
         "TaskGet" => get(input["taskId"].as_str().context("taskId is required")?)?,
-        "TaskOutput" => {
-            let task = get(input["taskId"].as_str().context("id is required")?)?;
-            json!({"id":task["id"],"output":task["output"]})
-        }
         "TaskList" => {
             let mut statement = tx.prepare("SELECT body FROM tasks ORDER BY rowid")?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
@@ -353,6 +449,19 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
         "TaskUpdate" => {
             let id = input["taskId"].as_str().context("taskId is required")?;
             let mut task = get(id)?;
+            // Replacing dependencies and appending or deleting are mutually
+            // exclusive: combining them would make the result depend on the
+            // order they happened to be applied in.
+            if input.get("setBlockedBy").is_some() {
+                ensure!(
+                    input.get("addBlockedBy").is_none() && input.get("addBlocks").is_none(),
+                    "setBlockedBy cannot be combined with addBlockedBy or addBlocks"
+                );
+                ensure!(
+                    input["status"] != "deleted",
+                    "setBlockedBy cannot be combined with deleting the task"
+                );
+            }
             if !shell_owner && task["metadata"]["managed_shell"] == true {
                 ensure!(
                     input.get("status").is_none() && input.get("output").is_none(),
@@ -423,6 +532,98 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
                             task["metadata"][key] = value.clone();
                         }
                     }
+                }
+                if let Some(values) = input.get("setBlockedBy") {
+                    let values = values.as_array().context("setBlockedBy must be an array")?;
+                    let mut desired: Vec<String> = Vec::new();
+                    for value in values {
+                        let other_id = value.as_str().context("Dependency must be a task ID")?;
+                        if other_id == id {
+                            bail!("Task cannot depend on itself");
+                        }
+                        // Repeated IDs are one edge; the reciprocal list must
+                        // not accumulate duplicates either.
+                        if !desired.iter().any(|existing| existing.as_str() == other_id) {
+                            desired.push(other_id.to_owned());
+                        }
+                    }
+                    // Validate the complete replacement before touching any row.
+                    // Following blockedBy from each new dependency finds this
+                    // task exactly when the final graph would contain a cycle;
+                    // removed edges cannot create one.
+                    for other_id in &desired {
+                        get(other_id)?;
+                        let mut pending = vec![other_id.clone()];
+                        let mut visited = std::collections::HashSet::new();
+                        while let Some(next) = pending.pop() {
+                            if next == id {
+                                bail!("Task dependency cycle");
+                            }
+                            if visited.insert(next.clone()) {
+                                let node = get(&next)?;
+                                for edge in node["blockedBy"]
+                                    .as_array()
+                                    .context("Invalid stored dependencies")?
+                                {
+                                    pending.push(
+                                        edge.as_str()
+                                            .context("Invalid stored dependency")?
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let mut current: Vec<String> = Vec::new();
+                    for value in task["blockedBy"]
+                        .as_array()
+                        .context("Invalid stored dependencies")?
+                    {
+                        let dependency = value.as_str().context("Invalid stored dependency")?;
+                        if !current
+                            .iter()
+                            .any(|existing| existing.as_str() == dependency)
+                        {
+                            current.push(dependency.to_owned());
+                        }
+                    }
+                    // Direct dependencies of this task change; every other
+                    // stored list stays as written. Only edges that really
+                    // changed are updated, so an identical replacement writes
+                    // no other row.
+                    for removed in current
+                        .iter()
+                        .filter(|dependency| !desired.iter().any(|edge| edge == *dependency))
+                    {
+                        let mut other = get(removed)?;
+                        let edges = other["blocks"]
+                            .as_array_mut()
+                            .context("Invalid stored dependencies")?;
+                        if edges.iter().any(|edge| edge.as_str() == Some(id)) {
+                            edges.retain(|edge| edge.as_str() != Some(id));
+                            tx.execute(
+                                "UPDATE tasks SET body=?2 WHERE id=?1",
+                                params![removed, other.to_string()],
+                            )?;
+                        }
+                    }
+                    for added in desired
+                        .iter()
+                        .filter(|dependency| !current.iter().any(|edge| edge == *dependency))
+                    {
+                        let mut other = get(added)?;
+                        let edges = other["blocks"]
+                            .as_array_mut()
+                            .context("Invalid stored dependencies")?;
+                        if !edges.iter().any(|edge| edge.as_str() == Some(id)) {
+                            edges.push(json!(id));
+                            tx.execute(
+                                "UPDATE tasks SET body=?2 WHERE id=?1",
+                                params![added, other.to_string()],
+                            )?;
+                        }
+                    }
+                    task["blockedBy"] = json!(desired);
                 }
                 for (parameter, field, inverse) in [
                     ("addBlockedBy", "blockedBy", "blocks"),
@@ -582,6 +783,460 @@ mod tests {
             .is_err());
         }
     }
+    #[test]
+    fn task_output_is_not_advertised_and_task_get_carries_wait_parameters() {
+        let definitions = definitions();
+        for name in ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"] {
+            assert_eq!(
+                definitions
+                    .iter()
+                    .filter(|definition| definition.name == name)
+                    .count(),
+                1,
+                "{name} must stay a registered built-in"
+            );
+        }
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != "TaskOutput"),
+            "TaskOutput must not be model-visible"
+        );
+        let get = definitions
+            .iter()
+            .find(|definition| definition.name == "TaskGet")
+            .unwrap();
+        for key in ["id", "task_id", "taskId", "block", "timeout"] {
+            assert!(
+                get.input_schema["properties"].get(key).is_some(),
+                "TaskGet is missing {key}"
+            );
+        }
+        assert_eq!(get.input_schema["properties"]["block"]["type"], "boolean");
+        assert_eq!(get.input_schema["properties"]["block"]["default"], false);
+        assert_eq!(get.input_schema["properties"]["timeout"]["type"], "integer");
+        assert_eq!(get.input_schema["properties"]["timeout"]["minimum"], 0);
+        assert_eq!(
+            get.input_schema["properties"]["timeout"]["maximum"],
+            600_000
+        );
+        let update = definitions
+            .iter()
+            .find(|definition| definition.name == "TaskUpdate")
+            .unwrap();
+        assert_eq!(
+            update.input_schema["properties"]["setBlockedBy"]["type"],
+            "array"
+        );
+        assert_eq!(
+            update.input_schema["properties"]["setBlockedBy"]["items"]["type"],
+            "string"
+        );
+        assert!(update.description.contains("setBlockedBy"));
+    }
+
+    #[test]
+    fn set_blocked_by_replaces_dependencies_and_keeps_inverse_edges() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let create = |subject: &str| {
+            execute_for_session(
+                "TaskCreate",
+                json!({"subject":subject}),
+                root.path(),
+                &session,
+            )
+            .unwrap()
+        };
+        let a = create("a");
+        let b = create("b");
+        let c = create("c");
+        let id = a["id"].as_str().unwrap();
+        let read = |task: &Value| {
+            execute_for_session("TaskGet", json!({"id":task["id"]}), root.path(), &session).unwrap()
+        };
+        execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"addBlockedBy":[b["id"]]}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        assert_eq!(read(&b)["blocks"], json!([id]));
+
+        // Replacing the direct dependency removes the old inverse edge and
+        // adds the new one.
+        execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"setBlockedBy":[c["id"]]}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        assert_eq!(read(&a)["blockedBy"], json!([c["id"]]));
+        assert_eq!(read(&b)["blocks"], json!([]));
+        assert_eq!(read(&c)["blocks"], json!([id]));
+
+        // Duplicate IDs collapse to one edge, and an identical replacement is
+        // idempotent.
+        for _ in 0..2 {
+            execute_for_session(
+                "TaskUpdate",
+                json!({"id":id,"setBlockedBy":[c["id"],c["id"]]}),
+                root.path(),
+                &session,
+            )
+            .unwrap();
+        }
+        assert_eq!(read(&a)["blockedBy"], json!([c["id"]]));
+        assert_eq!(read(&c)["blocks"], json!([id]));
+
+        // A freshly reopened connection reads the same persisted graph.
+        let reopened = uuid::Uuid::parse_str(&session).unwrap().to_string();
+        assert_eq!(
+            execute_for_session("TaskGet", json!({"id":id}), root.path(), &reopened).unwrap()
+                ["blockedBy"],
+            json!([c["id"]])
+        );
+        assert_eq!(
+            execute_for_session("TaskGet", json!({"id":c["id"]}), root.path(), &reopened).unwrap()
+                ["blocks"],
+            json!([id])
+        );
+
+        // The empty array clears the dependency and its inverse edge.
+        execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"setBlockedBy":[]}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        assert_eq!(read(&a)["blockedBy"], json!([]));
+        assert_eq!(read(&c)["blocks"], json!([]));
+    }
+
+    #[test]
+    fn set_blocked_by_failures_leave_every_row_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let create = |subject: &str| {
+            execute_for_session(
+                "TaskCreate",
+                json!({"subject":subject}),
+                root.path(),
+                &session,
+            )
+            .unwrap()
+        };
+        let a = create("a");
+        let b = create("b");
+        let c = create("c");
+        let id = a["id"].as_str().unwrap();
+        execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"addBlockedBy":[b["id"]]}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let snapshot = execute_for_session("TaskList", json!({}), root.path(), &session).unwrap();
+        let missing = uuid::Uuid::new_v4().to_string();
+        let cases = [
+            // A dependency that does not exist in this session.
+            json!({"id":id,"setBlockedBy":[missing]}),
+            // Self reference.
+            json!({"id":id,"setBlockedBy":[id]}),
+            // a depends on b, so b depending on a would cycle.
+            json!({"id":b["id"],"setBlockedBy":[id]}),
+            // A valid replacement plus a missing dependency and a metadata
+            // edit must not persist any part of the call.
+            json!({"id":id,"description":"changed","setBlockedBy":[c["id"],missing]}),
+            // Ambiguous dependency mutations are refused before writing.
+            json!({"id":id,"setBlockedBy":[c["id"]],"status":"deleted"}),
+            json!({"id":id,"setBlockedBy":[c["id"]],"addBlockedBy":[c["id"]]}),
+            json!({"id":id,"setBlockedBy":[c["id"]],"addBlocks":[c["id"]]}),
+            // Wrong types are rejected, not coerced.
+            json!({"id":id,"setBlockedBy":"not-an-array"}),
+            json!({"id":id,"setBlockedBy":[1]}),
+        ];
+        for case in cases {
+            assert!(
+                execute_for_session("TaskUpdate", case.clone(), root.path(), &session).is_err(),
+                "invalid dependency replacement was accepted: {case}"
+            );
+            assert_eq!(
+                execute_for_session("TaskList", json!({}), root.path(), &session).unwrap(),
+                snapshot,
+                "a failed update changed rows: {case}"
+            );
+        }
+
+        // Another session's task store cannot reference this session's task.
+        let foreign = uuid::Uuid::new_v4().to_string();
+        let foreign_task = execute_for_session(
+            "TaskCreate",
+            json!({"subject":"foreign"}),
+            root.path(),
+            &foreign,
+        )
+        .unwrap();
+        let error = execute_for_session(
+            "TaskUpdate",
+            json!({"id":foreign_task["id"],"setBlockedBy":[id]}),
+            root.path(),
+            &foreign,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Task not found"), "{error}");
+        assert_eq!(
+            execute_for_session("TaskList", json!({}), root.path(), &session).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            execute_for_session(
+                "TaskGet",
+                json!({"id":foreign_task["id"]}),
+                root.path(),
+                &foreign
+            )
+            .unwrap()["blockedBy"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn ordinary_task_get_keeps_fields_and_validates_wait_parameters() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let dependency = execute_for_session(
+            "TaskCreate",
+            json!({"subject":"dependency"}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let task = execute_for_session(
+            "TaskCreate",
+            json!({"subject":"ordinary task","description":"details","priority":"high","metadata":{"note":"kept"}}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let id = task["id"].as_str().unwrap();
+        execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"owner":"alice","status":"running","output":"saved output","addBlockedBy":[dependency["id"]]}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        for key in ["id", "task_id", "taskId"] {
+            let value = execute_for_session(
+                "TaskGet",
+                json!({key:id,"block":false}),
+                root.path(),
+                &session,
+            )
+            .unwrap();
+            assert_eq!(value["id"], id);
+            assert_eq!(value["subject"], "ordinary task");
+            assert_eq!(value["description"], "details");
+            assert_eq!(value["priority"], "high");
+            assert_eq!(value["owner"], "alice");
+            assert_eq!(value["output"], "saved output");
+            assert_eq!(value["metadata"]["note"], "kept");
+            assert_eq!(value["blockedBy"], json!([dependency["id"]]));
+            assert!(value.get("retrieval_status").is_none());
+        }
+        // An ordinary record has no live process to wait for: block must not
+        // hold the caller for the requested deadline.
+        let started = std::time::Instant::now();
+        let value = execute_for_session(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":600_000}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(value["status"], "running");
+        assert!(value.get("retrieval_status").is_none());
+        for bad in [
+            json!({"timeout":-1}),
+            json!({"timeout":1.5}),
+            json!({"timeout":"100"}),
+            json!({"timeout":600_001}),
+            json!({"block":"true"}),
+            json!({"block":1}),
+        ] {
+            let mut input = bad;
+            input["task_id"] = json!(id);
+            assert!(
+                execute_for_session("TaskGet", input, root.path(), &session).is_err(),
+                "invalid wait parameter was accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_job_task_get_waits_and_preserves_failure_and_cancel() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = root.path().join("background-tasks").join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        };
+        let write = |status: &str, exit_code: Option<i32>, error: Option<&str>| {
+            let job = json!({"id":id,"foreground":false,"parent_session_id":session,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":status,"supervisor_pid":null,"child_pid":null,"started_ms":now(),"heartbeat_ms":now(),"finished_ms":null,"exit_code":exit_code,"error":error});
+            std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
+        };
+        write("running", None, None);
+        std::fs::write(
+            dir.join("output.jsonl"),
+            "{\"type\":\"delta\",\"delta\":\"working\"}\n",
+        )
+        .unwrap();
+        let snapshot = execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot["status"], "running");
+        assert_eq!(snapshot["retrieval_status"], "not_ready");
+        assert_eq!(snapshot["stdout"], "working");
+        // The wait ends at the deadline and leaves the job alone.
+        let started = tokio::time::Instant::now();
+        let timed = execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":60}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(60));
+        assert_eq!(timed["status"], "running");
+        assert_eq!(timed["retrieval_status"], "timeout");
+        assert!(!dir.join("cancel").exists());
+        write("failed", Some(7), Some("worker failed"));
+        std::fs::write(
+            dir.join("output.jsonl"),
+            "{\"type\":\"result\",\"result\":\"failure report\"}\n",
+        )
+        .unwrap();
+        let failed = execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":5_000}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed["retrieval_status"], "success");
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["exit_code"], 7);
+        assert_eq!(failed["error"], "worker failed");
+        assert_eq!(failed["stdout"], "failure report");
+        write("cancelled", None, None);
+        let cancelled = execute_for_session_async(
+            "TaskGet",
+            json!({"id":id,"block":true,"timeout":1_000}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cancelled["retrieval_status"], "success");
+        assert_eq!(cancelled["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn background_job_task_get_deadline_bounds_a_locked_report_database() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = root.path().join("background-tasks").join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let job = json!({"id":id,"foreground":false,"parent_session_id":session,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"completed","supervisor_pid":null,"child_pid":null,"started_ms":now,"heartbeat_ms":now,"finished_ms":now,"exit_code":0,"error":null});
+        std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
+        std::fs::write(
+            dir.join("output.jsonl"),
+            "{\"type\":\"result\",\"result\":\"available report\"}\n",
+        )
+        .unwrap();
+        // A writer holding the shared database must not hold the retrieval
+        // open beyond the wait deadline plus a short bounded read. The job's
+        // own status is still reported; only the supplementary report remains
+        // unavailable.
+        let lock =
+            rusqlite::Connection::open(root.path().join(crate::runtime::DATABASE_FILE)).unwrap();
+        lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let started = tokio::time::Instant::now();
+        let value = execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":400}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        lock.execute_batch("ROLLBACK").unwrap();
+        assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["retrieval_status"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn background_job_task_get_timeout_zero_read_is_bounded() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = root.path().join("background-tasks").join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let job = json!({"id":id,"foreground":false,"parent_session_id":session,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"running","supervisor_pid":null,"child_pid":null,"started_ms":now,"heartbeat_ms":now,"finished_ms":null,"exit_code":null,"error":null});
+        std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
+        let lock =
+            rusqlite::Connection::open(root.path().join(crate::runtime::DATABASE_FILE)).unwrap();
+        lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        // timeout:0 still reads the snapshot, bounded by a short read deadline.
+        let started = tokio::time::Instant::now();
+        let value = execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":0}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        lock.execute_batch("ROLLBACK").unwrap();
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["retrieval_status"], "timeout");
+    }
+
     fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
         execute_at(name, input, &Path::new(cwd).join("test-data/tasks.sqlite3"))
     }

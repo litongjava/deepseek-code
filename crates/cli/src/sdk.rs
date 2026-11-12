@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{bail, ensure, Context, Result};
 use deepseek_code_core::native_engine::permission_response::PermissionResponse;
+use deepseek_code_core::services::input_queue::{self, QueueMode, QueueState};
 use serde_json::{json, Value};
 enum Reply {
     Question(String),
@@ -419,6 +420,123 @@ async fn idle_control(
     .await;
     response(&frame["request_id"], result)
 }
+/// A stream-json frame steered into the running turn: its durable queue entry
+/// and the original frame, restored if the turn ends before a boundary.
+struct SteeredFrame {
+    item_id: i64,
+    message: UserMessage,
+}
+
+/// Plain prompts follow the REPL rule; commands and frames for another session
+/// keep their previous next-turn behavior.
+fn steers_mid_turn(message: &UserMessage, session: &str) -> bool {
+    !message.initial_hook
+        && crate::session::queues_mid_turn(&message.text)
+        && message
+            .session_id
+            .as_deref()
+            .is_none_or(|id| id.is_empty() || id == "default" || id == session)
+}
+
+/// Cancel the durable entries a host cancellation names, unless the engine
+/// already handed them to the running turn.
+fn cancel_steered(
+    db: &deepseek_code_core::db::DbManager,
+    session: &str,
+    steered: &mut Vec<SteeredFrame>,
+    request: &Value,
+) -> bool {
+    let Some(uuid) = request["message_uuid"].as_str() else {
+        return false;
+    };
+    let items = input_queue::list(db, session).unwrap_or_default();
+    let mut cancelled = false;
+    steered.retain(|frame| {
+        if frame.message.uuid.as_deref() != Some(uuid) {
+            return true;
+        }
+        let Some(item) = items.iter().find(|item| item.id == frame.item_id) else {
+            return true;
+        };
+        if item.state != QueueState::Queued {
+            // Handed off or claimed: the running turn owns it now.
+            return true;
+        }
+        match input_queue::remove(db, session, item.id, item.revision) {
+            Ok(_) => {
+                cancelled = true;
+                false
+            }
+            Err(_) => true,
+        }
+    });
+    cancelled
+}
+
+/// Discard frames the host can no longer continue: the turn is aborted and no
+/// later turn may inherit them.
+fn discard_steered(
+    db: &deepseek_code_core::db::DbManager,
+    session: &str,
+    steered: &mut Vec<SteeredFrame>,
+) {
+    if steered.is_empty() {
+        return;
+    }
+    let ids: Vec<i64> = steered.iter().map(|frame| frame.item_id).collect();
+    if let Err(error) = input_queue::cancel_undelivered(db, session, &ids) {
+        eprintln!("Could not discard steered messages: {error:#}");
+    }
+    steered.clear();
+}
+
+/// Delivered items keep their transcript row; leftovers become the next turn.
+/// Returns the (uuid, handoff message id) pairs the host can address later.
+fn reconcile_steered(
+    db: &deepseek_code_core::db::DbManager,
+    session: &str,
+    steered: &mut Vec<SteeredFrame>,
+    queue: &mut VecDeque<UserMessage>,
+) -> Result<Vec<(String, String)>> {
+    if steered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let states: HashMap<i64, QueueState> = input_queue::list(db, session)?
+        .into_iter()
+        .map(|item| (item.id, item.state))
+        .collect();
+    let mut delivered = Vec::new();
+    let mut undelivered = Vec::new();
+    for frame in steered.drain(..) {
+        match states.get(&frame.item_id) {
+            Some(QueueState::Handoff) => {
+                if let Some(uuid) = frame.message.uuid.clone() {
+                    delivered.push((uuid, format!("queue-input-{}", frame.item_id)));
+                }
+            }
+            Some(QueueState::Queued | QueueState::Claimed) => undelivered.push(frame),
+            // Cancelled by the host or another reader: the frame is gone.
+            Some(QueueState::Cancelled) | None => {}
+        }
+    }
+    if !undelivered.is_empty() {
+        let ids: Vec<i64> = undelivered.iter().map(|frame| frame.item_id).collect();
+        let cancelled: std::collections::HashSet<i64> =
+            input_queue::cancel_undelivered(db, session, &ids)?
+                .into_iter()
+                .map(|item| item.id)
+                .collect();
+        // Restored frames were meant for the turn that just ended, so they run
+        // before frames that were never eligible for steering.
+        for frame in undelivered.into_iter().rev() {
+            if cancelled.contains(&frame.item_id) {
+                queue.push_front(frame.message);
+            }
+        }
+    }
+    Ok(delivered)
+}
+
 pub async fn run(
     cli: &Cli,
     session: &mut Session,
@@ -503,9 +621,9 @@ async fn run_inner(
     let mut eof = false;
     let mut failed = false;
     let mut started = false;
-    let mut answered = None::<(String, String)>;
+    let mut answered = Vec::<(String, String)>::new();
     loop {
-        if let Some((uuid, id)) = answered.take() {
+        for (uuid, id) in std::mem::take(&mut answered) {
             session.sdk_overrides.message_ids.insert(uuid, id);
         }
         if !started && (initialization.is_initialized() || !queue.is_empty()) {
@@ -571,6 +689,17 @@ async fn run_inner(
                 }
                 _ => message.text.clone(),
             };
+            // Frames received while this turn runs are steered through the same
+            // durable queue the REPL and Desktop fill; these handles outlive the
+            // immutable borrow the turn future takes on the session.
+            let steer_db = session.store.db.clone();
+            let steer_session = session.id.clone();
+            let replays = session.sdk_steered_replays.clone();
+            replays
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            let mut steered = Vec::<SteeredFrame>::new();
             let (interrupt, interrupted) = tokio::sync::watch::channel(false);
             session.sdk_interrupt = Some(interrupted);
             let turn = Box::pin(async {
@@ -594,13 +723,39 @@ async fn run_inner(
                                 session.engine.cancel_turn(&session.id).await;
                                 callbacks.close();mcp.close();session.sdk_mcp.clear();permissions.closed.store(true,Ordering::SeqCst);permissions.cancel().await;
                                 failed=true;turn_failed=true;queue.clear();
+                                discard_steered(&steer_db,&steer_session,&mut steered);
                                 crate::session::emit_json(&crate::sdk_messages::error_result(&session.id,"SDK input closed while a hook or MCP host was required"))?;
                                 break;
                             }
                             callbacks.close();mcp.close();permissions.closed.store(true,Ordering::SeqCst);permissions.cancel().await;
                         },
                         Some(Err(error))=>{session.engine.cancel_turn(&session.id).await;callbacks.cancel_all();mcp.cancel_all();permissions.cancel().await;return Err(error)},
-                        Some(Ok(Frame::User(user)))=>{ensure!(queue.len()<32,"SDK pending user queue exceeds 32 messages");queue.push_back(user);},
+                        Some(Ok(Frame::User(user)))=>{
+                            ensure!(queue.len()+steered.len()<32,"SDK pending user queue exceeds 32 messages");
+                            if steers_mid_turn(&user,&steer_session) {
+                                let mut user=user;
+                                let uuid=user.uuid.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string());
+                                user.uuid=Some(uuid.clone());
+                                match input_queue::enqueue(&steer_db,&steer_session,&uuid,user.content.clone(),QueueMode::Steer) {
+                                    Ok(item) if !steered.iter().any(|frame|frame.item_id==item.id) => {
+                                        let mut envelope=user.envelope.clone();
+                                        envelope["uuid"]=json!(uuid);
+                                        replays.lock().unwrap_or_else(|error|error.into_inner()).insert(format!("queue-input-{}",item.id),envelope);
+                                        steered.push(SteeredFrame{item_id:item.id,message:user});
+                                    },
+                                    // The same frame sent twice stays one queue item.
+                                    Ok(_)=>{},
+                                    Err(error)=>{
+                                        // Steering needs the durable queue; otherwise the
+                                        // frame keeps its long-standing next-turn behavior.
+                                        eprintln!("Steering unavailable; the message runs after this turn: {error:#}");
+                                        queue.push_back(user);
+                                    },
+                                }
+                            } else {
+                                queue.push_back(user);
+                            }
+                        },
                         Some(Ok(Frame::Response(value)))=>{route_response(&permissions, &callbacks, &mcp, &value).await?;},
                         Some(Ok(Frame::Control(value)))=>{
                             if value["request"]["subtype"]=="initialize" {
@@ -625,7 +780,13 @@ async fn run_inner(
                                 continue;
                             }
                             match request["subtype"].as_str() {
-                                Some("cancel_async_message") => response(&value["request_id"], cancel_queued(&mut queue, request))?,
+                                Some("cancel_async_message") => {
+                                    // A steered frame already left the local queue.
+                                    let queued=cancel_queued(&mut queue,request)?;
+                                    let cancelled=queued["cancelled"].as_bool().unwrap_or(false)
+                                        ||cancel_steered(&steer_db,&steer_session,&mut steered,request);
+                                    response(&value["request_id"],Ok(json!({"cancelled":cancelled})))?
+                                },
                                 Some("set_permission_mode") => response(&value["request_id"], set_permission_mode(session, request).await)?,
                                 _ => response(&value["request_id"],Err(anyhow::anyhow!("Control changes require an idle session; interrupt the active turn first")))?,
                             }
@@ -635,9 +796,14 @@ async fn run_inner(
             }
             mcp.cancel_all();
             permissions.cancel().await;
+            // Frames the turn never read run next, exactly once; delivered ones
+            // map their UUID onto the handoff row they were saved as.
+            let delivered = reconcile_steered(&steer_db,&steer_session,&mut steered,&mut queue)?;
+            let delivered_rows: std::collections::HashSet<String> = delivered.iter().map(|(_,id)|id.clone()).collect();
+            answered.extend(delivered);
             // The pinned turn still borrows the session; record the id next iteration.
-            if let Some(id) = crate::sdk_operations::latest_user_message(session)? {
-                answered = Some((message_uuid, id));
+            if let Some(id) = crate::sdk_operations::latest_user_message(session, &delivered_rows)? {
+                answered.push((message_uuid, id));
             }
             if !turn_failed && session.sdk_overrides.prompt_suggestions {
                 if let Err(error) = emit_prompt_suggestion(session).await {

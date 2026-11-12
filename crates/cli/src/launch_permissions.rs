@@ -88,7 +88,7 @@ mod tests {
         for name in [
             "Agent",
             "TaskStop",
-            "TaskOutput",
+            "TaskGet",
             "Bash",
             "Read",
             "mcp__fixture__*",
