@@ -387,7 +387,7 @@ pub async fn state_command(
     use deepseek_code_core::skills::{discovery, states};
     let stored = states::load(&paths.data_dir);
     let line = |name: &str| {
-        let value = stored.get(name).copied().unwrap_or_default();
+        let value = states::effective(&stored, name);
         format!("{name}  {}", value.label())
     };
     match (skill, state) {
@@ -618,6 +618,20 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn state_command_reports_user_only_default_for_translation_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+
+        // No states file yet: the bundled translation skills are user-only.
+        let shown = state_command(&paths, &workspace, Some("translate-zh-en"), None)
+            .await
+            .unwrap();
+        assert_eq!(shown, "translate-zh-en  user-only");
     }
 
     #[tokio::test]

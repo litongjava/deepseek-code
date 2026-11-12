@@ -142,7 +142,7 @@ pub(crate) async fn load(paths: &RuntimePaths, session: &Session) -> Result<Mode
     let mut skills: Vec<SkillRow> = names
         .into_iter()
         .map(|name| {
-            let state = states.get(&name).copied().unwrap_or_default();
+            let state = states::effective(&states, &name);
             let command = commands.get(&name);
             let listing_tokens = if state == SkillState::Off {
                 0

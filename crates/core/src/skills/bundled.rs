@@ -75,6 +75,18 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
             "Prepare auto mode for your environment, plus permission rules",
             include_str!("bundled/auto-mode-setup.md"),
         ),
+        // User-only by default (see `states::default_state`): hidden from the
+        // model listing until the user changes their state to `user`.
+        (
+            "translate-zh-en",
+            "Translate Chinese text into English",
+            include_str!("bundled/translate-zh-en.md"),
+        ),
+        (
+            "translate-en-zh",
+            "Translate English text into Chinese",
+            include_str!("bundled/translate-en-zh.md"),
+        ),
     ];
     definitions
         .into_iter()
@@ -115,7 +127,11 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
                     path: Path::new("__embedded_cli_skills__").join(name),
                     content,
                     user_invocable: true,
-                    disable_model_invocation: !super::bundled_resources::supports(name),
+                    // The translation skills restrict model invocation through
+                    // their default state instead, so switching them to `user`
+                    // really makes them listable and invocable.
+                    disable_model_invocation: !super::bundled_resources::supports(name)
+                        && !matches!(name, "translate-zh-en" | "translate-en-zh"),
                     listing_name_only: false,
                     context: None,
                     shell: None,
@@ -153,6 +169,36 @@ mod tests {
         assert!(commands["claude-api"].content.contains("Rust (HTTP API)"));
         assert!(!commands["doctor"].content.contains("Read-only local diagnostic snapshot:"));
     }
+    #[test]
+    fn translation_skills_discover_as_user_only_until_set_to_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+
+        let (commands, invalid) =
+            super::super::discovery::discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        for name in ["translate-zh-en", "translate-en-zh"] {
+            let command = &commands[name];
+            assert!(command.disable_model_invocation, "{name}");
+            assert!(command.user_invocable, "{name}");
+        }
+
+        crate::skills::states::set(
+            &data,
+            "translate-zh-en",
+            crate::skills::states::SkillState::User,
+        )
+        .unwrap();
+        let (commands, invalid) =
+            super::super::discovery::discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        assert!(!commands["translate-zh-en"].disable_model_invocation);
+        assert!(commands["translate-zh-en"].user_invocable);
+        assert!(commands["translate-en-zh"].disable_model_invocation);
+    }
+
     #[test]
     fn project_workflow_overrides_embedded_default() {
         let temp = tempfile::tempdir().unwrap();

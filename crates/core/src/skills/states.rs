@@ -1,7 +1,9 @@
 //! Per-skill states stored in `<data dir>/skill-states.json`.
 //!
-//! A skill without an entry is [`SkillState::User`], so existing installations
-//! keep their previous behavior until the user changes a state.
+//! A skill without an entry gets its default state: [`SkillState::User`], except
+//! the bundled translation skills, which default to [`SkillState::UserOnly`].
+//! Existing installations therefore keep their previous behavior until the user
+//! changes a state.
 use crate::skills::discovery::SkillCommand;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -87,8 +89,28 @@ pub fn load(data_dir: &Path) -> BTreeMap<String, SkillState> {
     states
 }
 
+/// Skills that ship hidden from the model: the user calls them by name.
+const USER_ONLY_BY_DEFAULT: [&str; 2] = ["translate-zh-en", "translate-en-zh"];
+
+/// The state a skill has when the states file does not mention it.
+pub fn default_state(name: &str) -> SkillState {
+    if USER_ONLY_BY_DEFAULT.contains(&name) {
+        SkillState::UserOnly
+    } else {
+        SkillState::User
+    }
+}
+
+/// The stored state, or the skill's default.
+pub fn effective(states: &BTreeMap<String, SkillState>, name: &str) -> SkillState {
+    states
+        .get(name)
+        .copied()
+        .unwrap_or_else(|| default_state(name))
+}
+
 pub fn get(data_dir: &Path, name: &str) -> SkillState {
-    load(data_dir).get(name).copied().unwrap_or_default()
+    effective(&load(data_dir), name)
 }
 
 /// Store one skill's state, keeping the other entries. The file is replaced
@@ -113,21 +135,24 @@ pub fn set(data_dir: &Path, name: &str, state: SkillState) -> Result<()> {
     Ok(())
 }
 
-/// Apply stored states to the merged command map.
+/// Apply stored states to the merged command map. Names the file does not
+/// mention still get their default, so skills that ship user-only stay hidden
+/// from the model until the user changes them.
 pub fn apply(commands: &mut BTreeMap<String, SkillCommand>, states: &BTreeMap<String, SkillState>) {
-    for (name, state) in states {
-        match state {
+    let names: Vec<String> = commands.keys().cloned().collect();
+    for name in names {
+        match effective(states, &name) {
             SkillState::Off => {
-                commands.remove(name);
+                commands.remove(&name);
             }
             SkillState::User => {}
             SkillState::NameOnly => {
-                if let Some(command) = commands.get_mut(name) {
+                if let Some(command) = commands.get_mut(&name) {
                     command.listing_name_only = true;
                 }
             }
             SkillState::UserOnly => {
-                if let Some(command) = commands.get_mut(name) {
+                if let Some(command) = commands.get_mut(&name) {
                     command.disable_model_invocation = true;
                     command.user_invocable = true;
                 }
@@ -216,6 +241,33 @@ mod tests {
         assert!(!commands["d"].model_invocable());
         assert!(commands["d"].user_invocable);
         assert!(!commands["d"].listing_name_only);
+    }
+
+    #[test]
+    fn translation_skills_default_to_user_only() {
+        assert_eq!(default_state("translate-zh-en"), SkillState::UserOnly);
+        assert_eq!(default_state("translate-en-zh"), SkillState::UserOnly);
+        assert_eq!(default_state("simplify"), SkillState::User);
+
+        // No entry: the default hides the skill from the model but keeps the
+        // user slash invocation.
+        let mut commands = ["translate-en-zh"]
+            .into_iter()
+            .map(|name| (name.to_owned(), command(name)))
+            .collect::<BTreeMap<_, _>>();
+        apply(&mut commands, &BTreeMap::new());
+        assert!(commands["translate-en-zh"].disable_model_invocation);
+        assert!(commands["translate-en-zh"].user_invocable);
+
+        // An explicit `user` state makes it listable and invocable by the model.
+        let mut commands = ["translate-en-zh"]
+            .into_iter()
+            .map(|name| (name.to_owned(), command(name)))
+            .collect::<BTreeMap<_, _>>();
+        let states = BTreeMap::from([("translate-en-zh".to_owned(), SkillState::User)]);
+        apply(&mut commands, &states);
+        assert!(!commands["translate-en-zh"].disable_model_invocation);
+        assert!(commands["translate-en-zh"].user_invocable);
     }
 
     #[test]
