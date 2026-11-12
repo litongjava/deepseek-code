@@ -96,4 +96,37 @@ mod tests {
             std::fs::canonicalize(first).unwrap()
         );
     }
+
+    #[test]
+    fn new_session_does_not_inherit_added_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let store = SessionStore::new(Arc::new(
+            DbManager::new(root.path().join("db.sqlite")).unwrap(),
+        ));
+        store.db.init().unwrap();
+        let a = store.create(&first, "model", "provider").unwrap();
+        change(&store.db, &a, &first, second.to_str().unwrap(), true).unwrap();
+        std::fs::remove_dir(&second).unwrap();
+        let c = store.create(&first, "model", "provider").unwrap();
+        store
+            .db
+            .with_conn(|conn| {
+                assert_eq!(
+                    workspace::conversation_project(conn, &c)
+                        .unwrap()
+                        .unwrap()
+                        .folders
+                        .len(),
+                    1
+                );
+            })
+            .unwrap();
+        let third = root.path().join("third");
+        std::fs::create_dir(&third).unwrap();
+        change(&store.db, &c, &first, third.to_str().unwrap(), true).unwrap();
+    }
 }

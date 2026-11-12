@@ -7,6 +7,8 @@ mod recovery_interrupt;
 mod apply_patch_permissions;
 #[path = "support/tool_loading.rs"]
 mod tool_loading;
+#[path = "sdk/steering.rs"]
+mod steering;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -103,6 +105,7 @@ enum Mode {
     ReadThenTruncated,
     ReadThenText,
     SlowText,
+    SlowTool,
     Tool,
     SchemaGood,
     SchemaBad,
@@ -115,6 +118,7 @@ enum Mode {
     /// Two different patches that reuse one provider id, so their occurrences
     /// must stay independent.
     ApplyPatchReusedId,
+    RoleEveryChunk,
 }
 /// The provider id the ApplyPatch fixture reuses; occurrences must not expose it.
 const APPLY_PATCH_PROVIDER_ID: &str = "apply-1";
@@ -203,6 +207,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
+        || matches!(state.mode, Mode::SlowTool) && count == 1
         || matches!(
             state.mode,
             Mode::ApplyPatchMixed | Mode::ApplyPatchAllowed
@@ -273,6 +278,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     "Write",
                     json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
                 )
+            } else if matches!(state.mode, Mode::SlowTool) {
+                (
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}),
+                )
             } else {
                 ("read-1", "Read", json!({"file_path":"fixture.txt"}))
             };
@@ -341,6 +352,8 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(state.mode, Mode::SlowTool) {
+                json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}).to_string()}}]})
             } else {
                 json!({"tool_calls":[{"index":0,"id":"read-1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"fixture.txt\"}"}}]})
             }
@@ -349,11 +362,33 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         } else {
             json!({"content":text})
         };
-        format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-            json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+        // Some providers repeat "role":"assistant" in every delta chunk.
+        let deltas = if !tool && matches!(state.mode, Mode::RoleEveryChunk) {
+            let chars: Vec<char> = text.chars().collect();
+            let third = chars.len() / 3;
+            let piece = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+            vec![
+                json!({"role":"assistant","reasoning_content":"think-a"}),
+                json!({"role":"assistant","reasoning_content":"think-b"}),
+                json!({"role":"assistant","content":piece(0, third)}),
+                json!({"role":"assistant","content":piece(third, third * 2)}),
+                json!({"role":"assistant","content":piece(third * 2, chars.len())}),
+            ]
+        } else {
+            vec![delta]
+        };
+        let mut stream = String::new();
+        for delta in &deltas {
+            stream.push_str(&format!(
+                "data: {}\n\n",
+                json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]})
+            ));
+        }
+        stream.push_str(&format!(
+            "data: {}\n\ndata: [DONE]\n\n",
             json!({"choices":[{"index":0,"delta":{},"finish_reason":if truncated {"length"} else if tool {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":4}})
-        )
+        ));
+        stream
     };
     ([("content-type", "text/event-stream")], stream).into_response()
 }
@@ -610,6 +645,15 @@ impl Client {
     }
     async fn send(&mut self, value: Value) {
         self.raw(&format!("{value}\n")).await;
+    }
+    /// The next line the CLI prints, whatever it is; used to observe ordering.
+    async fn next_frame(&mut self) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(20), self.output.next_line())
+            .await
+            .expect("CLI produced no frame")
+            .unwrap()
+            .expect("CLI ended before the expected frame");
+        serde_json::from_str(&line).unwrap_or_else(|_| panic!("Non-JSON stdout: {line}"))
     }
     async fn raw(&mut self, text: &str) {
         let input = self.input.as_mut().unwrap();

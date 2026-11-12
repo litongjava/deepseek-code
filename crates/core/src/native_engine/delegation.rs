@@ -546,7 +546,8 @@ impl ToolLoopExecutor {
             crate::services::session_messages::ExecutionLease::acquire(
                 &context.paths.data_dir,
                 id,
-            )?;
+            )?
+            .map(std::sync::Arc::new);
         let current: Value = context
             .setting(&format!("delegation.{id}"))?
             .context("Child ownership disappeared")?;
@@ -1543,7 +1544,8 @@ impl ToolLoopExecutor {
                 child.execution_lease = crate::services::session_messages::ExecutionLease::acquire(
                     &context.paths.data_dir,
                     &id,
-                )?;
+                )?
+                .map(std::sync::Arc::new);
             }
             let state = ChildState {
                 context: context.clone(),
