@@ -941,6 +941,35 @@ pub(crate) fn background_label(shells: usize, monitors: usize) -> Option<String>
     }
 }
 
+/// The idle prompt's footer: the permission status, the effort label, and the
+/// background hint. The effort label is shortened so the hint always fits;
+/// without a hint the footer is just the status and the effort.
+fn status_footer(status: &str, effort: &str, label: Option<&str>, width: usize) -> String {
+    let Some(label) = label else {
+        return format!("{status} {effort}");
+    };
+    let suffix = format!(" \u{b7} {label}");
+    if status.width() + 1 + effort.width() + suffix.width() <= width {
+        return format!("{status} {effort}{suffix}");
+    }
+    // Leave room for the hint and the ellipsis; a sliver of effort is useless.
+    let room = width.saturating_sub(status.width() + 1 + suffix.width());
+    if room < 4 {
+        return format!("{status}{suffix}");
+    }
+    let mut shortened = String::new();
+    let mut used = 0;
+    for c in effort.chars() {
+        let c_width = c.width().unwrap_or(0);
+        if used + c_width + 1 > room {
+            break;
+        }
+        shortened.push(c);
+        used += c_width;
+    }
+    format!("{status} {shortened}\u{2026}{suffix}")
+}
+
 impl PromptEditor {
     pub fn set_permission_mode(&mut self, mode: String) {
         self.permission_mode = mode;
@@ -1487,10 +1516,12 @@ impl PromptEditor {
                 }
             };
             let footer = if search.is_none() && !text.starts_with('!') && !text.starts_with("# ") {
-                format!(
-                    "{} {}",
+                // Keep the background hint: the effort label alone can fill the row.
+                status_footer(
                     crate::terminal::style::status_mode(&self.permission_mode),
-                    self.effort.as_deref().unwrap_or_default()
+                    self.effort.as_deref().unwrap_or_default(),
+                    background_label(self.shells, self.monitors).as_deref(),
+                    width,
                 )
             } else {
                 footer
@@ -2612,6 +2643,24 @@ mod tests {
         assert_eq!(background_label(3, 0).as_deref(), Some("3 shells \u{b7} \u{2193} to manage"));
         assert_eq!(background_label(0, 1).as_deref(), Some("1 monitor \u{b7} \u{2193} to manage"));
         assert_eq!(background_label(4, 2).as_deref(), Some("4 shells, 2 monitors \u{b7} \u{2193} to manage"));
+    }
+
+    #[test]
+    fn status_footer_keeps_the_background_label_visible() {
+        let status = "bypass permissions on";
+        let effort = "deepseek-flash default \u{b7} /home/dev/code/deepseek-code-dev/runs/monitor-tool/proj \u{b7} Monitor tool with a long title";
+        let footer = status_footer(status, effort, Some("1 monitor \u{b7} \u{2193} to manage"), 120);
+        assert!(
+            footer.ends_with("\u{b7} 1 monitor \u{b7} \u{2193} to manage"),
+            "hint is clipped: {footer}"
+        );
+        assert!(footer.width() <= 120, "footer is too wide: {footer:?}");
+        assert!(footer.contains('\u{2026}'), "effort is not shortened: {footer}");
+        assert_eq!(status_footer(status, effort, None, 120), format!("{status} {effort}"));
+        assert_eq!(
+            status_footer(status, "flash", Some("1 shell \u{b7} \u{2193} to manage"), 120),
+            "bypass permissions on flash \u{b7} 1 shell \u{b7} \u{2193} to manage"
+        );
     }
 
     #[test]
