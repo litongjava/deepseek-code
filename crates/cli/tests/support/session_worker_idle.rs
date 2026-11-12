@@ -522,6 +522,99 @@ async fn owned_child_wakes_without_parent_turn_and_preserves_its_original_runtim
     fixture.stop().await;
 }
 
+/// An inbox-triggered idle wake exists because a message is queued. When the
+/// host briefly holds the session writer, the poll must retry instead of
+/// treating its 250 ms busy window as "no message" and dropping the runtime.
+#[tokio::test]
+async fn inbox_resume_survives_a_briefly_held_writer() {
+    let fixture = Fixture::start("bypass", false).await;
+    let child = fixture.child.clone();
+    let watched = child.clone();
+    let database = fixture
+        .context
+        .paths
+        .data_dir
+        .join(deepseek_code_core::runtime::DATABASE_FILE);
+    // The wake commits its authority, runtime, transcript and consumer rows
+    // before it drains the inbox. Holding the writer from the start would only
+    // delay those writes and release it again before the drain, so the hold is
+    // taken as soon as the consumer row appears: the drain follows it at once.
+    let holder = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let attached: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_inbox_consumers WHERE session_id=?1)",
+                    [&watched],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if attached {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the idle wake never attached its inbox consumer"
+            );
+            std::thread::yield_now();
+        }
+        loop {
+            match connection.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => break,
+                Err(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("could not briefly hold the session writer: {error}"),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    fixture.send("IDLE_WRITE: write the requested file");
+    let job = fixture.next_job(1).await;
+    let finished = completed(&fixture.context.paths.data_dir, &job.id).await;
+    holder.join().unwrap();
+    assert_eq!(
+        finished.status, "completed",
+        "the inbox-triggered resume ended as {:?} with error {:?}",
+        finished.status, finished.error
+    );
+    let saved: Value = fixture
+        .context
+        .setting(&format!("delegation.{child}"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved["status"], "needs_resume", "{saved}");
+    assert_eq!(saved["status"], "completed", "{saved}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("idle.txt")).unwrap(),
+        "IDLE_CHILD_WRITE"
+    );
+    assert_eq!(
+        session_messages::pending_count(&fixture.context, &child).unwrap(),
+        0
+    );
+    let requests = fixture.model.requests.lock().unwrap();
+    assert!(requests.iter().any(|body| {
+        child_request(body)
+            && body["messages"].as_array().unwrap().iter().any(|message| {
+                message["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("IDLE_WRITE")
+            })
+    }));
+    drop(requests);
+    assert_no_secret(&fixture.context.paths.data_dir);
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn idle_child_live_mode_is_scoped_to_child_and_respects_owner_plan() {
     for mode in ["bypass", "plan"] {

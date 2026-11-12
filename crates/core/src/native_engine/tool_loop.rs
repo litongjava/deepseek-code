@@ -2632,7 +2632,17 @@ impl ToolLoopExecutor {
         self.message_deliveries = 0;
         self.child_resumes.store(0, Ordering::Relaxed);
         if self.require_pending_peer_message {
-            let incoming = self.drain_peer_messages()?;
+            // The inbox poll defers for up to 250 ms when the host holds the writer and
+            // then reports nothing. This resume exists because a message is queued, so
+            // retry briefly instead of treating one busy window as "no message".
+            let mut incoming = self.drain_peer_messages()?;
+            for _ in 0..20 {
+                if !incoming.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                incoming = self.drain_peer_messages()?;
+            }
             anyhow::ensure!(
                 !incoming.is_empty(),
                 "No trusted pending peer message remains; needs_resume"
