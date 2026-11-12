@@ -990,6 +990,28 @@ impl PromptEditor {
     pub fn set_background_counter(&mut self, counter: Box<dyn Fn() -> (usize, usize) + Send>) {
         self.background_counter = Some(counter);
     }
+    /// Refresh the footer's background counts once a second, also when none are
+    /// shown yet: shells and monitors start during turns, after the prompt took
+    /// its counts, and the footer must pick them up without any input.
+    /// Returns whether the counts changed.
+    fn poll_background(
+        &mut self,
+        last: &mut std::time::Instant,
+        now: std::time::Instant,
+    ) -> bool {
+        if now.saturating_duration_since(*last) < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        *last = now;
+        let Some(counter) = &self.background_counter else {
+            return false;
+        };
+        let (shells, monitors) = counter();
+        let changed = (shells, monitors) != (self.shells, self.monitors);
+        self.shells = shells;
+        self.monitors = monitors;
+        changed
+    }
     pub fn set_subagents(
         &mut self,
         context: deepseek_code_core::services::ServiceContext,
@@ -1109,7 +1131,11 @@ impl PromptEditor {
         let mut menu_hidden = false;
         // `?` on an empty prompt shows shortcuts in place of the footer.
         let mut shortcuts = false;
-        let mut last_shell_count = std::time::Instant::now();
+        // Poll the background counts right away: a task may already be running
+        // when this prompt opens, and the real counts are set during a turn.
+        let mut last_shell_count = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap_or_else(std::time::Instant::now);
         let mut agents: Vec<String> = Vec::new();
         let mut agent_records = Vec::<crate::background_commands::Agent>::new();
         let mut agent_click: Option<(String, std::time::Instant)> = None;
@@ -1184,12 +1210,10 @@ impl PromptEditor {
                     self.suggestion = Some(suggestion);
                 }
             }
-            if self.shells + self.monitors > 0 && last_shell_count.elapsed() >= std::time::Duration::from_secs(1) {
-                last_shell_count = std::time::Instant::now();
-                if let Some(counter) = &self.background_counter {
-                    (self.shells, self.monitors) = counter();
-                }
-            }
+            // Tasks start during turns, after this prompt set its counts, so the
+            // counter is polled even when the footer shows none; the frame diff
+            // below repaints the footer whenever the label changes.
+            self.poll_background(&mut last_shell_count, std::time::Instant::now());
             if buffer.chars != last_state.0 {
                 undo.push(std::mem::replace(
                     &mut last_state,
@@ -2588,6 +2612,33 @@ mod tests {
         assert_eq!(background_label(3, 0).as_deref(), Some("3 shells \u{b7} \u{2193} to manage"));
         assert_eq!(background_label(0, 1).as_deref(), Some("1 monitor \u{b7} \u{2193} to manage"));
         assert_eq!(background_label(4, 2).as_deref(), Some("4 shells, 2 monitors \u{b7} \u{2193} to manage"));
+    }
+
+    #[test]
+    fn footer_picks_up_a_monitor_started_after_the_prompt_opened() {
+        let mut editor = PromptEditor::default();
+        assert_eq!((editor.shells, editor.monitors), (0, 0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        editor.set_background_counter(Box::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (0, 1)
+        }));
+        // The monitor starts after the prompt opened; the first poll catches it.
+        let mut last = std::time::Instant::now();
+        let polled = last + std::time::Duration::from_secs(1);
+        assert!(editor.poll_background(&mut last, polled));
+        assert_eq!(editor.monitors, 1);
+        assert_eq!(
+            background_label(editor.shells, editor.monitors).as_deref(),
+            Some("1 monitor \u{b7} \u{2193} to manage")
+        );
+        // Within the poll interval the counter is not called again.
+        assert!(!editor.poll_background(
+            &mut last,
+            polled + std::time::Duration::from_millis(500)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn frame_lines() -> Vec<DisplayLine> {
