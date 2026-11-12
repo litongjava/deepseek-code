@@ -32,13 +32,12 @@ const MAX_EVENT_LINES: usize = 50;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 
 /// Starts a monitor for the owning session.
-// Registration as a model tool follows in a later round.
-#[allow(dead_code)]
 pub(crate) fn start(
     mut command: Command,
     description: &str,
     command_text: &str,
     timeout: Duration,
+    guard: Option<crate::services::wsl::Guard>,
 ) -> Result<Value> {
     anyhow::ensure!(
         !timeout.is_zero() && timeout <= MAX_TIMEOUT,
@@ -111,6 +110,8 @@ pub(crate) fn start(
     );
     let monitor_id = id.clone();
     tokio::spawn(async move {
+        // The WSL lease must outlive the command; dropping it cancels it.
+        let _guard = guard;
         let started = tokio::time::Instant::now();
         let deadline = started + timeout;
         let mut completion = Completion {
@@ -556,7 +557,7 @@ mod tests {
         let command = shell(script);
         let (root, session) = (root.to_path_buf(), session.to_owned());
         scope(Some((root, session)), async {
-            start(command, "fixture", script, timeout).unwrap()
+            start(command, "fixture", script, timeout, None).unwrap()
         })
         .await
     }
@@ -752,6 +753,92 @@ mod tests {
         )
         .unwrap();
         assert!(log.contains("err"), "{log:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn monitor_tool_runs_through_the_bash_path() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let cwd = root.path().to_string_lossy().into_owned();
+        let (owned_root, owned_session) = (root.path().to_path_buf(), session.clone());
+        let task = scope(Some((owned_root, owned_session)), async move {
+            crate::tools::execute_tool_async(
+                "Monitor",
+                json!({"command":"echo hi","description":"probe"}),
+                &cwd,
+            )
+            .await
+            .unwrap()
+        })
+        .await;
+        assert_eq!(task["status"], "running", "{task}");
+        assert_eq!(task["description"], "probe");
+        let id = task["task_id"].as_str().unwrap().to_owned();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut events = Vec::new();
+        loop {
+            events.extend(collect_events(root.path(), &session).unwrap());
+            let output = events
+                .iter()
+                .any(|event| event.kind == "output" && event.text == "hi");
+            let exited = events.iter().any(|event| event.kind == "exited");
+            if output && exited {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "monitor events did not arrive: {events:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(events.iter().all(|event| event.task_id == id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_stop_stops_a_monitor() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let cwd = root.path().to_string_lossy().into_owned();
+        let (owned_root, owned_session) = (root.path().to_path_buf(), session.clone());
+        let task = scope(Some((owned_root, owned_session)), async move {
+            crate::tools::execute_tool_async(
+                "Monitor",
+                json!({"command":"while true; do sleep 1; done","description":"watch"}),
+                &cwd,
+            )
+            .await
+            .unwrap()
+        })
+        .await;
+        let id = task["task_id"].as_str().unwrap().to_owned();
+        let stopped = crate::tools::tasks::execute_for_session_async(
+            "TaskStop",
+            json!({"task_id":id}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped["cancellation_requested"], true, "{stopped}");
+        assert_eq!(stopped["task_id"], id, "{stopped}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let events = collect_events(root.path(), &session).unwrap();
+            if events.iter().any(|event| event.kind == "stopped") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the monitor did not report that it stopped: {events:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let finished = wait_finished(root.path(), &session, &id).await;
+        assert_eq!(finished["status"], "cancelled", "{finished}");
     }
 
     #[test]

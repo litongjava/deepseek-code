@@ -373,6 +373,29 @@ async fn task_get_can_be_discovered_on_demand_and_invoked() {
     assert_eq!(value["subject"], "hidden task");
 }
 
+#[tokio::test]
+async fn monitor_is_deferred_and_loadable() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor =
+        executor(temp.path()).with_conv_id(uuid::Uuid::new_v4().to_string());
+    let initial = names(&executor);
+    assert!(
+        !initial.contains(&"Monitor".to_owned()),
+        "Monitor must not be in the default request: {initial:?}"
+    );
+    executor.exposed_tools = Some(initial.into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"select:Monitor"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let loaded: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(loaded["success"], true, "{output}");
+    assert_eq!(loaded["loaded_tools"], json!(["Monitor"]), "{output}");
+
+    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+    assert!(next.contains("Monitor"), "{next:?}");
+}
+
 #[test]
 fn the_catalog_carries_each_task_builtin_once_and_no_retired_entries() {
     let catalog = crate::tools::get_tool_definitions();
