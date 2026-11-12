@@ -1,6 +1,6 @@
 //! Discover only enabled, unambiguous skills that the shared engine can execute.
 use deepseek_code_core::{runtime::RuntimePaths, skills::SkillsManager};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub enum PreparedInvocation {
     NotHandled,
@@ -375,6 +375,54 @@ pub async fn load_for_workspace(
     Ok(commands)
 }
 
+/// Shared implementation of `dcl skills state` and `/skills state`. Returns the
+/// text to print: every `NAME  STATE` pair when no skill is given, one pair
+/// otherwise.
+pub async fn state_command(
+    paths: &RuntimePaths,
+    workspace: &std::path::Path,
+    skill: Option<&str>,
+    state: Option<&str>,
+) -> anyhow::Result<String> {
+    use deepseek_code_core::skills::{discovery, states};
+    let stored = states::load(&paths.data_dir);
+    let line = |name: &str| {
+        let value = stored.get(name).copied().unwrap_or_default();
+        format!("{name}  {}", value.label())
+    };
+    match (skill, state) {
+        (None, _) => {
+            let context = crate::services::context(paths)?;
+            // `off` skills are removed by the resolver, so keep the names the
+            // states file already knows.
+            let mut names: BTreeSet<String> = stored.keys().cloned().collect();
+            names.extend(discovery::discover(&paths.data_dir, workspace)?.into_keys());
+            names.extend(
+                deepseek_code_core::services::plugins::skill_commands(&context)?.into_keys(),
+            );
+            Ok(names
+                .iter()
+                .map(|name| line(name))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        (Some(name), None) => Ok(line(name)),
+        (Some(name), Some(label)) => {
+            let update: states::SkillState = label.parse()?;
+            let known = stored.contains_key(name)
+                || discovery::discover(&paths.data_dir, workspace)?.contains_key(name)
+                || crate::services::context(paths)
+                    .and_then(|context| {
+                        deepseek_code_core::services::plugins::skill_commands(&context)
+                    })?
+                    .contains_key(name);
+            anyhow::ensure!(known, "Unknown skill {name}");
+            states::set(&paths.data_dir, name, update)?;
+            Ok(format!("{name}  {}", update.label()))
+        }
+    }
+}
+
 pub fn catalog(skills: &BTreeMap<String, String>) -> Vec<(String, String)> {
     crate::command_catalog::COMMANDS
         .iter()
@@ -570,5 +618,61 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn state_command_sets_lists_and_rejects_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skill = data.join("skills/demo");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo state fixture\n---\nCheck the project",
+        )
+        .unwrap();
+        let paths = RuntimePaths::new(data).unwrap();
+
+        let set = state_command(&paths, &workspace, Some("demo"), Some("user-only"))
+            .await
+            .unwrap();
+        assert!(set.contains("demo") && set.contains("user-only"), "{set}");
+
+        let listing = state_command(&paths, &workspace, None, None).await.unwrap();
+        assert!(
+            listing.lines().any(|line| line == "demo  user-only"),
+            "{listing}"
+        );
+
+        let error = state_command(&paths, &workspace, Some("demo"), Some("bogus"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("name-only"), "{error}");
+
+        let error = state_command(&paths, &workspace, Some("nope"), Some("off"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown skill nope"), "{error}");
+
+        state_command(&paths, &workspace, Some("demo"), Some("off"))
+            .await
+            .unwrap();
+        let listing = state_command(&paths, &workspace, None, None).await.unwrap();
+        assert!(
+            listing.lines().any(|line| line == "demo  off"),
+            "{listing}"
+        );
+        let commands = load_for_workspace(&paths, &workspace).await.unwrap();
+        assert!(!commands.contains_key("/demo"));
+
+        state_command(&paths, &workspace, Some("demo"), Some("user-only"))
+            .await
+            .unwrap();
+        let commands = load_for_workspace(&paths, &workspace).await.unwrap();
+        assert!(commands.contains_key("/demo"));
     }
 }

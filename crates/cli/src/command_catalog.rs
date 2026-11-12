@@ -81,7 +81,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/rename", "Rename this session: /rename TITLE"),
     ("/sessions", "List saved sessions; resume with --resume ID"),
     ("/tools", "Inspect or change tool loading; opens the Tools panel in a terminal"),
-    ("/skills", "Installed skills"),
+    ("/skills", "Installed skills; state NAME [off|user|name-only|user-only]"),
     ("/mcp", "Configured MCP servers"),
     ("/provider", "Inspect/configure providers: [ID|add|edit ID]"),
     ("/model", "Inspect/switch models: [ID]"),
