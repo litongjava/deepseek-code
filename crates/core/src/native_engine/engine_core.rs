@@ -83,6 +83,171 @@ pub struct ActiveTurn {
     pub cancelled: bool,
 }
 
+/// Observed state of the executor attempt that ran a session's last turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorWait {
+    /// The executor task - and everything it owns, including the execution
+    /// lease - has ended.
+    Completed,
+    /// The deadline passed while the attempt was still running. The attempt
+    /// still owns the session and no completion is established.
+    Pending,
+}
+
+/// A single executor attempt. The task holds the sender half; waiters clone the
+/// receiver half. The latest attempt for a session is kept in the map only so a
+/// host can find it; the task removes its own entry when it ends.
+struct ExecutorAttempt {
+    id: u64,
+    finished: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Per-session completion bookkeeping, indexed by attempt identity so a stale
+/// attempt can never remove or wait for a newer one under the same session.
+#[derive(Default)]
+struct ExecutorAttempts {
+    entries: std::sync::Mutex<HashMap<String, ExecutorAttempt>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl ExecutorAttempts {
+    fn begin(
+        self: &Arc<Self>,
+        session: &str,
+        lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
+    ) -> Arc<AttemptOwnership> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        let (finished, receiver) = tokio::sync::watch::channel(false);
+        let replaced = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                session.to_owned(),
+                ExecutorAttempt {
+                    id,
+                    finished: receiver,
+                },
+            );
+        if let Some(replaced) = replaced {
+            tracing::warn!(
+                module = "EngineCore",
+                "Replacing unfinished executor attempt {} for {}",
+                replaced.id,
+                session
+            );
+        }
+        Arc::new(AttemptOwnership {
+            lease,
+            attempts: self.clone(),
+            session: session.to_owned(),
+            id,
+            finished: Some(finished),
+        })
+    }
+
+    fn waiter(&self, session: &str) -> Option<ExecutorAttemptWaiter> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .map(|attempt| ExecutorAttemptWaiter {
+                finished: attempt.finished.clone(),
+            })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+}
+
+/// Lives in the executor task itself, and is cloned into every mandatory
+/// mutating tail job that can outlive that task. A started `spawn_blocking` job
+/// cannot be aborted by dropping its handle, so such a job must keep the same
+/// attempt ownership: only the last holder releases the lease and establishes
+/// completion. Every exit path - normal return, cancellation/abort, panic or a
+/// disconnected host - therefore stays consistent.
+struct AttemptOwnership {
+    /// The same lease the executor holds. Keeping a reference here means a tail
+    /// job that outlives an aborted outer task still owns the session.
+    lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
+    attempts: Arc<ExecutorAttempts>,
+    session: String,
+    id: u64,
+    finished: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Drop for AttemptOwnership {
+    fn drop(&mut self) {
+        // Release the session before completion is established, so observing
+        // `Completed` always implies that a new attempt is admissible.
+        drop(self.lease.take());
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send(true);
+        }
+        // Only remove the entry this attempt registered. A newer attempt that
+        // replaced it must survive an older attempt's cleanup.
+        let mut entries = self
+            .attempts
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if entries
+            .get(&self.session)
+            .is_some_and(|attempt| attempt.id == self.id)
+        {
+            entries.remove(&self.session);
+        }
+    }
+}
+
+struct ExecutorAttemptWaiter {
+    finished: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ExecutorAttemptWaiter {
+    async fn wait(&mut self, timeout: std::time::Duration) -> ExecutorWait {
+        if *self.finished.borrow() {
+            return ExecutorWait::Completed;
+        }
+        match tokio::time::timeout(timeout, self.finished.changed()).await {
+            // A change or a lost sender both mean the attempt is over: the
+            // guard has been dropped and the lease released.
+            Ok(_) => ExecutorWait::Completed,
+            Err(_) if *self.finished.borrow() => ExecutorWait::Completed,
+            Err(_) => ExecutorWait::Pending,
+        }
+    }
+}
+
+/// Test-only gate at the actual outer executor tail: the public `MessageStop`
+/// has been emitted, while the executor, its lease and its cleanup task are
+/// still alive. Tests use it to make the post-stop race deterministic.
+#[cfg(test)]
+pub(crate) struct ExecutorTailGate {
+    pub(crate) entered: oneshot::Sender<()>,
+    pub(crate) release: oneshot::Receiver<()>,
+}
+
+/// Test-only gate inside the mandatory assistant-persistence blocking job,
+/// after it has started and before it mutates the database. A started
+/// `spawn_blocking` job cannot be aborted by dropping its handle, so this is the
+/// window in which a cancelled outer task can otherwise release the session
+/// while the write is still in flight. The release half is a blocking channel
+/// because the job runs on a blocking thread.
+#[cfg(test)]
+pub(crate) struct PersistenceGate {
+    pub(crate) entered: oneshot::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversationState {
     pub conversation_id: String,
@@ -123,6 +288,14 @@ pub struct QueryEngine {
     provider_manager: Arc<Mutex<ProviderManager>>,
     db_manager: Arc<DbManager>,
     active_turns: Arc<Mutex<HashMap<String, ActiveTurn>>>,
+    /// Completion bookkeeping for the executor attempt that owns a session.
+    /// Entries are created before the executor is spawned and removed by that
+    /// task itself, so callers that never wait do not accumulate entries.
+    executor_attempts: Arc<ExecutorAttempts>,
+    #[cfg(test)]
+    executor_tail_gate: Arc<std::sync::Mutex<Option<ExecutorTailGate>>>,
+    #[cfg(test)]
+    persistence_gate: Arc<std::sync::Mutex<Option<PersistenceGate>>>,
     conversation_states: Arc<Mutex<HashMap<String, ConversationState>>>,
     workspaces_dir: PathBuf,
     mcp_registry: Option<Arc<McpToolRegistry>>,
@@ -178,6 +351,11 @@ impl QueryEngine {
             provider_manager,
             db_manager,
             active_turns: Arc::new(Mutex::new(HashMap::new())),
+            executor_attempts: Arc::new(ExecutorAttempts::default()),
+            #[cfg(test)]
+            executor_tail_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            persistence_gate: Arc::new(std::sync::Mutex::new(None)),
             conversation_states: Arc::new(Mutex::new(HashMap::new())),
             workspaces_dir,
             mcp_registry: None,
@@ -404,14 +582,26 @@ impl QueryEngine {
         self.send_with_origin(request, save_response, true, None).await
     }
 
-    /// Transfer ownership acquired before a host's durable input handoff.
+    /// Share ownership acquired by a host for the whole turn. The engine holds
+    /// a clone only while it executes, so the host keeps the lease across
+    /// compaction, hooks and final persistence.
     pub async fn send_message_with_lease(
         &self,
         request: ChatRequest,
         save_response: bool,
-        lease: crate::services::session_messages::ExecutionLease,
+        lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         self.send_with_origin(request, save_response, false, Some(lease)).await
+    }
+
+    /// Hook wakes share ownership the same way.
+    pub async fn send_hook_wake_with_lease(
+        &self,
+        request: ChatRequest,
+        save_response: bool,
+        lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        self.send_with_origin(request, save_response, true, Some(lease)).await
     }
 
     async fn send_with_origin(
@@ -419,8 +609,29 @@ impl QueryEngine {
         mut request: ChatRequest,
         save_response: bool,
         hook_wake: bool,
-        execution_lease: Option<crate::services::session_messages::ExecutionLease>,
+        execution_lease: Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
+        // Every submission owns the session for its whole attempt. A host that
+        // already acquired (CLI, SDK, Desktop SSE) shares that same `Arc`; an
+        // independent caller is refused here, before any turn work.
+        let execution_lease = match execution_lease {
+            Some(lease) => Some(lease),
+            None => {
+                let root = self
+                    .provider_manager
+                    .lock()
+                    .await
+                    .config_path()
+                    .parent()
+                    .context("Missing runtime directory")?
+                    .to_path_buf();
+                crate::services::session_messages::ExecutionLease::acquire(
+                    &root,
+                    &request.conversation_id,
+                )?
+                .map(std::sync::Arc::new)
+            }
+        };
         crate::services::compaction::apply_boundary(
             &self.db_manager,
             &request.conversation_id,
@@ -487,7 +698,10 @@ impl QueryEngine {
         let git_snapshot = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await?;
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
-        discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
+        discovered_skills.extend(crate::skills::discovery::discover(
+            &plugin_context.paths.data_dir,
+            &workspace,
+        )?);
         let mut pending_user_skill = None;
         // Blocks kept after this turn's user message for the rest of the session;
         // a skill's block also records the skill for after a compaction.
@@ -771,6 +985,10 @@ impl QueryEngine {
         if let Some(ref registry) = self.mcp_registry {
             executor = executor.with_mcp_registry(registry.clone());
         }
+        // Ownership stays with the executor for its entire task lifetime,
+        // including the cleanup after the public MessageStop. The host shares
+        // this same lease; the last remaining owner performs the explicit
+        // unlock. The engine must not drop its reference early.
         executor.execution_lease = execution_lease;
         executor.share_owned_child_budget();
 
@@ -784,7 +1002,24 @@ impl QueryEngine {
 
         tracing::info!(module = "EngineCore", "Spawning executor task for conv_id={}", conv_id_clone);
 
+        // Registered before the task starts, so a host that waits immediately
+        // after this call always finds this attempt. The task removes its own
+        // entry, so callers that never wait leave nothing behind.
+        let completion = self
+            .executor_attempts
+            .begin(&conv_id_clone, executor.execution_lease.clone());
+        #[cfg(test)]
+        let executor_tail_gate = self.executor_tail_gate.clone();
+        #[cfg(test)]
+        let persistence_gate = self.persistence_gate.clone();
+
         let executor_handle = tokio::spawn(async move {
+            // Declared before the executor so the executor - and its lease -
+            // is dropped before completion is signalled. A mandatory tail job
+            // that outlives an abort keeps its own clone and defers both until
+            // it really ends.
+            let attempt_ownership = completion;
+            let mut executor = executor;
             let mut learning = learning;
             tracing::info!(module = "EngineCore", "Executor task STARTED for {}", conv_id_clone);
 
@@ -817,6 +1052,22 @@ impl QueryEngine {
                 }
             };
 
+            // Test-only barrier at the real outer tail: the public
+            // `MessageStop` has already been emitted and the executor still
+            // owns the session until this task ends.
+            #[cfg(test)]
+            {
+                let gate = executor_tail_gate
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some(gate) = gate {
+                    let ExecutorTailGate { entered, release } = gate;
+                    let _ = entered.send(());
+                    let _ = release.await;
+                }
+            }
+
             let successful_turn = matches!(&exec_result, Ok((_, reason)) if !matches!(reason.as_deref(), Some("stream_error" | "error" | "interrupted" | "failed" | "cancelled" | "max_iterations" | "max_tokens" | "length" | "incomplete")));
             if let Some(observation) = learning.as_mut() {
                 observation.complete(successful_turn);
@@ -827,7 +1078,27 @@ impl QueryEngine {
                     tracing::info!(module = "EngineCore", "Executor completed for {}, full_text_len={}", conv_id_clone, full_text.len());
                     if save_response && !full_text.is_empty() {
                         let conv_id = conv_id_clone.clone();
+                        // This blocking write cannot be aborted once started, so
+                        // it keeps the attempt's ownership until it exits: the
+                        // session stays admitted and completion stays pending
+                        // even if the outer task is cancelled meanwhile.
+                        let ownership = attempt_ownership.clone();
+                        #[cfg(test)]
+                        let persistence_gate = persistence_gate.clone();
                         let _ = tokio::task::spawn_blocking(move || {
+                            let _ownership = ownership;
+                            #[cfg(test)]
+                            if let Some(gate) = persistence_gate
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .take()
+                            {
+                                let PersistenceGate { entered, release } = gate;
+                                let _ = entered.send(());
+                                // Blocking thread: wait for the harness without
+                                // holding anything the async side needs.
+                                let _ = release.recv();
+                            }
                             db.with_conn(|conn| {
                                 let msg_id = Uuid::new_v4().to_string();
                                 let now = Utc::now().to_rfc3339();
@@ -1039,6 +1310,55 @@ impl QueryEngine {
         }
     }
 
+    /// Observe whether the executor attempt that produced the last event has
+    /// fully stopped. Public completion (MessageStop) is emitted from inside
+    /// the task, so a host must not treat the turn as fully released before
+    /// this reports [`ExecutorWait::Completed`].
+    ///
+    /// A deadline never establishes completion: a still-running attempt is
+    /// reported as [`ExecutorWait::Pending`], keeps its lease and therefore
+    /// keeps refusing a new same-session attempt until it really ends.
+    pub async fn wait_for_executor(
+        &self,
+        conv_id: &str,
+        timeout: std::time::Duration,
+    ) -> ExecutorWait {
+        match self.executor_attempts.waiter(conv_id) {
+            Some(mut waiter) => waiter.wait(timeout).await,
+            // No registered attempt means nothing of this session is running.
+            None => ExecutorWait::Completed,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_executor_tail_gate(&self, gate: ExecutorTailGate) {
+        *self
+            .executor_tail_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_persistence_gate(&self, gate: PersistenceGate) {
+        *self
+            .persistence_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executor_attempt_count(&self) -> usize {
+        self.executor_attempts.len()
+    }
+
+    /// Cancels the turn for `conv_id` and waits for the executor task to stop.
+    ///
+    /// Aborting the task does not stop a mandatory tail job that already runs on
+    /// the blocking pool (for example the `save_response` assistant write): that
+    /// job keeps the attempt's lease and completion until it exits. Admission is
+    /// therefore still refused and [`Self::wait_for_executor`] reports
+    /// [`ExecutorWait::Pending`] until the job really ends. Running blocking
+    /// code is not promised to be interruptible.
     pub async fn cancel_turn(&self, conv_id: &str) {
         let turn = self.active_turns.lock().await.remove(conv_id);
         if let Some(mut turn) = turn {
@@ -1244,6 +1564,10 @@ impl QueryEngine {
 #[cfg(test)]
 #[path = "scoped_answer_tests.rs"]
 mod scoped_answer_tests;
+
+#[cfg(test)]
+#[path = "executor_lifetime_tests.rs"]
+mod executor_lifetime_tests;
 
 pub type NativeEngine = QueryEngine;
 

@@ -31,47 +31,6 @@ interface Skill {
   files?: any[];
 }
 
-const SKILL_CREATOR_FILES = [
-  { name: 'SKILL.md', type: 'file' },
-  {
-    name: 'agents', type: 'folder', children: [
-      { name: 'analyzer.md', type: 'file' },
-      { name: 'comparator.md', type: 'file' },
-      { name: 'grader.md', type: 'file' },
-    ]
-  },
-  {
-    name: 'assets', type: 'folder', children: [
-      { name: 'eval_review.html', type: 'file' },
-    ]
-  },
-  {
-    name: 'eval-viewer', type: 'folder', children: [
-      { name: 'generate_review.py', type: 'file' },
-      { name: 'viewer.html', type: 'file' },
-    ]
-  },
-  {
-    name: 'references', type: 'folder', children: [
-      { name: 'schemas.md', type: 'file' },
-    ]
-  },
-  {
-    name: 'scripts', type: 'folder', children: [
-      { name: '__init__.py', type: 'file' },
-      { name: 'aggregate_benchmark.py', type: 'file' },
-      { name: 'generate_report.py', type: 'file' },
-      { name: 'improve_description.py', type: 'file' },
-      { name: 'package_skill.py', type: 'file' },
-      { name: 'quick_validate.py', type: 'file' },
-      { name: 'run_eval.py', type: 'file' },
-      { name: 'run_loop.py', type: 'file' },
-      { name: 'utils.py', type: 'file' },
-    ]
-  },
-  { name: 'LICENSE.txt', type: 'file' },
-];
-
 interface FileTreeNodeProps {
   skill: Skill;
   isExpanded: boolean;

@@ -83,9 +83,10 @@ impl ToolLoopExecutor {
             Arc::new(EnvironmentCredentials),
         )?;
         let mut skills = crate::services::plugins::skill_commands(&context)?;
-        skills.extend(crate::skills::discovery::discover(Path::new(
-            &self.workspace_cwd,
-        ))?);
+        skills.extend(crate::skills::discovery::discover(
+            root,
+            Path::new(&self.workspace_cwd),
+        )?);
         let skill = skills.get(name).context("Unknown skill")?;
         ensure!(
             skill
@@ -233,6 +234,157 @@ mod tests {
         native_engine::{engine_core::ReasoningMode, provider_manager::ResolvedProvider},
         permissions::rules::PermissionAction,
     };
+
+    #[tokio::test]
+    async fn data_dir_skill_is_invocable_through_the_skill_tool() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let directory = data.join("skills/data-dir-check");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: data-dir-check\ndescription: Data directory fixture\n---\nRead references/setup.md, then inspect $ARGUMENTS",
+        )
+        .unwrap();
+        let paths = RuntimePaths::new(data).unwrap();
+        let provider=ResolvedProvider {provider:serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap()};
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let mut executor = ToolLoopExecutor::new(
+            provider,
+            vec![],
+            None,
+            128,
+            tx,
+            workspace.to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(paths.data_dir.join("config.json"));
+        let result = executor
+            .execute_skill_tool(&json!({"skill":"data-dir-check","args":"the fixture"}))
+            .await
+            .unwrap();
+        let instructions = result["instructions"].as_str().unwrap();
+        assert!(instructions.contains("the fixture"), "{instructions}");
+        let rendered = directory.to_string_lossy().replace('\\', "/");
+        assert!(
+            instructions.contains(&rendered),
+            "instructions must name the data-dir skill directory: {instructions}"
+        );
+        assert_eq!(
+            result["path"].as_str().unwrap().replace('\\', "/"),
+            directory
+                .join("SKILL.md")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_case_data_dir_skill_uses_its_legacy_slash_name_in_the_skill_tool() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let directory = data.join("skills/My Skill");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: My Skill\ndescription: Mixed case fixture\n---\nInspect $ARGUMENTS",
+        )
+        .unwrap();
+        let paths = RuntimePaths::new(data).unwrap();
+        let provider=ResolvedProvider {provider:serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap()};
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let mut executor = ToolLoopExecutor::new(
+            provider,
+            vec![],
+            None,
+            128,
+            tx,
+            workspace.to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(paths.data_dir.join("config.json"));
+        let result = executor
+            .execute_skill_tool(&json!({"skill":"my-skill","args":"the fixture"}))
+            .await
+            .unwrap();
+        let instructions = result["instructions"].as_str().unwrap();
+        assert!(instructions.contains("the fixture"), "{instructions}");
+        let rendered = directory.to_string_lossy().replace('\\', "/");
+        assert!(
+            instructions.contains(&rendered),
+            "instructions must name the data-dir skill directory: {instructions}"
+        );
+        let error = executor
+            .execute_skill_tool(&json!({"skill":"My-Skill"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown skill"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn data_dir_skill_switches_reach_the_skill_tool() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        for (name, body) in [
+            (
+                "disabled-fixture",
+                "---\nname: disabled-fixture\nenabled: false\n---\nHidden",
+            ),
+            (
+                "manual-fixture",
+                "---\nname: manual-fixture\ndisable-model-invocation: true\n---\nManual $ARGUMENTS",
+            ),
+        ] {
+            let directory = skills.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("SKILL.md"), body).unwrap();
+        }
+        let paths = RuntimePaths::new(data).unwrap();
+        let provider=ResolvedProvider {provider:serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap()};
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let mut executor = ToolLoopExecutor::new(
+            provider,
+            vec![],
+            None,
+            128,
+            tx,
+            workspace.to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(paths.data_dir.join("config.json"));
+        let error = executor
+            .execute_skill_tool(&json!({"skill":"disabled-fixture"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown skill"), "{error}");
+        let error = executor
+            .execute_skill_tool(&json!({"skill":"manual-fixture","args":"target"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("disabled for model invocation"), "{error}");
+        executor.manual_skill_active = true;
+        let result = executor
+            .execute_skill_tool(&json!({"skill":"manual-fixture","args":"target"}))
+            .await
+            .unwrap();
+        assert!(result["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Manual target"));
+    }
 
     #[tokio::test]
     async fn embedded_review_manual_snapshot_and_model_restriction_preserve_custom_skills() {

@@ -105,4 +105,89 @@ mod tests {
         lock_file(&open()).unwrap();
         std::fs::remove_file(path).unwrap();
     }
+
+    /// A `fork`ed child shares the parent's open file description, so its
+    /// inherited descriptor keeps the lock alive after the owner drops its
+    /// `File`. Closing the owner cannot release it; an explicit unlock can.
+    /// The child is a disposable process, so no unsafe `fork` happens in the
+    /// multithreaded test process.
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn an_inherited_descriptor_keeps_a_close_only_lock_but_explicit_unlock_frees_it() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        for explicit_unlock in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "deepseek-inherited-lock-{}-{}",
+                std::process::id(),
+                if explicit_unlock { "unlock" } else { "close" }
+            ));
+            let _ = std::fs::remove_file(&path);
+            let open = || {
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)
+                    .unwrap()
+            };
+            let owner = open();
+            lock_file(&owner).unwrap();
+            // The owner keeps its descriptor when it closes; clearing
+            // close-on-exec lets the child inherit the same description.
+            rustix::io::fcntl_setfd(&owner, rustix::io::FdFlags::empty()).unwrap();
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("echo ready; exec sleep 30")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(
+                ready.trim(),
+                "ready",
+                "the child must have started after inheriting the descriptor"
+            );
+
+            if explicit_unlock {
+                unlock_file(&owner).unwrap();
+            }
+            drop(owner);
+
+            let contender = open();
+            let blocked = matches!(
+                try_lock_file(&contender),
+                Err(TryLockError::WouldBlock)
+            );
+            assert_eq!(
+                blocked, !explicit_unlock,
+                "explicit_unlock={explicit_unlock}: release must not wait for the child to exit"
+            );
+            if !blocked {
+                unlock_file(&contender).unwrap();
+            }
+            drop(contender);
+            // The child is still alive here: with close-only release the owner
+            // is gone but the session stays blocked, which is the defect.
+            let after = open();
+            let available = try_lock_file(&after).is_ok();
+            assert_eq!(
+                available, explicit_unlock,
+                "explicit_unlock={explicit_unlock}: the session must be free once the owner released it"
+            );
+            if available {
+                unlock_file(&after).unwrap();
+            }
+            drop(after);
+
+            child.kill().unwrap();
+            child.wait().unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
 }

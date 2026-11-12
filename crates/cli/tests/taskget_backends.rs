@@ -375,6 +375,13 @@ async fn workflow_task_get_returns_real_output_times_out_and_stops_without_cance
     assert_eq!(timed_out["task_id"], task_id, "{timed_out}");
     assert_eq!(timed_out["status"], "running", "{timed_out}");
     assert_eq!(timed_out["retrieval_status"], "timeout", "{timed_out}");
+    assert!(
+        timed_out["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("workflow-start"),
+        "the timed-out read did not return output already written: {timed_out}"
+    );
 
     // The blocking read observes the real child's completion and its output.
     let completed = state.slot("completed_result");
