@@ -198,6 +198,28 @@ pub enum EngineEvent {
     },
 }
 
+/// Lowercase words of a tool name, splitting CamelCase and separators
+/// (`CompactContext` -> "compact context"), so ToolSearch's speculative
+/// keyword pass can require that a query word actually names the tool.
+fn tool_name_words(name: &str) -> String {
+    let mut words = String::new();
+    let mut previous_lower = false;
+    for ch in name.chars() {
+        if !ch.is_alphanumeric() {
+            words.push(' ');
+            previous_lower = false;
+        } else if ch.is_uppercase() && previous_lower {
+            words.push(' ');
+            words.push(ch.to_ascii_lowercase());
+            previous_lower = false;
+        } else {
+            words.push(ch.to_ascii_lowercase());
+            previous_lower = ch.is_lowercase() || ch.is_ascii_digit();
+        }
+    }
+    words
+}
+
 pub struct ToolLoopExecutor {
     provider: ResolvedProvider,
     auto_manual_interactive: bool,
@@ -1634,7 +1656,7 @@ impl ToolLoopExecutor {
             .filter(|word| !word.is_empty())
             .map(str::to_owned)
             .collect();
-        let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
+        let candidates: Vec<&crate::tools::ToolDefinition> = catalog
             .iter()
             .filter(|tool| {
                 let searchable = match crate::mcp::states::server_of(&tool.name) {
@@ -1654,13 +1676,16 @@ impl ToolLoopExecutor {
                         .as_ref()
                         .is_none_or(|names| names.iter().any(|granted| granted == &tool.name))
             })
+            .collect();
+        let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = candidates
+            .iter()
             .filter_map(|tool| {
                 let name = tool.name.to_lowercase();
                 if let Some(selected) = &selected {
                     return selected
                         .iter()
                         .position(|wanted| *wanted == name)
-                        .map(|index| (index.min(u8::MAX as usize) as u8, tool.clone()));
+                        .map(|index| (index.min(u8::MAX as usize) as u8, (*tool).clone()));
                 }
                 let spaced_name = normalize(&tool.name);
                 let description = normalize(&tool.description);
@@ -1685,13 +1710,55 @@ impl ToolLoopExecutor {
                 } else {
                     return None;
                 };
-                Some((score, tool.clone()))
+                Some((score, (*tool).clone()))
             })
             .collect();
         // Stable, so tools of equal rank keep the catalog order.
         hits.sort_by_key(|(score, _)| *score);
+        // Models phrase queries in natural language, so one unrelated word must
+        // not hide a tool every other keyword names ("compact context summary
+        // request compaction"). Only when no tool matched every word, accept
+        // tools matching at least half of them. Whole words only, and one must
+        // name the tool: otherwise everyday prose ("no such tool") reaches the
+        // threshold through unrelated descriptions.
         let loaded: Vec<crate::tools::ToolDefinition> =
-            hits.into_iter().take(5).map(|(_, tool)| tool).collect();
+            if hits.is_empty() && selected.is_none() && keywords.len() >= 2 {
+                let unique: Vec<&str> = keywords
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let threshold = 2.max(unique.len().div_ceil(2));
+                let has_word = |text: &str, word: &str| {
+                    text.split(|ch: char| !ch.is_alphanumeric())
+                        .any(|candidate| candidate == word)
+                };
+                let mut partial: Vec<(usize, &crate::tools::ToolDefinition)> = candidates
+                    .iter()
+                    .filter_map(|tool| {
+                        let name = tool_name_words(&tool.name);
+                        let text = format!("{} {}", name, normalize(&tool.description));
+                        let matched: Vec<&str> = unique
+                            .iter()
+                            .copied()
+                            .filter(|word| has_word(&text, word))
+                            .collect();
+                        (matched.len() >= threshold
+                            && matched.iter().any(|word| has_word(&name, word)))
+                        .then_some((matched.len(), *tool))
+                    })
+                    .collect();
+                // Most matching words first; equal counts keep catalog order.
+                partial.sort_by(|a, b| b.0.cmp(&a.0));
+                partial
+                    .into_iter()
+                    .take(3)
+                    .map(|(_, tool)| (*tool).clone())
+                    .collect()
+            } else {
+                hits.into_iter().take(5).map(|(_, tool)| tool).collect()
+            };
         if loaded.is_empty() {
             let already = catalog
                 .iter()

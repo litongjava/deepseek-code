@@ -1126,3 +1126,76 @@ async fn tool_search_finds_compact_context_by_plain_words() {
     assert!(!failed, "{output}");
     assert!(output.contains("CompactContext"), "{output}");
 }
+
+/// The model's real query had one word ("request") that CompactContext's
+/// description does not contain; the rest already named the tool.
+#[tokio::test]
+async fn tool_search_loads_a_tool_when_most_query_words_match() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    executor.exposed_tools = Some(request_names(&executor).into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"compact context summary request compaction"}),
+            "search-most",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        result["loaded_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "CompactContext"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn tool_search_partial_matches_need_half_the_words() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    executor.exposed_tools = Some(request_names(&executor).into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"compaction zebra quantum walrus"}),
+            "search-half",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        result["loaded_tools"].as_array().unwrap().is_empty(),
+        "{result}"
+    );
+    assert!(
+        output.contains("No tool available on demand matches"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn tool_search_prefers_full_matches_over_partial_ones() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    executor.exposed_tools = Some(request_names(&executor).into_iter().collect());
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"git diff"}),
+            "search-full",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    // The unchanged every-word path: EnterWorktree's "different branch" also
+    // contains both words, and neither partial pass runs while it has hits.
+    assert_eq!(
+        result["loaded_tools"],
+        json!(["git_diff", "EnterWorktree"]),
+        "{result}"
+    );
+}
