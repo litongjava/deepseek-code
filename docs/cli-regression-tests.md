@@ -257,6 +257,39 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 
 自动回归：`cargo test --locked -p deepseek-code-cli opencode`、`cargo test --locked -p deepseek-code-cli presets_use_catalog_models`、`cargo test --locked -p deepseek-code-cli wizard_keeps_a_provider_saved_when_the_connection_test_fails`、`cargo test --locked -p deepseek-code-core model_listing`、`cargo test --locked -p deepseek-code-core request_identity`、`cargo test --locked -p deepseek-code-core provider_runtime`、`cargo test --locked -p deepseek-code-core --lib performance::tests::region_and_session`、`npm run test:run -- modelCapabilities`。单元测试覆盖 URL 纠正、预设字段、目录 baseUrl 推导、网页错误、只发 OpenCode 的会话头与会话外回退、非 OpenCode 不发送会话头，以及地区拒绝时只输出固定词表（不回显上游正文）；真实终端步骤仍要按第 2 到第 7 条执行。
 
+### N. 模型列表刷新
+
+`/model refresh` 刷新当前提供商的模型列表，`/provider refresh [ID]` 刷新指定提供商（省略 ID 时刷新当前提供商）。刷新以上游返回的模型 ID 为准：新增上游新出现的模型，移除上游不再返回的模型（包括手工添加的）。同一 ID 保留本地名称、启用状态、上下文窗口和协议等设置；新模型使用现有模板并默认启用。
+
+自动检查：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl interactive_config::tests
+cargo test --locked -p deepseek-code-cli --bin dcl refresh_subcommands
+cargo test --locked -p deepseek-code-core --lib model_listing
+```
+
+覆盖命令解析、增删同步、同 ID 设置保留、重复 ID、当前模型被移除后切换并保留历史、刷新其他提供商不切换会话、默认模型失效（含刷新前就已失效）与无效默认不写、取消不保存、会话切换失败和默认偏好写入失败后的回滚，以及 `/model r`、`/provider r` 的子命令补全与 provider ID 补全。
+
+`model_listing` 的本地 HTTP fixture 分协议覆盖：OpenAI、Anthropic、Gemini 的认证；Anthropic 与 Gemini 的多页遍历和游标循环；OpenAI 兼容接口单页返回，以及它声明分页时安全拒绝；非法条目、错误类型的 `has_more`/`nextPageToken`、空列表、失败分页、非 JSON、200 错误对象、重复或缺失游标、超时。错误与游标都不回显凭据或令牌：Key 的原样、URL 编码（大小写十六进制、逐字符混合编码）、Base64/URL-safe Base64 形式都会被替换为 `[redacted]`，Base URL 路径中出现的 Key 同样会被隐去。
+
+`cli.json` 通过临时文件加改名写入，权限为仅所有者可读写。`config::search_tests` 的 `saving_preferences_keeps_the_previous_file_when_the_commit_fails` 校验提交失败时旧文件字节不变、没有残留临时文件；`a_failed_default_save_restores_the_list_and_selection` 在完整刷新流程中注入同一失败，校验模型列表、会话和偏好文件都恢复。
+
+真实终端验收（使用隔离数据目录和本地 mock 端点）：
+
+1. 保存一个提供商，启动 dcl 后执行 `/model refresh`：输出新增、移除和保留的数量以及各自的模型 ID，使用普通文本列表。随后直接执行 `/model`，无需重启即可看到新增模型。
+2. 让当前模型从上游列表消失后再次刷新：保存前出现替代模型选择；用方向键选择并按 `Enter` 确认后，当前会话切换过去，对话历史保留，`/model` 显示新列表。
+3. 在同一场景按 `Esc`，或在文本选择模式下直接回车（没有选择列表时）：整次刷新取消，`config.json` 字节不变，当前模型和默认模型都不变。有选择列表时 `Enter` 是确认，不是取消。
+4. 用 `/provider refresh <另一个 ID>` 刷新非当前提供商：模型列表更新，当前会话的提供商和模型不变。
+5. 重启 dcl：刷新后的模型列表仍然存在；被移除的模型不再出现在 `/model`。
+6. 对没有 Base URL 的多协议提供商、未保存的临时提供商、未知 ID 和多余参数分别执行刷新：都应给出明确错误，配置不变。
+7. 断开 mock 端点、返回空列表、只返回第一页后让下一页失败、上游返回缺模型 ID 或错误类型的分页字段、整次查询超过 20 秒总预算：都应报告失败，`config.json` 不变，错误信息不包含 API Key。查询进行中按 `Ctrl+C` 应立即显示 `Refresh cancelled; nothing was changed`，同样不写入。
+8. 补全：输入 `/model r` 按 `Tab` 得到 `/model refresh `；输入 `/provider r` 按 `Tab` 得到 `/provider refresh `；输入 `/provider refresh ` 按 `Tab` 补出已保存的 provider ID。
+
+OpenAI/Responses 的模型接口通常一次返回全部模型。它们声明还有下一页时，dcl 会拒绝这次刷新并保持配置不变，不会只同步第一页；Anthropic 和 Gemini 会读完所有页。
+
+Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前分支的 Windows 终端验收尚未执行，汇报时必须单独列出，不能用 Linux 结果代替。
+
 ### J. 欢迎区与计划模式提示
 
 1. 新会话分别发送普通问题、`/plan <任务>`，以及先 `/plan` 再提问：欢迎区三行保持启动位置，计划模式提示使用 `DeepSeek Code`。
@@ -349,8 +382,10 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
 - `scripts/sync-opencode-go-catalog.mjs`、`src/data/providerCatalog.json`：M，以及 `npm run test:run -- modelCapabilities`
-- `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示
-- `native_engine/model_listing.rs`：M 的网页响应提示
+- `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示，以及 N 的刷新命令解析、增删同步、替代模型、默认模型失效、取消不保存和保存失败回滚
+- `config.rs`：M 的默认模型读取，以及 N 的偏好文件原子写入、提交失败保持旧文件和文件权限
+- `native_engine/model_listing.rs`：M 的网页响应提示，以及 N 的严格列表校验、分页类型校验、原始模型 ID、空列表、失败分页，以及错误中 Key 的多种编码形式和路径凭据都不外泄
+- `terminal/editor.rs`、`terminal/input.rs` 的命令补全：`refresh_subcommands`（`/model r`、`/provider r`、`/provider refresh `）
 - `native_engine/request_identity.rs`：M 的会话头
 - `native_engine/provider_runtime.rs`：M 的目录 baseUrl 推导和四种协议真实对话
 - `native_engine/stream_retry.rs`、`native_engine/utf8_stream.rs`、`native_engine/request_trace.rs`、`performance/`：K，以及 E1

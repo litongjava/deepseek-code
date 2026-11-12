@@ -227,7 +227,10 @@ async fn choose_models(
     let mut listing_failed = false;
     let listed = match api_key.filter(|key| !key.is_empty()) {
         Some(key) => {
-            command_eprintln!("  Listing models from {url}…");
+            command_eprintln!(
+                "  Listing models from {}…",
+                deepseek_code_core::native_engine::model_listing::display_url(url, key)
+            );
             match tokio::time::timeout(
                 std::time::Duration::from_secs(20),
                 deepseek_code_core::native_engine::model_listing::list_models(protocol, url, key),
@@ -236,7 +239,13 @@ async fn choose_models(
             {
                 Ok(Ok(models)) => models,
                 Ok(Err(error)) => {
-                    command_eprintln!("  Could not list models: {error:#}");
+                    command_eprintln!(
+                        "  Could not list models: {}",
+                        deepseek_code_core::native_engine::model_listing::redact_secrets(
+                            &format!("{error:#}"),
+                            key,
+                        )
+                    );
                     listing_failed = true;
                     Vec::new()
                 }
@@ -263,7 +272,13 @@ async fn choose_models(
         )
         .await;
     }
-    command_eprintln!("Models available from {url}:");
+    command_eprintln!(
+        "Models available from {}:",
+        deepseek_code_core::native_engine::model_listing::display_url(
+            url,
+            api_key.unwrap_or_default()
+        )
+    );
     for (index, model) in listed.iter().enumerate() {
         command_eprintln!("  {:>2}. {model}", index + 1);
     }
@@ -487,6 +502,16 @@ fn query_protocol(api: &str) -> &'static str {
     }
 }
 
+/// The transport implied by a saved `provider_type`.
+fn provider_protocol(provider_type: &str) -> &'static str {
+    match provider_type {
+        "anthropic" | "claude" => "anthropic",
+        "gemini" => "gemini",
+        "responses" => "responses",
+        _ => "openai",
+    }
+}
+
 /// The address and protocol one query can use for this provider's whole list.
 /// A provider that routes each model to its own address or protocol cannot be
 /// synchronized from a single endpoint.
@@ -496,6 +521,7 @@ fn refresh_endpoint(provider: &ProviderConfig) -> Result<(String, &'static str)>
         "Provider {} routes each model to its own address, so its list cannot be synchronized; refreshing it is not supported yet. Its configuration is unchanged.",
         provider.id
     );
+    let base_protocol = provider_protocol(&provider.provider_type);
     let mut protocols: std::collections::BTreeSet<&'static str> = provider
         .models
         .iter()
@@ -503,13 +529,14 @@ fn refresh_endpoint(provider: &ProviderConfig) -> Result<(String, &'static str)>
         .filter(|api| !api.is_empty())
         .map(query_protocol)
         .collect();
-    if protocols.is_empty() {
-        protocols.insert(match provider.provider_type.as_str() {
-            "anthropic" | "claude" => "anthropic",
-            "gemini" => "gemini",
-            "responses" => "responses",
-            _ => "openai",
-        });
+    // A model without its own `api` uses the provider transport, so a mixed
+    // list cannot be routed from one endpoint.
+    let uses_provider_transport = provider
+        .models
+        .iter()
+        .any(|model| model.api.as_deref().is_none_or(|api| api.is_empty()));
+    if protocols.is_empty() || uses_provider_transport {
+        protocols.insert(base_protocol);
     }
     ensure!(
         protocols.len() == 1,
@@ -521,13 +548,15 @@ fn refresh_endpoint(provider: &ProviderConfig) -> Result<(String, &'static str)>
 }
 
 /// The credential the saved provider already uses, in the same order as
-/// `config::select`: an inline key, the configured variable, the built-in
-/// convention, then the model family's usual variable.
+/// `config::select`: the configured, built-in or model-family variable, then a
+/// key saved in the configuration. An explicitly configured variable is
+/// authoritative, so an unset one is an error rather than a silent fallback.
 fn provider_api_key(provider: &ProviderConfig) -> Result<String> {
-    if let Some(key) = provider.api_key.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
-        return Ok(key.to_owned());
-    }
-    let configured = provider.settings.get("apiKeyEnv").and_then(Value::as_str);
+    let configured = provider
+        .settings
+        .get("apiKeyEnv")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty());
     let builtin = provider
         .settings
         .get("builtinId")
@@ -542,16 +571,33 @@ fn provider_api_key(provider: &ProviderConfig) -> Result<String> {
             .unwrap_or_else(|| "OPENAI_API_KEY".to_owned())
     };
     let name = configured.map(str::to_owned).or(builtin).unwrap_or(model_default);
-    std::env::var(&name)
+    let env_key = std::env::var(&name)
         .ok()
         .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty())
-        .with_context(|| {
+        .filter(|key| !key.is_empty());
+    if configured.is_some() {
+        return env_key.with_context(|| {
             format!(
                 "The API key for {} comes from {name}, which is empty or unset; set it and run the refresh again. Nothing was changed.",
                 provider.id
             )
-        })
+        });
+    }
+    if let Some(key) = env_key {
+        return Ok(key);
+    }
+    if let Some(key) = provider
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Ok(key.to_owned());
+    }
+    bail!(
+        "No API key is saved for {} and {name} is empty or unset; set it and run the refresh again. Nothing was changed.",
+        provider.id
+    )
 }
 
 /// Asks for the model that replaces one the endpoint no longer offers. Esc,
@@ -562,7 +608,7 @@ async fn choose_replacement(
     available: &[String],
     gone: &str,
 ) -> Result<String> {
-    if crate::terminal::picker::available() {
+    if !input.is_fixture() && crate::terminal::picker::available() {
         use crate::terminal::picker::{Entry, Picker};
         let entries: Vec<Entry> = available
             .iter()
@@ -609,6 +655,56 @@ async fn choose_replacement(
     bail!("No replacement model chosen; nothing was changed")
 }
 
+/// The default preference must not change while the refresh waits for a
+/// replacement; writing it then would discard the other edit.
+fn ensure_default_unchanged(
+    paths: &RuntimePaths,
+    expected: &Option<(String, String)>,
+) -> Result<()> {
+    ensure!(
+        &config::default_model(paths) == expected,
+        "The saved default model changed while refreshing; run the refresh again. Nothing was changed"
+    );
+    Ok(())
+}
+
+/// Restores only this refresh's provider entry, after checking that it still
+/// holds the list this refresh wrote. A concurrent edit is left alone.
+fn restore_provider(
+    manager: &mut ConfigManager,
+    target: &str,
+    written: &ProviderConfig,
+    original: &ProviderConfig,
+) -> Result<()> {
+    manager.reload()?;
+    let still_ours = manager.get_provider(target).is_some_and(|current| {
+        serde_json::to_value(current).ok() == serde_json::to_value(written).ok()
+    });
+    if !still_ours {
+        return Ok(());
+    }
+    manager.update_config(|config| {
+        if let Some(slot) = config.providers.iter_mut().find(|provider| provider.id == target) {
+            *slot = original.clone();
+        }
+    })
+}
+
+/// Saved, enabled provider IDs for `/provider refresh` completion.
+pub fn provider_ids(paths: &RuntimePaths) -> Vec<String> {
+    paths
+        .read_config()
+        .map(|config| {
+            config
+                .providers
+                .iter()
+                .filter(|provider| provider.enabled)
+                .map(|provider| provider.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Replaces one saved provider's model list with the endpoint's, keeping the
 /// current model and the saved default when they still exist.
 async fn refresh_provider(
@@ -642,7 +738,10 @@ async fn refresh_provider(
         })?;
     let (base_url, protocol) = refresh_endpoint(&provider)?;
     let key = provider_api_key(&provider)?;
-    command_eprintln!("Querying the model list from {base_url}\u{2026}");
+    command_eprintln!(
+        "Querying the model list from {}\u{2026}",
+        deepseek_code_core::native_engine::model_listing::display_url(&base_url, &key)
+    );
     let listed = tokio::select! {
         result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
@@ -655,7 +754,13 @@ async fn refresh_provider(
     };
     let listed = match listed {
         Ok(listed) => listed,
-        Err(error) => bail!("Could not query the model list: {error:#}\nNothing was changed."),
+        Err(error) => bail!(
+            "Could not query the model list: {}\nNothing was changed.",
+            deepseek_code_core::native_engine::model_listing::redact_secrets(
+                &format!("{error:#}"),
+                &key,
+            )
+        ),
     };
     ensure!(!listed.is_empty(), "The endpoint returned no models; nothing was changed");
 
@@ -675,23 +780,28 @@ async fn refresh_provider(
         },
     );
 
-    let removed: std::collections::HashSet<&str> =
-        sync.removed.iter().map(String::as_str).collect();
-    let current_removed = target == session.provider_id && removed.contains(session.model.as_str());
-    let default = config::default_model(paths)
-        .filter(|(provider_id, _)| *provider_id == target)
-        .map(|(_, model)| model);
-    let default_removed = default
-        .as_deref()
-        .is_some_and(|model| removed.contains(model));
+    let enabled: std::collections::HashSet<&str> = models
+        .iter()
+        .filter(|model| model.enabled)
+        .map(|model| model.id.as_str())
+        .collect();
+    let previous_model = session.model.clone();
+    let current_invalid = target == session.provider_id && !enabled.contains(previous_model.as_str());
+    let saved_default = config::default_model(paths);
+    // Valid means the endpoint still offers the model and it is enabled
+    // locally; comparing against the removed set alone would miss a default
+    // that was already invalid before this refresh.
+    let default_invalid = saved_default.as_ref().is_some_and(|(provider, model)| {
+        provider == &target && !enabled.contains(model.as_str())
+    });
     let mut gone: Vec<String> = Vec::new();
-    if current_removed {
-        gone.push(session.model.clone());
+    if current_invalid {
+        gone.push(previous_model.clone());
     }
-    if default_removed {
-        if let Some(default) = &default {
-            if !gone.contains(default) {
-                gone.push(default.clone());
+    if default_invalid {
+        if let Some((_, model)) = &saved_default {
+            if !gone.contains(model) {
+                gone.push(model.clone());
             }
         }
     }
@@ -711,11 +821,22 @@ async fn refresh_provider(
         );
         Some(choose_replacement(input, &provider.id, &available, &gone.join(" and ")).await?)
     };
+    // The default is written when it no longer resolves, or when switching to a
+    // replacement needs a default that was never saved.
+    let default_to_write = if default_invalid || (current_invalid && saved_default.is_none()) {
+        Some(
+            replacement
+                .clone()
+                .expect("an invalidated default model needs a replacement"),
+        )
+    } else {
+        None
+    };
 
-    // Read again right before writing so a concurrent edit is never overwritten.
-    let config_path = paths.data_dir.join("config.json");
+    // Read both files again right before writing so a concurrent edit is never
+    // overwritten; the selection above waits for the user, so this is late.
     ensure!(
-        config_path.exists(),
+        paths.data_dir.join("config.json").exists(),
         "The configuration file was removed while refreshing; nothing was changed"
     );
     let mut manager = ConfigManager::new(paths.data_dir.clone());
@@ -728,37 +849,51 @@ async fn refresh_provider(
         serde_json::to_value(&latest)? == serde_json::to_value(&provider)?,
         "Provider {target} changed while its models were being refreshed; run the refresh again. Other configuration changes were preserved."
     );
+    ensure_default_unchanged(paths, &saved_default)?;
+
     let mut updated = provider.clone();
     updated.models = models;
+    let written = updated.clone();
     manager.update_config(|config| {
         if let Some(slot) = config.providers.iter_mut().find(|provider| provider.id == target) {
-            *slot = updated;
+            *slot = written;
         }
     })?;
 
-    if current_removed {
+    if current_invalid {
         let replacement = replacement
             .as_deref()
             .expect("a removed current model needs a replacement");
         let selection = match select(paths, &target, replacement) {
             Ok(selection) => selection,
             Err(error) => {
-                // Leave the saved list and the session consistent.
-                manager.update_config(|config| {
-                    if let Some(slot) = config.providers.iter_mut().find(|provider| provider.id == target) {
-                        *slot = provider.clone();
-                    }
-                })?;
+                restore_provider(&mut manager, &target, &updated, &provider)?;
                 return Err(error.context(
                     "The replacement model could not be selected; the previous model list was restored",
                 ));
             }
         };
-        session.switch(paths, selection).await?;
-        config::save_default_model(paths, &session.provider_id, &session.model)?;
+        if let Err(error) = session.switch(paths, selection).await {
+            restore_provider(&mut manager, &target, &updated, &provider)?;
+            return Err(error.context(
+                "The replacement model could not be selected; the previous model list was restored",
+            ));
+        }
         command_eprintln!("Switched to {replacement}; conversation history preserved.");
-    } else if let Some(replacement) = replacement.as_deref() {
-        config::save_default_model(paths, &target, replacement)?;
+    }
+
+    if let Some(default_model) = default_to_write.as_deref() {
+        if let Err(error) = config::save_default_model(paths, &target, default_model) {
+            // Restore the list the selection reads from first, then the session.
+            restore_provider(&mut manager, &target, &updated, &provider)?;
+            if current_invalid {
+                let selection = select(paths, &target, &previous_model)?;
+                session.switch(paths, selection).await?;
+            }
+            return Err(error.context(
+                "The default model could not be saved; the previous model list and selection were restored",
+            ));
+        }
     }
 
     command_eprintln!(
@@ -1210,7 +1345,7 @@ pub async fn handle(
     }
     ensure!(
         words.next().is_none(),
-        "Use /provider [ID|refresh [ID]|add|edit ID] or /model [ID|refresh]"
+        "Use /provider [ID|list|refresh [ID]|add|edit ID] or /model [ID|list|refresh]"
     );
     let config = paths.read_config()?;
     let providers: Vec<_> = config.providers.iter().filter(|p| p.enabled).collect();
@@ -1807,6 +1942,572 @@ mod tests {
         assert_eq!(resumed.provider.as_deref(), Some("two"));
         session.close().await.unwrap();
         server.abort();
+    }
+
+    fn refresh_provider_config(
+        id: &str,
+        base_url: &str,
+        models: &[(&str, bool)],
+    ) -> deepseek_code_core::config::ProviderConfig {
+        let mut provider = config::provider_template(models[0].0);
+        provider.id = id.into();
+        provider.name = id.into();
+        provider.base_url = base_url.into();
+        provider.api_key = Some("fixture-only".into());
+        provider.models = models
+            .iter()
+            .map(|(model_id, enabled)| {
+                let mut model = config::provider_template(model_id).models.remove(0);
+                model.id = (*model_id).into();
+                model.name = (*model_id).into();
+                model.enabled = *enabled;
+                model
+            })
+            .collect();
+        provider
+    }
+
+    async fn open_refresh_session(paths: &RuntimePaths, provider: &str, model: &str) -> Session {
+        let cli = Cli::parse_from(["dcl"]);
+        Session::open(&cli, paths, select(paths, provider, model).unwrap(), None)
+            .await
+            .unwrap()
+    }
+
+    async fn listing_fixture(
+        models: serde_json::Value,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/models",
+            get(move || {
+                let models = models.clone();
+                async move { Json(models) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn refresh_adds_and_removes_models_and_keeps_same_id_settings() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        })).await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut provider = refresh_provider_config(
+            "one",
+            &format!("{base}/v1"),
+            &[("keep", true), ("gone", true)],
+        );
+        provider.models[0].name = "Local keep".into();
+        provider.models[0].context_window = Some(1234);
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.add_provider(provider).unwrap();
+        let mut session = open_refresh_session(&paths, "one", "keep").await;
+
+        handle("/model refresh", &paths, &mut session, &mut answers(&[]))
+            .await
+            .unwrap();
+
+        let saved = paths.read_config().unwrap();
+        let provider = saved.providers.iter().find(|p| p.id == "one").unwrap();
+        assert_eq!(
+            provider.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["keep", "new"]
+        );
+        assert_eq!(provider.models[0].name, "Local keep");
+        assert_eq!(provider.models[0].context_window, Some(1234));
+        assert!(provider.models[1].enabled, "a new model starts enabled");
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "keep", "the current model still exists");
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_cancel_keeps_the_saved_list_and_selection() {
+        let (base, server) = listing_fixture(json!({"data": [{"id": "new"}]})).await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let provider = refresh_provider_config("one", &format!("{base}/v1"), &[("gone", true)]);
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.add_provider(provider).unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+        let before = std::fs::read(paths.data_dir.join("config.json")).unwrap();
+
+        let error = handle("/model refresh", &paths, &mut session, &mut answers(&[""]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert_eq!(std::fs::read(paths.data_dir.join("config.json")).unwrap(), before);
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "gone");
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_switches_a_removed_current_model_and_preserves_history() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        })).await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let provider = refresh_provider_config(
+            "one",
+            &format!("{base}/v1"),
+            &[("keep", true), ("gone", true)],
+        );
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.add_provider(provider).unwrap();
+        config::save_default_model(&paths, "one", "gone").unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+        session
+            .store
+            .append(&session.id, "user", "refresh-history-marker")
+            .unwrap();
+        let before = serde_json::to_value(session.store.history(&session.id).unwrap()).unwrap();
+
+        handle("/provider refresh one", &paths, &mut session, &mut answers(&["2"]))
+            .await
+            .unwrap();
+
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "new", "the replacement is selected");
+        assert_eq!(
+            before,
+            serde_json::to_value(session.store.history(&session.id).unwrap()).unwrap(),
+            "conversation history is preserved"
+        );
+        assert_eq!(config::default_model(&paths), Some(("one".into(), "new".into())));
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_without_a_saved_default_records_the_replacement() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let provider = refresh_provider_config(
+            "one",
+            &format!("{base}/v1"),
+            &[("keep", true), ("gone", true)],
+        );
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.add_provider(provider).unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+        assert_eq!(config::default_model(&paths), None);
+
+        handle("/model refresh", &paths, &mut session, &mut answers(&["2"]))
+            .await
+            .unwrap();
+
+        assert_eq!(session.model, "new");
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("one".into(), "new".into())),
+            "a switch with no saved default records the replacement"
+        );
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_valid_default_elsewhere_survives_a_current_model_replacement() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true), ("gone", true)],
+            ))
+            .unwrap();
+        manager
+            .add_provider(refresh_provider_config(
+                "two",
+                &format!("{base}/v1"),
+                &[("other", true)],
+            ))
+            .unwrap();
+        config::save_default_model(&paths, "two", "other").unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+
+        handle("/model refresh", &paths, &mut session, &mut answers(&["1"]))
+            .await
+            .unwrap();
+
+        assert_eq!(session.model, "keep");
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("two".into(), "other".into())),
+            "a valid default is kept, even for another provider"
+        );
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_already_invalid_default_asks_for_a_replacement() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true), ("gone", true)],
+            ))
+            .unwrap();
+        // The saved default names a model this provider never had, so the
+        // removed set alone would not notice it.
+        config::save_default_model(&paths, "one", "already-gone").unwrap();
+        let mut session = open_refresh_session(&paths, "one", "keep").await;
+
+        handle("/model refresh", &paths, &mut session, &mut answers(&["2"]))
+            .await
+            .unwrap();
+
+        assert_eq!(session.model, "keep", "the current model is unchanged");
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("one".into(), "new".into())),
+            "an unresolved default is replaced"
+        );
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_valid_default_in_the_same_provider_survives_a_current_replacement() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "defaulted"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true), ("defaulted", true), ("gone", true)],
+            ))
+            .unwrap();
+        config::save_default_model(&paths, "one", "defaulted").unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+
+        handle("/model refresh", &paths, &mut session, &mut answers(&["1"]))
+            .await
+            .unwrap();
+
+        assert_eq!(session.model, "keep");
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("one".into(), "defaulted".into())),
+            "only an invalidated default is replaced"
+        );
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[test]
+    fn a_default_changed_during_the_selection_stops_the_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let expected = config::default_model(&paths);
+        config::save_default_model(&paths, "one", "changed").unwrap();
+        let error = ensure_default_unchanged(&paths, &expected).unwrap_err();
+        assert!(
+            error.to_string().contains("changed while refreshing"),
+            "{error:#}"
+        );
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("one".into(), "changed".into())),
+            "the guard never writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_switch_restores_the_saved_list() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true), ("gone", true)],
+            ))
+            .unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+        // A real database failure on the switch, without a product hook.
+        session
+            .store
+            .db
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refresh_switch_failure BEFORE UPDATE ON conversations \
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let error = handle("/model refresh", &paths, &mut session, &mut answers(&["2"]))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("previous model list was restored"), "{message}");
+        assert_eq!(
+            paths.read_config().unwrap().providers[0]
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["keep", "gone"],
+            "the saved list is restored"
+        );
+        assert_eq!(session.model, "gone", "the session is unchanged");
+        session
+            .store
+            .db
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER refresh_switch_failure"))
+            .unwrap()
+            .unwrap();
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_default_save_restores_the_list_and_selection() {
+        let (base, server) = listing_fixture(json!({
+            "data": [{"id": "keep"}, {"id": "new"}],
+        }))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true), ("gone", true)],
+            ))
+            .unwrap();
+        let mut session = open_refresh_session(&paths, "one", "gone").await;
+        // The preference file already holds an unrelated setting and a default
+        // this provider no longer offers. A failure between the temporary file
+        // and the rename must leave every byte of it in place.
+        let cli_path = paths.data_dir.join("cli.json");
+        std::fs::write(
+            &cli_path,
+            r#"{"model":"one::already-gone","theme":"dark"}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(&cli_path).unwrap();
+        config::FAIL_PREFERENCE_COMMIT.with(|flag| flag.set(true));
+
+        let error = handle("/model refresh", &paths, &mut session, &mut answers(&["2"]))
+            .await
+            .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("previous model list and selection were restored"),
+            "{message}"
+        );
+        assert_eq!(
+            paths.read_config().unwrap().providers[0]
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["keep", "gone"],
+            "the saved list is restored"
+        );
+        assert_eq!(session.model, "gone", "the session is restored");
+        assert_eq!(
+            std::fs::read(&cli_path).unwrap(),
+            before,
+            "the preference file survives the failed commit"
+        );
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("one".into(), "already-gone".into()))
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&paths.data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refreshing_another_provider_replaces_its_default_without_switching() {
+        let (base, server) = listing_fixture(json!({"data": [{"id": "fresh"}]})).await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("current", true)],
+            ))
+            .unwrap();
+        manager
+            .add_provider(refresh_provider_config(
+                "two",
+                &format!("{base}/v1"),
+                &[("old", true)],
+            ))
+            .unwrap();
+        config::save_default_model(&paths, "two", "old").unwrap();
+        let mut session = open_refresh_session(&paths, "one", "current").await;
+
+        handle(
+            "/provider refresh two",
+            &paths,
+            &mut session,
+            &mut answers(&["1"]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.provider_id, "one", "another provider stays unselected");
+        assert_eq!(session.model, "current");
+        let saved = paths.read_config().unwrap();
+        let provider = saved.providers.iter().find(|p| p.id == "two").unwrap();
+        assert_eq!(
+            provider.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["fresh"]
+        );
+        assert_eq!(config::default_model(&paths), Some(("two".into(), "fresh".into())));
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_arguments_are_validated_before_querying() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                "http://127.0.0.1:1/v1",
+                &[("model-a", true)],
+            ))
+            .unwrap();
+        let mut session = open_refresh_session(&paths, "one", "model-a").await;
+        let mut input = answers(&[]);
+
+        let error = handle(
+            "/provider refresh one extra",
+            &paths,
+            &mut session,
+            &mut input,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Usage: /provider refresh [ID]"), "{error:#}");
+        let error = handle("/model refresh extra", &paths, &mut session, &mut input)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Usage: /model refresh"), "{error:#}");
+        let error = handle("/provider refresh missing", &paths, &mut session, &mut input)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is not saved"), "{error:#}");
+        assert_eq!(
+            paths
+                .read_config()
+                .unwrap()
+                .providers
+                .iter()
+                .find(|p| p.id == "one")
+                .unwrap()
+                .models
+                .len(),
+            1,
+            "failed commands never write"
+        );
+        session.close().await.unwrap();
+    }
+
+    #[test]
+    fn refresh_endpoint_requires_one_complete_transport() {
+        let mut provider = config::provider_template("model-a");
+        provider.id = "one".into();
+        provider.provider_type = "openai".into();
+        provider.base_url = "http://127.0.0.1:1/v1".into();
+        assert_eq!(
+            refresh_endpoint(&provider).unwrap(),
+            ("http://127.0.0.1:1/v1".into(), "openai")
+        );
+        provider.models[0].api = Some("anthropic-messages".into());
+        assert_eq!(refresh_endpoint(&provider).unwrap().1, "anthropic");
+        provider.models.insert(0, config::provider_template("model-b").models.remove(0));
+        let error = refresh_endpoint(&provider).unwrap_err();
+        assert!(error.to_string().contains("several protocols"), "{error:#}");
+
+        provider.models.clear();
+        provider.base_url.clear();
+        let error = refresh_endpoint(&provider).unwrap_err();
+        assert!(error.to_string().contains("own address"), "{error:#}");
+    }
+
+    #[test]
+    fn refresh_credentials_follow_the_saved_precedence() {
+        let env = "DCL_REFRESH_CREDENTIAL_FIXTURE";
+        std::env::set_var(env, "from-environment");
+        let mut provider = config::provider_template("fixture-model");
+        provider.settings.insert("apiKeyEnv".into(), json!(env));
+        provider.api_key = Some("from-config".into());
+        assert_eq!(provider_api_key(&provider).unwrap(), "from-environment");
+        std::env::remove_var(env);
+        let error = provider_api_key(&provider).unwrap_err().to_string();
+        assert!(error.contains(env), "the variable name is reported: {error}");
+        assert!(!error.contains("from-environment"), "{error}");
+        assert!(!error.contains("from-config"), "{error}");
+
+        let builtin = "dcl-refresh-inline-fixture";
+        let builtin_env =
+            deepseek_code_core::native_engine::provider_runtime::credential_env(builtin);
+        std::env::remove_var(&builtin_env);
+        let mut provider = config::provider_template("fixture-model");
+        provider.settings.insert("builtinId".into(), json!(builtin));
+        provider.api_key = Some("from-config".into());
+        assert_eq!(provider_api_key(&provider).unwrap(), "from-config");
+        provider.api_key = None;
+        let error = provider_api_key(&provider).unwrap_err().to_string();
+        assert!(error.contains(&builtin_env), "{error}");
     }
 }
 

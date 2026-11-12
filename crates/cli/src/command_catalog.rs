@@ -83,8 +83,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/tools", "Inspect or change tool loading; opens the Tools panel in a terminal"),
     ("/skills", "Installed skills"),
     ("/mcp", "Configured MCP servers"),
-    ("/provider", "Inspect/configure providers: [ID|add|edit ID]"),
-    ("/model", "Inspect/switch models: [ID]"),
+    ("/provider", "Inspect/configure providers: [ID|list|refresh [ID]|add|edit ID]"),
+    ("/model", "Inspect/switch models: [ID|list|refresh]"),
     ("/test", "Test provider with an isolated request"),
     (
         "/compact",
@@ -133,5 +133,17 @@ fn aliases_resolve_to_listed_commands() {
     for (alias, command) in [("/new", "/clear"), ("/reset", "/clear"), ("/settings", "/config"), ("/checkpoint", "/rewind"), ("/help", "/help")] {
         assert_eq!(canonical(alias), command);
         assert!(COMMANDS.iter().any(|(name, _)| *name == command) || command == "/help");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_and_model_help_mention_refresh() {
+    for command in ["/provider", "/model"] {
+        let (_, description) = COMMANDS
+            .iter()
+            .find(|(name, _)| *name == command)
+            .expect("the command is discoverable");
+        assert!(description.contains("refresh"), "{command}: {description}");
     }
 }

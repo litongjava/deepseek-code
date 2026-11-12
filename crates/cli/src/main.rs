@@ -767,6 +767,10 @@ async fn run(cli: &Cli) -> Result<()> {
                 *description = format!("Set the AI model (currently {} · {})", session.model, session.provider_id);
             }
             input.as_mut().unwrap().set_commands(catalog);
+            input
+                .as_ref()
+                .unwrap()
+                .set_provider_ids(interactive_config::provider_ids(&paths));
             input.as_ref().unwrap().set_workspace(&session.workspace);
             input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
             input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
