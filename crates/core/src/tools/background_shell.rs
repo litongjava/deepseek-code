@@ -158,7 +158,7 @@ pub(crate) fn start(
         completion.finish(status, output);
     });
     Ok(
-        json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. Use TaskGet with task_id to read its output (block:true waits, block defaults to false) and TaskStop to stop it.")}),
+        json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolSearch; TaskStop stops it.")}),
     )
 }
 
@@ -332,7 +332,7 @@ pub(super) async fn run_foreground(
         completion.finish(status, output);
     });
     Ok(
-        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Use TaskGet with task_id for its output (block:true waits) and TaskStop to stop it."}),
+        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolSearch; TaskStop stops it."}),
     )
 }
 
