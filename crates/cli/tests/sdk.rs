@@ -2272,11 +2272,11 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
         let requests = server.fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let first = request_tool_names(&requests[0], anthropic);
-        // Exactly the 13 built-in defaults, each once. MCP tools keep their own
+        // Exactly the 12 built-in defaults, each once. MCP tools keep their own
         // loading rules and are not part of the switches.
         let mut core = vec![
             "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Skill", "ToolSearch",
-            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskGet", "TaskStop",
+            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskStop",
         ];
         let mut seen: Vec<String> = first
             .iter()
@@ -2293,7 +2293,7 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), first.len(), "duplicate tool: {first:?}");
-        for name in ["ListDir", "WebFetch", "Agent", "Workflow"] {
+        for name in ["ListDir", "WebFetch", "Agent", "Workflow", "TaskGet"] {
             assert!(!first.contains(&name.to_owned()), "{name}: {first:?}");
         }
         // Retired model-facing tools: plan_mode is gone, and TaskOutput was

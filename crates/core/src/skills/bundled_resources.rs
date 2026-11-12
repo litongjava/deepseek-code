@@ -29,7 +29,7 @@ pub struct Resources {
 }
 
 pub fn supports(name: &str) -> bool {
-    matches!(name, "claude-api" | "dataviz" | "skill-creator")
+    matches!(name, "dataviz" | "skill-creator")
 }
 
 /// Embedded files for one bundled skill, in manifest order.
@@ -106,7 +106,6 @@ impl Resources {
             );
         }
         let instructions = match name {
-            "claude-api" => include_str!("bundled/resources/claude-api/INSTRUCTIONS.md"),
             "dataviz" => include_str!("bundled/resources/dataviz/INSTRUCTIONS.md"),
             "skill-creator" => include_str!("bundled/resources/skill-creator/INSTRUCTIONS.md"),
             _ => unreachable!(),
@@ -406,7 +405,6 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let resources = Resources::default();
         for (name, count, example) in [
-            ("claude-api", 90, "shared/live-sources.md"),
             ("dataviz", 9, "scripts/validate_palette.js"),
         ] {
             let prompt = resources

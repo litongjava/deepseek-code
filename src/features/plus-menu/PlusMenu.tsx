@@ -1,6 +1,8 @@
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Paperclip, Github, ChevronDown, Plus, FileText, Check, ListCollapse } from 'lucide-react';
 import { IconProjects, IconResearch, IconWebSearch } from '../../components/Icons';
 import { Project } from '../../api';
+import { submenuPlacement } from './skillMenu';
 
 interface PlusMenuProps {
   menuRef: React.RefObject<HTMLDivElement | null>;
@@ -40,6 +42,16 @@ export default function PlusMenu({
   onWebSearch, onCompact, setShowProjectsSubmenu, setShowSkillsSubmenu, t,
 }: PlusMenuProps) {
   const clearSubs = () => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); };
+  const skillsRowRef = useRef<HTMLDivElement>(null);
+  const [skillsPlacement, setSkillsPlacement] = useState<{ direction: 'up' | 'down'; maxHeight: number }>({ direction: 'up', maxHeight: 0 });
+
+  // Measure the Skills row once the submenu opens so it stays inside the window.
+  useLayoutEffect(() => {
+    if (!showSkillsSubmenu) return;
+    const rect = skillsRowRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setSkillsPlacement(submenuPlacement(rect.top, rect.bottom, window.innerHeight));
+  }, [showSkillsSubmenu]);
 
   return (
     <div ref={menuRef} className="absolute bottom-full left-0 mb-2 w-[220px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50">
@@ -107,7 +119,7 @@ export default function PlusMenu({
       </div>
 
       {/* Skills submenu */}
-      <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
+      <div className="relative" ref={skillsRowRef} onMouseLeave={() => setShowSkillsSubmenu(false)}>
         <button
           onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
           onClick={() => setShowSkillsSubmenu(!showSkillsSubmenu)}
@@ -120,14 +132,20 @@ export default function PlusMenu({
           <ChevronDown size={14} className="text-deepseek-textSecondary -rotate-90" />
         </button>
         {showSkillsSubmenu && (
-          <div className="absolute left-full bottom-0 w-[220px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
+          <div
+            className={`absolute left-full ${skillsPlacement.direction === 'down' ? 'top-0' : 'bottom-0'} w-[220px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 overflow-y-auto`}
+            style={{ maxHeight: skillsPlacement.maxHeight }}
+          >
             {enabledSkills.length > 0 ? enabledSkills.map(skill => (
               <button
                 key={skill.id}
                 onClick={() => onSelectSkill(skill)}
-                className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors truncate"
+                className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
               >
-                {skill.name}
+                <span className="truncate">{skill.name}</span>
+                {skill.state === 'user-only' && (
+                  <span className="text-[11px] text-deepseek-textSecondary flex-shrink-0">user-only</span>
+                )}
               </button>
             )) : (
               <div className="px-4 py-2 text-[12px] text-deepseek-textSecondary italic">No skills enabled</div>
