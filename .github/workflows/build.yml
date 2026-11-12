@@ -30,7 +30,7 @@ jobs:
             artifact: windows-x64
           - os: ubuntu-22.04
             artifact: linux-x64
-          - os: macos-14
+          - os: macos-15
             artifact: macos-arm64
     steps:
       - uses: actions/checkout@v4
