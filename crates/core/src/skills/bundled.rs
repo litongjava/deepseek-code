@@ -116,6 +116,7 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
                     content,
                     user_invocable: true,
                     disable_model_invocation: !super::bundled_resources::supports(name),
+                    listing_name_only: false,
                     context: None,
                     shell: None,
                     agent: None,

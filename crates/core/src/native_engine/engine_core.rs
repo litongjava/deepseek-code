@@ -736,7 +736,11 @@ impl QueryEngine {
             // messages may legitimately begin with a literal filesystem path.
             if let Some((content, skill)) = content { turn_blocks.push((content, Some(skill))); }
         }
-        let available_skills = discovered_skills.values().filter(|skill| skill.model_invocable()).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"context":skill.context})).collect::<Vec<_>>();
+        let available_skills = discovered_skills.values().filter(|skill| skill.model_invocable()).map(|skill| if skill.listing_name_only {
+            serde_json::json!({"name":skill.name,"context":skill.context})
+        } else {
+            serde_json::json!({"name":skill.name,"description":skill.description,"context":skill.context})
+        }).collect::<Vec<_>>();
         if !available_skills.is_empty() {
             request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nAvailable skills: invoke the Skill tool with skill=name and optional args. Do not bypass Skill by reading its template: fork isolation and approved shell context must run through the tool. {}\n", serde_json::to_string(&available_skills)?));
         }
