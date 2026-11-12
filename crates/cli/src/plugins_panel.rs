@@ -4,7 +4,7 @@
 //! shows skill files that could not be read and MCP servers that failed.
 use crate::session::Session;
 use crate::terminal::input::TerminalInput;
-use crate::terminal::picker::{details, Entry, Key, Picked, Picker};
+use crate::terminal::picker::{details_from_top, Entry, Key, Picked, Picker};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use deepseek_code_core::runtime::RuntimePaths;
@@ -92,9 +92,18 @@ fn tab_bar(current: usize) -> String {
     format!("Plugins  {}", tabs.join("  "))
 }
 
+/// The part of a skill name people recognise: the last `:` segment.
+/// The full name stays the key for states and lookups.
+fn display_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
 /// Where a skill comes from: a plugin ID, the CLI's embedded skills, the
 /// workspace's `.claude` directory, or the user scope.
 fn source_label(name: &str, path: &Path, workspace: &Path) -> String {
+    if name.starts_with("synced:") {
+        return "synced".to_owned();
+    }
     if let Some((plugin, _)) = name.split_once(':') {
         return plugin.to_owned();
     }
@@ -198,24 +207,36 @@ fn token_label(tokens: u64) -> String {
     }
 }
 
+/// `text` unchanged, or its first `width - 1` characters and an ellipsis.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut fitted: String = text.chars().take(width.saturating_sub(1)).collect();
+    fitted.push('\u{2026}');
+    fitted
+}
+
 /// The Stats tab: what each skill costs and how often it ran, and plugins that
 /// have gone unused. Plain rows, columns padded with spaces.
 pub(crate) fn stats_rows(model: &Model, now: DateTime<Utc>, notice: bool) -> Vec<String> {
     let mut skills: Vec<&SkillRow> = model.skills.iter().collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // Caps keep the numeric columns on screen: synced and plugin skill names
+    // can be far longer than a terminal cares to show.
     let name_width = skills
         .iter()
-        .map(|skill| skill.name.len())
+        .map(|skill| display_name(&skill.name).chars().count())
         .max()
         .unwrap_or(0)
-        .max("skill".len());
+        .clamp("skill".len(), 24);
     let source_width = skills
         .iter()
-        .map(|skill| skill.source.len())
+        .map(|skill| skill.source.chars().count())
         .max()
         .unwrap_or(0)
-        .max("source".len());
+        .clamp("source".len(), 14);
 
     let mut rows = Vec::new();
     if notice {
@@ -236,8 +257,8 @@ pub(crate) fn stats_rows(model: &Model, now: DateTime<Utc>, notice: bool) -> Vec
         };
         rows.push(format!(
             "  {:<name_width$}  {:<source_width$}  {:<7}  {:<9}  {:<4}  {}",
-            skill.name,
-            skill.source,
+            fit(display_name(&skill.name), name_width),
+            fit(&skill.source, source_width),
             context,
             token_label(skill.usage.tokens_7d),
             format!("{}\u{d7}", skill.usage.uses),
@@ -422,7 +443,7 @@ pub(crate) fn installed_entries(
         for skill in skills {
             rows.push((
                 Entry {
-                    title: format!("\u{2714} {:<28} Skill    {}", skill.name, skill_detail(skill, now)),
+                    title: format!("\u{2714} {:<28} Skill    {}", display_name(&skill.name), skill_detail(skill, now)),
                     detail: String::new(),
                 },
                 Target::Skill(skill.name.clone()),
@@ -484,7 +505,7 @@ pub(crate) fn installed_entries(
                         Entry {
                             title: format!(
                                 "\u{25cb} {:<28} Skill    {}",
-                                skill.name,
+                                display_name(&skill.name),
                                 skill_detail(skill, now)
                             ),
                             detail: String::new(),
@@ -572,7 +593,7 @@ fn pick_skill_state(name: &str, current: SkillState) -> std::io::Result<Option<S
             detail: detail.clone(),
         })
         .collect();
-    let heading = format!("Skill state: {name}");
+    let heading = format!("Skill state: {}", display_name(name));
     let selected = choices
         .iter()
         .position(|(state, _)| *state == current)
@@ -600,7 +621,7 @@ fn plugin_details(plugin: &PluginRow, now: DateTime<Utc>) -> std::io::Result<()>
             skill_usage::relative_day(plugin.last_used, now)
         ),
     ];
-    details(
+    details_from_top(
         &plugin.id,
         &rows,
         "\u{2190} to go back \u{b7} Esc to close",
@@ -619,7 +640,7 @@ fn mcp_details(server: &McpRow, now: DateTime<Utc>) -> std::io::Result<()> {
             skill_usage::relative_day(server.last_used, now)
         ),
     ];
-    details(
+    details_from_top(
         &server.name,
         &rows,
         "\u{2190} to go back \u{b7} Esc to close",
@@ -666,7 +687,7 @@ pub(crate) async fn run(
                     hint: INSTALLED_HINT,
                     selected,
                 };
-                let (index, toggled) = match picker.run_keys(&[Key::Left, Key::Right, Key::Space])? {
+                let (index, toggled) = match picker.run_keys_filling(&[Key::Left, Key::Right, Key::Space])? {
                     Picked::Key(Key::Left, _) => {
                         tab = (tab + TABS.len() - 1) % TABS.len();
                         continue;
@@ -751,7 +772,7 @@ pub(crate) async fn run(
             }
             1 => {
                 let rows = error_rows(paths, session).await;
-                let step = match details(&tab_bar(1), &rows, HINT, &[])? {
+                let step = match details_from_top(&tab_bar(1), &rows, HINT, &[])? {
                     Some('<') => -1,
                     Some('>') => 1,
                     _ => return Ok(changed),
@@ -760,7 +781,7 @@ pub(crate) async fn run(
             }
             _ => {
                 let rows = stats_rows(&model, Utc::now(), start == "skill-doctor");
-                let step = match details(&tab_bar(tab), &rows, HINT, &[])? {
+                let step = match details_from_top(&tab_bar(tab), &rows, HINT, &[])? {
                     Some('<') => -1,
                     Some('>') => 1,
                     _ => return Ok(changed),
@@ -1008,5 +1029,53 @@ mod tests {
         assert_eq!(space_state(SkillState::User), SkillState::Off);
         assert_eq!(space_state(SkillState::NameOnly), SkillState::Off);
         assert_eq!(space_state(SkillState::UserOnly), SkillState::Off);
+    }
+
+    #[test]
+    fn synced_names_are_shortened() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let full = "synced:1234-abcd:translate";
+        let long = "x".repeat(40);
+        let model = Model {
+            skills: vec![
+                skill(full, "synced", SkillState::User, 20, Usage::default()),
+                skill(&long, "user", SkillState::User, 30, Usage::default()),
+            ],
+            plugins: Vec::new(),
+            mcp: Vec::new(),
+        };
+
+        let rows = stats_rows(&model, now, false);
+        let text = rows.join("\n");
+        let fields = |name: &str| {
+            rows.iter()
+                .map(|row| row.split_whitespace().collect::<Vec<_>>())
+                .find(|fields| fields.first() == Some(&name))
+                .unwrap_or_else(|| panic!("no row for {name}: {text}"))
+        };
+        assert_eq!(fields("translate")[0..2], ["translate", "synced"]);
+        let cut = format!("{}\u{2026}", "x".repeat(23));
+        assert_eq!(fields(&cut)[0].chars().count(), 24);
+        assert!(text.contains(&cut), "{text}");
+        assert!(!text.contains("synced:1234-abcd"), "{text}");
+
+        assert_eq!(
+            source_label(full, Path::new(""), Path::new("/work/project")),
+            "synced"
+        );
+
+        let rows = installed_entries(&model, false, now);
+        let translate = rows
+            .iter()
+            .find(|(_, target)| *target == Target::Skill(full.to_owned()))
+            .expect("the full name stays the target");
+        assert!(translate.0.title.contains("translate"), "{}", translate.0.title);
+        assert!(!translate.0.title.contains("synced:1234-abcd"), "{}", translate.0.title);
+        assert!(
+            rows.iter()
+                .any(|(entry, target)| entry.title.contains(&long) && *target == Target::Skill(long.clone())),
+            "{:?}",
+            rows.iter().map(|(entry, _)| &entry.title).collect::<Vec<_>>()
+        );
     }
 }
