@@ -913,10 +913,13 @@ fn agent_type_listing_is_sorted_and_includes_fork() {
         legacy: None,
     };
     let long = format!("{}\nsecond line", "x".repeat(200));
-    let listing = agent_type_listing(&[
-        definition("plan", "Plan the change"),
-        definition("explore", &long),
-    ]);
+    let listing = agent_type_listing(
+        &[
+            definition("plan", "Plan the change"),
+            definition("explore", &long),
+        ],
+        "Available agent types (subagent_type):",
+    );
     let lines: Vec<String> = listing.lines().map(String::from).collect();
     let expected: Vec<String> = vec![
         String::new(),
@@ -930,10 +933,13 @@ fn agent_type_listing_is_sorted_and_includes_fork() {
     // The text depends only on the definitions, so repeated requests match.
     assert_eq!(
         listing,
-        agent_type_listing(&[
-            definition("explore", &long),
-            definition("plan", "Plan the change"),
-        ])
+        agent_type_listing(
+            &[
+                definition("explore", &long),
+                definition("plan", "Plan the change"),
+            ],
+            "Available agent types (subagent_type):",
+        )
     );
 }
 
@@ -960,4 +966,83 @@ fn the_agent_tool_description_lists_the_agent_types() {
     ] {
         assert!(agent.description.contains(expected), "{expected}\n{}", agent.description);
     }
+}
+
+#[test]
+fn tool_search_lists_agent_types_while_agent_is_deferred() {
+    let root = tempfile::tempdir().unwrap();
+    let executor = executor(root.path());
+    // Agent stays on demand until ToolSearch loads it, so this request has no
+    // Agent definition; ToolSearch carries the list instead.
+    let tools = executor.tool_definitions().unwrap();
+    assert!(!tools.iter().any(|tool| tool.name == "Agent"));
+    let tool_search = tools
+        .iter()
+        .find(|tool| tool.name == "ToolSearch")
+        .expect("ToolSearch is a core tool");
+    for expected in [
+        "Agent types (subagent_type), available after loading Agent:",
+        "- explore: Read-only search across the codebase",
+        "- fork: Forks this session; the fork keeps the full history.",
+        "- general: Complete the requested task",
+        "- guide: Explain application and project workflows",
+        "- plan: Read-only investigation",
+        "- verify: Verify the requested behavior",
+    ] {
+        assert!(
+            tool_search.description.contains(expected),
+            "{expected}\n{}",
+            tool_search.description
+        );
+    }
+    // Nothing time-dependent enters the text, so the next request matches.
+    let again = executor.tool_definitions().unwrap();
+    let again = again
+        .iter()
+        .find(|tool| tool.name == "ToolSearch")
+        .expect("ToolSearch is a core tool");
+    assert_eq!(tool_search.description, again.description);
+}
+
+#[test]
+fn tool_search_drops_the_listing_once_agent_is_loaded() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = executor(root.path());
+    executor.loaded_tools.insert("Agent".into());
+    let tools = executor.tool_definitions().unwrap();
+    let agent = tools
+        .iter()
+        .find(|tool| tool.name == "Agent")
+        .expect("a loaded Agent tool");
+    assert!(agent
+        .description
+        .contains("Available agent types (subagent_type):"));
+    let tool_search = tools
+        .iter()
+        .find(|tool| tool.name == "ToolSearch")
+        .expect("ToolSearch is a core tool");
+    assert!(
+        !tool_search.description.contains("Agent types (subagent_type)"),
+        "{}",
+        tool_search.description
+    );
+}
+
+#[test]
+fn tool_search_has_no_agent_listing_when_agent_cannot_load() {
+    let root = tempfile::tempdir().unwrap();
+    // Agent is not resident and may not be loaded through ToolSearch either.
+    write_switches(root.path(), &[("Agent", false, false)]);
+    let executor = executor(root.path());
+    let tools = executor.tool_definitions().unwrap();
+    assert!(!tools.iter().any(|tool| tool.name == "Agent"));
+    let tool_search = tools
+        .iter()
+        .find(|tool| tool.name == "ToolSearch")
+        .expect("ToolSearch is a core tool");
+    assert!(
+        !tool_search.description.contains("Agent types (subagent_type)"),
+        "{}",
+        tool_search.description
+    );
 }
