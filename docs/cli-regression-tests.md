@@ -524,6 +524,14 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 - SDK 全套覆盖审批、Hook、MCP 等待取消及迟到回复；同时保留 `usage_accounting`、`recovery_result_contract`、`request_usage_tests`、ContextReset、初始 Hook/hook wake 回归。
 - 第十轮的独立复现与需求证据已在 2026-11-10 的开发支持目录清理中删除。未执行平台或旧验收组合继续标记未验证。
 
+### 会话创建与消息追加的 SQLite 写者竞争
+
+- `cargo test --locked -p deepseek-code-core --test session_concurrency`：`SessionStore::create`/`append` 在第二个连接持有写锁且超过一次 `busy_timeout` 时，应重试整笔事务而不是直接失败；持锁超过 30 秒预算时返回带静态操作名（`session create`／`session append`）的类型化竞争错误，不得留下部分会话、项目、文件夹、消息、结构化内容或来源行，释放写者后同一连接池仍可正常写入。
+- 非竞争错误（如触发器中止）必须立即返回并整笔回滚；`BEFORE INSERT` 早失败和“消息/计数写入后、最终时间戳更新时失败”两种中断点都要覆盖。
+- 口径：每次尝试仍使用每连接原有的 5 秒 `busy_timeout`；30 秒只是整笔事务的重试预算，不改变全局超时，也不序列化整个应用。测试里夹具持有写者的保护上限长于该预算，避免夹具与预算同时到期。
+- 未包含：`derive_empty`（fork/clear/子会话）仍是单次 `BEGIN IMMEDIATE`，本轮没有观察到失败，也未改动。
+- 不确定：R37 全量套件失败只在“写者被占用超过一次 busy_timeout”这一边界上被确定性复现；保留的日志不能证明当时写者为何 ≥5 秒不可用（调度饥饿还是其他长写），因此不声称已还原那条历史时间线。
+
 ### 回合内控制请求的确定性夹具
 
 - `cargo test --locked -p deepseek-code-cli --test sdk controls::running_turn_answers_queries_and_cancels_only_queued_messages -- --exact`：`Mode::HeldText` 只在第一个流式请求上先发出该协议的第一帧（Anthropic `message_start`／OpenAI 首个 delta），随后等待测试释放的 `Notify` 才发送完成帧；控制序列在释放前执行并刻意等待超过旧的固定 2 秒，两个协议都必须回答全部控制、保持排队消息未运行，释放后恰好 2 个结果、被取消的第二个提示不出现、保留的第三个提示出现。
