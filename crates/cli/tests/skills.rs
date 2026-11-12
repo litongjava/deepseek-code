@@ -130,9 +130,16 @@ async fn model_skill_tool_runs_a_real_isolated_child_and_returns_its_result() {
     assert!(!child.contains("ORIGINAL_PARENT_CONTEXT"));
     assert!(child.contains("specific-target"));
     assert!(child.contains("模型上下文😀"));
-    assert!(!requests[1]["tools"]
-        .as_array()
-        .unwrap()
+    let child_tools = requests[1]["tools"].as_array().unwrap();
+    assert!(child_tools.iter().all(|tool| ![
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit"
+    ]
+    .contains(&tool["function"]["name"].as_str().unwrap_or(""))));
+    // The read-only gate is tested in read_only_agent_runs_read_only_bash_and_refuses_the_rest.
+    assert!(child_tools
         .iter()
         .any(|tool| tool["function"]["name"] == "Bash"));
     assert!(requests[2]["messages"]
@@ -255,9 +262,16 @@ async fn slash_skills_expand_once_fork_without_parent_history_and_reject_private
     assert!(body.contains("收集结果😀"));
     assert!(body.contains("external data"));
     assert!(body.contains("target-file"));
-    assert!(!requests[0]["tools"]
-        .as_array()
-        .unwrap()
+    let child_tools = requests[0]["tools"].as_array().unwrap();
+    assert!(child_tools.iter().all(|tool| ![
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit"
+    ]
+    .contains(&tool["function"]["name"].as_str().unwrap_or(""))));
+    // The read-only gate is tested in read_only_agent_runs_read_only_bash_and_refuses_the_rest.
+    assert!(child_tools
         .iter()
         .any(|tool| tool["function"]["name"] == "Bash"));
     server.abort();
