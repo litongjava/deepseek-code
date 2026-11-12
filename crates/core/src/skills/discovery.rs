@@ -98,7 +98,7 @@ pub fn discover_runtime_from(
     data_dir: &Path,
     workspace: &Path,
 ) -> (BTreeMap<String, SkillCommand>, Vec<PathBuf>) {
-    let mut commands = super::bundled::commands(workspace);
+    let mut commands = super::bundled::commands();
     let mut invalid = Vec::new();
     if let Some(user) = user_config {
         let _ = scan_config_impl(user, &mut commands, Some(&mut invalid));
@@ -120,7 +120,7 @@ pub fn discover_available_from(
     user_config: Option<&Path>,
     workspace: &Path,
 ) -> (BTreeMap<String, SkillCommand>, Vec<PathBuf>) {
-    let mut commands = super::bundled::commands(workspace);
+    let mut commands = super::bundled::commands();
     let mut invalid = Vec::new();
     for config in user_config
         .into_iter()
@@ -150,7 +150,7 @@ pub fn discover_from(
     user_config: Option<&Path>,
     workspace: &Path,
 ) -> Result<BTreeMap<String, SkillCommand>> {
-    let mut commands = super::bundled::commands(workspace);
+    let mut commands = super::bundled::commands();
     if let Some(user) = user_config {
         scan_config(user, &mut commands)?;
     }
