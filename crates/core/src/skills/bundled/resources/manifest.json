@@ -694,6 +694,55 @@
       "bytes": 16091,
       "sha256": "13968104e3746cc903c1e2a9bd5bec949eccd81f7c3ea9bfee486c4777f386ce",
       "bundleHash": "17e9a9a0ee8f2aad7a862f8f66282260"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "INSTRUCTIONS.md",
+      "bytes": 15796,
+      "sha256": "d42217caa24426926f1c922f79d06e76e07e4829609b73985fd9bea55803f41f",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "NOTICE.md",
+      "bytes": 845,
+      "sha256": "c507ff1d4cbf6b54b423ebe5df3433ffeb81abbe9fa16513f96bb9b21d63ddc5",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "SKILL.md",
+      "bytes": 16075,
+      "sha256": "faf67a2ef6224ae743a11cba73e8d1fd384f379d5d70437c3daabeb23d2a099b",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "license.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "references/frontmatter.md",
+      "bytes": 3382,
+      "sha256": "0acde7f8936663a60f837ec914ff5cc564173b1427ab82d26cfa80241a69475d",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "scripts/init_skill.py",
+      "bytes": 8050,
+      "sha256": "392a476186343550937a03757401faddb9951e35fd18666fcdaedd439fa17524",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
+    },
+    {
+      "skill": "skill-creator",
+      "path": "scripts/quick_validate.py",
+      "bytes": 7924,
+      "sha256": "9fea5733a18773e5ef133b915c21a9634d16359563714273a28f1c1a118b835d",
+      "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
     }
   ]
 }

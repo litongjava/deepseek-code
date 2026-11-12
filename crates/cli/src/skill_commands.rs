@@ -1,9 +1,6 @@
 //! Discover only enabled, unambiguous skills that the shared engine can execute.
-use deepseek_code_core::{
-    runtime::RuntimePaths,
-    skills::{Skill, SkillsManager},
-};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use deepseek_code_core::{runtime::RuntimePaths, skills::SkillsManager};
+use std::collections::BTreeMap;
 
 pub enum PreparedInvocation {
     NotHandled,
@@ -133,6 +130,7 @@ pub async fn prepare_invocation(
     let context = crate::services::context(&session.paths)?;
     let mut commands = deepseek_code_core::services::plugins::skill_commands(&context)?;
     commands.extend(deepseek_code_core::skills::discovery::discover(
+        &session.paths.data_dir,
         &session.workspace,
     )?);
     let Some(skill) = commands.get(name) else {
@@ -351,13 +349,17 @@ pub async fn load_for_workspace(
     paths: &RuntimePaths,
     workspace: &std::path::Path,
 ) -> anyhow::Result<BTreeMap<String, String>> {
-    let skills = SkillsManager::with_path(paths.data_dir.join("skills"))
-        .list_enabled_skills()
-        .await?;
-    let mut commands = from_skills(&skills);
+    // First-run installation of bundled/legacy files keeps its existing
+    // behavior; the listing below comes only from the shared read-only resolver
+    // used by the engine listing and the Skill tool.
+    SkillsManager::with_path(paths.data_dir.join("skills")).ensure_installed()?;
     let context = crate::services::context(paths)?;
     let mut discovered = deepseek_code_core::services::plugins::skill_commands(&context)?;
-    discovered.extend(deepseek_code_core::skills::discovery::discover(workspace)?);
+    discovered.extend(deepseek_code_core::skills::discovery::discover(
+        &paths.data_dir,
+        workspace,
+    )?);
+    let mut commands = BTreeMap::new();
     for (name, skill) in discovered {
         let command = format!("/{name}");
         if crate::command_catalog::COMMANDS
@@ -368,58 +370,9 @@ pub async fn load_for_workspace(
         }
         if skill.user_invocable {
             commands.insert(command, format!("[skill] {}", skill.description));
-        } else {
-            commands.remove(&command);
         }
     }
     Ok(commands)
-}
-
-fn from_skills(skills: &[Skill]) -> BTreeMap<String, String> {
-    let aliases = |skill: &Skill| {
-        let mut names = HashSet::new();
-        names.insert(skill.id.clone());
-        names.insert(
-            skill
-                .name
-                .to_lowercase()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join("-"),
-        );
-        names
-    };
-    let mut counts = HashMap::<String, usize>::new();
-    for skill in skills.iter().filter(|s| s.enabled) {
-        for name in aliases(skill) {
-            *counts.entry(name).or_default() += 1;
-        }
-    }
-    let mut commands = BTreeMap::new();
-    for skill in skills.iter().filter(|s| s.enabled && s.content.is_some()) {
-        let slug = skill
-            .name
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join("-");
-        for name in [slug, skill.id.clone()] {
-            let command = format!("/{name}");
-            if !name.is_empty()
-                && !name
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || c == '/')
-                && counts.get(&name) == Some(&1)
-                && !crate::command_catalog::COMMANDS
-                    .iter()
-                    .any(|(builtin, _)| *builtin == command)
-            {
-                commands.insert(command, format!("[skill] {}", skill.description));
-                break;
-            }
-        }
-    }
-    commands
 }
 
 pub fn catalog(skills: &BTreeMap<String, String>) -> Vec<(String, String)> {
@@ -553,39 +506,69 @@ mod tests {
             .unwrap();
         assert_eq!(store.history(&parent).unwrap().len(), 1);
     }
-    use deepseek_code_core::skills::SkillSource;
-
-    fn skill(id: &str, name: &str, enabled: bool) -> Skill {
-        Skill {
-            id: id.into(),
-            name: name.into(),
-            description: "Check the project".into(),
-            content: Some("Instructions".into()),
-            when_to_use: None,
-            enabled,
-            source: SkillSource::User,
-            loaded_from: String::new(),
-            source_dir: None,
-            is_example: false,
-            files: vec![],
-            created_at: None,
-            od_metadata: None,
-        }
+    #[tokio::test]
+    async fn slash_list_comes_from_the_shared_resolver_and_includes_data_dir_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skill = data.join("skills/data-dir-only-fixture");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: data-dir-only-fixture\ndescription: Data directory slash fixture\n---\nCheck the project",
+        )
+        .unwrap();
+        let paths = RuntimePaths::new(data).unwrap();
+        let commands = load_for_workspace(&paths, &workspace).await.unwrap();
+        assert_eq!(
+            commands.get("/data-dir-only-fixture").map(String::as_str),
+            Some("[skill] Data directory slash fixture")
+        );
+        assert_eq!(
+            commands
+                .keys()
+                .filter(|name| name.as_str() == "/data-dir-only-fixture")
+                .count(),
+            1
+        );
     }
 
-    #[test]
-    fn discovery_avoids_disabled_ambiguous_and_builtin_commands() {
-        let skills = vec![
-            skill("one", "Review Code", true),
-            skill("two", "Review Code", true),
-            skill("three", "help", true),
-            skill("four", "Hidden", false),
-            skill("five", "Verify", true),
-        ];
-        let commands = from_skills(&skills);
-        assert!(commands.contains_key("/one") && commands.contains_key("/two"));
-        assert!(!commands.contains_key("/review-code"));
-        assert!(commands.contains_key("/three") && !commands.contains_key("/help"));
-        assert!(commands.contains_key("/verify") && !commands.contains_key("/hidden"));
+    #[tokio::test]
+    async fn slash_list_uses_pre_round_01_data_dir_slugs() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        for (directory, name, description) in [
+            ("mixed", "My Skill", "Mixed case fixture"),
+            ("punctuated", "R&D (team)'s check", "Punctuation fixture"),
+        ] {
+            let path = data.join("skills").join(directory);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n---\nCheck the project"),
+            )
+            .unwrap();
+        }
+        let paths = RuntimePaths::new(data).unwrap();
+        let commands = load_for_workspace(&paths, &workspace).await.unwrap();
+        assert_eq!(
+            commands.get("/my-skill").map(String::as_str),
+            Some("[skill] Mixed case fixture")
+        );
+        assert!(!commands.contains_key("/My-Skill"));
+        assert_eq!(
+            commands.get("/r&d-(team)'s-check").map(String::as_str),
+            Some("[skill] Punctuation fixture")
+        );
+        assert_eq!(
+            commands
+                .keys()
+                .filter(|name| name.as_str() == "/my-skill")
+                .count(),
+            1
+        );
     }
 }
