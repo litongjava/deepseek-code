@@ -445,7 +445,7 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 - `repl.rs`：C4、D1、D2、D6、D7、D8–D10（恢复提示、完成耗时与运行中状态），以及 L（手动 `/compact` 的完成输出、提交前取消与 `post-commit-manual` 的提交后取消）
 - `terminal/input.rs` 的取消通道：L 的 `cancel-manual`、`cancel-empty-manual`、`cancel-invalid-manual`、`cancel-merge-manual`、`post-commit-manual`，并在真实终端确认 `Esc` 不滞留到下一个提示、等待期间 `Ctrl+O` 仍能打开完整记录
 - `status_commands.rs`、`services/context_usage.rs`：`status_commands_tests`、`compaction_status_regressions` 与 L 的 `status-manual`（按边界与配置匹配用量、部分估算、压缩后估算、次数持久化）
-- `session_commands.rs`：L（自动压缩完成输出与次数）
+- `session_commands.rs`：L（自动压缩完成输出与次数）；模型请求压缩（`services/compaction_requests.rs`、`prepare_turn` 开头的取用）另见“模型请求压缩（CompactContext）”
 - `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
 - `memory.rs`、`display_commands.rs`、`crates/core/src/memory`：G
 - `services/customization.rs`、`prompt/`、`native_engine/tool_loop.rs`：H，以及 SDK 测试
@@ -605,3 +605,13 @@ env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
 - 只读快照读取沿用该连接原有的 `busy_timeout`（池默认值），250ms 只是有排队消息时“获取写事务”的单次上限，不是一次轮询或整个回合的总时限；模型请求、工具执行和其他写路径不受影响。
 - 仅对 `SQLITE_BUSY`/`SQLITE_LOCKED` 的类型化错误回滚并推迟到下一个边界；所有权、信任、归档和写入错误仍作为错误返回。没有递归重试，也没有全局修改数据库超时。
 - 本轮只证明并修复了收件箱轮询这一条可复现的致命竞争路径。历史长回合退出（Super R27/R01/R28）和独立数据目录下的启动期失败仍未归因；启动期数据库打开/初始化也未加同样的操作名诊断，不能用本场景的通过结果替代。
+
+### 模型请求压缩（CompactContext）
+
+模型在任务完成后可以请求在下一条用户消息前压缩；当前回合继续用完整历史，请求不会立即执行。历史不足窗口 30% 或刚压缩过时拒绝。
+
+1. `cargo test --locked -p deepseek-code-core --lib compaction_requests`：低于 30% 拒绝且不留请求；达到 30% 保存并只取用一次；刚压缩后只有一条用户消息时拒绝、两条后允许；后一次请求覆盖前一次。
+2. `cargo test --locked -p deepseek-code-core --lib tool_loading`：没有上下文用量快照时工具不在内置目录；`Some((50,100))` 时在目录中且默认按需加载；`delegation_depth = 1` 的子代理不提供。
+3. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
+4. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
+5. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。

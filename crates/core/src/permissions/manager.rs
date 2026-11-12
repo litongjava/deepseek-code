@@ -502,6 +502,7 @@ impl PermissionManager {
                 | "TaskOutput"
                 | "ToolSearch"
                 | "ProposeGoal"
+                | "CompactContext"
                 | "EnterPlanMode"
                 | "ExitPlanMode"
                 | "brief"

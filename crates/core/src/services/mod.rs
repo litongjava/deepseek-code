@@ -5,6 +5,7 @@ pub mod turn_context;
 pub mod lifecycle;
 pub mod deep_research;
 pub mod compaction;
+pub mod compaction_requests;
 pub mod plans;
 pub mod plan_approval;
 pub mod permission_authority;

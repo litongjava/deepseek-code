@@ -42,7 +42,7 @@ use crate::streaming::sse_parser::{
     consume_sse_payloads, merge_tool_args, recover_malformed_tool_input,
 };
 use crate::tools::get_tool_definitions;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -203,6 +203,10 @@ pub struct ToolLoopExecutor {
     auto_manual_interactive: bool,
     permission_host_available: bool,
     local_goal_frontend: bool,
+    /// The active history's estimated tokens and the model window, snapshotted
+    /// by an interactive host before the turn. `None` keeps CompactContext
+    /// unavailable, as in SDK, Desktop and child sessions.
+    context_usage: Option<(u64, u64)>,
     auto_history: Vec<Value>,
     messages: Vec<Value>,
     /// The compact boundary the current `messages` were built from, supplied
@@ -980,6 +984,7 @@ impl ToolLoopExecutor {
             auto_manual_interactive: false,
             permission_host_available: true,
             local_goal_frontend: false,
+            context_usage: None,
             auto_history: messages.clone(),
             provider,
             messages,
@@ -2325,6 +2330,9 @@ impl ToolLoopExecutor {
         if !self.goal_proposals_available() {
             tools.retain(|tool| tool.name != "ProposeGoal");
         }
+        if !self.compaction_requests_available() {
+            tools.retain(|tool| tool.name != "CompactContext");
+        }
         if self.search_config_path.is_some() && self.delegation_depth < 2 {
             let mut definitions = delegation::definitions();
             // The model cannot choose a type it was never told exists. The
@@ -2509,6 +2517,19 @@ impl ToolLoopExecutor {
     pub fn with_local_goal_frontend(mut self, enabled: bool) -> Self {
         self.local_goal_frontend = enabled;
         self
+    }
+
+    pub fn with_context_usage(mut self, usage: Option<(u64, u64)>) -> Self {
+        self.context_usage = usage;
+        self
+    }
+
+    fn compaction_requests_available(&self) -> bool {
+        self.context_usage.is_some()
+            && self.delegation_depth == 0
+            && self.subagent_hook_context.is_none()
+            && self.goal_db.is_some()
+            && self.conv_id.is_some()
     }
 
     pub fn with_auto_manual_interactive(mut self, interactive: bool) -> Self {
@@ -3495,6 +3516,16 @@ impl ToolLoopExecutor {
         }
         if tool_name == "AskUserQuestion" {
             return CallStep::Finished(self.execute_ask_user_question(tool_input, _tool_use_id).await);
+        }
+        if tool_name == "CompactContext" {
+            let result = (|| -> Result<String> {
+                anyhow::ensure!(self.compaction_requests_available(), "CompactContext is only available in an interactive terminal session");
+                let keep = tool_input["keep"].as_str().context("CompactContext requires keep")?;
+                let (used, window) = self.context_usage.context("CompactContext is only available in an interactive terminal session")?;
+                crate::services::compaction_requests::request(self.goal_db.as_ref().unwrap(), self.conv_id.as_deref().unwrap(), keep, used, window)
+            })();
+            let failed = result.is_err();
+            return CallStep::Finished((tool_input.clone(), result.unwrap_or_else(|error| error.to_string()), failed));
         }
         if tool_name == "ProposeGoal" {
             let result = (|| -> Result<Value> {

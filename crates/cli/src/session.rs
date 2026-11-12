@@ -1267,6 +1267,20 @@ impl Session {
             )?
             .is_some(),
         );
+        // The model may only ask for a compaction when a local terminal owns the
+        // next prompt; SDK and print runs keep the tool unavailable.
+        let context_usage = if input.is_some() && self.sdk_permissions.is_none() {
+            match (
+                self.context_window().await.filter(|window| *window > 0),
+                crate::session_commands::active_history(self),
+            ) {
+                (Some(window), Ok((_, used))) => Some((used as u64, window as u64)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.engine.set_context_usage(context_usage);
         let chat_request = ChatRequest {
             conversation_id: self.id.clone(),
             context_boundary,

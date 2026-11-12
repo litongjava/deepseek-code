@@ -899,13 +899,31 @@ pub async fn reactive_compact(session: &Session, prompt: &str, turn: &mut deepse
     let failed_attempt = rows[index].sort_order;
     session.store.db.with_conn(|conn| message_repo::delete_messages_from(conn, &session.id, failed_attempt))??;
     turn.clear_segment();
-    compact_automatic(session).await?;
+    compact_automatic(session, "").await?;
     Ok(true)
 }
 
 /// Run before assembling the next request so the compact boundary is reflected
 /// in model_history. The original transcript remains available to Desktop.
 pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Result<()> {
+    // A request the model queued is honored before this prompt even when the
+    // history is below the automatic threshold. It is consumed exactly once.
+    if let Some(keep) =
+        deepseek_code_core::services::compaction_requests::take(&session.store.db, &session.id)?
+    {
+        let rows = session.store.db.with_conn(|conn| {
+            deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
+        })??;
+        let start = rows
+            .iter()
+            .rposition(|row| row.is_compact_boundary)
+            .map_or(0, |index| index + 1);
+        if rows.len().saturating_sub(start) >= 2 {
+            crate::compaction::notice("Compacting the conversation as the model requested…");
+            compact_automatic(session, &keep).await?;
+            return Ok(());
+        }
+    }
     let settings = load(&session.store.db, &session.id)?;
     let window = match context_window.filter(|v| *v > 0) {
         Some(window) => window,
@@ -923,11 +941,13 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
-    compact_automatic(session).await
+    compact_automatic(session, "").await?;
+    deepseek_code_core::services::compaction_requests::clear(&session.store.db, &session.id)?;
+    Ok(())
 }
 
 /// Both automatic entries retain the commit outcome across cancellation.
-async fn compact_automatic(session: &Session) -> Result<()> {
+async fn compact_automatic(session: &Session, instructions: &str) -> Result<()> {
     use deepseek_code_core::services::compaction::{compact_with_hooks_tracked, CompactionTracker};
     let context = crate::services::context(&session.paths)?;
     let tracker = CompactionTracker::default();
@@ -938,7 +958,7 @@ async fn compact_automatic(session: &Session) -> Result<()> {
             _ = session.sdk_cancelled() => None,
             result = crate::hook_progress::during(&session.id, session.sdk_permissions.is_none(), compact_with_hooks_tracked(
                 &session.engine, &context, &session.workspace, &session.id,
-                &session.provider_id, &session.model, "", "auto", Some(&tracker),
+                &session.provider_id, &session.model, instructions, "auto", Some(&tracker),
             )) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
             _ = deepseek_code_core::services::background_sessions::wait_for_cancellation() => None,

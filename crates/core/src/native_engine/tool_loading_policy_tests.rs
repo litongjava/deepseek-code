@@ -1046,3 +1046,45 @@ fn tool_search_has_no_agent_listing_when_agent_cannot_load() {
         tool_search.description
     );
 }
+
+/// A session-backed executor, as the CLI runs it: CompactContext also needs the
+/// database and conversation it would write the request to.
+fn context_executor(root: &std::path::Path) -> ToolLoopExecutor {
+    let db = Arc::new(crate::db::DbManager::new(root.join("state.db")).unwrap());
+    db.init().unwrap();
+    executor(root).with_goal_state(db)
+}
+
+#[test]
+fn compact_context_is_offered_only_with_context_usage() {
+    let root = tempfile::tempdir().unwrap();
+    let executor = context_executor(root.path());
+    assert!(!executor
+        .builtin_catalog()
+        .iter()
+        .any(|tool| tool.name == "CompactContext"));
+    let executor = executor.with_context_usage(Some((50, 100)));
+    assert!(executor
+        .builtin_catalog()
+        .iter()
+        .any(|tool| tool.name == "CompactContext"));
+    // On demand, like ProposeGoal: not a default core tool.
+    let loading = crate::services::customization::default_loading("CompactContext");
+    assert!(loading.on_demand && !loading.enabled);
+    assert!(!executor
+        .tool_definitions()
+        .unwrap()
+        .iter()
+        .any(|tool| tool.name == "CompactContext"));
+}
+
+#[test]
+fn compact_context_is_not_offered_to_subagents() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    executor.delegation_depth = 1;
+    assert!(!executor
+        .builtin_catalog()
+        .iter()
+        .any(|tool| tool.name == "CompactContext"));
+}

@@ -363,6 +363,8 @@ pub async fn compact(
         // The block ends here, so a cancel after the commit drops the future
         // and stops the post-compaction hooks instead of waiting for them.
     };
+    // A manual compaction supersedes any request the model queued.
+    deepseek_code_core::services::compaction_requests::clear(&session.store.db, &session.id)?;
     for warning in &compacted.report.warnings { command_eprintln!("Hook: {warning}"); }
     Ok(compacted)
 }
