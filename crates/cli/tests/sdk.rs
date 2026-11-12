@@ -5,6 +5,8 @@ mod interrupt_usage;
 mod recovery_interrupt;
 #[path = "sdk/apply_patch_permissions.rs"]
 mod apply_patch_permissions;
+#[path = "sdk/approval_cancellation.rs"]
+mod approval_cancellation;
 #[path = "support/tool_loading.rs"]
 mod tool_loading;
 #[path = "sdk/steering.rs"]
@@ -95,6 +97,7 @@ enum Mode {
     Text,
     RuntimeAgent,
     Approval,
+    ShellApproval,
     ProtectedApproval,
     DelayedApproval,
     Question,
@@ -219,7 +222,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
-        || matches!(state.mode, Mode::SlowTool) && count == 1
+        || matches!(state.mode, Mode::SlowTool | Mode::ShellApproval) && count == 1
         || matches!(
             state.mode,
             Mode::ApplyPatchMixed | Mode::ApplyPatchAllowed
@@ -289,6 +292,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     "write-1",
                     "Write",
                     json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
+                )
+            } else if matches!(state.mode, Mode::ShellApproval) {
+                (
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"printf should-not-run > approval-shell.txt"}),
                 )
             } else if matches!(state.mode, Mode::SlowTool) {
                 (
@@ -364,6 +373,8 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(state.mode, Mode::ShellApproval) {
+                json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"printf should-not-run > approval-shell.txt"}).to_string()}}]})
             } else if matches!(state.mode, Mode::SlowTool) {
                 json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}).to_string()}}]})
             } else {
