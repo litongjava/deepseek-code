@@ -176,6 +176,27 @@ fn validate_fork(input: &Value, typed: bool) -> Result<()> {
     Ok(())
 }
 
+/// Fills `input["model"]` from the stored default of its agent type when the
+/// call has no model of its own. Returns the type whose default was used, so a
+/// provider that rejects it can name the type in the error.
+fn fill_default_model(input: &mut Value, data_dir: &std::path::Path) -> Option<String> {
+    if is_fork(input) {
+        return None;
+    }
+    if input["model"]
+        .as_str()
+        .is_some_and(|model| !model.trim().is_empty())
+    {
+        return None;
+    }
+    let raw = input["agent_type"].as_str().unwrap_or("general");
+    let normalized = raw.to_lowercase();
+    let agent = agents::canonical(&normalized);
+    let model = agents::default_model(data_dir, agent)?;
+    input["model"] = json!(model);
+    Some(agent.to_owned())
+}
+
 struct ChildState {
     context: ServiceContext,
     key: String,
@@ -750,7 +771,7 @@ impl ToolLoopExecutor {
         web_research: bool,
         tool_use_id: Option<&str>,
     ) -> Result<Value> {
-        let input = if preapproved {
+        let mut input = if preapproved {
             input.clone()
         } else {
             use crate::permissions::PermissionResult;
@@ -793,10 +814,19 @@ impl ToolLoopExecutor {
             validate_fork(&input, schema.is_some() || tools.is_some())?;
             return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
         }
+        // A per-type default model stands in for an omitted model; an explicit
+        // per-call model always wins. Remember the type for the validation error.
+        let default_for = self
+            .search_config_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .and_then(|data_dir| fill_default_model(&mut input, data_dir));
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
             return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
         }
-        let mut prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
+        let mut prepared =
+            Box::pin(self.prepare_delegated_child(&input, schema, tools, default_for.as_deref()))
+                .await?;
         let mut invocation = self.record_child_invocation(
             &prepared.context,
             &prepared.id,
@@ -1081,6 +1111,7 @@ impl ToolLoopExecutor {
         input: &Value,
         schema: Option<Value>,
         tools: Option<Vec<String>>,
+        default_for: Option<&str>,
     ) -> Result<PreparedChild> {
         ensure!(self.delegation_depth < 2, "Delegation depth limit reached");
         let prompt = input["prompt"].as_str().context("prompt is required")?;
@@ -1124,11 +1155,20 @@ impl ToolLoopExecutor {
             .filter(|model| !model.trim().is_empty())
         {
             if model != provider.model.id {
-                provider.model = crate::native_engine::provider_manager::resolve_model_selection(
+                let selected = crate::native_engine::provider_manager::resolve_model_selection(
                     &provider.provider.models,
                     model,
-                )
-                .with_context(|| format!("Unknown model for agent provider: {model}"))?;
+                );
+                provider.model = match selected {
+                    Some(selected) => selected,
+                    None => {
+                        let reason = format!("Unknown model for agent provider: {model}");
+                        match default_for {
+                            Some(agent) => anyhow::bail!("The default model for agent type {agent} ({model}) is not available: {reason}. Change it with dcl agents model {agent} <model> or clear it with dcl agents model {agent} default."),
+                            None => anyhow::bail!("{reason}"),
+                        }
+                    }
+                };
             }
         }
         if let Some(effort) = input["effort"].as_str() {
@@ -1508,6 +1548,7 @@ impl ToolLoopExecutor {
                 &json!({"prompt":prompt,"agent_type":agent_type}),
                 None,
                 None,
+                None,
             ))
             .await?;
             let registered = teams::register_member(
@@ -1859,4 +1900,46 @@ fn child_usage_accumulates_requests_without_counting_repeated_snapshots_or_paren
         .unwrap()
         .unwrap();
     assert_eq!(count, 2);
+}
+
+#[cfg(test)]
+#[test]
+fn a_stored_default_model_fills_an_agent_call_without_model() {
+    let temp = tempfile::tempdir().unwrap();
+    agents::set_model(temp.path(), "explore", Some("cheap-model")).unwrap();
+
+    let mut input = json!({"prompt":"p","agent_type":"explore"});
+    assert_eq!(
+        fill_default_model(&mut input, temp.path()).as_deref(),
+        Some("explore")
+    );
+    assert_eq!(input["model"], "cheap-model");
+
+    // A blank model counts as omitted.
+    let mut blank = json!({"prompt":"p","agent_type":"explore","model":"  "});
+    assert_eq!(
+        fill_default_model(&mut blank, temp.path()).as_deref(),
+        Some("explore")
+    );
+    assert_eq!(blank["model"], "cheap-model");
+
+    // A type without a stored default keeps the parent's model.
+    let mut general = json!({"prompt":"p","agent_type":"general"});
+    assert!(fill_default_model(&mut general, temp.path()).is_none());
+    assert!(general["model"].is_null());
+
+    // A fork always uses this session's model.
+    let mut fork = json!({"prompt":"p","agent_type":"fork"});
+    assert!(fill_default_model(&mut fork, temp.path()).is_none());
+    assert!(fork["model"].is_null());
+}
+
+#[cfg(test)]
+#[test]
+fn an_explicit_model_wins_over_the_stored_default() {
+    let temp = tempfile::tempdir().unwrap();
+    agents::set_model(temp.path(), "explore", Some("cheap-model")).unwrap();
+    let mut input = json!({"prompt":"p","agent_type":"explore","model":"chosen-model"});
+    assert!(fill_default_model(&mut input, temp.path()).is_none());
+    assert_eq!(input["model"], "chosen-model");
 }

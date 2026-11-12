@@ -4,6 +4,8 @@ use crate::db::DbManager;
 use anyhow::{ensure, Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,6 +204,81 @@ pub fn for_session(db: &DbManager, session: &str) -> Result<Option<Definition>> 
         .transpose()
 }
 
+const MODELS_FILE: &str = "agent-models.json";
+const MODELS_TEMP_FILE: &str = "agent-models.json.tmp";
+
+/// On-disk shape: `{"agents": {"<canonical id>": "<model id>"}}`.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct AgentModelsFile {
+    #[serde(default)]
+    agents: BTreeMap<String, String>,
+}
+
+/// Default model per agent type, keyed by canonical id. Missing, unreadable or
+/// invalid files mean that every agent uses its parent's model.
+pub fn load_models(data_dir: &Path) -> BTreeMap<String, String> {
+    let path = data_dir.join(MODELS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "Ignoring unreadable agent models");
+            return BTreeMap::new();
+        }
+    };
+    match serde_json::from_str::<AgentModelsFile>(&text) {
+        Ok(file) => file
+            .agents
+            .into_iter()
+            .filter(|(_, model)| !model.trim().is_empty())
+            .collect(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "Ignoring invalid agent models");
+            BTreeMap::new()
+        }
+    }
+}
+
+/// Set (Some) or clear (None) one type's default, keeping the others. A fork
+/// always uses its session's model, so it cannot have one.
+pub fn set_model(data_dir: &Path, agent: &str, model: Option<&str>) -> Result<()> {
+    let normalized = agent.to_lowercase();
+    let agent = canonical(&normalized);
+    ensure!(agent != "fork", "A fork always uses this session's model");
+    let mut models = load_models(data_dir);
+    match model {
+        Some(model) => {
+            let model = model.trim();
+            ensure!(!model.is_empty(), "A default model must not be empty");
+            models.insert(agent.to_owned(), model.to_owned());
+        }
+        None => {
+            models.remove(agent);
+        }
+    }
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("Creating {}", data_dir.display()))?;
+    let path = data_dir.join(MODELS_FILE);
+    let temp = data_dir.join(MODELS_TEMP_FILE);
+    let mut text = serde_json::to_string_pretty(&AgentModelsFile { agents: models })?;
+    text.push('\n');
+    std::fs::write(&temp, text).with_context(|| format!("Writing {}", temp.display()))?;
+    std::fs::rename(&temp, &path).with_context(|| format!("Replacing {}", path.display()))?;
+    Ok(())
+}
+
+/// The stored default for an agent type, or None. A fork never has one.
+pub fn default_model(data_dir: &Path, agent: &str) -> Option<String> {
+    let normalized = agent.to_lowercase();
+    let agent = canonical(&normalized);
+    if agent == "fork" {
+        return None;
+    }
+    load_models(data_dir)
+        .remove(agent)
+        .filter(|model| !model.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +326,61 @@ mod tests {
             encoded.get("read_only_shell").is_none(),
             "false stays out of stored definitions: {encoded}"
         );
+    }
+
+    #[test]
+    fn agent_models_round_trip_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(default_model(dir.path(), "explore").is_none());
+        set_model(dir.path(), "explore", Some("cheap-model")).unwrap();
+        set_model(dir.path(), "plan", Some("deep-model")).unwrap();
+        // Aliases store under the canonical id.
+        set_model(dir.path(), "claude-code-guide", Some("guide-model")).unwrap();
+        assert_eq!(
+            default_model(dir.path(), "explore").as_deref(),
+            Some("cheap-model")
+        );
+        assert_eq!(
+            default_model(dir.path(), "guide").as_deref(),
+            Some("guide-model")
+        );
+        assert_eq!(load_models(dir.path()).len(), 3);
+
+        set_model(dir.path(), "explore", None).unwrap();
+        assert!(default_model(dir.path(), "explore").is_none());
+        assert_eq!(
+            default_model(dir.path(), "plan").as_deref(),
+            Some("deep-model")
+        );
+        assert_eq!(load_models(dir.path()).len(), 2);
+    }
+
+    #[test]
+    fn fork_has_no_default_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = set_model(dir.path(), "fork", Some("cheap-model"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("A fork always uses this session's model"),
+            "{error}"
+        );
+        // Even a hand-written entry cannot give a fork its own model.
+        std::fs::write(
+            dir.path().join(MODELS_FILE),
+            r#"{"agents":{"fork":"cheap-model"}}"#,
+        )
+        .unwrap();
+        assert!(default_model(dir.path(), "fork").is_none());
+    }
+
+    #[test]
+    fn missing_or_invalid_models_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_models(dir.path()).is_empty());
+        assert!(default_model(dir.path(), "explore").is_none());
+        std::fs::write(dir.path().join(MODELS_FILE), "not json").unwrap();
+        assert!(load_models(dir.path()).is_empty());
+        assert!(default_model(dir.path(), "explore").is_none());
     }
 }

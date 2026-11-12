@@ -51,7 +51,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/copy", "Copy the latest assistant response: [N]"),
     ("/copy-session-id", "Copy the current session ID to the clipboard"),
     ("/export", "Export transcript: FILE or clipboard"),
-    ("/agents", "Show active agents in this session family; definitions lists available types"),
+    ("/agents", "Show active agents in this session family; definitions lists available types; model shows or sets a type's default model"),
     ("/loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo); omit the interval to let the model self-pace"),
     ("/scroll-speed", "Adjust mouse wheel scroll speed in the transcript pager: 1-10"),
     ("/subagents", "Switch between this session’s subagents"),

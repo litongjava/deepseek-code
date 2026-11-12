@@ -484,6 +484,13 @@ pub enum AgentCommands {
     Import {
         source: PathBuf,
     },
+    /// Show or set an agent type's default model; "default" clears it.
+    ///
+    /// The model is checked when the agent starts, not here: the provider can change.
+    Model {
+        agent: Option<String>,
+        model: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

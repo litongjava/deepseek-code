@@ -64,6 +64,7 @@ mod observe;
 mod output;
 mod compaction;
 mod skill_commands;
+mod agent_commands;
 mod extended_commands;
 mod session_commands;
 mod session_trust;
@@ -344,6 +345,13 @@ async fn run(cli: &Cli) -> Result<()> {
                     let definition = serde_json::from_slice(&std::fs::read(source)?)?;
                     deepseek_code_core::services::agents::install(&context, definition)?;
                     return services::print(&serde_json::json!({"imported":true}));
+                }
+                args::AgentCommands::Model { agent, model } => {
+                    println!(
+                        "{}",
+                        agent_commands::model_command(&paths, agent.as_deref(), model.as_deref())?
+                    );
+                    return Ok(());
                 }
             }
         }
