@@ -185,7 +185,10 @@ impl Picker<'_> {
             lines.push((clipped(&format!(" {text}"), width), if query.is_empty() { TextStyle::Muted } else { TextStyle::Plain }));
         }
         let spaced = self.heading == "Resume session";
-        let page = height.saturating_sub(lines.len() + 3) / if spaced { 3 } else { 2 };
+        // An entry takes its title row, a detail row when it has one, and a blank
+        // row between entries in the spaced Resume list.
+        let per_entry = 1 + usize::from(shown.iter().any(|index| !self.entries[*index].detail.is_empty())) + usize::from(spaced);
+        let page = height.saturating_sub(lines.len() + 3) / per_entry;
         // Other menus keep their short page; the Installed tab fills the screen.
         let page = if fill { page.max(1) } else { page.clamp(1, 8) };
         let start = selected.saturating_sub(page - 1).min(shown.len().saturating_sub(page));
@@ -546,8 +549,18 @@ mod tests {
             let (lines, _) = picker.lines(&shown, 0, "", 120, 40, fill);
             lines.iter().filter(|(line, _)| line.contains("entry ")).count()
         };
-        assert!(count(true) > 8, "fill = {}", count(true));
+        // A one-line entry needs one row, so all 30 fit in 40 - heading - 3 rows.
+        assert!(count(true) >= 30, "fill = {}", count(true));
         assert_eq!(count(false), 8);
+
+        let detailed: Vec<Entry> = (0..30)
+            .map(|index| Entry { title: format!("entry {index}"), detail: format!("detail {index}") })
+            .collect();
+        let picker = Picker { heading: "Plugins", subtitle: None, entries: &detailed, search: false, hint: "", selected: 0 };
+        let (lines, _) = picker.lines(&shown, 0, "", 120, 40, true);
+        let rows = lines.iter().filter(|(line, _)| line.contains("entry ")).count();
+        // Two rows per detailed entry: (40 - heading - 3) / 2.
+        assert_eq!(rows, 18);
     }
 
     #[test]

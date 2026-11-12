@@ -98,6 +98,16 @@ fn display_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
+/// The order skills appear in: the name people see, then the source, then the
+/// full name so same-named skills from different sources stay together.
+fn skill_order(a: &SkillRow, b: &SkillRow) -> std::cmp::Ordering {
+    (display_name(&a.name).to_lowercase(), &a.source, &a.name).cmp(&(
+        display_name(&b.name).to_lowercase(),
+        &b.source,
+        &b.name,
+    ))
+}
+
 /// Where a skill comes from: a plugin ID, the CLI's embedded skills, the
 /// workspace's `.claude` directory, or the user scope.
 fn source_label(name: &str, path: &Path, workspace: &Path) -> String {
@@ -149,7 +159,7 @@ pub(crate) async fn load(paths: &RuntimePaths, session: &Session) -> Result<Mode
             }
         })
         .collect();
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| skill_order(a, b));
 
     let mut plugins: Vec<PluginRow> = deepseek_code_core::services::plugins::list(&context)?
         .into_iter()
@@ -221,7 +231,7 @@ fn fit(text: &str, width: usize) -> String {
 /// have gone unused. Plain rows, columns padded with spaces.
 pub(crate) fn stats_rows(model: &Model, now: DateTime<Utc>, notice: bool) -> Vec<String> {
     let mut skills: Vec<&SkillRow> = model.skills.iter().collect();
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| skill_order(a, b));
 
     // Caps keep the numeric columns on screen: synced and plugin skill names
     // can be far longer than a terminal cares to show.
@@ -437,7 +447,7 @@ pub(crate) fn installed_entries(
         .iter()
         .filter(|skill| skill.state != SkillState::Off)
         .collect();
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| skill_order(a, b));
     if !skills.is_empty() {
         rows.push(header("Skills"));
         for skill in skills {
@@ -462,7 +472,7 @@ pub(crate) fn installed_entries(
         .iter()
         .filter(|skill| skill.state == SkillState::Off)
         .collect();
-    disabled_skills.sort_by(|a, b| a.name.cmp(&b.name));
+    disabled_skills.sort_by(|a, b| skill_order(a, b));
     let disabled = disabled_plugins.len() + disabled_mcp.len() + disabled_skills.len();
 
     if disabled > 0 {
@@ -1077,5 +1087,36 @@ mod tests {
             "{:?}",
             rows.iter().map(|(entry, _)| &entry.title).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn skills_sort_by_shown_name() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let model = Model {
+            skills: vec![
+                skill("bundled:skill-creator", "bundled", SkillState::User, 10, Usage::default()),
+                skill("build", "cli", SkillState::User, 10, Usage::default()),
+                skill("claude-api", "cli", SkillState::User, 10, Usage::default()),
+                skill("synced:1:alpha", "synced", SkillState::User, 10, Usage::default()),
+            ],
+            plugins: Vec::new(),
+            mcp: Vec::new(),
+        };
+        let expected = ["alpha", "build", "claude-api", "skill-creator"];
+        let known = |name: &str| expected.contains(&name);
+
+        let stats: Vec<String> = stats_rows(&model, now, false)
+            .iter()
+            .filter_map(|row| row.split_whitespace().next().filter(|name| known(name)))
+            .map(|name| name.to_owned())
+            .collect();
+        assert_eq!(stats, expected, "stats order");
+
+        let installed: Vec<String> = installed_entries(&model, false, now)
+            .iter()
+            .filter_map(|(entry, _)| entry.title.split_whitespace().nth(1).filter(|name| known(name)))
+            .map(|name| name.to_owned())
+            .collect();
+        assert_eq!(installed, expected, "installed order");
     }
 }
