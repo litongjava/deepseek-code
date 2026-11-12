@@ -32,6 +32,7 @@ mod worker_frontend;
 mod mcp_menu;
 mod hooks_menu;
 mod settings_dialog;
+mod plugins_panel;
 mod stats_view;
 mod permissions_menu;
 mod startup_prompts;
@@ -106,10 +107,27 @@ use deepseek_code_core::{
     skills::SkillsManager,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{self, IsTerminal, Read, Write},
     path::PathBuf,
 };
+
+/// Rebuild the interactive slash list from disk; `/reload-skills` and a
+/// successful `/skills state` change both need exactly this.
+async fn reload_skill_commands(
+    paths: &RuntimePaths,
+    workspace: &std::path::Path,
+    skills: &mut BTreeMap<String, String>,
+    input: &mut Option<terminal::input::TerminalInput>,
+) -> Result<usize> {
+    let updated = skill_commands::load_for_workspace(paths, workspace).await?;
+    *skills = updated;
+    input
+        .as_mut()
+        .context("interactive reader")?
+        .set_commands(skill_commands::catalog(skills));
+    Ok(skills.len())
+}
 
 /// Prints a turn or command error once, after removing an input box a
 /// finished turn left on screen for the prompt.
@@ -413,6 +431,20 @@ async fn run(cli: &Cli) -> Result<()> {
                 SkillsCommands::ImportLegacy {..} => unreachable!(),
                 SkillsCommands::List => {
                     println!("{}", serde_json::to_string_pretty(&skills)?);
+                    return Ok(());
+                }
+                SkillsCommands::State { skill, state } => {
+                    let workspace = std::env::current_dir()?;
+                    println!(
+                        "{}",
+                        skill_commands::state_command(
+                            &paths,
+                            &workspace,
+                            skill.as_deref(),
+                            state.as_deref()
+                        )
+                        .await?
+                    );
                     return Ok(());
                 }
                 SkillsCommands::Search { query } => {
@@ -779,9 +811,15 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_mut().unwrap().set_commands(catalog);
             input.as_ref().unwrap().set_workspace(&session.workspace);
             input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
-            input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
+            input.as_ref().unwrap().set_background(
+                background_commands::running_shells(&paths, &session.id),
+                background_commands::running_monitors(&paths, &session.id),
+            );
             let (counter_paths, counter_session) = (paths.clone(), session.id.clone());
-            input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
+            input.as_ref().unwrap().set_background_counter(Box::new(move || (
+                background_commands::running_shells(&counter_paths, &counter_session),
+                background_commands::running_monitors(&counter_paths, &counter_session),
+            )));
             input.as_ref().unwrap().set_effort(Some(session_commands::model_label(&session).await));
             let (agent_paths, agent_db, agent_session) = (paths.clone(), session.store.db.clone(), session.id.clone());
             input.as_ref().unwrap().set_agent_rows(Box::new(move || background_commands::running_agents(&agent_paths, &agent_db, &agent_session)));
@@ -995,13 +1033,52 @@ async fn run(cli: &Cli) -> Result<()> {
                 if let Err(error) = shell_mode::run(&session, command).await { command_eprintln!("Error: {error:#}"); }
                 continue;
             }
+            let words: Vec<&str> = line.trim().split_whitespace().collect();
+            if words.first() == Some(&"/skills") && words.get(1) == Some(&"state") {
+                if words.len() > 4 {
+                    command_eprintln!("Usage: /skills state [NAME [STATE]]");
+                    continue;
+                }
+                let skill = words.get(2).copied();
+                let state = words.get(3).copied();
+                match skill_commands::state_command(&paths, &session.workspace, skill, state).await {
+                    Ok(text) => {
+                        if let Some(state) = state {
+                            match reload_skill_commands(&paths, &session.workspace, &mut skills, &mut input).await {
+                                Ok(count) => command_eprintln!("Reloaded: {count} skill commands · {} is now {state}.", skill.unwrap_or_default()),
+                                Err(error) => command_eprintln!("Error: {error:#}"),
+                            }
+                        } else {
+                            command_eprintln!("{text}");
+                        }
+                    }
+                    Err(error) => command_eprintln!("Error: {error:#}"),
+                }
+                continue;
+            }
+            if line.trim() == "/plugins" || line.trim() == "/skill-doctor" {
+                let start = if line.trim() == "/skill-doctor" { "skill-doctor" } else { "installed" };
+                if terminal::picker::available() {
+                    match plugins_panel::run(start, &paths, &mut session, input.as_mut().unwrap()).await {
+                        Ok(true) => match reload_skill_commands(&paths, &session.workspace, &mut skills, &mut input).await {
+                            Ok(count) => command_eprintln!("Reloaded: {count} skill commands."),
+                            Err(error) => command_eprintln!("Error: {error:#}"),
+                        },
+                        Ok(false) => {},
+                        Err(error) => command_eprintln!("Error: {error:#}"),
+                    }
+                } else {
+                    // Scripts and tests get the same Stats text without a terminal.
+                    match plugins_panel::load(&paths, &session).await {
+                        Ok(model) => command_eprintln!("{}", plugins_panel::stats_rows(&model, chrono::Utc::now(), true).join("\n")),
+                        Err(error) => command_eprintln!("Error: {error:#}"),
+                    }
+                }
+                continue;
+            }
             if line.trim() == "/reload-skills" {
-                match skill_commands::load_for_workspace(&paths, &session.workspace).await {
-                    Ok(updated) => {
-                        skills = updated;
-                        input.as_mut().unwrap().set_commands(skill_commands::catalog(&skills));
-                        command_eprintln!("Loaded {} skill commands.", skills.len());
-                    },
+                match reload_skill_commands(&paths, &session.workspace, &mut skills, &mut input).await {
+                    Ok(count) => command_eprintln!("Loaded {count} skill commands."),
                     Err(error) => command_eprintln!("Cannot reload skills: {error:#}"),
                 }
                 continue;

@@ -67,7 +67,6 @@ pub const CORE_TOOLS: &[&str] = &[
     "AskUserQuestion",
     "EnterPlanMode",
     "ExitPlanMode",
-    "TaskGet",
     "TaskStop",
 ];
 
@@ -345,7 +344,7 @@ mod tests {
             CORE_TOOLS,
             [
                 "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Skill", "ToolSearch",
-                "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskGet", "TaskStop",
+                "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskStop",
             ]
         );
         for name in CORE_TOOLS {

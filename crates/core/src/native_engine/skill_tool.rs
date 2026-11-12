@@ -135,6 +135,19 @@ impl ToolLoopExecutor {
             return serde_json::from_str(&output).context("Invalid research result");
         }
         if name == "doctor" && skill.path.parent() == Some(Path::new("__embedded_cli_skills__")) {
+            // `/doctor prompt-audit [request]`: audit the instruction files loaded into
+            // sessions with dcl's model-neutral guide; the target is this session's model.
+            if let Some(rest) = arguments.trim_start().strip_prefix("prompt-audit").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+                let request = rest.trim();
+                let instructions = format!(
+                    "{}\n\n## This run\n\nProject directory: {}\nTarget model: {} (the model this session runs on).\nUser request: {}\n",
+                    include_str!("../skills/bundled/doctor-prompt-audit.md"),
+                    self.workspace_cwd,
+                    self.provider.model.id,
+                    if request.is_empty() { "audit the default scope and propose a diff; do not apply edits" } else { request },
+                );
+                return Ok(json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+            }
             let instructions =
                 skill.render_template(arguments, self.conv_id.as_deref().unwrap_or("unknown"))?;
             let snapshot = crate::services::doctor::inspect(

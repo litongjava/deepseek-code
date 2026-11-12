@@ -66,7 +66,7 @@ fn with_raw<T>(run: impl FnOnce(&mut dyn FnMut() -> io::Result<Option<Event>>) -
 impl Picker<'_> {
     /// The chosen entry's index, or None after Esc or Ctrl+C.
     pub fn run(&self) -> io::Result<Option<usize>> {
-        Ok(match with_raw(|next| self.drive_keys(&[], next))? {
+        Ok(match with_raw(|next| self.drive_keys(&[], false, next))? {
             Picked::Entry(index) => Some(index),
             _ => None,
         })
@@ -74,17 +74,22 @@ impl Picker<'_> {
 
     /// Like `run`, also returning any of `keys`.
     pub fn run_keys(&self, keys: &[Key]) -> io::Result<Picked> {
-        with_raw(|next| self.drive_keys(keys, next))
+        with_raw(|next| self.drive_keys(keys, false, next))
+    }
+
+    /// Like `run_keys`, but the list uses the whole terminal height.
+    pub fn run_keys_filling(&self, keys: &[Key]) -> io::Result<Picked> {
+        with_raw(|next| self.drive_keys(keys, true, next))
     }
 
     fn drive(&self, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Option<usize>> {
-        Ok(match self.drive_keys(&[], next_event)? {
+        Ok(match self.drive_keys(&[], false, next_event)? {
             Picked::Entry(index) => Some(index),
             _ => None,
         })
     }
 
-    fn drive_keys(&self, keys: &[Key], next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Picked> {
+    fn drive_keys(&self, keys: &[Key], fill: bool, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Picked> {
         let mut screen = Screen::default();
         let mut query = String::new();
         let mut selected = self.selected;
@@ -92,7 +97,7 @@ impl Picker<'_> {
             let shown = self.matching(&query);
             selected = selected.min(shown.len().saturating_sub(1));
             let (cols, rows) = crate::terminal::size();
-            let (lines, cursor) = self.lines(&shown, selected, &query, cols as usize, rows as usize);
+            let (lines, cursor) = self.lines(&shown, selected, &query, cols as usize, rows as usize, fill);
             screen.draw(&lines, cursor, 3)?;
             let Some(Event::Key(key)) = next_event()? else {
                 continue;
@@ -164,7 +169,7 @@ impl Picker<'_> {
     }
 
     /// The frame and the row of the selected entry.
-    fn lines(&self, shown: &[usize], selected: usize, query: &str, width: usize, height: usize) -> (Vec<DisplayLine>, usize) {
+    fn lines(&self, shown: &[usize], selected: usize, query: &str, width: usize, height: usize, fill: bool) -> (Vec<DisplayLine>, usize) {
         let width = width.saturating_sub(1).max(20);
         let mut lines = vec![(clipped(&format!(" {}", self.heading), width), TextStyle::Accent)];
         if let Some(subtitle) = self.subtitle {
@@ -180,7 +185,12 @@ impl Picker<'_> {
             lines.push((clipped(&format!(" {text}"), width), if query.is_empty() { TextStyle::Muted } else { TextStyle::Plain }));
         }
         let spaced = self.heading == "Resume session";
-        let page = (height.saturating_sub(lines.len() + 3) / if spaced { 3 } else { 2 }).clamp(1, 8);
+        // An entry takes its title row, a detail row when it has one, and a blank
+        // row between entries in the spaced Resume list.
+        let per_entry = 1 + usize::from(shown.iter().any(|index| !self.entries[*index].detail.is_empty())) + usize::from(spaced);
+        let page = height.saturating_sub(lines.len() + 3) / per_entry;
+        // Other menus keep their short page; the Installed tab fills the screen.
+        let page = if fill { page.max(1) } else { page.clamp(1, 8) };
         let start = selected.saturating_sub(page - 1).min(shown.len().saturating_sub(page));
         let mut cursor = lines.len();
         if shown.is_empty() {
@@ -255,12 +265,21 @@ fn edit_text(heading: &str, initial: &str, next_event: &mut dyn FnMut() -> io::R
 /// and a hint. Esc, Enter or Space close it (None); `←` returns `'<'` and
 /// any of `keys` returns that key.
 pub fn details(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io::Result<Option<char>> {
+    details_at(heading, rows, hint, keys, false)
+}
+
+/// Like [`details`], but opening at the top of `rows` instead of their end.
+pub fn details_from_top(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io::Result<Option<char>> {
+    details_at(heading, rows, hint, keys, true)
+}
+
+fn details_at(heading: &str, rows: &[String], hint: &str, keys: &[char], from_top: bool) -> io::Result<Option<char>> {
     let raw = terminal::is_raw_mode_enabled()?;
     if !raw {
         terminal::enable_raw_mode()?;
     }
     let mut reader = super::paste_input::Reader::new()?;
-    let result = show_details(heading, rows, hint, keys, &mut || reader.next(std::time::Duration::from_millis(100)));
+    let result = show_details(heading, rows, hint, keys, from_top, &mut || reader.next(std::time::Duration::from_millis(100)));
     drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
@@ -322,17 +341,24 @@ fn show_details(
     rows: &[String],
     hint: &str,
     keys: &[char],
+    from_top: bool,
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Option<char>> {
     let mut screen = Screen::default();
-    let (cols, height) = crate::terminal::size();
-    let width = (cols as usize).saturating_sub(1).max(20);
-    let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
-    let room = (height as usize).saturating_sub(4).max(1);
-    let skip = rows.len().saturating_sub(room);
-    lines.extend(rows.iter().skip(skip).map(|row| (clipped(&format!(" {row}"), width), TextStyle::Plain)));
-    lines.push((clipped(&format!(" {hint}"), width), TextStyle::Muted));
+    let mut offset: Option<usize> = None;
     let result = loop {
+        let (cols, height) = crate::terminal::size();
+        let width = (cols as usize).saturating_sub(1).max(20);
+        let room = (height as usize).saturating_sub(4).max(1);
+        let wrapped = wrap_rows(rows, width.saturating_sub(1));
+        let limit = wrapped.len().saturating_sub(room);
+        let start = offset.unwrap_or(if from_top { 0 } else { limit }).min(limit);
+        offset = Some(start);
+        let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
+        for row in details_window(&wrapped, room, start) {
+            lines.push((clipped(&format!(" {row}"), width), TextStyle::Plain));
+        }
+        lines.push((clipped(&format!(" {hint}"), width), TextStyle::Muted));
         screen.draw(&lines, lines.len() - 1, 1)?;
         let Some(Event::Key(key)) = next_event()? else {
             continue;
@@ -349,12 +375,44 @@ fn show_details(
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
             KeyCode::Left => break Some('<'),
             KeyCode::Right => break Some('>'),
+            KeyCode::Up => offset = Some(start.saturating_sub(1)),
+            KeyCode::Down => offset = Some((start + 1).min(limit)),
+            KeyCode::PageUp => offset = Some(start.saturating_sub(room)),
+            KeyCode::PageDown => offset = Some((start + room).min(limit)),
+            KeyCode::Home => offset = Some(0),
+            KeyCode::End => offset = Some(limit),
+            // `j`/`k` scroll here, but only when they are not handed back.
+            KeyCode::Char('k') if !keys.contains(&'k') => offset = Some(start.saturating_sub(1)),
+            KeyCode::Char('j') if !keys.contains(&'j') => offset = Some((start + 1).min(limit)),
             KeyCode::Char(ch) if keys.contains(&ch) => break Some(ch),
             _ => {}
         }
     };
     screen.suspend()?;
     Ok(result)
+}
+
+/// Rows longer than `width` broken over as many rows as they need, keeping
+/// the leading spaces of the row on its continuation rows.
+fn wrap_rows(rows: &[String], width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    for row in rows {
+        if unicode_width::UnicodeWidthStr::width(row.as_str()) <= width {
+            wrapped.push(row.clone());
+            continue;
+        }
+        let indent: String = row.chars().take_while(|ch| *ch == ' ').collect();
+        for part in wrap_words(row.trim_start(), width.saturating_sub(indent.len())) {
+            wrapped.push(format!("{indent}{part}"));
+        }
+    }
+    wrapped
+}
+
+/// The `room` rows of already wrapped `rows` starting at `offset`.
+fn details_window(rows: &[String], room: usize, offset: usize) -> Vec<String> {
+    let offset = offset.min(rows.len().saturating_sub(room));
+    rows.iter().skip(offset).take(room).cloned().collect()
 }
 
 /// A paragraph over as many rows as it needs, broken between words.
@@ -405,7 +463,7 @@ mod tests {
     fn empty_resume_allows_tab_scope_switch() {
         let picker = Picker { heading: "Resume session", subtitle: Some("[cwd] all"), entries: &[], search: true, hint: "Tab: cwd/all", selected: 0 };
         let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))].into_iter();
-        assert_eq!(picker.drive_keys(&[Key::Tab], &mut || Ok(events.next())).unwrap(), Picked::Key(Key::Tab, None));
+        assert_eq!(picker.drive_keys(&[Key::Tab], false, &mut || Ok(events.next())).unwrap(), Picked::Key(Key::Tab, None));
     }
 
     #[test]
@@ -427,7 +485,7 @@ mod tests {
             .collect();
         keys.reverse();
         assert_eq!(picker.drive(&mut || Ok(keys.pop())).unwrap(), Some(2));
-        let (lines, cursor) = picker.lines(&picker.matching("parser"), 1, "parser", 80, 24);
+        let (lines, cursor) = picker.lines(&picker.matching("parser"), 1, "parser", 80, 24, false);
         assert_eq!(lines[1].0, " \u{2315} parser");
         assert!(lines[cursor].0.starts_with(" \u{276f} refactor parser"));
     }
@@ -437,7 +495,7 @@ mod tests {
         let entries = entries();
         let picker = Picker { heading: "Resume session", subtitle: None, entries: &entries, search: true, hint: "", selected: 1 };
         let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))];
-        assert_eq!(picker.drive_keys(&[Key::Space], &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Space, Some(1)));
+        assert_eq!(picker.drive_keys(&[Key::Space], false, &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Space, Some(1)));
         // Once searching, Space is text.
         let mut keys = vec![
             Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
@@ -445,7 +503,7 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
         ];
-        assert_eq!(picker.drive_keys(&[Key::Space, Key::Ctrl('r')], &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Ctrl('r'), Some(0)));
+        assert_eq!(picker.drive_keys(&[Key::Space, Key::Ctrl('r')], false, &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Ctrl('r'), Some(0)));
         let mut keys: Vec<Event> = [KeyCode::Enter, KeyCode::Char('x'), KeyCode::Backspace].into_iter().map(|code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE))).collect();
         assert_eq!(edit_text("Rename session:", "old", &mut || Ok(keys.pop())).unwrap().as_deref(), Some("olx"));
     }
@@ -459,9 +517,9 @@ mod tests {
     fn details_close_or_return_their_keys() {
         let rows = vec!["Status:   running".to_owned()];
         let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))];
-        assert_eq!(show_details("Shell details", &rows, "", &['x'], &mut || Ok(keys.pop())).unwrap(), Some('x'));
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut || Ok(keys.pop())).unwrap(), Some('x'));
         let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
-        assert_eq!(show_details("Shell details", &rows, "", &['x'], &mut || Ok(keys.pop())).unwrap(), None);
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut || Ok(keys.pop())).unwrap(), None);
     }
 
     #[test]
@@ -478,5 +536,53 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
         ];
         assert_eq!(picker.drive(&mut || Ok(keys.pop())).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn filling_picker_uses_the_terminal_height() {
+        let entries: Vec<Entry> = (0..30)
+            .map(|index| Entry { title: format!("entry {index}"), detail: String::new() })
+            .collect();
+        let picker = Picker { heading: "Plugins", subtitle: None, entries: &entries, search: false, hint: "", selected: 0 };
+        let shown: Vec<usize> = (0..entries.len()).collect();
+        let count = |fill| {
+            let (lines, _) = picker.lines(&shown, 0, "", 120, 40, fill);
+            lines.iter().filter(|(line, _)| line.contains("entry ")).count()
+        };
+        // A one-line entry needs one row, so all 30 fit in 40 - heading - 3 rows.
+        assert!(count(true) >= 30, "fill = {}", count(true));
+        assert_eq!(count(false), 8);
+
+        let detailed: Vec<Entry> = (0..30)
+            .map(|index| Entry { title: format!("entry {index}"), detail: format!("detail {index}") })
+            .collect();
+        let picker = Picker { heading: "Plugins", subtitle: None, entries: &detailed, search: false, hint: "", selected: 0 };
+        let (lines, _) = picker.lines(&shown, 0, "", 120, 40, true);
+        let rows = lines.iter().filter(|(line, _)| line.contains("entry ")).count();
+        // Two rows per detailed entry: (40 - heading - 3) / 2.
+        assert_eq!(rows, 18);
+    }
+
+    #[test]
+    fn long_rows_wrap_and_details_window_starts_at_the_offset() {
+        let text = "word word word word word word word word word word word word word";
+        assert!(text.len() >= 60, "{}", text.len());
+        let wrapped = wrap_rows(&[text.to_owned()], 30);
+        assert!(wrapped.len() >= 2, "{wrapped:?}");
+        assert!(wrapped.iter().all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= 30));
+
+        // A row's leading spaces stay on the rows it wraps onto.
+        let indented = wrap_rows(&[format!("  {text}")], 30);
+        assert!(indented.len() >= 2, "{indented:?}");
+        assert!(indented.iter().all(|row| row.starts_with("  ")), "{indented:?}");
+
+        let rows: Vec<String> = (0..20).map(|index| format!("row {index}")).collect();
+        let rows = wrap_rows(&rows, 30);
+        assert_eq!(details_window(&rows, 5, 0), rows[..5].to_vec());
+        assert_eq!(details_window(&rows, 5, 18), rows[15..].to_vec());
+
+        // A row exactly `width - 1` columns wide stays one row.
+        let exact = "x".repeat(29);
+        assert_eq!(wrap_rows(&[exact], 29).len(), 1);
     }
 }
