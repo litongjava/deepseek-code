@@ -71,7 +71,6 @@ fn the_request_carries_only_the_core_tools_by_default() {
         "AskUserQuestion",
         "EnterPlanMode",
         "ExitPlanMode",
-        "TaskGet",
         "TaskStop",
     ] {
         assert!(
@@ -283,7 +282,7 @@ async fn retired_task_output_is_not_advertised_searched_or_restored() {
     let temp = tempfile::tempdir().unwrap();
     let mut probe = executor(temp.path());
     let names = names(&probe);
-    assert!(names.contains(&"TaskGet".to_owned()), "{names:?}");
+    assert!(!names.contains(&"TaskGet".to_owned()), "{names:?}");
     assert!(!names.contains(&"TaskOutput".to_owned()), "{names:?}");
     assert!(crate::tools::get_tool_definitions()
         .iter()
@@ -301,6 +300,15 @@ async fn retired_task_output_is_not_advertised_searched_or_restored() {
     let value: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(value["loaded_tools"], json!([]), "{output}");
     assert_eq!(value["tools"], json!([]), "{output}");
+
+    // TaskGet itself is deferred, but the same search still loads it.
+    let (_, output, failed) = probe
+        .execute_tool_call("ToolSearch", &json!({"query":"select:TaskGet"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["loaded_tools"], json!(["TaskGet"]), "{output}");
+    assert_eq!(value["tools"].as_array().map(Vec::len), Some(1), "{output}");
 
     // A stored search result from before the consolidation cannot restore the
     // retired name either.
@@ -371,6 +379,41 @@ async fn task_get_can_be_discovered_on_demand_and_invoked() {
     assert!(!failed, "{output}");
     let value: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(value["subject"], "hidden task");
+}
+
+#[tokio::test]
+async fn task_get_is_deferred_and_loadable() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut executor = executor(temp.path()).with_conv_id(session.clone());
+    let initial = names(&executor);
+    assert!(!initial.contains(&"TaskGet".to_owned()), "{initial:?}");
+    executor.exposed_tools = Some(initial.into_iter().collect());
+
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"select:TaskGet"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let loaded: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(loaded["success"], true, "{output}");
+    assert_eq!(loaded["loaded_tools"], json!(["TaskGet"]), "{output}");
+
+    let task = crate::tools::tasks::execute_for_session(
+        "TaskCreate",
+        json!({"subject":"deferred task"}),
+        temp.path(),
+        &session,
+    )
+    .unwrap();
+    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+    assert!(next.contains("TaskGet"), "{next:?}");
+    executor.exposed_tools = Some(next);
+    let (_, output, failed) = executor
+        .execute_tool_call("TaskGet", &json!({"id":task["id"]}), "get")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["subject"], "deferred task");
 }
 
 #[test]
