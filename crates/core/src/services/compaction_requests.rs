@@ -43,7 +43,7 @@ fn save(conn: &Connection, session: &str, keep: &str) -> Result<()> {
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
         name: "CompactContext".into(),
-        description: "Ask for the conversation to be compacted before the next user message, when the earlier history is no longer needed (for example a finished task before an unrelated one). `keep` says what the summary must preserve: open tasks, decisions, file paths, facts the user may refer to. It does not run now: the current turn continues with the full history. Refused when the context is still small or a compaction happened recently. Do not call it in the middle of a task.".into(),
+        description: "Ask for the conversation to be compacted before the next user message, when the earlier session memory is no longer needed (for example a finished task before an unrelated one). `keep` says what the summary must preserve: open tasks, decisions, file paths, facts the user may refer to. It does not run now: the current turn continues with the full history. The compaction happens before your next user message and uses `keep` to summarize the earlier history. Refused when the context is still small or a compaction happened recently. Do not call it in the middle of a task.".into(),
         input_schema: json!({"type":"object","properties":{"keep":{"type":"string","minLength":1,"maxLength":2000}},"required":["keep"],"additionalProperties":false}),
     }
 }

@@ -1088,3 +1088,41 @@ fn compact_context_is_not_offered_to_subagents() {
         .iter()
         .any(|tool| tool.name == "CompactContext"));
 }
+
+/// In a real terminal the model searched "compact summarize session memory".
+/// Every keyword must match, so the description carries the ordinary words.
+#[tokio::test]
+async fn tool_search_finds_compact_context_by_plain_words() {
+    let root = tempfile::tempdir().unwrap();
+    let mut executor = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"compact summarize session memory"}),
+            "search-compact",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        result["loaded_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "CompactContext"),
+        "{result}"
+    );
+    // The next request carries the real definition, not just a name.
+    assert!(executor
+        .tool_definitions()
+        .unwrap()
+        .iter()
+        .any(|tool| tool.name == "CompactContext"));
+    // A single descriptive word matches as well.
+    let mut other = context_executor(root.path()).with_context_usage(Some((50, 100)));
+    let (_, output, failed) = other
+        .execute_tool_call("ToolSearch", &json!({"query":"compaction"}), "search-word")
+        .await;
+    assert!(!failed, "{output}");
+    assert!(output.contains("CompactContext"), "{output}");
+}

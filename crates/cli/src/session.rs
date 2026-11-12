@@ -839,6 +839,19 @@ impl Session {
         self.waiting_for_continue.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Whether a local terminal owns this turn: it either passed its input
+    /// reader, or the turn runs in the session worker of a live terminal, whose
+    /// control directory proves ownership. The worker case has no `input`.
+    fn local_terminal_owns_turn(&self, input: &Option<TerminalInput>) -> Result<bool> {
+        Ok(self.sdk_permissions.is_none()
+            && (input.is_some()
+                || deepseek_code_core::services::background_sessions::worker_directory(
+                    &self.paths.data_dir,
+                    &self.id,
+                )?
+                .is_some()))
+    }
+
     pub(crate) fn allow_automatic_wake(&self) {
         self.waiting_for_continue.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1269,7 +1282,7 @@ impl Session {
         );
         // The model may only ask for a compaction when a local terminal owns the
         // next prompt; SDK and print runs keep the tool unavailable.
-        let context_usage = if input.is_some() && self.sdk_permissions.is_none() {
+        let context_usage = if self.local_terminal_owns_turn(input)? {
             match (
                 self.context_window().await.filter(|window| *window > 0),
                 crate::session_commands::active_history(self),
