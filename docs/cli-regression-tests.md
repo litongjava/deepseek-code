@@ -517,6 +517,30 @@ python3 ../dev-support/deepseek-code/toolscript-20261111/j2b/run_j2b.py \
 - 未被覆盖的边界另行记录：每次调用的即时权限读取、等待审批期间撤销权限、运行中的 hooks 变化、J3 内层持久化、J4 真实审批、J5 停止清理。
 - 宽松的 CLI 交互路径（`load_settings`）不变；严格版本只在 ToolScript job 内使用。产品自身的 settings 写入是 temp+rename，不会产生半写文件。
 
+## ToolScript 真实 CLI 历史闭环（J3a）
+
+```bash
+cargo test --locked -j 2 -p deepseek-code-cli --test toolscript_history -- --nocapture
+```
+
+`cli_toolscript_repeated_calls_keep_history_across_model_rounds_and_reopen` 使用当前构建的真实 `dcl` 与它启动的真实 ToolScript worker、本地 OpenAI Chat Completions mock、临时数据目录。ToolScript 默认按需加载；fixture 不覆盖其加载配置，断言首请求没有该工具，模型先调用 `ToolSearch(select:ToolScript)`，成功后下一请求才包含它。fixture 不创建会话、assistant 或工具记录。
+
+两个模型轮次故意复用 `same-provider-id` 作为 ToolScript raw provider ID。每个脚本先用真实 Bash 写本轮标记与 `same.txt`，再用完全相同的参数执行两次顺序 Read、三次 `Promise.all` Read，最后尝试被显式 deny 的 Write 并捕获拒绝。每个脚本 7 次实际调用（6 成功、1 拒绝）；逐个核对 worker log 的 start/done/origin 与数据库的 invocation ID、assistant ID、parent ID、sequence、原参数和完整结果。第二轮改变文件内容，第一轮结果必须仍为 ROUND_1，第二轮为 ROUND_2，拒绝目标文件不存在。
+
+验收要求：14 条独立内层记录、2 条不同的 ToolScript 父调用、1 条 ToolSearch，共 17 条工具记录；关闭 SQLite 连接再独立重开后全部字段相等，`PRAGMA foreign_key_check` 为零。`--nocapture` 输出实际 CLI 退出码、每条 DB 行、worker spec/state/result/output.log 和重开结论，供提取证据；CLI 退出 0 本身不替代这些断言。
+
+当前 CLI 的 `TurnTimer::ensure_segment`（`turn_repo.rs`）在提交真实 assistant 与 turn 关联后才返回，`session.rs` 随后把该 ID 放入 ChatRequest 并发送模型请求。本用例还通过独立只读 SQLite 连接，确认每次模型响应发出前已有该会话的唯一 assistant。当前分支未复现“父 assistant 尚未落库”的 FK 竞态，因此没有为此添加等待/ack 或改写持久化路径；不能把此前 `assistant_id=None` 的私有 worker fixture 当作本验收。
+
+范围：Linux 的普通前台 CLI 单个用户回合内两次模型工具轮次、OpenAI mock、真实 worker、SQLite 重开。未覆盖 Anthropic/Responses、Windows/macOS、Desktop 运行、真实提供商、Plan reset 后重新关联、后台父进程提前退出、J4 审批、J5 停止、J3b 损坏磁盘处理。旧的基础/桥接章节描述其当阶段的测试边界，当前模型入口的历史验收以本节为准。
+
+### ToolScript 与 TaskGet 的按需加载回归
+
+- 保持 `services::customization::tests::only_core_tools_load_by_default_and_every_tool_stays_discoverable` 和 SDK `sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one` 的默认列表断言；ToolScript 不在 CORE_TOOLS 中，仍可被 ToolSearch 发现。J3a 用例直接验证默认配置的加载与真实执行。
+- ToolScript 后台启动、前台等待超时和工具说明都提示先通过 ToolSearch 加载 TaskGet，再读取输出；TaskStop 仍可直接使用。
+- `task_input` 的普通、逐次记录和 PreToolUse 拒绝三个 fixture 先搜索 `select:TaskInput,TaskGet`，然后保留真实 stdin/EOF、Hook、拒绝无写入和历史断言。
+- `taskget_background::cli_task_get_pages_a_background_shell_to_its_exit_status` 专测分页执行，在独立数据目录通过 `support/tool_loading.rs` 显式开启 TaskGet，保留完整分页、字节上限和终态断言；同文件另一用例仍验证模型自行搜索 TaskGet。
+- `sdk` 全文件中的 `apply_patch_permissions::sdk_input_closed_while_the_patch_waits_for_approval_never_writes` 是监督者确认的公共 ApplyPatch 取消问题，交由运行时分支处理，不因本轮默认工具修复放宽断言。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3

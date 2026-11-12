@@ -19,8 +19,8 @@ issuing them one request at a time.\n\n- Each `tools.call` runs the same tool th
 could call directly, with the same permissions, hooks and history records.\n- Calls may \
 be sequential, conditional, or grouped with `Promise.all`; mutations still run one at a \
 time.\n- `args` is exposed to the script as `args`.\n- Set `run_in_background: true` to \
-return a durable task id immediately; use TaskGet for its paged output and TaskStop to \
-cancel it.\n\nA call that runs longer than the bounded response wait returns its task id \
+return a durable task id immediately; load TaskGet with ToolSearch for its paged output, \
+and use TaskStop to cancel it.\n\nA call that runs longer than the bounded response wait returns its task id \
 instead of cancelling. The script cannot call ToolScript, Agent, Workflow or a managed \
 background Bash."
             .into(),

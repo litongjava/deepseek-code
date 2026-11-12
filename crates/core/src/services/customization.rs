@@ -68,7 +68,6 @@ pub const CORE_TOOLS: &[&str] = &[
     "EnterPlanMode",
     "ExitPlanMode",
     "TaskStop",
-    "ToolScript",
 ];
 
 /// Whether the name belongs to the default core set. The list only decides the

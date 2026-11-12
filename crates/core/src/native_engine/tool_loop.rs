@@ -1307,7 +1307,7 @@ impl ToolLoopExecutor {
                 json!({
                     "task_id": start.id,
                     "status": "running",
-                    "message": "ToolScript is running in the background. Use TaskGet with this task id for its paged output (block:true waits) and TaskStop to cancel it.",
+                    "message": "ToolScript is running in the background. To read its paged output, load TaskGet with ToolSearch (block:true waits); TaskStop stops it.",
                 })
                 .to_string(),
                 false,
@@ -1338,7 +1338,7 @@ impl ToolLoopExecutor {
                     json!({
                         "task_id": start.id,
                         "status": state.status,
-                        "message": "ToolScript is still running. Use TaskGet with this task id for its paged output and TaskStop to cancel it.",
+                        "message": "ToolScript is still running. To read its paged output, load TaskGet with ToolSearch; TaskStop stops it.",
                     })
                     .to_string(),
                     false,
