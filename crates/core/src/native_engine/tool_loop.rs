@@ -385,12 +385,15 @@ fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
     batches
 }
 
-/// The Agent tool's "Available agent types (subagent_type)" block: one line per
+/// The "agent types (subagent_type)" block under `heading`: one line per
 /// built-in or custom definition plus `fork`, sorted by id. The first line of a
 /// description is used, cut at 160 characters; nothing time-dependent enters the
 /// text, so an unchanged set of definitions produces the same request bytes.
+/// Agent carries it as "Available agent types"; while Agent is deferred,
+/// ToolSearch carries it so the model can learn the types before loading it.
 fn agent_type_listing(
     definitions: &[crate::services::agents::Definition],
+    heading: &str,
 ) -> String {
     fn one_line(description: &str) -> String {
         let first = description.lines().next().unwrap_or_default().trim();
@@ -410,7 +413,7 @@ fn agent_type_listing(
         "fork".into(),
         "Forks this session; the fork keeps the full history.".into(),
     );
-    let mut listing = String::from("\n\nAvailable agent types (subagent_type):");
+    let mut listing = format!("\n\n{heading}");
     for (id, description) in lines {
         listing.push_str(&format!("\n- {id}: {description}"));
     }
@@ -2327,7 +2330,9 @@ impl ToolLoopExecutor {
             // The model cannot choose a type it was never told exists. The
             // block depends only on the saved definitions, so repeated
             // requests carry the same text and keep the prompt cache valid.
-            if let Some(listing) = self.agent_type_listing() {
+            if let Some(listing) =
+                self.agent_type_listing("Available agent types (subagent_type):")
+            {
                 for definition in &mut definitions {
                     definition.description.push_str(&listing);
                 }
@@ -2355,14 +2360,14 @@ impl ToolLoopExecutor {
         adapt_tools(tools, self.prompt_profile)
     }
 
-    /// The "Available agent types" block for the Agent tool, or None when the
-    /// saved definitions cannot be read so the description stays as it is.
-    fn agent_type_listing(&self) -> Option<String> {
+    /// The agent-type block under `heading`, or None when the saved definitions
+    /// cannot be read so the description stays as it is.
+    fn agent_type_listing(&self, heading: &str) -> Option<String> {
         let root = self.search_config_path.as_deref()?.parent()?;
         match crate::services::session_messages::context(root)
             .and_then(|context| crate::services::agents::list(&context))
         {
-            Ok(definitions) => Some(agent_type_listing(&definitions)),
+            Ok(definitions) => Some(agent_type_listing(&definitions, heading)),
             Err(error) => {
                 tracing::warn!(%error, "Could not list agent types for the Agent tool description");
                 None
@@ -2440,6 +2445,27 @@ impl ToolLoopExecutor {
                 }),
         );
         tools.retain(|tool| allowed(&tool.name));
+        // Agent is deferred by default, so a model that wants to pick a type
+        // cannot see the list. While Agent is absent from this request but the
+        // model could still load it, ToolSearch carries the same list. Once
+        // Agent is in the request (resident or loaded) only Agent carries it.
+        let agent_loadable = self.builtin_names().contains("Agent")
+            && customization.loading("Agent").on_demand
+            && allowed("Agent");
+        if agent_loadable
+            && !tools.iter().any(|tool| tool.name == "Agent")
+            && tools.iter().any(|tool| tool.name == "ToolSearch")
+        {
+            if let Some(listing) = self.agent_type_listing(
+                "Agent types (subagent_type), available after loading Agent:",
+            ) {
+                for tool in &mut tools {
+                    if tool.name == "ToolSearch" {
+                        tool.description.push_str(&listing);
+                    }
+                }
+            }
+        }
         Ok(tools)
     }
 
