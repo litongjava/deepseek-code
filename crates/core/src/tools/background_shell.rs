@@ -12,7 +12,7 @@ mod notifications;
 pub use notifications::{
     collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START,
 };
-tokio::task_local! { static CONTEXT: Option<(PathBuf, String)>; }
+tokio::task_local! { pub(super) static CONTEXT: Option<(PathBuf, String)>; }
 
 /// A shell task's log directory: its task ID, or the directory of a
 /// foreground call that was moved to the background.

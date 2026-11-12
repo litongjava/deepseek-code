@@ -45,6 +45,7 @@ mod worktrees;
 pub use utf8::powershell_command;
 pub mod background_shell;
 mod bash_process;
+pub mod monitor;
 pub mod file_change;
 pub(crate) mod image_generation;
 pub(crate) mod path_scope;
