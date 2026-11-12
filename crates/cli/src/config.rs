@@ -516,6 +516,20 @@ mod budget_tests {
     }
 
     #[test]
+    fn saved_default_model_is_read_in_provider_model_form() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        assert_eq!(default_model(&paths), None);
+        save_default_model(&paths, "cli", "fixture-model").unwrap();
+        assert_eq!(
+            default_model(&paths),
+            Some(("cli".into(), "fixture-model".into()))
+        );
+        std::fs::write(paths.data_dir.join("cli.json"), r#"{"model":"broken"}"#).unwrap();
+        assert_eq!(default_model(&paths), None);
+    }
+
+    #[test]
     fn astra_context_template_uses_256k_without_changing_output_budget() {
         assert_eq!(default_context_window("gpt-6-astra"), Some(256_000));
         let provider = provider_template("gpt-6-astra");

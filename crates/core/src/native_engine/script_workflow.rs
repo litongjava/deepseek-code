@@ -165,8 +165,15 @@ impl ToolLoopExecutor {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let label = format!("Workflow {name}");
-        let started =
-            crate::tools::background_shell::start(command, None, "workflow", &label, &label, None)?;
+        let started = crate::tools::background_shell::start(
+            command,
+            None,
+            "workflow",
+            &label,
+            &label,
+            None,
+            crate::tools::background_shell::Interaction::None,
+        )?;
         let task_id = started["task_id"].clone();
         if task_id.is_null() {
             bail!("The workflow did not start: {started}");

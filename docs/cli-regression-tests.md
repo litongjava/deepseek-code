@@ -92,6 +92,22 @@ cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test sess
 
 若出现 `is not loaded. Call ToolSearch`，先确认场景是否需要显式加载工具或增加模型搜索步骤；不要把未执行工具导致的后续空结果误判为 Worker 或消息传递失效。
 
+## Worker 生命周期：旧代重建、锁释放与下一轮准入
+
+修改 `crates/core/src/services/session_worker.rs`、`crates/core/src/services/session_worker/recovery.rs`、`crates/cli/src/persistent_worker.rs` 或 `crates/cli/src/persistent_child.rs` 后，执行：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib services::session_worker
+cargo test --locked -p deepseek-code-cli --bin dcl admission_tests
+cargo test --locked -p deepseek-code-cli --test session_worker
+```
+
+三处行为必须分别验证，不能互相替代：
+
+1. 旧代在就绪前停止时重建。`ensure_worker` 对最近有心跳的旧代只等待，不直接调用 `wait_ready`；旧代在等待中变成 `stopped` 时返回 `None`，由持有 startup lock 的调用方创建新代，新代仍走原 `wait_ready`，因此真正的启动失败不会被无限重试掩盖。用例 `ensure_worker_replaces_a_predecessor_that_stops_before_ready` 在 startup lock 出现后等待 1 秒再发布 `stopped`，覆盖“旧代仍在启动”分支；这是时间门控的复现，不是对某次内部读取顺序的证明。把该分支改回旧的直接 `wait_ready` 后，该用例必须报 `session host exited before becoming ready`。
+2. 恢复锁按所有权生命周期释放。`startup.lock` 与 `repair` 中的代际锁用 `fs::unlock_file` 显式释放，而不是只依赖描述符关闭；`flock` 归属打开文件描述，fork 出的子进程持有同一描述符时，仅关闭不会释放锁。用例 `recovery_releases_the_startup_lock_for_a_retained_descriptor` 与 `a_failed_recovery_releases_the_lifetime_locks_it_took` 保留真实描述符副本，旧语义（只在 `Drop` 关闭）下两者都会因 `WouldBlock` 失败。这不覆盖 SIGKILL 或异常退出的边界，那里仍只有描述符关闭兜底。
+3. 完成与下一轮准入交接。`persistent_worker` 只对本宿主已准入且持久记录证明已完成的一轮等待释放事件；真正运行中的一轮立即拒绝，等待超时返回未提交且不排队、不重放。`admission_tests` 共 4 项，其中 2 项使用暂停时钟（旧实现 25 x 10 ms 窗口后仍必须继续等待；超时后不写入、不启动第二轮）；另 2 项是同步状态与身份断言。真实协议路径由 `turns_submitted_right_after_completion_are_admitted` 连续 3 轮覆盖，它不强制收尾窗口，因此不是该竞态的确定性复现。
+
 ## 真实终端的测试方法
 
 真实终端指在伪终端里启动 `dcl`，发送按键，再检查屏幕内容。Linux 上使用开发目录的工具：
@@ -438,6 +454,157 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 
 事件形状（与 REPL/Desktop 共用的 `queued_input` 行）：`{"type":"queued_input","text":"…","content":"…","origin":"queue-input-<id>"}`。`origin` 是持久队列项的 handoff 标识；引导消息自己的 `messages` 行已由 handoff 保存，故不再作为工具附件重复写入。REPL/Desktop 的 legacy 队列项保持原有 `origin`（`user`、`task_notification`）并继续依附最近工具结果。
 
+## ApplyPatch 补丁工具
+
+`ApplyPatch` 是模型可见的写工具，解析、只读预检和写盘回滚三个内部模块位于 `crates/core/src/tools/apply_patch*.rs`。改动它们或改动 `tools/mod.rs` 的注册/分发时，至少运行：
+
+```bash
+env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-core --lib apply_patch
+env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-core --lib model_tool_output
+env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-cli --test apply_patch_tool
+env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-cli --test sdk apply_patch_permissions
+```
+
+`crates/cli/tests/apply_patch_tool.rs` 用本地 OpenAI mock 和真实 CLI 覆盖：多文件混合补丁的最终字节与持久化工具记录、第二个文件不匹配时全部不变、工作区外路径与移动目标被拒绝、plan 模式拒绝、Hook 拒绝和 Hook 改写输入后重新校验、ToolSearch 首次发现且只加载一次、无改动补丁与既有 `Edit` 仍然可用，以及 accept-edits 下持久化的 `Edit`/`Write`/`MultiEdit` 路径规则：`Confirm` 与 `Edit` 一致地阻止写入、`Deny` 阻止整补丁、移动目标也参与判断、Hook 把补丁改写到确认/拒绝目标时不会继承批准。核心测试直接驱动引擎审批流程（批准、拒绝、不产生第二次请求）并覆盖 `Confirm` 永不静默变成 `Allow`。测试的进程等待必须使用异步方式（`tokio::process::Command`），默认 current-thread 运行时下同步 `Command::output` 会和服务端一起死锁；mock 每个响应使用不同的调用 ID，避免和调用 ID 复用问题混在一起。直接调用 `ToolLoopExecutor::execute_tool_call` 的单元测试必须像 `execute_scoped`/`run_builtin` 一样用 `path_scope::scope`、`with_permissions` 和 `with_edit_session` 包住调用，否则路径规则的任务局部上下文不存在。
+
+`crates/cli/tests/sdk/apply_patch_permissions.rs` 补充真实 SDK 控制协议层：真实 `dcl` 进程、本地 OpenAI mock、`--input-format stream-json`。测试先用 `SessionStore::create_with_id` 建立 Code 会话，把 `Edit(secret.txt)=Confirm` 写入 `peripheral_settings` 的 `cli.permissions.<id>` 并读回校验，再用 `--resume` 恢复同一会话，权限模式为 accept-edits，同时通过 `support/tool_loading.rs` 让 `ApplyPatch` 常驻加载，避免“工具未加载”伪装成权限保护。覆盖四种情况：Allow 前断言两个目标字节未变且只有一个 `can_use_tool` 请求（工具名为 `ApplyPatch`、输入是生效补丁、带请求 ID），批准后字节精确写为 `ONE`/`LEAK`、只有一次工具结果和一条持久化记录、没有第二次审批、正常结束；Deny 时混合补丁的所有文件不变，结果记录 `permission_denials`，工具结果和持久化记录都是错误；等待真实请求时关闭 SDK 输入，进程在既有 20 秒测试时限内以失败状态退出、不写文件、不留下仍在运行的所属进程；PreToolUse Hook 把允许目标的补丁改写为确认目标并返回 allow 时，审批请求针对改写后的生效补丁，拒绝后原目标和改写目标都不变。这些是本地 mock 的 SDK 协议验证，不是真实远程模型或 Desktop/TUI 验收；SDK 模式下的工具结果出现在 `user` 帧的 `tool_result` 内容块中，持久化记录仍从隔离数据库读取。若把 Hook 用例改成不恢复带规则的会话，测试会因缺少显式规则而走自动放行；该失败是 fixture 错误，不是产品绕过证据。
+
+工具调用身份采用“每次执行一个 occurrence id”的约定：事件、显示编号、`permission_denials`、`tool_result`、SDK `can_use_tool.tool_use_id`、hook payload 和持久化行都使用 `inv-<turn-scope>-<n>`；供应商原始调用 ID 只用于出站协议配对。因此 SDK 测试断言的是实际观察到的 occurrence id（非空、`inv-` 前缀、不等于 mock 的原始 `apply-1`），并单独在 provider 请求体中确认 `tool_calls[].id` 与 `tool_call_id` 仍是同一条原始 ID；持久化行 id 以 `:<occurrence>` 结尾。`sdk_reused_provider_id_keeps_occurrences_prompts_and_records_independent` 覆盖同一供应商 ID 被连续复用两次：两次补丁目标都处于 `Confirm`，第一次批准后只写入 `a.txt`，第二次仍单独弹出审批请求（request id 和 occurrence id 都与第一次不同），拒绝后 `secret.txt` 保持不变，两条持久化记录一条成功一条失败，provider 侧两次 `tool_call_id` 仍是同一个原始 ID。不要把该用例改成依赖自动放行来“通过”。
+
+SDK 审批等待期间关闭输入或发送 interrupt 时，还要核对持久化终态，不能只检查进程退出和文件不变：
+
+- `cargo test --locked -p deepseek-code-cli --test sdk apply_patch_permissions`：包含原 `sdk_input_closed_while_the_patch_waits_for_approval_never_writes`；准确 occurrence 对应且恰好一条工具行，`is_error=true`、`output` 为既有 `UNFINISHED_TOOL_RESULT`，关联回合为 cancelled，补丁目标字节不变。
+- `cargo test --locked -p deepseek-code-cli --test sdk approval_cancellation`：Write/Bash × EOF/interrupt 四个用例，每个覆盖 OpenAI/Anthropic；等待真实 `can_use_tool` 后取消，无目标文件、无多余模型请求，interrupt 后同 session 下一轮正常完成，旧调用终态不被改写。此文件是 SDK 子模块，没有独立的 `--test apply_patch_permissions` 目标。
+- `cargo test --locked -p deepseek-code-cli --bin dcl -- background_transcript_tests compaction_cancellation_tests`：先收齐已报告结果，再仅对缺少结果的工具补错误终态；已有成功（包括空输出）、失败与队列中晚到的完成结果保持，重复结算不改值。`SDK turn interrupted` 归为取消，不扩宽普通提供商/Hook 错误的分类。
+- 同时运行 SDK 全套及 core 的 `tool_approval::tests::`、`tool_loading_tests::`、`executor_lifetime_tests::`、`child_transcript::tests::`；分别覆盖审批决策、审批/运行取消、执行器与强制写库尾部的所有权、子会话最后事件收集。模型入口、核心 mailbox 取消及 Desktop 运行是不同证据层，不能互相替代。
+
+公共收尾使用结果未知的既有提示，不声称正在执行的工具没有副作用或已回滚；只有审批测试通过文件/marker 断言证明没有执行。真实完成结果必须优先于取消时的兜底结果。
+
+`ApplyPatch` 只做进程内失败一致性：受控失败会回滚已写文件，但进程崩溃没有日志恢复，不能当作跨文件原子操作验收。Linux 上的单元与 CLI 证据不代表 Windows 的 ACL/只读属性行为。
+
+## ToolScript 嵌入式 JS 基础（J1–J3）
+
+`crates/core/src/toolscript/` 是 ToolScript 的引擎基础，使用锁定版本 `rquickjs 0.14.0` 在进程内执行真实 QuickJS。它目前只暴露 Rust API 和 `tools.call` 的 fake callback 测试，**没有**注册模型可见工具，也没有接入 `ToolLoopExecutor` 的权限、Hook、历史、事件或持久化。完整契约与限制见 `docs/toolscript-foundation.md`。
+
+改动该目录或 `crates/core/Cargo.toml` 的 `rquickjs` 依赖后运行：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib toolscript::
+cargo check --locked -p deepseek-code-core --lib
+cargo check --locked -p deepseek-code-cli
+cargo check --locked -p deepseek-code-desktop --all-targets
+git diff --check
+```
+
+33 个用例使用真实 QuickJS 和 fake host callback，覆盖：顺序调用、`Promise.all` 顺序与峰值并发、条件/变换、结构化工具错误与脚本抛出、Unicode、非 JSON/循环参数、脚本结果限制、CPU 死循环的 QuickJS interrupt hook、外部线程取消、栈溢出、内存压力、等待中的 host future 取消/超时、脚本结束时未 await 调用的 Drop 与无迟到副作用、日志/参数/结果/并发/待定调用上限，以及 `require`/`process`/`fetch`/timer 全局不存在。以下回归专门证明本轮边界：
+
+- `private_prelude_bindings_are_not_visible_to_user_code`：用户 body 与 prelude 分属两个脚本，`rawCall`、`config`、`normalizeResult`、内部 globals 都是 `undefined`。
+- `monkeypatched_intrinsics_cannot_change_arguments_or_bypass_validation`：改写 `JSON.stringify`、`JSON.parse`、`Object.keys`、`Object.getPrototypeOf`、`Number.isFinite`、`Array.isArray` 后，Rust 仍收到原始参数并拒绝循环值。
+- `function_constructor_and_dynamic_import_expose_no_host_or_io`：`Function` 构造函数看不到 host helper；没有 module loader/动态 import 的 I/O 能力。
+- `cancellation_during_a_waiting_host_call_drops_the_future`、`host_call_timeout_drops_the_future`、`unawaited_call_is_abandoned_without_a_late_effect`：断言真实 host `Drop` guard，而不只是计数器，并在返回后等待确认没有迟到副作用。
+- `numeric_boundary_preserves_values_in_arguments`、`numeric_boundary_preserves_values_in_script_results`：覆盖 `±2^53`、`i64` 边界、`2^63`、`2^64`、`1e20`、`-0` 与分数字面量。`2^63` 必须保持浮点值，不能被 `i64::MAX as f64` 饱和成 `9223372036854775807`；旧代码负向复现见 `round02-negative-numeric-02.log`。
+- `sparse_array_holes_are_rejected_despite_inherited_values`：`Array.prototype[0]=7` 加 `new Array(1)` 与 `[1, , 3]` 都被拒绝，dense 数组通过；旧代码把 hole 读成继承的 `[7]`，负向复现见 `round02-negative-sparse-01.log`。
+- `getter_mutation_cannot_resurrect_an_argument_hole_from_the_prototype`、`getter_mutation_cannot_resurrect_a_result_hole_from_the_prototype`：index 0 的 getter 删除 index 1 后，边界在每次读取前重新做 native own-property 检查，不会回退到 `Array.prototype[1]`；参数场景要求 host 未收到调用。旧代码负向复现见 `round02-negative-getter-01.log`。
+- `proxy_values_are_rejected_before_traps_or_enumeration`：数组和对象 proxy 都在结构遍历前按 class id 拒绝，`get`/`ownKeys`/`getOwnPropertyDescriptor` trap 计数为 0。
+- `out_of_range_numeric_property_on_an_array_is_ignored`：`"4294967295"`（`2^32-1`）不是数组索引，只是普通自有属性，不当作 hole；负向复现见 `round02-negative-indexrange-01.log`。
+
+数组 own-property 检查使用 QuickJS 的 native `JS_GetOwnProperty`（空 descriptor），不经过 `in`、`Object.keys` 或任何可被脚本替换的 intrinsic；边界仍会先做一次 own-key 连续性扫描，再在每次读取前逐 index 复查。这些用例只证明 JS 引擎、边界和限制，不证明权限、Hook、历史、持久化或真实执行器分发。Android（返回 `UnsupportedPlatform`，未构建）、Windows、macOS 未验证；阻塞式非 async host handler 不能被抢占；`run` 是 `!Send`，集成时必须由专用 current-thread executor 持有 VM。
+
+## ToolScript 执行器桥接（J4，引擎内部）
+
+`crates/core/src/native_engine/toolscript_bridge.rs` 是 `ToolLoopExecutor::run_toolscript` 的内部入口：真实 QuickJS 脚本的 `tools.call` 走现有 `prepare_tool_call_with`/`complete_tool_call_with`（加载策略、实时权限模式、Plan reset、Pre/Post hook、真实权限提示、路径/文件状态/MCP/sandbox），不注册模型可见工具，也没有持久后台任务生命周期。VM 在专用 16 MiB 线程的 current-thread runtime 上运行，只通过有界 channel 与执行器交换 JSON/id，不使用 `unsafe Send/Sync`。完整契约见 `docs/toolscript-executor-bridge.md`。
+
+改动该目录、`services/tool_history.rs`、`tool_call_origins` schema、`SessionStore::model_history` 或 CLI `BackgroundTranscript` 后运行：
+
+```bash
+cargo test -p deepseek-code-core --lib toolscript_bridge
+cargo test -p deepseek-code-core --lib "toolscript::"
+cargo test -p deepseek-code-core --lib "services::tool_history"
+cargo test -p deepseek-code-core --lib "db::conversation_repo"
+cargo test -p deepseek-code-cli --bins background_transcript
+cargo check -p deepseek-code-core --lib
+cargo check -p deepseek-code-cli
+cargo check -p deepseek-code-desktop --all-targets
+```
+
+17 个用例（15 个集成用例 + 2 个 `toolscript_bridge` 内部单测）使用真实 QuickJS、真实 Read/Bash/Edit 和真实 SQLite：
+
+- `sequential_calls_execute_real_tools_and_persist_after_reopen`：值/文件正确；事件顺序为 origin 先于 start；经共享 writer 持久化并重开后 4 行、独立 `inv-` id、parent/sequence 正确；OpenAI 与 Anthropic `model_history` 都不含嵌套 id。
+- `repeated_calls_and_replayed_events_keep_distinct_rows`：相同工具/参数两次调用保留两行；重复事件不覆盖。
+- `plan_mode_denies_edit_without_a_file_effect`、`unloaded_and_lifecycle_tools_are_refused_before_side_effects`、`pre_hook_blocks_and_rewrites_nested_input`：拒绝/未加载/生命周期工具/Pre-hook block 均无副作用且有终态记录；`ToolUseDone` 输入为 hook 后的有效输入。
+- `live_policy_changes_apply_between_script_calls`：两次脚本之间 PlanMode 生效。
+- `script_error_propagates_and_history_keeps_the_terminal_outcome`：脚本异常保留已执行工具的真实结果。
+- `cancellation_during_bash_terminates_the_exact_owned_processes`：fixture 先发布 shell 与后台子进程的 PID 及启动时间，取消后等两个精确身份消失，并等待超过命令自身副作用时长的 horizon；失败路径只用精确 PID 清理，不发宽泛信号。`ProcessTree::drop` 只发送 `SIGKILL(-pgid)`，不等待内核回收，这一点在文档中如实声明。
+- `dropping_the_alive_receiver_stops_a_started_bash_body`（单测）：这是**私有 per-call alive 缝**，与全局 `Cancellation` 不同：真实 Bash body 启动并发布 PID 后直接 drop alive sender，验证已启动 body 被丢弃且精确进程消失。清理 guard 在 barrier 读到 PID+启动时间时立即构造、经 `tokio::join!` 返回并在最终断言前一直持有，`join` 另一分支 panic 时仍会 drop；不重写原有显式取消用例。
+- `settling_script_abandons_an_unawaited_call_before_dispatch`：脚本在最后一次 await 后立即结束时，未 await 的调用不会被提交（`calls_started == 0`）。
+- `a_permission_wait_aborts_when_the_script_settles_early`：调用确实进入权限等待（观察到 `ToolPermission`）后脚本结束，准备阶段立即放弃而不是等到 600 s。
+- `completed_sibling_results_survive_cancellation`：取消时已完成的安全调用保留成功记录，阻塞的兄弟标记为取消。
+- `a_cancelled_first_batch_records_every_later_admitted_call`：被取消的首批 Bash、排队的 Write/Read 都得到终态记录；`late.txt` 不存在；持久化 id 完整且被重放排除。
+- `a_hook_rewritten_background_bash_is_refused_before_the_body`：hook 把 Bash 改写为 `run_in_background` 后仍在 body 前拒绝，无 sentinel、无 shell task 目录。
+- `a_hook_rewritten_mutation_does_not_overlap_a_safe_neighbor`：FIFO handshake 证明 hook 改写出的写命令不会与相邻安全调用并发。
+- `promise_all_reads_overlap_while_mutations_stay_serial`：FIFO handshake 证明安全读并发、写调用串行。
+- `a_prepared_mutation_with_a_gone_caller_never_runs`：body 前已放弃的写调用不会创建文件。
+
+`services::tool_history` 另有 6 个用例：row+origin 原子回滚、origin 先到而 row 未到时延后、冲突 origin 不重新认父、消息删除级联、late delta/start 不覆盖已完成输入、实时事件投影。Android（返回 `UnsupportedPlatform`）、Windows、macOS 未验证；Desktop `src-tauri` 仅转发 `nested_tool_call` 事件，尚未写 origins，且该工具未在 Desktop 注册。无模型可见注册、无 TaskGet/TaskStop、无持久后台脚本。
+
+## ToolScript 持久任务权限刷新（J2b）
+
+`crates/core/src/native_engine/toolscript_job.rs` 的 owner 每 500 ms 重新读取并**严格**应用整份持久权限快照（settings、会话规则、持久模式）。任一必需读取/解析/应用失败都会记录首个错误、取消该脚本并停止再接纳内层调用；终态为 `failed` + `policy_refresh_failed`，不会写成用户 `cancelled` 或 `completed`。此前 `if let Ok` 保留旧 Allow 的行为已删除。
+
+```bash
+env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-core --lib toolscript_job::j2_tests
+cargo test --locked -p deepseek-code-core --lib toolscript_job::j1_tests
+cargo build --locked -p deepseek-code-cli
+python3 ../dev-support/deepseek-code/toolscript-20261111/j2b/run_j2b.py \
+  target/debug/dcl /tmp/j2b-fixtures /tmp/j2b-result.json
+```
+
+6 个单测覆盖严格读取层。`toolscript_job::j2_tests` 5 个：损坏的会话规则、损坏的持久模式、存在但损坏的 settings 文件都带阶段失败，缺失文件不算失败；settings 中的 deny 不会被旧存储的 Allow 放宽；被拒绝的规则集不会清空已应用规则。`services::permission_updates::tests::strict_loading_rejects_malformed_permission_fields_the_lenient_path_skips` 1 个：`permissions` 不是对象、`deny` 是数字、`deny` 数组混入非字符串、`allow` 不是数组、`additionalDirectories` 混入非字符串、`defaultMode` 不是字符串、`deny` 规则非法，都在 strict 分支返回带文件名与字段的阶段错误，同时宽松路径对这些输入仍成功加载。
+
+真实 CLI 私有 worker（`DEEPSEEK_CODE_TOOLSCRIPT_JOB`）5 个用例，均使用隔离数据目录、本地 fixture provider（`127.0.0.1:1`，无真实凭据）、ask + 持久 `Bash: Allow`，脚本先完成一次 `Bash` marker，再进入有界真实工具调用循环等待 release 文件：
+
+- 会话规则损坏、持久模式损坏、settings 文件损坏、settings 为合法 JSON 但 `deny` 是数字（`{"permissions":{"deny":7}}`，即父级复现该缺陷的原始形状）：驱动等首个调用 `done` 后注入，再等 worker 自己写出 `policy_refresh_failed` 日志行（该行在请求取消之后写入），然后创建 release。断言终态 `failed`/`policy_refresh_failed`、错误阶段准确（结构倒例为 `permissions.deny must be an array of strings`）、`result.json` 的 `policy_refresh_failed=true` 且 `cancelled=false`、任务记录 `failed`、第一个 marker 存在、第二个 marker 不存在、`output.log` 保留已完成的调用记录、`calls_started`/`calls_succeeded` 为真实计数；恢复被破坏的来源后重跑同一 worker 必须被“terminal state”拒绝且 `state.json` 字节不变。
+- 运行中把持久规则改为 `Bash: Deny`：脚本捕获 `permission_denied` 后返回，终态 `completed`、`calls_succeeded=1`、第二个 marker 不存在，证明撤销在下一个调用生效。
+
+修复前的失败证据保留在 `supervision-20261110/restart-review-20261112/j2b-malformed-probe.json`（父级用同一 CLI 复现：`{"permissions":{"deny":7}}` 时 marker2 产生且 job `completed`），本轮的通过结果不能替代它。
+
+口径说明：
+
+- 500 ms 周期刷新**不是**每次调用即时读取的保证：同一窗口内已接纳的调用可能仍按旧策略执行。本场景只证明“刷新失败即停止并在下一调用前拒绝”，不证明所有权限边界即时一致。
+- 失败被检测前已经开始的并发批次按实际结果记录，不声称这些已发生的副作用被撤销。
+- 已执行调用保留在 `output.log` 与历史行中；`state.calls_*` 由同一事件流统计（脚本已返回时用引擎统计）。脚本在一次失败刷新同一 tick 内已返回的窄竞争会被记为 `failed`，其值保留在 `result.json` 的 `script_value`。
+- 未被覆盖的边界另行记录：每次调用的即时权限读取、等待审批期间撤销权限、运行中的 hooks 变化、J3 内层持久化、J4 真实审批、J5 停止清理。
+- 宽松的 CLI 交互路径（`load_settings`）不变；严格版本只在 ToolScript job 内使用。产品自身的 settings 写入是 temp+rename，不会产生半写文件。
+
+## ToolScript 真实 CLI 历史闭环（J3a）
+
+```bash
+cargo test --locked -j 2 -p deepseek-code-cli --test toolscript_history -- --nocapture
+```
+
+`cli_toolscript_repeated_calls_keep_history_across_model_rounds_and_reopen` 使用当前构建的真实 `dcl` 与它启动的真实 ToolScript worker、本地 OpenAI Chat Completions mock、临时数据目录。ToolScript 默认按需加载；fixture 不覆盖其加载配置，断言首请求没有该工具，模型先调用 `ToolSearch(select:ToolScript)`，成功后下一请求才包含它。fixture 不创建会话、assistant 或工具记录。
+
+两个模型轮次故意复用 `same-provider-id` 作为 ToolScript raw provider ID。每个脚本先用真实 Bash 写本轮标记与 `same.txt`，再用完全相同的参数执行两次顺序 Read、三次 `Promise.all` Read，最后尝试被显式 deny 的 Write 并捕获拒绝。每个脚本 7 次实际调用（6 成功、1 拒绝）；逐个核对 worker log 的 start/done/origin 与数据库的 invocation ID、assistant ID、parent ID、sequence、原参数和完整结果。第二轮改变文件内容，第一轮结果必须仍为 ROUND_1，第二轮为 ROUND_2，拒绝目标文件不存在。
+
+验收要求：14 条独立内层记录、2 条不同的 ToolScript 父调用、1 条 ToolSearch，共 17 条工具记录；关闭 SQLite 连接再独立重开后全部字段相等，`PRAGMA foreign_key_check` 为零。`--nocapture` 输出实际 CLI 退出码、每条 DB 行、worker spec/state/result/output.log 和重开结论，供提取证据；CLI 退出 0 本身不替代这些断言。
+
+当前 CLI 的 `TurnTimer::ensure_segment`（`turn_repo.rs`）在提交真实 assistant 与 turn 关联后才返回，`session.rs` 随后把该 ID 放入 ChatRequest 并发送模型请求。本用例还通过独立只读 SQLite 连接，确认每次模型响应发出前已有该会话的唯一 assistant。当前分支未复现“父 assistant 尚未落库”的 FK 竞态，因此没有为此添加等待/ack 或改写持久化路径；不能把此前 `assistant_id=None` 的私有 worker fixture 当作本验收。
+
+范围：Linux 的普通前台 CLI 单个用户回合内两次模型工具轮次、OpenAI mock、真实 worker、SQLite 重开。未覆盖 Anthropic/Responses、Windows/macOS、Desktop 运行、真实提供商、Plan reset 后重新关联、后台父进程提前退出、J4 审批、J5 停止、J3b 损坏磁盘处理。旧的基础/桥接章节描述其当阶段的测试边界，当前模型入口的历史验收以本节为准。
+
+### ToolScript 与 TaskGet 的按需加载回归
+
+- 保持 `services::customization::tests::only_core_tools_load_by_default_and_every_tool_stays_discoverable` 和 SDK `sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one` 的默认列表断言；ToolScript 不在 CORE_TOOLS 中，仍可被 ToolSearch 发现。J3a 用例直接验证默认配置的加载与真实执行。
+- ToolScript 后台启动、前台等待超时和工具说明都提示先通过 ToolSearch 加载 TaskGet，再读取输出；TaskStop 仍可直接使用。
+- `task_input` 的普通、逐次记录和 PreToolUse 拒绝三个 fixture 先搜索 `select:TaskInput,TaskGet`，然后保留真实 stdin/EOF、Hook、拒绝无写入和历史断言。
+- `taskget_background::cli_task_get_pages_a_background_shell_to_its_exit_status` 专测分页执行，在独立数据目录通过 `support/tool_loading.rs` 显式开启 TaskGet，保留完整分页、字节上限和终态断言；同文件另一用例仍验证模型自行搜索 TaskGet。
+- `sdk` 全文件中的 `apply_patch_permissions::sdk_input_closed_while_the_patch_waits_for_approval_never_writes` 是监督者确认的公共 ApplyPatch 取消问题，交由运行时分支处理，不因本轮默认工具修复放宽断言。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -462,7 +629,45 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 - `crates/cli/tests/tasks_catalog.rs`：`cargo test --locked -p deepseek-code-cli --test tasks_catalog`（真实 CLI + 本地 mock：四个任务工具默认不可见，经逗号和空格两种 ToolSearch 选择后在下一请求出现；核对实际请求 schema，并通过真实任务工具创建根/步骤、设置依赖和输出、列表与读取；持久化行/边/结果与 `TaskGet` 一致，请求中没有 `plan_mode`/`TaskOutput`）
 - `crates/cli/src/task_commands.rs`、`args.rs` 的 `tasks import-plan`：`cargo test --locked -p deepseek-code-cli --test tasks_import`（真实 `dcl` 子进程 + 本地临时 legacy/数据目录：成功导入后可用任务存储读回根/步骤/依赖；dry run 与缺失/非法源、非法会话/计划、缺少或同时给出选择器都不创建目标；仅 current 变化返回 conflict 且退出码 1、任务不变；`--data-dir` 隔离；workspace 旧库保持只读）
 - `tools/tasks.rs`、`tools/background_shell.rs`、Workflow/背景 Agent 的 TaskGet 输出：`cargo test --locked -p deepseek-code-cli --test taskget_backends --test taskget_background`（真实 CLI + 本地 mock：Workflow 实时输出、完成、超时不取消、TaskStop 取消；背景 Agent 运行快照、报告、退出码、超时不停、会话隔离；请求中四个任务内置各一次且无 TaskOutput，并核对实际请求的 TaskUpdate schema 带 `setBlockedBy`），以及 `cargo test --locked -p deepseek-code-core --lib tools::tasks` 与 `cargo test --locked -p deepseek-code-core --lib tools::background_shell`。`tools::tasks` 覆盖 `TaskUpdate setBlockedBy` 的原子替换/清空、反向 `blocks` 同步、重复项去重、缺失/自引用/成环/跨会话拒绝且失败不落盘、`addBlockedBy`/`addBlocks`/删除混用时先拒绝。
+- TaskGet 增量输出页：`cargo test --locked -p deepseek-code-core --lib tools::output_page`、`cargo test --locked -p deepseek-code-core --lib background_shell::foreground_output_tests::task_get_`、`cargo test --locked -p deepseek-code-core --lib tools::tasks::tests`，以及真实 CLI 的 `cargo test --locked -p deepseek-code-cli --test taskget_background cli_task_get_pages_a_background_shell_to_its_exit_status`（真实 `dcl` + 本地 mock：后台 Bash 写出两行 stdout 和一行 stderr，模型用 `max_output_bytes:5` 连续读页直到 `has_more:false`；断言每页 `stdout+stderr` 字节数不超过上限、逐页拼接后与原始输出完全一致、最后一页 `status:"completed"`/`retrieval_status:"success"`、页面中不重复完整的 `output`/`result` 字段）。
+  契约：传入 `cursor` 或 `max_output_bytes` 才进入分页模式，否则保持原快照行为。`max_output_bytes` 取 4..1048576；不足 4 直接报错（小于一个 UTF-8 字符无法推进）。`next_cursor` 是不透明、无状态、不含权限的字符串（`tg1.` + hex JSON），绑定任务、后端和每条流的输出代际；两个读者用同一 cursor 互不影响。`has_more`/`output_truncated` 表示本页是否被上限截断，`output_gap` 在出现无法解码的字节时给出 `invalid_utf8` 及字节数。
+  代际检测只覆盖：追加（代际不变、继续读）、从未读取过的流稍后创建（合法的空到首输出）、换 inode 的轮转、短于游标位置的截断。**同 inode 原地改写，或截断后重新增长超过保存的偏移，不会被检测**——要检测需由生产者维护代际或重读已消费字节，本实现明确记录该限制，不假装任意改写都能发现。
+  语义回归（第 17 轮）：`output_page` 的 metadata-only 页、真正的空 `result`/`delta` 字符串、metadata 跨页后首条文本、以及逐页拼接等于原快照文本；`out=0` 但 `out_skip>0`（首条记录只返回了一部分）也必须拒绝换 inode 的输出，而追加重放和稍后创建的 stderr 仍然合法。后台 job 的 `job_report` 只在任务进入终态后才替换输出：运行中即使子会话已有历史/中间 assistant 消息，`TaskGet` 分页仍来自当前 `output.jsonl`，游标继续有效；运行到完成的跨越游标会明确报错。真实 CLI 用例为 `background_agent_task_get_pages_while_a_prior_assistant_turn_exists`（本地 mock、真实背景 Agent，子会话预置历史 assistant 行；用 fixture gate 保证两页都在 `running` 时读取）。已完成报告仍从 SQLite 整条取出后再在内存中截断，DB 读取不受日志分页 IO 上限约束。
+  运行中的文件若停在多字节字符中间，偏移会停在该字符之前等下一次写入，不吞掉也不替换；只有任务已终止时才把末尾残余字节定义为无效并以 U+FFFD 替换，同时在 `output_gap` 报告。替换字符的 3 字节也计入上限，返回文本总字节数（stdout+stderr）不超过 `max_output_bytes`；stderr 使用 stdout 之外剩余额度，因此 stdout 持续写满时 stderr 会延后到后续页。后台 job 的 `output.jsonl` 按完整记录分页，单条记录超过一页时用记录内偏移分段，超过 8 MiB 扫描上限则明确报错。任务完成时最终报告替换事件流，此时不提供 cursor（`output_mode:"bounded_snapshot"`）；普通任务的 `output` 由 `TaskUpdate` 替换而非追加，因此 cursor 被明确拒绝，只按上限返回快照。
+  并行时序：第 18 轮已单独导入并验证 reviewed 的 fixture 修复（parent 独立复跑 `tools::background_shell` 22 passed；本轮模块共 29 passed），因此下面这句描述的是历史状态，不代表第 19 轮的诊断：~~`tools/background_shell.rs` 既有的并行时序失败仍然 OPEN：isolated/serial 才稳定，4 线程运行时可能各次失败不同用例~~。本轮没有为了本轮功能重跑全部并行套件，也没有改写这些 fixture。
+- 交互式 stdin 管道与原生 `TaskInput`（第 19 轮）：`cargo test --locked -p deepseek-code-core --lib tools::background_shell::tests`、`cargo test --locked -p deepseek-code-core --lib tools::shell_input`、`cargo test --locked -p deepseek-code-core --lib permissions::manager::policy_tests`，以及真实 CLI 的 `cargo test --locked -p deepseek-code-cli --test task_input`（真实 `dcl` + 本地 mock，SDK stream-json 两轮同一宿主进程）。
+  契约：只有 `Bash interaction:"pipe"` 且 `run_in_background:true` 才创建管道；普通 Bash、前台和 `detach` 仍然使用 null stdin，结果中也不出现 `interaction` 字段。`interaction` 缺省以外的值、缺少后台标志、以及非 POSIX 平台都在创建任务记录之前被拒绝（平台错误不会留下 pending managed shell）。管道是普通 FIFO，不是终端：没有 PTY、resize 或终端信号语义。
+  `TaskInput` 是原生内置工具（默认按需加载，不在核心工具集），接受 `task_id` 与 UTF-8 `data` 和/或 `eof`，`timeout` 为等待锁与管道容量的毫秒数（默认 10000，最大 60000），单次最多 64 KiB。返回 `input_mode:"pipe"`、`bytes_written`（操作系统管道已接受的字节，不代表进程已消费）、`bytes_remaining`、`eof`、`stdin_closed`、`already_closed`、`write_complete`、`timed_out`；写超时或写失败（含 broken pipe）都以结构化结果报告已接受字节，绝不自动重试。重复 EOF 幂等；写后 EOF、已退出、已取消、非交互任务和外部会话都会给出明确错误且不改动任务。
+  权限：`TaskInput` 不是只读工具，plan 模式直接拒绝，Ask/AcceptEdits 需要确认，Bypass 允许；真实 CLI 的 `cli_task_input_is_refused_in_plan_mode` 验证拒绝结果确实到达模型。所有权以调用方会话的任务库为准，任务 ID 本身不构成授权。
+  持久 worker 与逐调用记录（第 20 轮）：真实 worker 用例 `cargo test --locked -p deepseek-code-cli --test task_input_worker`（本地 mock、`worker::ensure_worker`、真实 engine 进程）：第一轮启动不读 stdin 的 shell（脚本写入 shell 与 descendant 的 PID，descendant 只循环、不读 stdin），第二轮由同一个存活 worker 执行 `TaskInput` 并读到 shell 回显；断言 shell 属于 engine 的进程树、descendant 是 shell 的子进程。生命周期按既有策略：shell 运行时 `worker::shutdown` 明确拒绝（"background shell tasks"），随后 `TaskStop` 结束两个精确 PID（PID + 启动时间判定，避免 PID 复用），最后优雅关闭 worker，engine 与 supervisor 均退出。`TaskStop` 只请求取消：owner 先发布终态任务记录、结束 shell future，之后才释放进程级 `ACTIVE` 计数，所以操作系统里的进程消失不等于该计数已释放。两个 worker 用例在显式 `TaskStop` 后都先等终态记录，再在 READY 内只重试上述 documented `background shell tasks` 拒绝；其他错误立即失败，超时诊断包含任务状态和仍存活的 shell 树。该等待/重试只存在于测试 fixture，不改变产品的 `has_active`、权限或关闭策略。`a_second_session_cannot_write_the_workers_shell` 证明他人会话无法写入且不改变任务。
+  逐调用记录与钩子（`crates/cli/tests/task_input.rs`）：真实 CLI + 本地 mock 在两轮模型请求中故意复用同一个 provider tool-call id，断言 3 条 `tool_calls` 行（id 为 `<assistant_message>:inv-...`、互不覆盖）、各自 `input`/`output` 与该次调用一致（`bytes_written` 分别等于各自的 UTF-8 字节数，只有 EOF 调用 `stdin_closed:true`，`task_id` 相同）。PreToolUse/PostToolUse 各触发 3 次，钩子的 `tool_use_id` 与持久行中的 `inv-...` occurrence 完全一致（不是 provider id）；PostToolUse 的 `tool_response` 与对应调用的 `bytes_written`/`eof` 对应。`cli_task_input_pre_hook_denial_writes_no_stdin_bytes` 用 PreToolUse deny 证明拒绝发生在写入之前：模型收到 `FIXTURE_DENIED`、无 `bytes_written` 字段、持久行 `is_error=1`、shell 的 `cat` 输出为空。
+  拥有者存活（第 21 轮改为内核租约）：`background_shell::start`（后台管理 shell 与前台提升为后台的两条路径）在任务解析出的目录里创建 `owner.lock`，并在拥有者任务整个生命周期内持有排他 `flock`；PID 仍写入 `owner.pid`，仅供诊断和旧记录使用。租约绑定在打开的文件描述上，进程退出或关闭描述符时由内核释放，因此 PID 复用无法冒充它。`owner.lock` 先在与同目录的临时文件上取锁，再用 `hard_link` 发布，链接不会覆盖已有记录——第二个拥有者会得到 "already has a live owner lease"，不能替换存活身份；这也消除了“先发布任务、后取租约”期间被并发探针抢锁的窗口。探针使用共享 `flock`，所以探针之间不会互相误判。真实 shell 不继承该描述符（Linux 下核对 `/proc/<shell pid>/fd`）。
+  `OwnerProbe` 区分四种状态：`Held`（持有租约）、`Gone`（租约已释放，或旧记录 PID 确认退出）、`LegacyPid`（只有存活 PID 的旧记录，无法证明是同一进程）、`Unreadable`（缺失/格式错误/无法读取）。`TaskInput` 只接受 `Held`，其余一律拒绝并说明原因（`owner_lost` 结构化结果的 `bytes_written` 保留已接受字节）；`TaskGet` 仍可读，`task_status` 仅对确认已死的拥有者报 `unresponsive`，缺失或格式错误的身份按 heartbeat 维持原有可读行为。
+  等待期间的所有者检查：获取 `stdin.lock` 的轮询循环、拿到锁之后、每次管道容量等待迭代、以及写入 EOF 之前都会重新探测。真实用例：`a_full_pipe_write_stops_at_owner_loss`（先填满管道，写调用持有锁并阻塞，释放租约后返回 `bytes_written:0`、无 EOF，读者最终收到的正是先前已接受的字节）；`owner_loss_stops_a_cross_process_write_waiting_for_the_lock`（独立进程调用真实 TaskInput；子进程在真实 `TryLockError::WouldBlock` 分支、也就是通过自身“拥有者仍存活”的初始校验之后写出就绪标记，父进程等到该标记才释放租约，因此第 31 轮观察到的“拥有者在初始校验前已死、提前拒绝”竞态已从构造上排除；该闩锁是 `#[cfg(test)]` 的线程本地钩子，不改变生产行为）。
+  生命周期与描述符：`a_cancelled_async_write_stops_and_sends_nothing_more` 曾只在单测通过、在整套 4 线程运行时超时。负面对照 `a_transient_writer_descriptor_is_not_inherited_by_unrelated_children` 证明原因：TaskInput 的临时 FIFO 写端原先没有 `CLOEXEC`，被并发启动的 shell/helper 继承后，即使拥有者关闭自己的写端，shell 也永远收不到 EOF。修复为 `WRONLY|NONBLOCK|CLOEXEC` 后同一对照通过；`prepare_stdin_pipe` 的两端本来就是 `CLOEXEC`。
+  engine-only 死亡与 engine+supervisor 全杀是两种情况：`engine_only_death_refuses_input_and_records_the_tree_outcome` 只杀 engine，实测 supervisor 随后退出、根 shell 因 stdin EOF 退出，但**不读 stdin 的 descendant 成为孤儿**；该用例只断言输入契约（`unresponsive`、`TaskInput` 拒绝、零字节），并把进程树结果作为测量输出而非期望行为。
+  **明确限制**：租约只覆盖 POSIX `flock`（Windows 走 PID 回退且交互管道不可用，未在本机验证）；检查与最终 `write(2)` 之间仍有竞态窗口，拥有者在这之后退出时已接受的字节无法撤回；旧记录只有 PID 时无法排除 PID 复用，所以交互写入一律拒绝而不是猜测；拥有者被强杀后遗留的进程树（例如不读 stdin 的 descendant）不会自动清理，属既有 owner-death/supervisor 范围，本轮未实现也未声称完成，用例只清理自己记录的精确 PID。
+- 内部 Linux PTY 传输基础（第 35 轮，仅内部模块）：`cargo test --locked -p deepseek-code-core --lib tools::pty_transport`。
+  契约：新增 `crates/core/src/tools/pty_transport.rs`，只提供传输层；**尚未**注册 `interaction:"pty"`，Bash/TaskInput/TaskGet/TaskStop 与现有 pipe 行为均未改变。`SpawnSpec` 显式给出可执行文件、精确 argv（`OsString`，含非 UTF-8 字节）、cwd、完整环境（先 `CommandBuilder::env_clear()` 再逐项设置，portable-pty 自身仍会补 `SHELL`）和已校验的初始 rows/cols，所有校验都在 `openpty` 之前完成。子进程经 portable-pty 的 `setsid()` + `TIOCSCTTY` 获得真实控制终端（`test -t 0/1/2`、`tty`、`stty size`、`/dev/tty` 均被真实用例覆盖）。master 设为 `O_NONBLOCK`；读写各自使用共享同一 open file description 的复制描述符，都用 `poll` 分片等待并显式处理 `EAGAIN`/`EINTR`，读取把 `EIO` 视为 EOF；后端无法提供 raw fd 时直接失败，不回退到阻塞写。每次读写都有绝对 deadline 和取消标志，取消在等待循环的每个 `poll` 分片（≤50 ms）内重新检查，不会拖到 deadline；共享写闸门用 `try_lock` 分片获取并同样遵守调用方自己的 deadline/取消，因此第二个写入方不会排在一个长期写入方后面超时后才返回，在 gate 等待期间被取消的调用也会在 1 秒内返回 `cancelled`、0 接受字节。超时/取消报告终端实际接受的字节数且不自动重试；单次写入上限 64 KiB、单次读取上限 1 MiB，返回原始字节、不做文本切分。真实用例用“先报 READY、等闸门、再把 stdin 原样回显”的子进程，按实际消费字节数与哨兵位置断言没有迟到写入，而不只是观察一个不读 stdin 的进程没有输出。`resize` 先校验 1..=500 行、1..=1000 列再调用原生 resize，并由真实子进程的 `stty size` 复核。VEOF 仅在实时 termios 仍为 canonical 模式且 VEOF 字符有效时发送（字节取自 termios，本机默认 0x04）；非 canonical（raw）或不可用返回能力错误并保持终端可写；VEOF 不被描述为永久关闭，之后仍可继续写入。
+  **终止保证与限制（第 37 轮起为会话范围）**：portable-pty 使直接子进程成为会话首进程（`pid == pgid == sid`）。`stop()` 与 Drop 终止**该会话内**（`/proc/<pid>/stat` 的 session 字段等于 leader PID）的每个存活进程，因此既覆盖 leader 自己的进程组，也覆盖交互式 shell 用 `set -m` 为前台/后台作业建立的其他进程组，以及清理期间新 fork 的同一会话子进程。实现不按进程名匹配、不杀宽泛 PID 范围、不碰其他会话；每个信号都经 pidfd 发出，并在 `pidfd_open` 前后复核创建时钟与 session，因此被回收复用的 PID（session 不同）只会被跳过而不会被误杀。leader 在整个清理完成前保持未回收：只要它未被 `wait`，其 PID 与 session ID 就不会被复用；只有确认会话内已无存活成员后才在剩余预算内回收 leader（此后不再枚举），避免“先回收再按旧 SID 枚举”的复用风险。
+  **不确定即失败**：`/proc` 目录项读取失败、`stat` 权限/I/O 失败、stat 记录不可解析，都视为**无法验证**而不是“进程已消失”，清理返回错误、保留 `armed` 和未回收身份、不报告成功；只有 `ENOENT`/`ESRCH` 才按“已退出”处理（由注入式 `ProcSource` 用例分别验证）。超过 5 秒预算时错误列出剩余 PID 与进程组，后续 stop/Drop 仍负责重试。`SessionGuard` 是测试自有、独立于生产清理路径的保险：断言失败时也会清理本夹具的会话，且仅在会话被验证为空后才解除。
+  **读/写与停止**：停止请求分两个状态——`stop_requested` 立即让写入返回 `closed`（报告已接受字节、之后不再写入），并让阻塞读停止等待；`cleanup_done` 只在会话验证为空且 leader 已回收后才置位。停止后读走有界非阻塞排空：单次调用最多返回请求页大小、每字节只返回一次，已排队的尾部输出不会因为 stop 而被丢弃；空排空只有在清理已确认或终端真实关闭（读回 0/EIO）时才报 `eof`，清理未完成或失败时报 `cleanup_pending: true` 且 `eof: false`，绝不阻塞等待新输出。真实用例用测试专用的一次性 stop 钩子把“已请求、未清理”的窗口固定住，让仍存活的子进程在该窗口写入尾部，再验证尾部可达且此时不报 EOF。
+  **边界**：主动 `setsid`/双重 fork 成为守护进程、或被 service manager 接管的进程已离开该会话，不在保证内，模块不作此承诺。假设本进程是唯一回收该直接子进程的一方（没有外部 reaper，也未把 SIGCHLD 设为 SIG_IGN）；若外部回收导致 `try_wait` 失败，清理保持 armed 由后续 stop/Drop 重试，但不保证成功。未验证：跨进程 IPC 与所有者语义、持久输出/TaskGet、TaskStop 注册、驱动进程死亡、信号与真正的中断投递、Windows ConPTY、macOS 与其他 Unix、真实远端服务。
+- 内部托管 PTY 所有者（第 39 轮，仅内部模块）：`cargo test --locked -p deepseek-code-core --lib tools::pty_owner`。
+  契约：新增 `crates/core/src/tools/pty_owner.rs`，在传输层之上加入拥有者、私有 IPC 与持久合并输出；**仍未**注册 `interaction:"pty"`，`TaskInput` 明确只接受 `interaction:"pipe"`，Bash/前台执行与 pipe 行为不变，模块只在 Linux 编译。
+  **线程模型**：`start` 只创建一个拥有者线程，它自己再创建一个 accept 线程并在退出前 `join` 它；连接由 accept 线程串行处理，最多同时保留 4 个 pending，请求经 `sync_channel(4)` 交给拥有者，没有每连接线程池。accept 线程**不因 pending 满而停止 accept**：控制 `stop` 在满额时仍会被接收、校验并在准入处认领；超过容量的普通请求立即以 `not_executed`/`may_have_been_written:false` 拒绝（不进入 backlog、不占槽位），因此 pending 集合与内存仍有界。`start` 在**调用线程**上先登记 active owner 再创建子进程和拥有者线程；登记 guard 转入拥有者线程，`Drop`/最终清理完成后才递减；启动中途失败走统一回滚（停止会话、写启动失败状态、标记任务 failed）。其后的 `OwnerGuard` 拥有拥有者线程的 `JoinHandle`；`stop_and_join` 直接设置共享 stop/cancel 并写 `cancel` 标记、在预算内等待线程结束、`join` 并返回 `terminal-state.json`，`Drop` 做同样的有界 `join`（SIGKILL 不在保证内）。没有任何进程级 registry 会被忘记 drain。
+  **请求生命周期**：每个请求有 `QUEUED/CLAIMED/CANCELLED_BEFORE_EXECUTION` 状态单元；拥有者在产生任何效果**之前**用 `compare_exchange(QUEUED, CLAIMED)` 认领，accept 线程只有在自己的 `compare_exchange(QUEUED, CANCELLED)` 成功时才可回复 `not_executed`/`may_have_been_written:false`。`stop` 不是排队的普通命令：accept 线程先校验信封/所有权并计算绝对 deadline，仅当 `now < deadline` 时以 `compare_exchange(QUEUED, CLAIMED)` **在准入处认领**，随后立即设置 owner stop/cancel 与各 pending 请求的取消位并回复 `cancellation_requested:true, confirmed:false`；因此过期、未认证或未认领的 stop 没有任何副作用，并发的多个 stop 幂等且不存在会把对方取消“清掉”的路径。进行中的长写会观察 guard 停止、跨进程 `TaskStop` 标记、已认证的端点 stop 和对端断连；被认领的写只报告真实已接受前缀与剩余字节，绝不把超时或取消说成“未写入”。已认领或已完成的请求在 `EXECUTION_GRACE` 内等真实回复，超时回 `outcome:"unknown"`、`may_have_been_written:true`。客户端只用一个绝对 deadline，并在发送帧前把**剩余预算**作为 `timeout_ms` 发出，因此连接与组帧都计入调用方窗口；`resize`/`stop` 同样携带该预算，服务端不会回退到默认值。**注意区分**：端点 socket 路径被删除（path loss）不是对端断连；拥有者持有已绑定 inode，观察不到路径删除，所以路径丢失本身不取消进行中的写，取消仍须走 guard/`cancel` 标记等控制路径，且已接受字节与清理结果照常报告。
+  **端点与认证**：socket 位于 `$XDG_RUNTIME_DIR/dcl-pty-<uid>/pty-<generation>.sock`（否则临时目录），目录 0700、socket 0600、`terminal.json` 0600；记录 `generation`、`endpoint`、`socket_dev`、`socket_ino`、`token`、`owner_pid`。客户端先按会话/租约/心跳校验，再 lstat（非符号链接）、要求 socket 类型、本人 uid、0600、父目录 0700 且 dev/ino 与记录一致；**连接之后**再用 `SO_PEERCRED` 校验对方 uid 与 `owner_pid`，并重新 stat 路径复核 dev/ino，所以“检查与连接之间被替换”也会被拒绝。服务端对每个请求独立校验 `version`、常量时间 token、`generation`、`task_id`、`session`，不依赖调用方自检。连接使用非阻塞 `connect(2)` + `poll` + `SO_ERROR`（`EAGAIN` 表示 backlog 已满则重试），有绝对 deadline 与取消标志，**不创建连接线程**；独立子进程用例证明 backlog 饱和时反复超时不会增长线程或描述符。
+  **输出与终止**：拥有者持续把 PTY 合并输出原样追加到 `stdout.log`，`stderr.log` 留空并在任务元数据标记 `merged_output:true`（不声称分离流）；UTF-8 边界与分页由既有 `output_page` 处理，`TaskGet` 光标/代际/去重尾部规则不变，查询超时不会影响拥有者或子进程。`TaskStop` 写 `cancel` 标记、IPC `stop` 先回 `cancellation_requested:true, confirmed:false`；只有 `transport.stop()` 完成会话清理、最终排空结束后才写 `terminal-state.json` 并更新任务记录一次。**四类事实分开记录**：子进程清理结果、输出捕获（写与 flush 错误、最终排空是否完整）、`terminal-state.json` 写入、`TaskUpdate` 持久化。任一输出失败只算输出失败（`cleanup_complete` 仍可为 true，状态 `failed`），不冒充清理失败；`terminal-state.json` 或 `TaskUpdate` 任一路径失败时 `OwnerGuard::stop_and_join` 返回错误（两者都失败时错误同时指明），保存的元数据在可能时刷新为 `task_record_updated:false` 与错误信息，绝不以 `Ok`/`completed` 加标志位的样子返回成功。最终排空用真实排队字节验证（暂停拥有者、让子进程填满输出队列、再清理并核对日志增长与分页仅出现一次），注入的“尾部”仅用于故障注入用例，不作为“真实读取排队字节”的证据。清理失败时任务状态一律为 `failed`（绝不 `cancelled`/`completed`），并记录 `cleanup_complete:false`、`final_drain_complete`、`cleanup_error`；重复 stop 幂等。写入/刷新完成只表示文件系统接受了字节，**未做 fsync**，不作持久性承诺。
+  **明确未完成**：`request_id` 只是关联 id，没有持久去重记录，丢回复一律 `outcome:"unknown"` 且不自动重试；拥有者被 SIGKILL 时不执行 `Drop`。Linux 上由在子进程之前独立 exec 的 supervisor 通过启动握手取得已发布的 session 身份，owner 退出后按 pidfd + start tick 验证并清理该 session 的成员（含 job-control 子进程组）。`tools::pty_owner::tests::owner_sigkill_cleans_the_whole_terminal_session` 用忽略 HUP 的受控夹具使只有 supervisor 能结束成员，独立按 PID+start tick 验证 leader、后台作业和 sub shell 均已退出、无关 sentinel 仍存活、延迟写入没有发生；`supervisor-state.json` 分开记录 `owner_lost:true`、`os_cleanup_complete`、`output_finalized:false`、`task_record_updated:false`；重开任务时 `TaskGet` 依该经 pidfd 验证的 owner 死亡记录**幂等 reconcile** 持久任务为 `failed`（`owner_loss.reason:"owner_lost"`），并分开返回 `os_cleanup_complete`、`output_finalized`（恒为 false，清理进程不等于日志读到 EOF）、`session_published`、`persistence_complete`、`task_record_updated`，绝不写入 `success:true`/`exit_code:0`；已有 `completed`/`cancelled`/`failed` 终态不会被较旧的监督记录覆盖，重复查询不改写记录，输入不重放。`cleaned_pids` 只记录实际接受信号的成员，自行先退出的成员不强制列入，但每个被声明的 PID 必须存在于清理前观测到的 session 中且该实例已退出。owner 在 gate spawn 之后、session 发布之前的 SIGKILL 窗口由 `tools::pty_owner::tests::owner_sigkill_before_publication_never_runs_the_user_program` 覆盖：测试构建在真实 gate 子进程创建之后、`accept_specification`/`session.json` 之前进入受控屏障，记录 owner 与 gate 的 PID+start tick 后阻塞；父测试确认屏障到达、用户命令标记与后代标记从未出现后，只 SIGKILL 确切的 owner。supervisor 如实记录未发布 session（`session_published:false`、`os_cleanup_complete:false`、`status:"failed"`、无 `success`），gate 实例按 PID+start tick 证明退出，无关 sentinel 存活；`TaskGet` 依据同一条 owner 死亡记录把持久任务从 `pending` reconcile 为 `failed`（`session_published:false`），不再永远停留 `pending`，且没有 `terminal-state.json`。该屏障只在 `cfg(test)` 编译，生产构建和模型输入都不可达。正常 owner 结束时监督记录反映 `terminal-state.json` 的真实终态（`tools::pty_supervisor::tests::a_normal_finish_reflects_the_owner_terminal_status`；`tools::pty_owner::tests::a_normal_owner_finish_is_not_recorded_as_a_supervisor_failure` 用自行退出的子进程验证 `completed` 不被写成 `failed`）；缺失或损坏的 `terminal-state.json` 记录为显式 `failed` 加错误（`a_missing_or_damaged_terminal_state_is_never_success`），缺失的监督记录不改变历史表现、损坏的监督记录使查询有界报错且不改写任务（`a_missing_or_damaged_supervisor_record_never_fabricates_a_terminal_state`）。gate 的同 uid 认证与 stale socket 清理仍未验证/未完成；Windows ConPTY、macOS、跨进程 owner 语义扩展、持久 TaskGet 集成与 TaskStop 注册均未完成。
+- 内置 `GitHub` 薄封装（第 31 轮）：`cargo test --locked -p deepseek-code-core --lib tools::github`、`cargo test --locked -p deepseek-code-core --lib permissions::manager`、`cargo test --locked -p deepseek-code-cli --test github_tool`。
+  契约：单个按需加载的内置工具 `GitHub`（不在核心工具集，只能由 ToolSearch 暴露），操作仅有 `repo_view`、`issue_list/view/create/comment`、`pr_list/view/create/comment/merge`；未知操作在启动任何进程之前拒绝。所有调用以参数向量交给已安装的 `gh`，从不拼接 shell 命令；schema 不暴露 token、host、URL、`confirm` 或任意命令字段，`additionalProperties:false`。`repo` 只接受 `owner/name`（字母数字与 `.`、`-`、`_`，且不以 `.`/`-` 开头），省略时由当前目录解析。
+  读操作返回规范化 JSON（蛇形字段；REST 与 `--json` 两种命名都归一），列表用 `gh api --include` 并输出 `page`、`per_page`、`count`、`items`、`has_more`、`next_page`（来自 `Link: rel="next"`），`issue_list` 会剔除 REST 混合返回的 PR 并计入 `filtered_pull_requests`。`labels` 过滤器只属于 `issue_list`（`labels=help%20wanted,bug` 编码保持不变）；`GET /repos/{owner}/{repo}/pulls` 本身没有 `labels` 参数，所以 `pr_list` 带非空 `labels` 会在启动 `gh` 之前被拒绝（`pr_list_refuses_a_label_filter_without_running_gh`，假 `gh` 调用计数为 0；纯校验函数由平台无关的 `the_label_filter_belongs_to_the_issue_list_only` 覆盖），不会静默返回未过滤的 PR。`issue_create`/`pr_create` 的 `--label` 行为不变。原始响应有 1 MiB 硬上限：超过时返回 `error_kind:"output_limit"`，绝不把截断缓冲当作 JSON 解析；完整页面内再按字段裁剪正文（8 KiB，`body_truncated`），因此大于工具展示上限（100 KiB）的合法页面仍能完整解析。其他错误分别报 `gh_missing`、`auth_required`（gh 退出码 4）、`cancelled`（2）、`invalid_json`、`empty_response`、`timeout`，stderr 有上限并去掉 `gho_`/`ghp_`/`github_pat_` 等令牌。
+  写操作把正文以 UTF-8 临时文件经 stdin 传入（`--body-file -`），从不进入参数；返回 `created`/`commented`/`url`/`number` 或合并结果。写操作绝不自动重试：超时或疑似传输失败返回 `outcome:"unknown"` 并要求先核对 GitHub；`create` 成功而随后的详情读取失败只记为 `detail_error`，仍报 `created:true`。`pr_merge` 必须给出 `merge_method`（`merge|squash|rebase`），可选 `match_head_commit` 头部守卫，永不生成 `--admin`/`--auto`/`--delete-branch`；gh 退出 0 只代表请求被接受，只有后续读取显示已合并才报 `outcome:"merged"`，否则报 `"accepted"` 并说明可能排队。
+  权限：同一工具按操作分类，读操作在 Plan 模式允许、写操作被拒绝；Ask/AcceptEdits 需确认，Bypass 允许；`--disallowed-tools GitHub` 等 deny 规则仍然生效，且"已加载"不构成授权。真实 CLI 用例 `crates/cli/tests/github_tool.rs` 用 PATH 上的假 `gh` 验证：ToolSearch 前请求中没有该工具、加载后 schema 正确、一次读经由正常执行器返回规范化 JSON、Pre/PostToolUse 各触发一次且 `tool_use_id` 与持久的 `tool_calls` 行一致（相互独立的 occurrence id，不是模型给的 id）、Plan 模式与 deny 规则下写操作被拒绝且假 `gh` 从未被启动。
+  **明确限制**：全部验证使用本地假 `gh`，未对真实 GitHub 执行任何创建/评论/合并；Windows 与 macOS 上的 `gh` 探测和 CLI 用例未运行（假 `gh` fixture 是 Unix shell 脚本，CLI 用例整体 `#![cfg(unix)]`）；取消/超时只证明自有进程被终止，不证明远端请求是否已被接受，因此写操作一律报 `unknown` 而不是推测结果。
 - `tools/mod.rs` 的 shell 启动、`services/tool_hooks.rs`、`mcp/mod.rs` 的 stdio 启动：`worker_environment`，并按 E4 复核后台与分离命令
+- `tools/apply_patch*.rs`、`tools/mod.rs` 的 ApplyPatch 注册与分发、`services/checkpoints.rs` 的补丁记录、`native_engine/model_tool_output.rs`：ApplyPatch 一节的三条命令，并在真实终端确认多文件补丁的改动摘要和 `unrestored` 提示
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `db/mod.rs`（`write_tx`）：`cargo test --locked -p deepseek-code-core --lib db::write_tx`（重试、非争用不重试、超时报 label、失败不留半行）与 `cargo test --locked -p deepseek-code-core --test session_concurrency`。真实争用复验：用 `VACUUM INTO` 复制数据库，`DEEPSEEK_CODE_DATA_DIR` 指向副本，另一个进程 `BEGIN IMMEDIATE` 占锁 8 秒，期间跑一轮带工具调用的请求，确认回合完成、日志有重试告警、工具行与快照完整；再占锁 40 秒，确认回合以带 label 的错误结束（不是裸 `database is locked`），且没有半成品工具行。
 - `db/message_repo.rs` 的请求快照去重（`request_blobs` / `*Ref`）：`cargo test --locked -p deepseek-code-core --lib db::message_repo`（同头只存一份、往返字段一致、旧内联行可读、缺 blob 不伪造、不修改调用方数据）、`cargo test --locked -p deepseek-code-core --test compaction_status_regressions` 与 `cargo test --locked -p deepseek-code-cli --bin dcl status_commands_tests`。历史数据不会自动回填：要缩小现有库需另跑一次性回填脚本并 `VACUUM`，验证方法是回填前后比较 `requests_json` 总字节、`request_blobs` 行数，并抽 3 条消息确认 `get_request_snapshots` 往返一致。
@@ -509,6 +714,7 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 6. 工具运行期间用独立 SQLite 连接持有写事务 3 秒：前台不弹锁库提示，继续显示工具结果并保留已有建议；持续锁超过 5 秒才提示状态延迟。释放锁后正常结束，过期建议不能获批；任务目录中没有新增 `cancel` 文件。
 7. 空标准输入失败后允许保留诊断日志，但不能创建会话数据库或配置；损坏的配置文件不能被覆盖。
 8. Windows 短暂独占 `pending-question.json` 后释放，前台仍能读取审批；持续占用时在有限重试后报告具体文件路径。文件已删除则视为审批已处理，其他会话不能读取或回答该审批。
+9. Ask 模式弹出普通权限审批时，直接输入 `/mcp state mockweather user-only` 再按 `Enter`：审批保持打开、选项不变，`j`/`k` 不再移动选择，选项下方显示 `Typed ahead: … · Esc keeps it and returns to the choices`。按 `Esc` 把已输入文字移出缓冲（不删除、也不回答），该行改为 `Kept for the input: … · answer the prompt as usual`，随后数字 `1`/`2`、`Enter` 和方向键恢复原有回答方式；回答后这段文字追加到输入框末尾且不自动提交。缓冲非空时按 `Backspace` 清空同样恢复快捷回答。审批因该回合结束等外部原因关闭时，已输入文字（含 `Esc` 移出的部分）按顺序追加到输入框末尾。计划审批、AskUserQuestion 和多选菜单的按键行为保持不变。
 
 ## Plan 联网与文件编辑授权回归
 
@@ -606,13 +812,146 @@ env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
 - 仅对 `SQLITE_BUSY`/`SQLITE_LOCKED` 的类型化错误回滚并推迟到下一个边界；所有权、信任、归档和写入错误仍作为错误返回。没有递归重试，也没有全局修改数据库超时。
 - 本轮只证明并修复了收件箱轮询这一条可复现的致命竞争路径。历史长回合退出（Super R27/R01/R28）和独立数据目录下的启动期失败仍未归因；启动期数据库打开/初始化也未加同样的操作名诊断，不能用本场景的通过结果替代。
 
+### Super Agent 0–2 阶段：子会话、任务存储与隔离
+
+本轮只覆盖 Router 之前的基础能力；Coder/Reviewer 调度、`/crp` 和 Desktop 入口尚未实现，不能按完整 Super Agent 验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：任务规格、状态机、完成门禁、存储、仓库发现和隔离共 64 项。重点检查：
+  - 损坏的 `.git` 指针、损坏仓库、Git 不可执行和不可读元数据都是 `DETECTION_FAILED`，不会降级为“无 Git”；已有文件目标从其所在目录探测，尚不存在的文件目标从最近存在的目录探测。
+  - 审核报告的信封与正文版本、轮次必须等于任务当前值；通过结论必须覆盖每条验收标准、不得重复或引用未知标准、必须有证据；空的提交/审核/集成版本不被接受；会话必须在数据库中真实存在，执行轨迹必须包含实现、审核和 Harness 事件；非 Git 快照必须通过内容校验。
+  - 上一轮 `BLOCKED` 或退回的报告保留为历史，不会永久阻止后续轮次；只按当前 `spec_version` 和 `review_round` 判断。
+  - 锁只按当前 `sa_locks` 判断所有权：释放后的旧 operation 重放返回 `Released`，不会被当作仍持有；非 Git 路径锁按规范化路径的祖先/后代关系冲突，`/target` 与 `/target2` 互不冲突；独立数据库连接的并发只有一个持有者。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_child`：真实 `dcl` 子进程加本地模型 mock（不连接真实服务）。子进程用 Bash 工具把 `pwd` 写入临时文件，验证首次和 `--resume` 后都在准备的工作目录；`conversations.workspace_path` 记录该目录；父工作目录没有子进程写入；旧的 Job 已完成、没有重复的活动子进程；尝试把已有子会话移到另一个目录会被拒绝。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::child_session`：抽取后的启动/继续逻辑 7 项，覆盖无效父会话、归档父会话、启动失败不写成功状态、重新使用同一会话和拒绝更换工作目录。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation` 与 `cargo test --locked -p deepseek-code-core --test delegation`：原有 Agent 委派和后台子会话行为不变（分别 22 与 4 项）。
+- 非 Git 快照场景包含在 `super_agent::isolation`：用户自己的 `manifest.json`、文件与目录互换、可执行权限、快照目录位于源目录内或其符号链接别名的拒绝、损坏或缺失 payload 时先校验后恢复（当前文件保持不变）、被跳过条目（依赖目录等）在清单中如实记录而不是声称已保护。
+- 当前无法自动化的部分：真实多仓库任务的合并与清理、Router 与 `/crp` 交互、Desktop 角色切换、Windows 上的路径与符号链接行为，均在后续轮次实现并单独验收。
+
+### Super Agent 第 3 阶段：角色、Router 工具与 CRP 启动
+
+本轮覆盖角色与工具授权、任务持久化事件和 Coder/Reviewer 启动。审核、集成、Watcher、`/crp` 页面和 Desktop 入口属于后续阶段，不能按完整流程验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：设置校验、角色持久化、CRP 工具授权、事件待处理/确定性处理、启动器与编排器共 93 项。重点检查：
+  - 角色默认 Agent，按会话持久化；`--role` 只在显式传入时覆盖，恢复会话时沿用已保存角色；角色与权限模式互不影响。
+  - Router 会话的工具表中没有 `Edit`、`Write`、`MultiEdit`、`NotebookEdit`，但仍保留只读工具和 `Bash`；执行层同样拒绝这些工具（计划文件的既有例外保留），伪造调用不能绕过。
+  - `CrpCreate`/`CrpList`/`CrpShow`/`CrpSend`/`CrpUpdateSpec`/`CrpAnswer` 只对 Router 开放且只作用于本 Router 的任务；`CrpAnswer` 只能回答存在、待处理、规格版本与权限策略版本都匹配的审批，重复回答同一 operation 返回原结果。
+  - `CrpSubmit`/`CrpProposeTask` 只对任务当前 Coder/Reviewer 开放；Coder 只能提交 plan/implementation/integration，Reviewer 只能提交 review/harness；报告正文与当前 `spec_version`/`review_round` 不符会被拒绝。成员工具只写待处理事件，不直接改变任务状态。
+  - `ingest_event` 与 `process_pending` 分离：未处理事件不改变任务；重复处理同一事件是 no-op；非法事件让整批处理失败且不留下半应用状态；只处理本 Router 的待处理事件。
+  - 编排器一次 tick 依次准备环境、以计划模式启动 Coder、按 `manual`/`auto` 策略创建或自动批准计划审批、批准后恢复同一 Coder；重复 tick 不产生重复会话、Job 或审批。配置的 Coder 模型不存在时回退 Router 模型并记录警告。
+  - Reviewer 使用按 `submitted_commit` 固定的独立工作树，与 Coder 可写工作树不同。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_router`：真实 `dcl` Router 会话调用 `CrpCreate`；宿主 tick 启动真实 `dcl` Coder，其本地模型 mock 调用 `CrpSubmit(plan)`；tick 生成审批；第二次真实 `dcl` 会话调用 `CrpAnswer`；tick 恢复同一 Coder。仅使用本地 mock，检查任务归属、阶段从 PLANNING 变为 IMPLEMENTING、会话 ID 不变、子进程工作目录为任务工作树、父工作目录无写入且没有重复活动子进程。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_child`：现有 Agent 子会话的真实工作目录与恢复行为不变。
+- 现有回归：`cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation`、`cargo test --locked -p deepseek-code-core --test delegation`、`cargo test --locked -p deepseek-code-cli`。
+- 当前无法自动化的部分：`/role` 交互渲染、等待用户输入时的手工恢复、参考文档第 13 节的完整配置项（本轮只读取 `router`、`agents`、`approvals.plan`、`review.maxRounds`、`scheduler` 中已被使用的字段）、Windows 下的工作树与进程行为、真实多仓库与审核/集成流程。
+
+### Super Agent 第 4 阶段：审核请求、Reviewer 查询与报告配对
+
+本轮覆盖提交版本固定、Reviewer 独立工作区、只读会话查询、报告配对和退回重审。集成、Watcher、`/crp` 页面、Desktop 入口和完整端到端仍未实现，不能按完整流程验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：设置、角色、CRP、审核请求、Reviewer 查询、隔离和编排共 110 项。重点检查：
+  - 任务规格的 `workspace` 与每个目标必须位于 Router 持久化工作区和 `settings.json` 的 `permissions.additionalDirectories` 之内；自称的规格工作区或外部目标在创建任何工作树/快照/子进程之前被拒绝，显式授权目录则被接受。
+  - 实现提交时检查任务工作树 `git status --porcelain` 为空并固定实际 `HEAD`；有未提交修改时任务阻塞且不启动 Reviewer。Round 增加后会重新固定新 `HEAD`，并使用 `agent/<task>-review-<round>` 的独立工作树。
+  - `review_request` 记录当前 `spec_version`/`review_round`、实际提交版本、事件序号范围、Coder 当前/历史/递归子会话、证据引用和 Harness 版本；非 Git 目标记录内容差异并生成独立审核快照。
+  - Reviewer 只能查询本任务 Coder 会话树；`SessionMessages`/`SessionEvents` 使用稳定游标分页，输出脱敏；`ArtifactRead` 只接受报告 ID 或任务 artifacts 目录中的普通文件，拒绝遍历、符号链接和跨任务路径。
+  - `CrpSubmit` 的 `payload` 暴露 plan/implementation/review/harness/integration 五种类型化 schema；Review 报告必须匹配当前阶段（`IMPLEMENTATION`/`FINAL_DELIVERY`）。Review 与 Harness 报告都到达后才作结论，与到达顺序无关；缺少任一份不推进任务。
+  - `CHANGES_REQUESTED` 增加轮次并把具体 issues 发回同一 Coder 会话；新实现提交后同一 Reviewer 会话被恢复并使用新的审核请求。`BLOCKED` 或达到配置阈值的 Harness 故障创建 `DELIVERY_BLOCKER` 审批；仅效率类建议不阻塞。
+  - 初始启动和每次恢复按 task/member/spec/round 持久化一个操作，并在任何外部进程之前预定会话与 Job UUID；重新打开数据库后按该身份继续或接管，不新建第二个会话/Job，也不重发已消费的指令。
+  - 保留 Job 在 `Command::spawn` 之前发布 `worker.claim`（独占执行令牌），spawn 成功后才写不可变的 `spawn.json`；`state.json` 在启动前由宿主写入预约，之后只由真实 supervisor 写入。快速子进程写出的 `completed`/`failed` 不得被宿主的旧 `starting` 快照覆盖。
+  - 接管已推进的 Job 之前，必须校验父会话、子会话、启动参数和规范化工作目录；不匹配时保留原始文件并明确失败，不得因为状态已是 `launched`/`running`/`completed` 而提前返回。
+- `cargo test --locked -p deepseek-code-core --lib services::background_sessions`：真实 supervisor（测试二进制以 `--exact --ignored` 调用生产 `run_worker_from_env`）加真实子进程。覆盖：终端状态在宿主发布后仍保留、spawn 后宿主中断的接管、重复 supervisor 因 claim 令牌不符而不执行子进程、身份/参数/工作目录不匹配在任意已推进状态下被拒绝、匹配的已推进 Job 被接管且不启动新进程。
+  - 支持的配置路径为 `settings.json` 的 `superAgent` 对象（camelCase 字段，例如 `review.maxRounds`、`review.blockingSeverity`、`review.maxTaskProposals`）；测试验证非默认值实际生效。
+- `cargo test --locked -p deepseek-code-core --lib services::session_messages::tests`：消息投递按 operation 幂等；重复 tool_use_id 或投递后崩溃重试只产生一条收件箱消息。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::tool_approval`：Coder 计划批准前 Write/Bash/ApplyPatch 在运行时被拒绝，计划文件仍可写；规格/策略不匹配的旧审批不能放行；当前审批放行，ExitPlanMode 切换到 Router 继承的权限模式。ApplyPatch 即使配置为常驻工具也不能出现在 Router 工具列表，直接调用仍须由 Router 编辑门禁拒绝；合入新编辑工具时同时验证展示和执行限制。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_router`：真实 Router/Coder 计划审批流程（仅本地 mock）。Coder 在批准前尝试 `Bash` 被硬拒绝且不创建文件；提交计划并获批后，同一会话执行只读 `Bash` 得到正常结果，证明计划门禁只阻止未批准的执行。
+- 当前无法自动化的部分：真实 Reviewer 模型进程的完整退回→修复→复审循环、非 Git 多目标端到端、Watcher、`/crp`、Desktop 和 Windows 行为；这些属于后续阶段，不能由本轮单元/编排测试替代。
+
+### Super Agent 第 5A 阶段：集成准备与 shell 状态暂存回滚
+
+工作区迁移会暂存会话已保存的前台 shell 工作目录。候选文件必须在任何重命名之前全部列出并校验，只接受精确的会话文件名和 `safe_cwd` 生成的精确 WSL 名（`<session>.wsl-` 加 16 位小写十六进制）；`.stale-*`、格式不合法的后缀和其他会话的文件都不能被选中。暂存第 N 个文件失败时，必须尝试恢复此前所有已暂存文件，并同时报告原始错误和每个回滚失败/保留的备份路径。
+
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::shell_cwd_tests`：9 项。覆盖第二个有效重命名被注入失败后第一个文件恢复、回滚也失败时保留备份并报告路径、恢复遇到新建的活动状态时拒绝覆盖、hard link 失败且目的地在同一时刻被创建时绝不替换、恢复/清理逐个尝试并汇总失败、清理失败发生在数据库提交之后不回滚缓存、stale/大写/长度错误/非十六进制后缀与其他会话不被选中。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::workspace::tests`：12 项。除原有成功迁移、事务中止恢复和托管工作树拒绝外，新增真实 `shell-cwd` 不是目录时数据库完全不变，以及提交后的清理失败保持新工作区且不恢复旧缓存。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::child_session::tests`：7 项，恢复既有工作目录行为不变。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：3 项。真实最终审核阶段仍在集成提交的隔离检出中读取 `pwd`、文件内容和 `HEAD`，目标分支保持基线，未产生交付/完成/清理事件。
+- 未验证：不支持 hard link 的文件系统只会得到明确错误并保留备份（没有覆盖式回退，可选可用性降级未实现）；进程崩溃时文件系统与数据库之间不承诺原子性；Windows 未运行。负向对照使用旧实现和新实现各自编译的独立探针，记录在开发支持目录的 `round13-evidence/negative-control/`。
+
+### Super Agent 第 5B1 阶段：交付预检与分支所有权
+
+本阶段只生成并持久化交付计划、取得协作式分支所有权，不写目标分支、不产生 `INTEGRATION_COMPLETED`、不清理工作树。目标必须是任务保存的精确 `refs/heads/<branch>`，不能回退到 `main`；基线、已审核提交必须都是集成提交的祖先，集成提交和树对象必须与主机验证过的 `INTEGRATION_PREPARED` 事实一致。计划只从主机事件和主机决定的已批准 Review+Harness 生成，模型报告里的成功布尔值不是证据。交付后验证每次都用 `git worktree list --porcelain -z` 重新发现当前目标分支的检出拓扑，不能因为计划当时是 `RefOnly` 就跳过检出检查。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent::delivery`：44 项。覆盖非 `main` 目标、未检出分支的 CAS 计划、带空格路径的 linked worktree 检出、脏/未跟踪/锁定/缺失工作树、非 Git-only 任务、旧/新内容对实现阶段或最终交付阶段复用的选择、基线移动返回 reintegration、外部任务竞争同一分支、按规范锁键排序的多仓库获取、部分获取失败只释放本次新锁、SQLite 触发器拒绝保存计划时释放新锁并保持 Git 不变且同一内容用新 attempt 重试成功、陈旧 spec/round 或仓库集合不能通过交付验证、部分多仓库交付结果与“代理声明不覆盖真实目标 OID”。第 16 轮新增：交付命令的 CAS/快进语义、忽略文件冲突中止、切换分支拒绝、派发收据幂等与冲突、交付观察记录幂等、所有权读取（释放后不再是持有者并报告实际持有者）、计划绑定的主机证据检查，以及“读取失败不得写入”的注入测试（伪造 `git` 使 `worktree list` 或 `status` 失败，断言没有调用 `update-ref`/`merge` 且目标不变）。
+  - 交付后重新发现检出：`RefOnly` 计划之后新建的 linked checkout 若索引/工作树仍是旧内容（例如 `D  reviewed.txt`）必须失败（父评审反例）；干净且 HEAD 等于批准提交的新检出可以成功；真正未检出的目标仍可通过；锁定、重复（fixture 用 `worktree add --force` 制造）、外来仓库、计划中的检出被删除、移动或切换到别的分支都给出明确原因而不是虚构成功；两个仓库其中一个的当前检出失败时保留另一个已验证结果。
+- `cargo test --locked -p deepseek-code-core --lib super_agent::integration::tests`、`super_agent::state::tests`、`super_agent::store::tests`、`super_agent::launcher::tests`、`super_agent::orchestrator::tests`、`super_agent::crp::tests`：9/15/23/13/16/7 项，5A 准备、状态门禁、存储、启动和编排行为不变。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::workspace::tests`、`native_engine::tool_loop::shell_cwd_tests`、`native_engine::child_session::tests`：12/9/7 项，第 13 轮的 shell 缓存修复保持。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：3 项旧场景（默认关闭交付）仍在 `DELIVERY_PENDING`/`PREPARED` 停止，目标分支不变。
+- 未验证：真正快进/`update-ref` 目标分支和 Coder 交付指令属于 5B2；协作式 `branch:` 锁不能阻止任意外部 `git` 命令；进程崩溃与数据库之间的原子性未承诺；Windows 未运行。证据日志在开发支持目录 `round15-evidence/`，每次尝试使用独立文件名。已成功持久化并显式释放的交付计划目前无法用同一证据重新取得所有权（通用 `TaskStore::try_lock` 的 `Released` 语义），该限制保留到 5B2 处理。
+
+### Super Agent 第 5B2a 阶段：单仓库交付经同一 Coder 执行
+
+交付默认关闭，只有 `settings.json` 的 `superAgent.delivery.enabled=true` 才启用，因此 0–5A/5B1 的既有流程和三个真实 CLI 场景保持原行为。启用后，处于 `DELIVERY_PENDING` 且有一个或多个 Git 仓库、没有非 Git 目标的任务会把主机验证过的集成提交逐个交给**原 Coder 会话**落地：已检出的目标分支在该真实工作树执行 `git merge --ff-only --no-overwrite-ignore`，未检出的目标执行带旧值的 `git update-ref` CAS。命令在派发前由主机按持久化计划生成，路径用单引号引用；每个 Git 读操作都必须成功，`worktree list`/`status` 读取失败时绝不继续写入。主机只负责调度与验证，真正写操作由 Coder 完成，且从不 push。
+
+- 派发前持久化 `sa_delivery_dispatches` 收据（task/spec/round、计划 operation、Coder 会话、purpose，随后绑定 job）。重复 tick 复用同一计划、收据和启动操作，不会重复派发；收据事实冲突会明确失败。
+- 已持久化的计划是权威：主机不再用移动后的目标重算基线。每次先检查计划仍绑定当前 `INTEGRATION_PREPARED`/`REVIEW_COMPLETED` 证据和 reviewed/integrated 提交，再检查 `branch:` 锁仍由本任务和本次 lock operation 持有；释放或被其他任务持有则阻塞，不派发、不写 Git、不窃取锁。
+- 第 33/34 轮把交付执行身份结构化：`DeliveryOperationIdentity`（版本、task/spec/round、计划 operation、证据/审核事件、内容指纹、repository、old/new OID、attempt、原 Coder 会话）决定唯一 purpose key（`delivery.v<N>.<sha256>`）；同一计划下 A/B 仓库或不同 attempt 得到不同 operation key 与 job，单独的 legacy `delivery` 只用于旧记录。身份随 operation、job 目录中的 `delivery-identity.json` sidecar、handle 和 receipt 传递；接管或观察前逐项校验。typed 记录缺少必需版本或字段会阻塞，不会静默降级为旧格式；sidecar 以原子 no-clobber 方式写入。
+- 旧 `purpose="delivery"` 记录只在完整持久化单仓库计划唯一绑定、且原 job 存在时才被接管；不升级为新记录、不猜测仓库、不另起子进程。
+- 第 35 轮实现顺序多仓库交付：完整持久化计划仍按 task/spec/round/证据校验仓库全集，不构造单仓库替身。每个 tick 按计划持久化顺序只推进一个尚未完成的仓库；同一 Coder 会话、每个仓库各自 typed purpose/job，不会并发恢复同一 Coder。已到达 approved new OID 的仓库只记录一次观察，不运行命令；待交付仓库在派发前重新读取该仓库的 old OID、ref、检出拓扑、干净状态和协作锁，历史观察不是新副作用授权。
+- 每个仓库的子进程停止后只验证该仓库并独立持久化观察；A 已交付而 B 仍是旧提交不算失败。B 失败时阻塞原因点名仓库，保留 A 的观察、真实提交和进度，不回滚、不提前产生 `INTEGRATION_COMPLETED`。只有全部计划仓库都有匹配的持久观察、且再次实时验证所有目标仍等于 approved new OID 后，才记录任务级完成；已观察仓库之后发生漂移会阻塞而不是刷新旧基线。失败仓库保持阻塞并保留原 attempt，不自动发明重试。
+- 有 job 收据时只做只读观察：运行中的子进程即使目标暂时匹配也不会被判定为完成；子进程停止后才按固定计划验证真实 ref 和当前检出。读取 job 时必须先验证实际文件的 job id、Coder session 和 Router parent，身份不符或状态不可读会明确阻塞并保留文件，不能把该 job 的状态当作交付证据。
+- 收据存在但尚未绑定 job 时，宿主读取 launcher 的持久化 operation；其内容必须先通过 task/spec/round/purpose、Coder role/resume kind 和原 Coder session 校验，之后才允许接管已保留或运行中的 job、绑定收据或观察状态。仅仅命中相同存储 key 不构成证据；矛盾记录、畸形 job ID、读取错误和不可解析状态都产生明确阻塞原因，原记录和文件保持不变，不会新起子进程或覆盖收据。
+- 只有主机验证通过才在同一事务内把仓库标为 `COMPLETED` 并追加 `INTEGRATION_COMPLETED`（`complete:true`），任务进入 `FINALIZING`。失败、脏检出、错误 OID 或成员伪造的成功消息都保持未交付并阻塞。
+- 第 37 轮补齐完成路径：`FINALIZING` 任务只通过既有事务门禁记录 `TASK_COMPLETED`，且需同时满足：持久不可变交付计划仍绑定当前 task/spec/round 及其准备/批准事件、仓库集合精确且唯一、所有目标再次实时验证仍等于 approved new OID、每个仓库都有匹配的持久观察、当前轮次存在可解码的 `FINAL_DELIVERY` Review 与 Harness、无仍在运行的 Coder/Reviewer 子进程，以及主机记录过对那份 harness 的分析事件（该事件只在存在真实、当前、非阻塞且被决定事件引用的 harness 时写入）。任一条件不满足即保留具体原因并等待或阻塞，绝不直接改状态、不伪造报告。
+- 内容未改变的集成沿用实现阶段批准进入交付，因此交付后由原 Reviewer 会话以独立 purpose `final-completion` 再提交一次真实 `FINAL_DELIVERY` Review+Harness（不复制、不改写实现报告）；内容改变时复用交付前的 `FINAL_DELIVERY` 审核。两个阶段 operation/job 互异。`CrpSubmit` 在 `FINALIZING` 只接受当前任务 Reviewer 的当前 spec/round 的 `FINAL_DELIVERY` Review 与 Harness，拒绝 `IMPLEMENTATION`、过期 round 和非成员提交；真正的工具拒绝会导致明确阻塞而不是无限等待。
+- 完成记录只写一次（确定性 operation），额外 tick 与重开数据库不会重复事件或重放交付；5B2a 本身不清理工作树；后续 S4a 已接入单 Git 仓库的 `COMPLETED` tick，清理规则与证据见下节。多仓库/非 Git 仍不产生 `CLEANUP_COMPLETED`。非 Git-only 任务即使处于 `FINALIZING` 也不会被该 Git 完成器标记完成，其快照完成规则留待后续增量。
+- 多个 Git 仓库按上述顺序交付；Git+非 Git 混合目标仍明确不派发，任务留在 `DELIVERY_PENDING` 并在 tick 报告中给出警告。已观察 A 之后，待交付 B 若检出变脏、目标 ref 漂移或协作锁被释放/被其他任务持有，编排层在启动任何子进程前以点名 B 的原因阻塞：A 的观察与真实 ref 不变、持久不可变计划的 old/new OID 和证据不变、不刷新基线、不重新获取或窃取锁、不产生全局完成事件。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：21 项。除原有场景外还有：未检出目标 CAS 成功；带空格路径的 linked checkout 原地快进成功；交付命令失败但成员声称成功时不交付并阻塞；计划已释放且他人持锁时不派发；持久化 `deny Bash` 规则下交付子进程收到真实 `Permission denied: Explicit tool deny rule`；交付前通过 `session_permission_mode` 把 Router 父会话改为 `DontAsk`（Orchestrator 仍以 `bypass` 构造，且不写 Coder 专属 deny）时，恢复的原 Coder 在 Bash 调用上收到真实 `Permission denied: dontAsk mode: ...`，目标、索引与文件逐字节不变、无完成事件、Coder 身份不变；Git 已被移动但宿主尚未观察时重开新 context/store/orchestrator 不重复派发、不在子进程运行时完成、停止后只观察一次；launcher `after-spawn` 崩溃边界（operation 已保留、job 已运行、handle 未写入、receipt 无 job）由新宿主按保留的 job 身份接管，不按旧基线重新校验、不重启子进程；同一崩溃边界下把 operation 的 `task_id` 改成另一个任务（仍写在其正确 key 下）时，新宿主在绑定收据或观察前明确阻塞，零重启、零重复命令、目标保持子进程真实写入后的提交、矛盾记录原样保留；当前 typed 身份的有效 receipt 已保存但从未启动、随后目标被外部移动时，恢复必须走到实时 drift 校验并以 `moved`/`approved plan is stale` 阻塞，零子进程、目标保持外部移动后的提交、无完成事件；已绑定的 receipt 被改指向同一 Coder 的另一个真实 job 时，新宿主在观察前阻塞，收据与 operation 原样保留（不覆盖为原 job 或其他 job）、零重启、零重复命令、目标保持子进程真实写入后的提交、无完成事件。真实集成报告由显式 fixture gate 持有：任务仍为 `INTEGRATING` 时重复 tick 必须复用同一 integration job/operation 且命令次数不变，释放后才允许进入最终审核。每个成功场景验证同一 Coder 会话、真实 Bash 工作目录、目标提交、逐字节内容、交付命令只执行一次、重复 tick 与重开数据库不重复派发。另有两个真实双仓库场景：两个独立 Git 仓库、不同目标分支、含空格路径；每个仓库由真实 `dcl` 子进程执行一次 Bash 交付命令，fixture 拥有的执行日志记录命令实际运行次数，durable `tool_calls` 记录两次 Bash 调用且 invocation ID 不同（provider 在两轮复用同一个 raw `delivery-bash` ID）。成功场景在第二个仓库子进程仍运行时确认没有任务级完成事件，释放后才最终完成；A 成功/B 失败场景保留 A 的观察与提交、点名 B 阻塞，重开宿主后不重放 A、不新增子进程。第三个双仓库场景覆盖“真实写入后、观察前”的宿主重开：B 子进程已执行真实 Git 命令但仍被模型完成门挡住时，丢弃旧 host/context，从同一持久化 DB 重开新 host 并 tick，必须接管同一 typed job/operation、零新增子进程、零 `INTEGRATION_COMPLETED`；释放后新 host 才观察到成功。最终完成后再额外 tick 和再次重开仍只有一个 `INTEGRATION_COMPLETED`，且不产生 `TASK_COMPLETED`/清理；A/B 执行标记各一次、durable invocation 仍为两个不同 ID。第 37 轮另加两个真实完成场景：内容未改变时，同一 Reviewer 被独立 purpose 再次恢复并提交真实的 `FINAL_DELIVERY` Review 与 Harness（工具结果确认两次 `Report recorded`），主机在只有 Review 时必须等待 Harness；内容改变时复用交付前审核、不新增子进程；两者最后都通过事务门禁进入 `COMPLETED`，只产生一个 `TASK_COMPLETED`；S4a 后单仓库的额外 tick 还须验证工作树/任务分支删除、归档 hash 与 OID、恰好一个清理事件，重开 DB 不重复。这些是真实单/双仓库实际交付；`crates/core` 的 `two_repository_deliveries_get_distinct_operations_and_jobs` 使用 fixture shell 子进程，只证明 A/B operation 与 job 互异，不能替代真实 CLI 证据。第 45 轮另加两个真实完成门禁场景（两者均仅 Linux 运行）：最终 `FINAL_DELIVERY` Review 与 Harness 已落库、真实子 Reviewer 仍停在 held 模型响应时，删除该 job 的 `state.json` 后必须阻塞且原因点名该 job，重开宿主仍阻塞、不新建替代 Reviewer、损坏证据保留；对照场景在报告齐全但 job 仍 running 时等待，释放 held 响应、真实子进程正常退出后才恰好产生一次 `TASK_COMPLETED`。就绪由数据库记录、HTTP mock step3 记录和 job 状态屏障证明。负例收尾不复用要求所有 job 成功的通用等待：先恢复被暂停的 supervisor，等它重新发布 `state.json`（避免子进程最后读取控制目录时与删除竞态），再释放响应；该故意损坏的 job 允许真实终态 `failed`/`cancelled`（缺失 state 不是退出证明），其他 job 仍要求 `completed`；子进程与 supervisor 的停止分别按记录的 PID+start 验证，sentinel 必须存活。
+- 预取观察者：`cargo test --locked -p deepseek-code-core --lib prefetch::`：2 项。`git status` 预取在独立任务中执行且可能与同一工作树的 `git add/commit` 重叠；观察者必须使用 `GIT_OPTIONAL_LOCKS=0`，否则 Git 会刷新并重写索引（短暂持有 `index.lock`），导致写入方报 `index.lock: File exists`。测试用“内容相同但 mtime 变化”使 stat 缓存失效：对照组证明普通 `git status` 会改写索引，观察者组要求索引字节完全不变且状态仍被缓存；负向对照（去掉环境变量）失败，修复后通过。
+- 未验证：失败仓库的受控重试协议、多仓库/非 Git 完成后的清理/工作树/分支归置、Watcher/UI、Git+非 Git 混合交付、非 Git-only 完成；上述“实时父策略”证明引擎按持久化父模式拒绝 Bash，不是操作系统级沙箱拒绝；外部 `git` 与协作锁之间的竞态仍不具原子性；Windows 未运行。
+
+
+### S4a：已完成单 Git 仓库的持久化安全清理
+
+状态机仅允许已 `COMPLETED` 的任务接收 `CLEANUP_COMPLETED`，状态仍保持 `COMPLETED`，其他终态事件继续拒绝。`COMPLETED` 的后续 tick 单独执行清理，失败只写 `cleanup_status=PENDING` 和持久原因，不改变任务完成状态。多仓库、非 Git 及混合目标明确 PENDING，后续需独立实现；本阶段不代表完整 Super Agent，也不含 Watcher/UI。
+
+- `cargo test --locked -p deepseek-code-cli --test super_agent_child`：首次和同目录恢复后，真实 `dcl --resume <child> --path <another-directory> --print ...` 必须非零退出并明确拒绝。比较全部 SQLite 表的逻辑行、job ID 集合、mock 请求数、原/父/新目录文件及两次 pwd 结果，拒绝路径不得写入或启动新工作。
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：清理测试使用真实临时 Git 仓库和既有交付/最终审核 fixture，经真实状态机完成后才执行。覆盖归档在删除之前、base→delivered binary diff、报告与 diff 的 SHA256/OID、目标和源目录不变、重复 tick/重开一次事件；dirty/untracked/ignored 内容保留、外部推进任务分支、错误路径/branch/common/外来工作树、artifact 写失败零删除、Git 分支锁导致工作树已删除但分支删除失败、两处 Git 成功后宿主中断恢复、无删除意图时资产缺失、资产重建、归档损坏、他人锁保留、缺失成员 job/报告、活动或未知子会话、子任务与不支持的清理范围。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：真实单仓库完成场景继续验证原 Coder/Reviewer、reviewed/integrated OID、交付一次和完成一次；清理 tick 验证 task worktree 与 agent branch 消失、源 checkout/目标提交保持、归档可读且 hash 匹配，重开仍恰好一次 `CLEANUP_COMPLETED`。未完成和多仓库场景继续保留原 no-cleanup 断言。
+- 持久 operation 绑定 task/spec/round/repository、完整 RepoTarget、完成事件和 delivery plan。先保存报告索引与 diff，后保存归档路径/hash 和逐步删除意图。缺失资产只能凭既有意图恢复，已记录删除后重建的资产必须保留。每次恢复先复核当前完成证据、job 状态、Git 注册/身份/交付 OID 和归档，禁止只按路径不存在判断所有权。
+- 只使用不带 force 的 `git worktree remove` 和 `git branch -d`；针对源 checkout 与目标分支不同的情况，仅为该命令指定已验证目标作为 upstream，不改持久配置。包括 ignored 文件在内的新增内容一律留待人工处理；`assume-unchanged`/`skip-worktree` 会隐藏修改，因此同样拒绝。归档基线必须是不可变 OID，分支删除前拒绝符号引用，避免重试时触及它指向的目标。目标状态观察不刷新用户索引。只按 delivery plan 中精确 task/lock operation 释放锁。已完成后的清理允许目标分支在交付 OID 上继续前进（交付 OID 必须仍是其祖先），任务分支仍必须精确指向交付 OID；完成门禁仍要求目标精确匹配，不能提前应用此放宽。
+- 保守限制：后台 job 的生命周期损坏/未知时，先核对目录 ID、session 和 parent_session；身份完整且明确无关的 job 不阻止清理，相关或身份缺失/冲突/不可读的 job 保持 PENDING 并记录具体原因。无法识别归属的 child-owner 记录仍保守处理。归档超过既有 64 MiB 限制同样保持 PENDING。协作锁不能阻止外部 Git/文件写入；文件系统/Git 与 SQLite 之间不承诺原子性，恢复依靠持久意图与实时复核。Windows/ConPTY、Watcher/UI、多仓库与非 Git 清理未验证/未实现。
+
+相同 cleanup-pending 原因连续 tick 及重开不重复警告，原因变化仍告警；不支持的多仓库/非 Git/混合形态在任何 Git/归档检查前返回。`cleanup_allows_target_to_advance_after_completion`、`cleanup_rejects_target_that_no_longer_contains_delivery`、`cleanup_unknown_jobs_are_filtered_by_readable_identity` 和 `cleanup_pending_warning_is_deduplicated_and_changes_are_reported` 覆盖第 3 轮修正；保留任务分支被推进的拒绝断言。第 3 轮仅跑受影响组，证据见 `super-agent-20261110/codex-round-03-report.md`。
+
+第 2 轮命令、实际匹配数量、退出码与源码 hash 见相邻开发支持目录 `super-agent-20261110/codex-round-02-report.md`；不把历史数量或 core fixture 证据当作真实 CLI/其他平台的通过结果。
+
+### Linux PTY 模型入口（Codex P3）
+
+`cargo test --locked -p deepseek-code-cli --test pty_worker -- --nocapture` 使用本地 OpenAI mock、真实 CLI 持久 worker 与隔离会话库：模型通过 ToolSearch/Bash/TaskInput/TaskGet/TaskStop 运行完整链路，日志输出 `PTY_WORKER`、`PTY_ID`、`PTY_CLEANUP`、`PTY_DB_CALLS`、`PTY_TERMINAL` 作为本次精确身份和清理证据。核心回归保留 `tools::pty_owner::tests` 当前 HEAD 的 38 个独立用例（旧任务草稿写 39；backlog 子进程复跑不重复计数）、`owner_loss` 过滤器实际匹配的 4 项、`tools::pty_supervisor::tests` 3 项；另覆盖 `tools::pty_bash`、`tools::shell_input`、`tools::tasks` 与 `permissions::manager::session_rule_tests`。普通管道运行 `task_input`、`task_input_worker`、`task_input_owner_death`，TaskGet 回归运行 `taskget_backends`、`taskget_background`。按本文必跑命令完成 core/CLI 全套及 Desktop all-targets 编译。
+
+- Linux Bash `interaction:"pty"` 必须同时 `run_in_background:true`；初始 `rows` 1..500（默认 24）、`cols` 1..1000（默认 80）。使用普通 Bash 构造完成的 program/argv/environment/cwd，保留 shell 配置、session environment、权限、hooks、path scope。当前配置了 sandbox、显式 Bash 进程 timeout 或 Monitor 时明确拒绝；不回退到无 sandbox。TaskGet 的等待 timeout 不终止进程。
+- OwnerGuard 由运行时持有到真实退出；活跃计数沿用 worker 生命周期。真实 tty 检查覆盖 stdin/stdout/stderr、`/dev/tty`、初始 `stty size`，模型 resize 后必须读到 `40 120`，下一 resume turn 继续输入。活跃时拒绝 worker shutdown；TaskStop 后确认任务 cancelled、清理完成和 PID/start tick 对应的进程退出，再关闭 worker。
+- TaskInput 先完整校验参数，再按所属会话中 owner 写入的 task kind 分派。模型不能通过 TaskUpdate 更改 managed task 的 interaction/log_dir，也不能伪造 managed_shell。resize 必须单独调用；与 data/eof 混用、未知字段、非法尺寸/timeout 都在任何写入前拒绝。
+- PTY eof 发送当前 canonical VEOF；它不是永久关闭 stdin，有缓冲输入时可能仅交付缓冲。真实用例在 read 返回 EOF 后继续 read，下一次模型输入仍成功。非 canonical 或禁用 VEOF 的能力错误、部分写入/取消不重放由既有 owner/transport 套件验证。正常 exit 0、非零退出与 TaskStop 分别检查 completed、failed、cancelled，不手工改 task 状态。
+- 模型入口验证 plan 拒绝 PTY 启动和 TaskInput、PreToolUse deny 拒绝输入、显式 Bash deny 与 sandbox 拒绝启动；marker 不变。外 session 输入拒绝。TaskGet 分页拼接与完整输出完全相等；SQLite 各调用 occurrence ID 独立，成功输入的 hooks ID 与持久行对应。
+- 初始化目录失败不留下 running task 或 child；执行 gate 已启动但目标 exec 失败时，TaskGet 必须给出 failed 与真实清理结果。失败日志保留，不把 Bash 返回 running 当成目标程序已成功 exec。
+
+范围：仅 Linux 接线。Windows/ConPTY、macOS 明确未实现；不以 Linux 编译或内部 owner 测试代替这些平台、Desktop 运行、远程模型或完整长输出压力验收。
+
+### ToolScript 的 Super 身份与公共编辑门禁
+
+ToolScript 保持按需加载。Router 可以加载它来组合允许的工具，但内层 Write、Edit、ApplyPatch 仍须经过直接调用的 Router 门禁；隐藏工具 schema 不能代替执行时拒绝。Bash 沿用直接调用的 Router 权限语义。Coder 的业务写入与 Bash 在当前任务计划批准前拒绝，过期规格审批不能放行；普通会话的持久 plan 模式同样约束内层调用。
+
+- `cargo test --locked -j 2 -p deepseek-code-core --lib toolscript`：包含 `router_can_load_toolscript_but_nested_edits_hit_the_direct_call_gate`，验证默认不加载、加载后 Router 可见、安全 Read 成功、三种内层编辑与直接调用收到相同公共门禁拒绝。
+- `cargo test --locked -j 2 -p deepseek-code-cli --test toolscript_super_agent -- --nocapture`：4 项使用真实私有 worker，验证 Router 三种编辑拒绝；Coder 无审批/过期审批拒绝 Write、Edit、ApplyPatch、Bash，当前审批后四者均产生预期文件内容；持久 plan 覆盖 job 的 bypass 快照；损坏 Super 身份在首个调用前持久失败。断言逐调用结果、调用数量及文件副作用，而不只看进程退出或脚本完成。
+- engine 和 worker 都调用 `ToolLoopExecutor::with_durable_super_agent`，从数据库加载角色及任务成员关系。读取/解析错误不能降级成普通 Agent。内层仍走 `prepare_tool_call_with` → `execute_tool_call_inner` → `permission_hard_denial_for` / `super_agent_plan_gate`，没有 ToolScript 专用编辑拒绝名单。
+
 ### 模型请求压缩（CompactContext）
 
 模型在任务完成后可以请求在下一条用户消息前压缩；当前回合继续用完整历史，请求不会立即执行。历史不足窗口 30% 或刚压缩过时拒绝。
 
 1. `cargo test --locked -p deepseek-code-core --lib compaction_requests`：低于 30% 拒绝且不留请求；达到 30% 保存并只取用一次；刚压缩后只有一条用户消息时拒绝、两条后允许；后一次请求覆盖前一次。
 2. `cargo test --locked -p deepseek-code-core --lib tool_loading`：没有上下文用量快照时工具不在内置目录；`Some((50,100))` 时在目录中且默认按需加载；`delegation_depth = 1` 的子代理不提供；`tool_search_finds_compact_context_by_plain_words` 验证提问式搜索 `compact summarize session memory` 与单词 `compaction` 都能命中。
-3. `cargo test --locked -p deepseek-code-cli --test session_worker compact_context_is_offered_in_a_worker_terminal_session`：真实会话 Worker（`worker_frontend` 提交、`persistent_worker` 以 `&mut None` 运行回合）中，ToolSearch 后下一请求包含 `CompactContext`。只看 `input.is_some()` 会把真实终端判为无主会话，去掉 Worker 目录判定时该用例失败。
-4. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
-5. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
-6. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。回合实际在会话 Worker 里执行（`input` 为 `None`），有主判定必须同时接受 Worker 控制目录；远端/SDK 宿主不得据此启用。
+3. `cargo test --locked -p deepseek-code-core --lib tool_search`：没有工具命中全部关键词时，命中至少一半（且其中一个词属于工具名）的工具仍会加载，最多 3 个；单靠描述里的无关词不能凑够一半。
+4. `cargo test --locked -p deepseek-code-cli --test session_worker compact_context_is_offered_in_a_worker_terminal_session`：真实会话 Worker（`worker_frontend` 提交、`persistent_worker` 以 `&mut None` 运行回合）中，ToolSearch 后下一请求包含 `CompactContext`。只看 `input.is_some()` 会把真实终端判为无主会话，去掉 Worker 目录判定时该用例失败。
+5. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
+6. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
+7. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。回合实际在会话 Worker 里执行（`input` 为 `None`），有主判定必须同时接受 Worker 控制目录；远端/SDK 宿主不得据此启用。

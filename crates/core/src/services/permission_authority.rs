@@ -55,6 +55,22 @@ pub fn record_conn(
 pub fn record_user(db: &DbManager, session: &str, content: &Value) -> Result<()> {
     db.with_conn(|conn| record_conn(conn, session, Source::User, content))?
 }
+/// Records the user's launch instruction only when the session has no user
+/// authorization yet. A crash between session creation and binding is repaired
+/// without duplicating the reviewed intent.
+pub fn ensure_user(db: &DbManager, session: &str, content: &Value) -> Result<()> {
+    db.with_conn(|conn| -> Result<()> {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_permission_authority WHERE conversation_id=?1 AND source='user')",
+            [session],
+            |row| row.get(0),
+        )?;
+        if present {
+            return Ok(());
+        }
+        record_conn(conn, session, Source::User, content)
+    })?
+}
 /// Forks and owned children inherit reviewed human intent; an empty /clear does not.
 pub fn inherit_conn(conn: &Connection, parent: &str, child: &str) -> Result<()> {
     conn.execute("INSERT OR IGNORE INTO session_permission_authority(conversation_id,source,origin_id,content_json) SELECT ?1,source,origin_id,content_json FROM session_permission_authority WHERE conversation_id=?2 ORDER BY id", params![child,parent])?;

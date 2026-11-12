@@ -654,6 +654,71 @@ pub fn load_settings(
     workspace: &Path,
     project_trusted: bool,
 ) -> Result<LoadedPermissions> {
+    load_settings_inner(data_dir, workspace, project_trusted, false)
+}
+
+/// Same merge as `load_settings`, from the same single parse of each source,
+/// but a source that exists and cannot be read or parsed is an error instead of
+/// being skipped. A missing source is still normal. A running job uses this so a
+/// stored deny cannot silently disappear from a file read only once.
+pub(crate) fn load_settings_strict(
+    data_dir: &Path,
+    workspace: &Path,
+    project_trusted: bool,
+) -> Result<LoadedPermissions> {
+    load_settings_inner(data_dir, workspace, project_trusted, true)
+}
+
+/// Strict type check for the fields the merge reads. The interactive CLI treats
+/// a malformed field as "no rules"; a running job must not, because a `deny`
+/// that is not an array of strings would silently disappear. `null` carries no
+/// rules and is treated as absent.
+fn validate_permissions_shape(permissions: &Value, path: &Path) -> Result<()> {
+    let object = permissions
+        .as_object()
+        .with_context(|| format!("permissions must be an object in {}", path.display()))?;
+    for field in [
+        "allow",
+        "ask",
+        "deny",
+        "additionalDirectories",
+        "defaultMode",
+    ] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        if field == "defaultMode" {
+            ensure!(
+                value.is_string(),
+                "permissions.defaultMode must be a string in {}",
+                path.display()
+            );
+            continue;
+        }
+        let entries = value.as_array().with_context(|| {
+            format!(
+                "permissions.{field} must be an array of strings in {}",
+                path.display()
+            )
+        })?;
+        ensure!(
+            entries.iter().all(Value::is_string),
+            "permissions.{field} must contain only strings in {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn load_settings_inner(
+    data_dir: &Path,
+    workspace: &Path,
+    project_trusted: bool,
+    strict: bool,
+) -> Result<LoadedPermissions> {
     let mut loaded = LoadedPermissions::default();
     let sources = [
         (data_dir.join("settings.json"), true),
@@ -669,6 +734,9 @@ pub fn load_settings(
         }
         let edit = match read_settings(&path) {
             Ok(edit) => edit,
+            Err(error) if strict => {
+                return Err(error).with_context(|| format!("Reading {}", path.display()))
+            }
             Err(error) => {
                 tracing::warn!("Ignoring invalid permission settings {}: {error:#}", path.display());
                 continue;
@@ -677,6 +745,13 @@ pub fn load_settings(
         let Some(permissions) = edit.value.get("permissions") else {
             continue;
         };
+        if strict {
+            // `string_rules`/`validate` below deliberately skip malformed
+            // entries for interactive use. A running job must not: a `deny`
+            // that is a number, a mixed array or an invalid pattern would
+            // silently disappear and leave an old allow in force.
+            validate_permissions_shape(permissions, &path)?;
+        }
         for (key, action) in [
             ("allow", PermissionAction::Allow),
             ("ask", PermissionAction::Confirm),
@@ -684,7 +759,11 @@ pub fn load_settings(
         ] {
             for rule in string_rules(permissions.get(key).unwrap_or(&Value::Null)) {
                 let rule = crate::permissions::patterns::canonical_rule(&rule);
-                if crate::permissions::patterns::validate(&rule).is_err() {
+                if let Err(error) = crate::permissions::patterns::validate(&rule) {
+                    if strict {
+                        return Err(error)
+                            .with_context(|| format!("Invalid {key} rule {rule:?} in {}", path.display()));
+                    }
                     tracing::warn!("Ignoring invalid permission rule {rule} in {}", path.display());
                     continue;
                 }
@@ -974,6 +1053,66 @@ mod tests {
         assert_eq!(saved["permissions"]["allow"], json!(["Read", "WebFetch(domain:example.com)"]));
         let loaded = load_settings(&temp.path().join("data"), workspace, true).unwrap();
         assert_eq!(loaded.rules.get("WebFetch(domain:example.com)"), Some(&PermissionAction::Allow));
+    }
+
+    /// The lenient CLI path keeps skipping malformed entries; the strict path a
+    /// running job uses must reject them, because a dropped `deny` would leave
+    /// an old allow in force.
+    #[test]
+    fn strict_loading_rejects_malformed_permission_fields_the_lenient_path_skips() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = data.join("settings.json");
+        let cases = [
+            (r#"{"permissions":[]}"#, "permissions must be an object"),
+            (r#"{"permissions":{"deny":5}}"#, "permissions.deny must be an array of strings"),
+            (
+                r#"{"permissions":{"deny":["Bash",1]}}"#,
+                "permissions.deny must contain only strings",
+            ),
+            (
+                r#"{"permissions":{"allow":"Bash"}}"#,
+                "permissions.allow must be an array of strings",
+            ),
+            (
+                r#"{"permissions":{"additionalDirectories":[1]}}"#,
+                "permissions.additionalDirectories must contain only strings",
+            ),
+            (
+                r#"{"permissions":{"defaultMode":5}}"#,
+                "permissions.defaultMode must be a string",
+            ),
+            (r#"{"permissions":{"deny":["Bash("]}}"#, "Invalid deny rule"),
+        ];
+        for (body, stage) in cases {
+            std::fs::write(&path, body).unwrap();
+            // The interactive path still loads what it can.
+            assert!(
+                load_settings(&data, &workspace, true).is_ok(),
+                "the lenient path must not fail on {body}"
+            );
+            let error = match load_settings_strict(&data, &workspace, true) {
+                Ok(_) => panic!("strict loading accepted {body}"),
+                Err(error) => error,
+            };
+            let text = format!("{error:#}");
+            assert!(text.contains(stage), "{body}: {text}");
+            assert!(text.contains("settings.json"), "{body}: {text}");
+        }
+        // A missing source is still normal, and well-formed rules still merge.
+        std::fs::write(
+            &path,
+            r#"{"permissions":{"allow":["Read"],"deny":["Bash"],"additionalDirectories":[]}}"#,
+        )
+        .unwrap();
+        let loaded = load_settings_strict(&data, &workspace, true).expect("well-formed settings");
+        assert_eq!(loaded.rules.get("Bash"), Some(&PermissionAction::Deny));
+        assert_eq!(loaded.rules.get("Read"), Some(&PermissionAction::Allow));
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_settings_strict(&data, &workspace, true).unwrap().rules.is_empty());
     }
 }
 

@@ -17,15 +17,21 @@ fn subagent_type_fork_survives_normalization() {
 
 #[test]
 fn fork_rejects_foreground_model_schema_and_tools() {
-    let foreground =
-        validate_fork(&json!({"agent_type":"fork","run_in_background":false}), false).unwrap_err();
+    let foreground = validate_fork(
+        &json!({"agent_type":"fork","run_in_background":false}),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
         foreground.to_string(),
         "A fork runs in the background; omit run_in_background or set it to true"
     );
     let model =
         validate_fork(&json!({"agent_type":"fork","model":"other-model"}), false).unwrap_err();
-    assert_eq!(model.to_string(), "A fork uses this session's model; omit model");
+    assert_eq!(
+        model.to_string(),
+        "A fork uses this session's model; omit model"
+    );
     let typed = validate_fork(&json!({"agent_type":"fork"}), true).unwrap_err();
     assert_eq!(
         typed.to_string(),

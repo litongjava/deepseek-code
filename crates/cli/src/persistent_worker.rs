@@ -19,7 +19,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
-type StatusTarget = Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
+type StatusTarget =
+    Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
 struct ModeControl {
     job_id: String,
     session_id: String,
@@ -32,7 +33,8 @@ struct ModeControl {
     full_access: bool,
 }
 type ModeTarget = Arc<std::sync::Mutex<Option<ModeControl>>>;
-type BashTarget = Arc<std::sync::Mutex<Option<Arc<deepseek_code_core::permissions::PermissionManager>>>>;
+type BashTarget =
+    Arc<std::sync::Mutex<Option<Arc<deepseek_code_core::permissions::PermissionManager>>>>;
 
 /// The turn this host admitted, if any. Kept next to the admission flag so a
 /// submission can tell "the turn that just finished is still releasing
@@ -327,7 +329,8 @@ async fn execute(
         );
         std::env::set_var(name, value);
     }
-    let mut cli = Cli::try_parse_with_mode_source(std::iter::once("dcl".to_owned()).chain(arguments))?;
+    let mut cli =
+        Cli::try_parse_with_mode_source(std::iter::once("dcl".to_owned()).chain(arguments))?;
     cli.normalize();
     ensure!(
         cli.resume.as_deref() == Some(worker.session_id.as_str()) && cli.command.is_none(),
@@ -344,8 +347,13 @@ async fn execute(
             .iter_mut()
             .find(|provider| provider.id == selection.provider_id)
             .context("Worker provider missing")?;
-        let expected=deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&provider.models,&selection.model).context("Worker selected model missing")?;
-        ensure!(model.id==expected.id,"Worker model snapshot mismatch");
+        let expected =
+            deepseek_code_core::native_engine::provider_manager::resolve_model_selection(
+                &provider.models,
+                &selection.model,
+            )
+            .context("Worker selected model missing")?;
+        ensure!(model.id == expected.id, "Worker model snapshot mismatch");
         let target = provider
             .models
             .iter_mut()
@@ -359,7 +367,9 @@ async fn execute(
         // Each job carries its own launch permissions.
         session.bypass_available = cli.allow_dangerously_skip_permissions;
         session.full_access = cli.full_access;
-        session.permissions.set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
+        session
+            .permissions
+            .set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
         session.auto_route =
             std::env::var("DEEPSEEK_CODE_WORKER_AUTO_ROUTE").as_deref() == Ok("true");
         session
@@ -378,11 +388,28 @@ async fn execute(
     let prompt = cli.prompt.as_deref().context("Worker prompt missing")?;
     let session = current.as_ref().unwrap();
     *bash_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.permissions.clone());
-    session.engine.set_owned_child_idle_ready(&session.id, false);
-    *status_target.lock().unwrap_or_else(|error|error.into_inner()) = Some(session.runtime_status_source());
+    session
+        .engine
+        .set_owned_child_idle_ready(&session.id, false);
+    *status_target
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(session.runtime_status_source());
     let current_provider = session.selected_provider().await?;
-    *mode_target.lock().unwrap_or_else(|e|e.into_inner()) = Some(ModeControl { job_id:id.into(), session_id:session.id.clone(), manager:session.permissions.clone(), db:session.store.db.clone(), provider:current_provider, owner_manager:None, bypass_available:session.bypass_available, full_access:session.full_access });
-    deepseek_code_core::permissions::set_full_access(session.full_access && session.permissions.get_mode() == deepseek_code_core::permissions::PermissionMode::BypassPermissions);
+    *mode_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(ModeControl {
+        job_id: id.into(),
+        session_id: session.id.clone(),
+        manager: session.permissions.clone(),
+        db: session.store.db.clone(),
+        provider: current_provider,
+        owner_manager: None,
+        bypass_available: session.bypass_available,
+        full_access: session.full_access,
+    });
+    deepseek_code_core::permissions::set_full_access(
+        session.full_access
+            && session.permissions.get_mode()
+                == deepseek_code_core::permissions::PermissionMode::BypassPermissions,
+    );
     let result = current
         .as_ref()
         .unwrap()
@@ -392,29 +419,71 @@ async fn execute(
         .hook_wake_cli
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(cli));
-    session.engine.set_owned_child_idle_ready(&session.id, result.is_ok());
-    let _mode_guard = mode_target.lock().unwrap_or_else(|e|e.into_inner());
-    deepseek_code_core::services::session_permission_mode::set(&session.store.db, &session.id, &session.permissions, session.permissions.get_mode())?;
+    session
+        .engine
+        .set_owned_child_idle_ready(&session.id, result.is_ok());
+    let _mode_guard = mode_target.lock().unwrap_or_else(|e| e.into_inner());
+    deepseek_code_core::services::session_permission_mode::set(
+        &session.store.db,
+        &session.id,
+        &session.permissions,
+        session.permissions.get_mode(),
+    )?;
     result
 }
 
-fn update_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str, mode: &str) -> Result<String> {
-    let target = target.lock().unwrap_or_else(|e|e.into_inner());
-    let control = target.as_ref().context("Session worker has no active initialized turn")?;
-    let bypass = deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::BypassPermissions;
-    ensure!(!bypass || control.bypass_available, "Live switching cannot enable bypass permissions unless the launch allows it");
-    ensure!(control.job_id == job_id, "Permission change targets a different job");
-    if control.owner_manager.as_ref().is_some_and(|manager| manager.get_mode() == deepseek_code_core::permissions::PermissionMode::PlanMode) {
-        ensure!(deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::PlanMode, "Owner remains in plan mode; child mode cannot expand its authority");
+fn update_live_mode(
+    worker: &Worker,
+    target: &ModeTarget,
+    job_id: &str,
+    mode: &str,
+) -> Result<String> {
+    let target = target.lock().unwrap_or_else(|e| e.into_inner());
+    let control = target
+        .as_ref()
+        .context("Session worker has no active initialized turn")?;
+    let bypass = deepseek_code_core::services::session_permission_mode::parse(mode)?
+        == deepseek_code_core::permissions::PermissionMode::BypassPermissions;
+    ensure!(
+        !bypass || control.bypass_available,
+        "Live switching cannot enable bypass permissions unless the launch allows it"
+    );
+    ensure!(
+        control.job_id == job_id,
+        "Permission change targets a different job"
+    );
+    if control.owner_manager.as_ref().is_some_and(|manager| {
+        manager.get_mode() == deepseek_code_core::permissions::PermissionMode::PlanMode
+    }) {
+        ensure!(
+            deepseek_code_core::services::session_permission_mode::parse(mode)?
+                == deepseek_code_core::permissions::PermissionMode::PlanMode,
+            "Owner remains in plan mode; child mode cannot expand its authority"
+        );
     }
     let job = jobs::get(&worker.root, job_id)?;
-    ensure!(job.session_id == worker.session_id && job.finished_ms.is_none(), "Permission change targets an inactive session job");
-    if deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::Auto {
-        deepseek_code_core::native_engine::auto_permissions::configured(&crate::services::context(&RuntimePaths::new(worker.root.clone())?)?, &control.provider)?;
+    ensure!(
+        job.session_id == worker.session_id && job.finished_ms.is_none(),
+        "Permission change targets an inactive session job"
+    );
+    if deepseek_code_core::services::session_permission_mode::parse(mode)?
+        == deepseek_code_core::permissions::PermissionMode::Auto
+    {
+        deepseek_code_core::native_engine::auto_permissions::configured(
+            &crate::services::context(&RuntimePaths::new(worker.root.clone())?)?,
+            &control.provider,
+        )?;
     }
-    deepseek_code_core::services::session_permission_mode::set(&control.db, &control.session_id, &control.manager, deepseek_code_core::services::session_permission_mode::parse(mode)?)?;
+    deepseek_code_core::services::session_permission_mode::set(
+        &control.db,
+        &control.session_id,
+        &control.manager,
+        deepseek_code_core::services::session_permission_mode::parse(mode)?,
+    )?;
     deepseek_code_core::permissions::set_full_access(control.full_access && bypass);
-    let _ = service::emit_event(&serde_json::json!({"type":"permission_mode","mode":mode,"session_id":control.session_id}));
+    let _ = service::emit_event(
+        &serde_json::json!({"type":"permission_mode","mode":mode,"session_id":control.session_id}),
+    );
     Ok(control.session_id.clone())
 }
 
@@ -434,7 +503,8 @@ fn current_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str) -> Resu
     );
     let mut reply = Reply::ok(Some(job_id.into()));
     reply.permission_mode = Some(
-        deepseek_code_core::services::session_permission_mode::name(control.manager.get_mode()).into(),
+        deepseek_code_core::services::session_permission_mode::name(control.manager.get_mode())
+            .into(),
     );
     reply.permission_session_id = Some(control.session_id.clone());
     reply.launch_rules = Some(control.manager.launch_rules(&control.session_id));
@@ -452,9 +522,13 @@ fn idle_expiry_keeps_managed_servers_alive_but_not_fatal_workers() {
     assert!(!should_expire(false, true, false, Duration::from_secs(301)));
     assert!(should_expire(false, false, false, Duration::from_secs(301)));
     assert!(should_expire(false, true, true, Duration::from_secs(301)));
-    assert!(!should_expire(false, false, false, Duration::from_secs(299)));
+    assert!(!should_expire(
+        false,
+        false,
+        false,
+        Duration::from_secs(299)
+    ));
 }
-
 #[cfg(test)]
 mod admission_tests {
     use super::*;
@@ -498,10 +572,19 @@ mod admission_tests {
     /// second turn overlap the first.
     #[test]
     fn only_a_provably_finished_admitted_turn_is_waited_for() {
-        assert_eq!(admission_state(true, Some("running"), |_| false), Admission::Busy);
+        assert_eq!(
+            admission_state(true, Some("running"), |_| false),
+            Admission::Busy
+        );
         assert_eq!(admission_state(true, None, finished), Admission::Busy);
-        assert_eq!(admission_state(true, Some("finished"), finished), Admission::Finalizing);
-        assert_eq!(admission_state(false, Some("finished"), finished), Admission::Admit);
+        assert_eq!(
+            admission_state(true, Some("finished"), finished),
+            Admission::Finalizing
+        );
+        assert_eq!(
+            admission_state(false, Some("finished"), finished),
+            Admission::Admit
+        );
         assert_eq!(admission_state(false, None, finished), Admission::Admit);
     }
 
@@ -520,9 +603,14 @@ mod admission_tests {
         let signal = release.clone();
         let waiter = tokio::spawn(async move {
             let _ = started_tx.send(());
-            let decision =
-                await_admission(&flag, Some("finished-job"), &signal, finished, ADMISSION_GRACE)
-                    .await;
+            let decision = await_admission(
+                &flag,
+                Some("finished-job"),
+                &signal,
+                finished,
+                ADMISSION_GRACE,
+            )
+            .await;
             let _ = done_tx.send(decision).await;
         });
         started_rx.await.unwrap();
@@ -530,9 +618,9 @@ mod admission_tests {
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
-        // 40 ticks = 400 ms virtual: past the old 250 ms window, still well
+        // 44 ticks = 440 ms virtual: past the old 250 ms window, still well
         // inside the 2 s grace.
-        advance_ticks(44).await;
+        advance_ticks(OLD_POLL_STEPS + 19).await;
         assert!(
             done_rx.try_recv().is_err(),
             "the submission stopped waiting while the turn still held admission"
@@ -565,7 +653,8 @@ mod admission_tests {
         let grace = Duration::from_millis(30);
         let waiter = tokio::spawn(async move {
             let _ = started_tx.send(());
-            let decision = await_admission(&flag, Some("finished-job"), &signal, finished, grace).await;
+            let decision =
+                await_admission(&flag, Some("finished-job"), &signal, finished, grace).await;
             let _ = done_tx.send(decision).await;
         });
         started_rx.await.unwrap();
@@ -590,7 +679,14 @@ mod admission_tests {
         active.store(false, Ordering::Release);
         release.notify_one();
         assert_eq!(
-            await_admission(&active, Some("finished-job"), &release, finished, ADMISSION_GRACE).await,
+            await_admission(
+                &active,
+                Some("finished-job"),
+                &release,
+                finished,
+                ADMISSION_GRACE
+            )
+            .await,
             Admission::Admit
         );
         assert!(
@@ -608,7 +704,14 @@ mod admission_tests {
         let active = AtomicBool::new(false);
         let release = tokio::sync::Notify::new();
         assert_eq!(
-            await_admission(&active, None, &release, |_| panic!("must not consult the job"), ADMISSION_GRACE).await,
+            await_admission(
+                &active,
+                None,
+                &release,
+                |_| panic!("must not consult the job"),
+                ADMISSION_GRACE
+            )
+            .await,
             Admission::Admit
         );
     }

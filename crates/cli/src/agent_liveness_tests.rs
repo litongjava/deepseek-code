@@ -49,6 +49,7 @@ impl Fixture {
                 finished_ms: None,
                 exit_code: None,
                 error: None,
+                launched: true,
             },
         };
         fixture.save();

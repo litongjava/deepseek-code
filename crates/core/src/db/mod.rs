@@ -246,6 +246,22 @@ impl DbManager {
                     )?;
                 }
 
+                // Delivery observations gained a provenance column. Older rows
+                // stay 'unknown' and completion treats them conservatively.
+                let has_observation_source: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('sa_repository_delivery_observations') WHERE name='source'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if has_observation_source == 0 {
+                    conn.execute(
+                        "ALTER TABLE sa_repository_delivery_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'",
+                        [],
+                    )?;
+                }
+
                 for col_name in &["thread_id", "message_count", "last_message_content", "metadata", "updated_at"] {
                     // Bug #22 fix: Validate column name to ensure no SQL injection
                     // (col_name comes from hardcoded array, but defensive validation is good practice)

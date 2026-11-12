@@ -155,6 +155,19 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+-- Nested calls made by an embedded ToolScript run. The parent is the script's
+-- own occurrence; `sequence` is the script's internal admission order. The
+-- cascade is load-bearing: deleting a message cascades to tool_calls, and
+-- connections run PRAGMA foreign_keys=ON.
+CREATE TABLE IF NOT EXISTS tool_call_origins (
+    tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
+    parent_tool_call_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'toolscript'
+);
+CREATE INDEX IF NOT EXISTS idx_tool_call_origins_parent
+    ON tool_call_origins(parent_tool_call_id);
+
 -- Messages typed while a turn runs, read after its next tool results.
 CREATE TABLE IF NOT EXISTS session_input_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,5 +403,191 @@ CREATE TABLE IF NOT EXISTS feishu_chat_mappings (
     last_active_at TEXT NOT NULL,
     message_count INTEGER DEFAULT 0,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+-- Super Agent durable state. Conversation references deliberately have no
+-- foreign key: deleting a session must not delete task history and evidence.
+CREATE TABLE IF NOT EXISTS sa_operations (
+    operation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sa_tasks (
+    task_id TEXT PRIMARY KEY,
+    router_session_id TEXT NOT NULL,
+    pair_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    spec_version INTEGER NOT NULL DEFAULT 1,
+    phase TEXT NOT NULL,
+    status TEXT NOT NULL,
+    review_round INTEGER NOT NULL DEFAULT 0,
+    parent_task_id TEXT,
+    depends_on_json TEXT NOT NULL DEFAULT '[]',
+    coder_session_id TEXT,
+    coder_previous_json TEXT NOT NULL DEFAULT '[]',
+    coder_agent_status TEXT NOT NULL DEFAULT 'IDLE',
+    reviewer_session_id TEXT,
+    reviewer_agent_status TEXT NOT NULL DEFAULT 'IDLE',
+    cleanup_status TEXT NOT NULL DEFAULT 'NOT_STARTED',
+    permission_policy_version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sa_tasks_router ON sa_tasks(router_session_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_sa_tasks_status ON sa_tasks(status);
+
+CREATE TABLE IF NOT EXISTS sa_task_repos (
+    task_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    git_common_dir TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    task_branch TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    working_path TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    submitted_commit TEXT,
+    reviewed_commit TEXT,
+    integrated_commit TEXT,
+    integration_status TEXT NOT NULL DEFAULT 'PENDING',
+    verification_status TEXT NOT NULL DEFAULT 'PENDING',
+    source_state_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY(task_id, repository_id)
+);
+
+CREATE TABLE IF NOT EXISTS sa_non_git_targets (
+    task_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    snapshot_dir TEXT NOT NULL,
+    snapshot_manifest_json TEXT NOT NULL,
+    diff_ref TEXT,
+    status TEXT NOT NULL DEFAULT 'PREPARED',
+    lock_key TEXT NOT NULL,
+    submission_json TEXT,
+    PRIMARY KEY(task_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS sa_events (
+    event_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    pair_id TEXT NOT NULL,
+    session_id TEXT,
+    run_id TEXT,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    causation_id TEXT,
+    operation_id TEXT NOT NULL UNIQUE,
+    timestamp TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    processed INTEGER NOT NULL DEFAULT 0,
+    spec_version INTEGER NOT NULL DEFAULT 1,
+    review_round INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(task_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_sa_events_task_sequence ON sa_events(task_id, sequence);
+
+CREATE TABLE IF NOT EXISTS sa_approvals (
+    approval_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL,
+    pair_id TEXT NOT NULL,
+    source_session_id TEXT NOT NULL,
+    parent_session_id TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    task_spec_version INTEGER NOT NULL,
+    permission_policy_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    answer_json TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sa_approvals_task ON sa_approvals(task_id, status);
+
+CREATE TABLE IF NOT EXISTS sa_reports (
+    report_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    round INTEGER NOT NULL DEFAULT 0,
+    body_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    invalidated INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sa_reports_task ON sa_reports(task_id, kind, spec_version, round);
+
+CREATE TABLE IF NOT EXISTS sa_locks (
+    lock_key TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    owner_operation_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_plans (
+    operation_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    plan_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sa_delivery_plans_task ON sa_delivery_plans(task_id, spec_version, review_round);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_attempts (
+    task_id TEXT NOT NULL,
+    content_fingerprint TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, content_fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_dispatches (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    job_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, plan_operation_id)
+);
+
+CREATE TABLE IF NOT EXISTS sa_repository_dispatches (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    old_oid TEXT NOT NULL,
+    new_oid TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    job_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, plan_operation_id, repository_id)
+);
+
+CREATE TABLE IF NOT EXISTS sa_repository_delivery_observations (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    old_oid TEXT NOT NULL,
+    new_oid TEXT NOT NULL,
+    target_ref TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    observed_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'unknown',
+    PRIMARY KEY(task_id, plan_operation_id, repository_id)
 );
 "#;

@@ -18,6 +18,10 @@ pub const CONTROL_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_CONTROL";
 /// explicit `environment` after inherited values have been stripped.
 pub const WORKER_MODEL_ENV: &str = "DEEPSEEK_CODE_WORKER_MODEL";
 pub const WORKER_AUTO_ROUTE_ENV: &str = "DEEPSEEK_CODE_WORKER_AUTO_ROUTE";
+/// The exclusive-execution token of a reserved job. The host publishes it in
+/// the worker claim before spawning and passes it to that supervisor only, so
+/// a duplicate supervisor cannot execute the same job.
+pub const WORKER_TOKEN_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_TOKEN";
 
 /// Host-private variables of the supervising worker. An ordinary child process
 /// (shell command, hook, MCP server, nested CLI) is a separate session:
@@ -25,11 +29,12 @@ pub const WORKER_AUTO_ROUTE_ENV: &str = "DEEPSEEK_CODE_WORKER_AUTO_ROUTE";
 /// rejected by its own ownership check, or silently join the parent's job. A
 /// managed worker additionally inherits the parent's model snapshot, which its
 /// own launch then rejects as a mismatch.
-pub const INTERNAL_ENV: [&str; 4] = [
+pub const INTERNAL_ENV: [&str; 5] = [
     WORKER_ENV,
     CONTROL_ENV,
     WORKER_MODEL_ENV,
     WORKER_AUTO_ROUTE_ENV,
+    WORKER_TOKEN_ENV,
 ];
 
 /// A command type whose environment can be pruned before it starts.
@@ -74,6 +79,229 @@ pub struct Job {
     pub finished_ms: Option<u64>,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
+    /// True when this job has durable authorization to execute: a worker claim
+    /// was published or the host recorded a spawn fact. A reserved job publishes
+    /// its claim **before** `Command::spawn`, so a crash in the spawn window also
+    /// reports true and a later host must adopt rather than spawn again. This is
+    /// deliberately not "a process definitely ran": a reserved job can be
+    /// authorized and still lack a process, and a non-reserved job's claim is
+    /// published by its worker after it starts. `false` only means no
+    /// authorization was observed when this record was read.
+    #[serde(default)]
+    pub launched: bool,
+}
+
+/// Durable view of a reserved job, used by hosts that reconcile after a crash.
+#[derive(Debug, Clone)]
+pub enum JobSnapshot {
+    /// No directory or no published state: the job never started.
+    Missing,
+    /// The published state, with the same stale-heartbeat observation as `list`.
+    Present(Job),
+    /// The state file exists but cannot be parsed. The original bytes are kept.
+    Unreadable(String),
+}
+
+/// Reads a reserved job without creating it or scanning by title. The caller
+/// supplies the identity it reserved before any external side effect.
+pub fn inspect(root: &Path, id: &str) -> Result<JobSnapshot> {
+    let dir = directory(root, id)?;
+    if !dir.exists() {
+        return Ok(JobSnapshot::Missing);
+    }
+    let path = dir.join("state.json");
+    match fs::read(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(JobSnapshot::Missing),
+        Err(error) => Err(error).with_context(|| format!("Reading task state {}", path.display())),
+        Ok(bytes) => match serde_json::from_slice::<Job>(&bytes) {
+            Ok(job) => Ok(JobSnapshot::Present(published(&dir, job)?)),
+            Err(error) => Ok(JobSnapshot::Unreadable(error.to_string())),
+        },
+    }
+}
+
+/// The launch arguments published for a reserved job. Reconciliation uses them
+/// to prove the job still belongs to the same instruction and workspace.
+pub fn launch_of(root: &Path, id: &str) -> Result<Option<Launch>> {
+    let path = directory(root, id)?.join("launch.json");
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("Parsing task launch {}", path.display()))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Reading task launch {}", path.display())),
+    }
+}
+
+/// A concurrent host owns the spawn critical section for this job. The caller
+/// must not start a second supervisor and should reconcile on its next pass.
+#[derive(Debug)]
+pub struct LaunchInProgress;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only boundary between a successful `spawn` and the host's own
+    /// publication. It either waits for the real supervisor to publish a
+    /// terminal state (deterministic publication race) or injects an
+    /// interruption (host death before its launch record). Production builds
+    /// compile this out.
+    static AFTER_SPAWN_TEST_HOOK: std::cell::RefCell<
+        Option<Box<dyn FnOnce(&Path) -> Result<()>>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_spawn_test_hook(
+    hook: impl FnOnce(&Path) -> Result<()> + 'static,
+) {
+    AFTER_SPAWN_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn after_spawn_test_hook(dir: &Path) -> Result<()> {
+    let hook = AFTER_SPAWN_TEST_HOOK.with(|slot| slot.borrow_mut().take());
+    match hook {
+        Some(hook) => hook(dir),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(test))]
+fn after_spawn_test_hook(_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+impl std::fmt::Display for LaunchInProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Another host is already starting this background task"
+        )
+    }
+}
+
+impl std::error::Error for LaunchInProgress {}
+
+pub fn is_launch_in_progress(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<LaunchInProgress>().is_some())
+}
+
+/// Immutable spawn fact. The host publishes it only after `Command::spawn`
+/// succeeded, so its presence proves a supervisor process was started. The
+/// worker claim, published earlier, remains the authorization that prevents a
+/// second spawn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnFact {
+    pub supervisor_pid: u32,
+    pub token: String,
+    pub published_ms: u64,
+}
+
+pub const SPAWN_FACT_FILE: &str = "spawn.json";
+
+fn worker_claim_path(dir: &Path) -> PathBuf {
+    dir.join("worker.claim")
+}
+
+/// The exclusive-execution token published for this job directory.
+fn worker_claim_token(dir: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(worker_claim_path(dir)) {
+        Ok(token) => Ok(Some(token)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("Reading worker claim {}", worker_claim_path(dir).display())),
+    }
+}
+
+/// Publishes the exclusive claim. Returns false when another writer already
+/// owns it; the claim is never replaced.
+fn create_worker_claim(dir: &Path, token: &str) -> Result<bool> {
+    let path = worker_claim_path(dir);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(token.as_bytes())?;
+            file.sync_all()?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Claiming {}", path.display())),
+    }
+}
+
+/// The immutable spawn fact of a reserved job, if the host recorded it.
+pub fn spawn_fact(root: &Path, id: &str) -> Result<Option<SpawnFact>> {
+    let path = directory(root, id)?.join(SPAWN_FACT_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(
+            || format!("Parsing spawn fact {}", path.display()),
+        )?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Reading spawn fact {}", path.display())),
+    }
+}
+
+/// Writes the spawn fact exactly once. A retry that finds the same fact is
+/// idempotent; a different one means the directory is inconsistent.
+fn write_spawn_fact(dir: &Path, fact: &SpawnFact) -> Result<()> {
+    let path = dir.join(SPAWN_FACT_FILE);
+    let parent = path.parent().context("Missing parent")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut temporary, fact)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    for attempt in 0..=20 {
+        match temporary.persist_noclobber(&path) {
+            Ok(file) => {
+                file.sync_all()?;
+                #[cfg(unix)]
+                fs::File::open(parent)?.sync_all()?;
+                return Ok(());
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing: SpawnFact = serde_json::from_slice(&fs::read(&path)?)
+                    .with_context(|| format!("Parsing spawn fact {}", path.display()))?;
+                ensure!(
+                    existing.token == fact.token
+                        && existing.supervisor_pid == fact.supervisor_pid,
+                    "Spawn fact {} belongs to a different supervisor; refusing to replace it",
+                    path.display()
+                );
+                return Ok(());
+            }
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 20 =>
+            {
+                temporary = error.file;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    unreachable!()
+}
+
+fn same_workspace(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Reads the published lifecycle state and merges the durable publication
+/// evidence. Lifecycle fields come only from `state.json`; the worker claim and
+/// spawn fact contribute the `launched` authorization flag.
+fn published(dir: &Path, mut job: Job) -> Result<Job> {
+    if !job.launched {
+        job.launched = worker_claim_token(dir)?.is_some() || dir.join(SPAWN_FACT_FILE).exists();
+    }
+    Ok(observed(job))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -187,8 +415,14 @@ impl Drop for SessionClaim {
 
 /// Build the command that starts a managed worker. Inherited worker state is
 /// removed first, then only what the caller passes explicitly is applied;
-/// delegation forwards a deliberate model snapshot that way.
-fn supervisor_command(supervisor: &Path, dir: &Path, environment: &[(String, String)]) -> Command {
+/// delegation forwards a deliberate model snapshot that way. A reserved job's
+/// exclusive token is passed to this supervisor and no other process.
+fn supervisor_command(
+    supervisor: &Path,
+    dir: &Path,
+    environment: &[(String, String)],
+    token: Option<&str>,
+) -> Command {
     let mut command = Command::new(supervisor);
     strip_internal_env(&mut command);
     command
@@ -197,6 +431,9 @@ fn supervisor_command(supervisor: &Path, dir: &Path, environment: &[(String, Str
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(token) = token {
+        command.env(WORKER_TOKEN_ENV, token);
+    }
     command
 }
 
@@ -253,32 +490,206 @@ fn spawn_impl(
     environment: &[(String, String)],
     foreground: bool,
 ) -> Result<Job> {
-    let id = uuid::Uuid::new_v4().to_string();
+    spawn_at(
+        root,
+        supervisor,
+        launch,
+        parent,
+        session,
+        title,
+        environment,
+        foreground,
+        None,
+    )
+}
+
+/// Starts a job whose UUID was reserved by the caller before any external side
+/// effect. A concurrent host that already owns the spawn section receives
+/// [`LaunchInProgress`] instead of starting a duplicate supervisor. A crash
+/// releases the OS file lock automatically, so the next host can continue the
+/// same reserved operation.
+pub fn spawn_reserved(
+    root: &Path,
+    supervisor: &Path,
+    launch: Launch,
+    parent: &str,
+    session: &str,
+    title: &str,
+    environment: &[(String, String)],
+    id: &str,
+) -> Result<Job> {
+    spawn_at(
+        root,
+        supervisor,
+        launch,
+        parent,
+        session,
+        title,
+        environment,
+        false,
+        Some(id),
+    )
+}
+
+fn spawn_at(
+    root: &Path,
+    supervisor: &Path,
+    launch: Launch,
+    parent: &str,
+    session: &str,
+    title: &str,
+    environment: &[(String, String)],
+    foreground: bool,
+    reserved: Option<&str>,
+) -> Result<Job> {
+    let id = match reserved {
+        Some(id) => {
+            // Validates the reserved identity before touching the filesystem.
+            directory(root, id)?;
+            id.to_owned()
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     let dir = directory(root, &id)?;
     fs::create_dir_all(&dir)?;
-    let mut job = Job {
-        id,
-        foreground,
-        parent_session_id: parent.into(),
-        session_id: session.into(),
-        title: title.chars().take(160).collect(),
-        status: "starting".into(),
-        supervisor_pid: None,
-        child_pid: None,
-        started_ms: now(),
-        heartbeat_ms: now(),
-        finished_ms: None,
-        exit_code: None,
-        error: None,
+    // Serialize the spawn decision for a reserved job. The advisory lock is
+    // released on process death, which is what makes a crashed host's reserved
+    // job recoverable without guessing from PIDs or timestamps.
+    let _spawn_lock = match reserved {
+        Some(_) => {
+            let path = dir.join("spawn.lock");
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("Opening spawn lock {}", path.display()))?;
+            match crate::fs::try_lock_file(&file) {
+                Ok(()) => Some(file),
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(anyhow::Error::new(LaunchInProgress));
+                }
+                Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        None => None,
     };
+    let existing = match fs::read(dir.join("state.json")) {
+        Ok(bytes) => Some(serde_json::from_slice::<Job>(&bytes).with_context(|| {
+            format!("Parsing task state {}", dir.join("state.json").display())
+        })?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let claim_token = worker_claim_token(&dir)?;
+    let fact_present = dir.join(SPAWN_FACT_FILE).exists();
+    let mut job = if let Some(mut job) = existing {
+        ensure!(
+            reserved.is_some(),
+            "Background task {id} already exists at {}",
+            dir.display()
+        );
+        // Identity and launch-contract validation always precede any adoption.
+        // A progressed or completed job must never be returned when the caller
+        // supplies a different parent, session, instruction or workspace.
+        ensure!(
+            job.id == id,
+            "Reserved background task {id} has a different identity"
+        );
+        ensure!(
+            job.parent_session_id == parent,
+            "Reserved background task {id} belongs to another Router session"
+        );
+        ensure!(
+            job.session_id == session,
+            "Reserved background task {id} belongs to another child session"
+        );
+        let stored = launch_of(root, &id)?
+            .with_context(|| format!("Reserved background task {id} has no launch record"))?;
+        ensure!(
+            stored.arguments == launch.arguments,
+            "Reserved background task {id} has different launch arguments; refusing to reuse it"
+        );
+        ensure!(
+            same_workspace(&stored.cwd, &launch.cwd),
+            "Reserved background task {id} has a different canonical workspace; refusing to reuse it"
+        );
+        let progressed = job.launched
+            || claim_token.is_some()
+            || fact_present
+            || job.supervisor_pid.is_some()
+            || job.child_pid.is_some()
+            || matches!(job.status.as_str(), "running" | "completed" | "cancelled");
+        if progressed {
+            // A supervisor was authorized (or a process recorded). Adopt the
+            // durable state and never publish lifecycle state from here.
+            let mut job = job;
+            job.launched = true;
+            return Ok(observed(job));
+        }
+        // No external authorization was published. A previous attempt failed
+        // before it started a process; continue the same reserved identity.
+        // This is the only point where the host writes lifecycle state after a
+        // reservation, and it is still before any spawn.
+        job.status = "starting".into();
+        job.error = None;
+        job.finished_ms = None;
+        job.exit_code = None;
+        job.supervisor_pid = None;
+        job.child_pid = None;
+        job.started_ms = now();
+        job.heartbeat_ms = now();
+        job.title = title.chars().take(160).collect();
+        job.launched = false;
+        // The instruction and workspace were validated above; only the host's
+        // executable may have changed between attempts, so refresh it before
+        // the worker reads `launch.json`.
+        save(&dir.join("launch.json"), &launch)?;
+        save(&dir.join("state.json"), &job)?;
+        job
+    } else {
+        // A reserved job must be published before its name is returned, so a
+        // crash after this point is always discoverable by exact identity.
+        let job = Job {
+            id: id.clone(),
+            foreground,
+            parent_session_id: parent.into(),
+            session_id: session.into(),
+            title: title.chars().take(160).collect(),
+            status: "starting".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            started_ms: now(),
+            heartbeat_ms: now(),
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: false,
+        };
+        save(&dir.join("launch.json"), &launch)?;
+        save(&dir.join("state.json"), &job)?;
+        job
+    };
+    // A reserved job publishes its exclusive claim before the process starts.
+    // This is the durable evidence that survives a crash between `spawn`
+    // returning and the host recording it, and it is why a recovering host
+    // adopts instead of starting a second supervisor.
+    let token = reserved.map(|_| uuid::Uuid::new_v4().to_string());
+    let mut created_claim = false;
+    if let Some(token) = token.as_deref() {
+        if !create_worker_claim(&dir, token)? {
+            job.launched = true;
+            return Ok(observed(job));
+        }
+        created_claim = true;
+    }
     let mut claim = if foreground {
         Some(SessionClaim::acquire(root, session, &job.id)?)
     } else {
         None
     };
-    save(&dir.join("launch.json"), &launch)?;
-    save(&dir.join("state.json"), &job)?;
-    let mut command = supervisor_command(supervisor, &dir, environment);
+    let mut command = supervisor_command(supervisor, &dir, environment, token.as_deref());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -294,21 +705,46 @@ fn spawn_impl(
             if let Some(claim) = claim.as_mut() {
                 claim.committed = true;
             }
-            // Reap when this host remains alive; dropping this thread on host exit
-            // does not terminate the independently owned supervisor process.
+            let supervisor_pid = child.id();
+            // Reap when this host remains alive; dropping this thread on host
+            // exit does not terminate the independently owned supervisor process.
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
+            // Test-only boundary: production compiles this to a no-op.
+            after_spawn_test_hook(&dir)?;
+            // Publish the immutable spawn fact. The host never writes
+            // `state.json` after a spawn: the supervisor is the single writer of
+            // lifecycle state, so a fast worker's running/terminal publication
+            // cannot be overwritten with a stale `starting` snapshot.
+            write_spawn_fact(
+                &dir,
+                &SpawnFact {
+                    supervisor_pid,
+                    token: token.clone().unwrap_or_default(),
+                    published_ms: now(),
+                },
+            )?;
+            job.launched = true;
+            job.supervisor_pid = Some(supervisor_pid);
+            job.heartbeat_ms = now();
+            Ok(job)
         }
         Err(error) => {
+            // The supervisor never started. Revoke only the claim this attempt
+            // created, then record a retryable failure below the spawn lock.
+            if created_claim {
+                if worker_claim_token(&dir)?.as_deref() == token.as_deref() {
+                    let _ = fs::remove_file(worker_claim_path(&dir));
+                }
+            }
             job.status = "failed".into();
             job.error = Some(error.to_string());
             job.finished_ms = Some(now());
             save(&dir.join("state.json"), &job)?;
-            return Err(error).context("Starting background supervisor");
+            Err(error).context("Starting background supervisor")
         }
     }
-    Ok(job)
 }
 
 /// Returns true only in the dedicated supervisor process.
@@ -321,7 +757,28 @@ pub fn run_worker_from_env() -> Result<bool> {
     Ok(true)
 }
 
+/// A supervisor may execute a job only when it can prove it owns the exclusive
+/// claim. A reserved job publishes the claim (with a random token) before the
+/// host starts any process and passes the same token to that supervisor only;
+/// a duplicate supervisor has no matching token and exits. Non-reserved
+/// supervisors keep the previous behavior and publish their own claim.
+fn claim_worker(dir: &Path) -> Result<bool> {
+    let env_token = std::env::var(WORKER_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty());
+    match worker_claim_token(dir)? {
+        Some(stored) => Ok(env_token.as_deref() == Some(stored.as_str())),
+        None => create_worker_claim(dir, env_token.as_deref().unwrap_or_default()),
+    }
+}
+
 fn run_worker(dir: &Path) -> Result<()> {
+    // Exactly one supervisor may execute this job's CLI. A second supervisor
+    // (for example one started by a host that recovered a reserved job while
+    // the first was still starting) exits without touching durable state.
+    if !claim_worker(dir)? {
+        return Ok(());
+    }
     let mut job = read_job(dir)?;
     let outcome = supervise(dir, &mut job);
     if let Err(error) = outcome {
@@ -352,6 +809,7 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<()> {
         .args(&launch.arguments)
         .current_dir(&launch.cwd)
         .env_remove(WORKER_ENV)
+        .env_remove(WORKER_TOKEN_ENV)
         .env(CONTROL_ENV, dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(fs::File::create(dir.join("output.jsonl"))?))
@@ -466,14 +924,15 @@ pub fn list(root: &Path, parent: Option<&str>) -> Result<Vec<Job>> {
             Err(error) => return Err(error),
         };
         if parent.map_or(true, |id| job.parent_session_id == id) {
-            jobs.push(observed(job));
+            jobs.push(published(&entry.path(), job)?);
         }
     }
     jobs.sort_by_key(|job| job.started_ms);
     Ok(jobs)
 }
 pub fn get(root: &Path, id: &str) -> Result<Job> {
-    Ok(observed(read_job(&directory(root, id)?)?))
+    let dir = directory(root, id)?;
+    published(&dir, read_job(&dir)?)
 }
 pub fn cancel(root: &Path, id: &str) -> Result<Job> {
     let dir = directory(root, id)?;
@@ -1051,6 +1510,359 @@ pub fn collect_completed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Production supervisor entry for reserved-job tests. The wrapper fixture
+    /// execs the test binary with `--exact` on this ignored test, so the tests
+    /// exercise the real `run_worker_from_env`/`run_worker`/`supervise` path
+    /// rather than a re-implementation of the protocol.
+    #[test]
+    #[ignore = "entry point for the reserved-job supervisor fixture"]
+    fn run_worker_entry() {
+        assert!(
+            run_worker_from_env().unwrap(),
+            "the fixture supervisor must run with WORKER_ENV set"
+        );
+    }
+
+    struct RealWorker {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        supervisor: PathBuf,
+        child: PathBuf,
+        counter: PathBuf,
+    }
+
+    fn real_worker_fixture() -> RealWorker {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let counter = temp.path().join("child-runs.log");
+        let test_binary = std::env::current_exe().unwrap();
+        let supervisor = temp.path().join("supervisor.sh");
+        fs::write(
+            &supervisor,
+            format!(
+                "#!/bin/sh\nexec '{}' --exact 'services::background_sessions::tests::run_worker_entry' --ignored --nocapture\n",
+                test_binary.display()
+            ),
+        )
+        .unwrap();
+        let child = temp.path().join("child.sh");
+        fs::write(
+            &child,
+            format!("#!/bin/sh\necho run >> '{}'\nexit 0\n", counter.display()),
+        )
+        .unwrap();
+        for script in [&supervisor, &child] {
+            fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        RealWorker {
+            root: temp.path().to_path_buf(),
+            supervisor,
+            child,
+            counter,
+            _temp: temp,
+        }
+    }
+
+    fn child_runs(counter: &Path) -> usize {
+        fs::read_to_string(counter)
+            .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
+    fn wait_for_terminal(dir: &Path) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(job) = read_job(dir) {
+                if matches!(job.status.as_str(), "completed" | "failed" | "cancelled") {
+                    return Ok(());
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "the real supervisor did not publish a terminal state in {}",
+                    dir.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_child_runs(counter: &Path, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while child_runs(counter) < expected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the real supervisor did not run its child"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn reserved_launch(worker: &RealWorker) -> Launch {
+        Launch {
+            executable: worker.child.clone(),
+            arguments: Vec::new(),
+            cwd: worker.root.clone(),
+        }
+    }
+
+    #[test]
+    fn a_fast_worker_terminal_state_survives_parent_publication() {
+        let worker = real_worker_fixture();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = directory(&worker.root, &id).unwrap();
+        install_after_spawn_test_hook(|dir| {
+            let dir = dir.to_path_buf();
+            // Deterministic barrier: the real supervisor has already published
+            // its terminal state before the host continues its own publication.
+            wait_for_terminal(&dir)
+        });
+
+        let job = spawn_reserved(
+            &worker.root,
+            &worker.supervisor,
+            reserved_launch(&worker),
+            "parent",
+            "child",
+            "fixture",
+            &[],
+            &id,
+        )
+        .unwrap();
+        assert!(job.launched);
+        assert_eq!(child_runs(&worker.counter), 1);
+
+        let stored = get(&worker.root, &id).unwrap();
+        assert_eq!(
+            stored.status, "completed",
+            "the host must not overwrite the supervisor's terminal state"
+        );
+        assert_eq!(stored.exit_code, Some(0));
+        assert!(stored.finished_ms.is_some());
+        assert_eq!(stored.parent_session_id, "parent");
+        assert_eq!(stored.session_id, "child");
+        assert!(stored.launched);
+    }
+
+    #[test]
+    fn a_host_interruption_after_spawn_is_adopted_without_a_second_child() {
+        let worker = real_worker_fixture();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = directory(&worker.root, &id).unwrap();
+        install_after_spawn_test_hook(|_dir| {
+            // Injected host interruption: the supervisor was started, but the
+            // host dies before recording the spawn fact or its launch handle.
+            anyhow::bail!("simulated host interruption after spawn")
+        });
+        let error = spawn_reserved(
+            &worker.root,
+            &worker.supervisor,
+            reserved_launch(&worker),
+            "parent",
+            "child",
+            "fixture",
+            &[],
+            &id,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("simulated host interruption after spawn"),
+            "{error:#}"
+        );
+        assert!(dir.join("worker.claim").exists());
+        assert!(!dir.join("spawn.json").exists());
+        wait_for_child_runs(&worker.counter, 1);
+        wait_for_terminal(&dir).unwrap();
+
+        // Recovery must adopt the authorized job, not start a second one.
+        let recovered = spawn_reserved(
+            &worker.root,
+            &worker.supervisor,
+            reserved_launch(&worker),
+            "parent",
+            "child",
+            "fixture",
+            &[],
+            &id,
+        )
+        .unwrap();
+        assert_eq!(recovered.status, "completed");
+        assert_eq!(child_runs(&worker.counter), 1);
+    }
+
+    #[test]
+    fn reserved_adoption_validates_identity_before_progressed_state() {
+        let worker = real_worker_fixture();
+        let canonical_root = worker.root.canonicalize().unwrap();
+        let other_root = canonical_root.join("other-workspace");
+        fs::create_dir_all(&other_root).unwrap();
+        for (status, launched, finished) in [
+            ("starting", false, None),
+            ("launched", true, None),
+            ("running", true, None),
+            ("completed", true, Some(1234)),
+        ] {
+            for mismatch in ["parent", "session", "arguments", "workspace"] {
+                let id = uuid::Uuid::new_v4().to_string();
+                let dir = directory(&worker.root, &id).unwrap();
+                fs::create_dir_all(&dir).unwrap();
+                let stored_launch = Launch {
+                    executable: worker.child.clone(),
+                    arguments: vec!["--original".into()],
+                    cwd: canonical_root.clone(),
+                };
+                save(&dir.join("launch.json"), &stored_launch).unwrap();
+                let stored = Job {
+                    id: id.clone(),
+                    foreground: false,
+                    parent_session_id: "parent".into(),
+                    session_id: "child".into(),
+                    title: "fixture".into(),
+                    status: status.into(),
+                    supervisor_pid: launched.then_some(11),
+                    child_pid: launched.then_some(12),
+                    started_ms: 1,
+                    heartbeat_ms: 1,
+                    finished_ms: finished,
+                    exit_code: finished.map(|_| 0),
+                    error: None,
+                    launched,
+                };
+                save(&dir.join("state.json"), &stored).unwrap();
+                let before = fs::read(dir.join("state.json")).unwrap();
+
+                let mut requested = stored_launch;
+                if mismatch == "arguments" {
+                    requested.arguments = vec!["--different".into()];
+                }
+                if mismatch == "workspace" {
+                    requested.cwd = other_root.clone();
+                }
+                let error = spawn_reserved(
+                    &worker.root,
+                    &worker.supervisor,
+                    requested,
+                    if mismatch == "parent" { "another-parent" } else { "parent" },
+                    if mismatch == "session" { "another-child" } else { "child" },
+                    "fixture",
+                    &[],
+                    &id,
+                )
+                .unwrap_err();
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("another Router session")
+                        || message.contains("another child session")
+                        || message.contains("different launch arguments")
+                        || message.contains("different canonical workspace"),
+                    "{status} {mismatch}: {message}"
+                );
+                assert_eq!(
+                    fs::read(dir.join("state.json")).unwrap(),
+                    before,
+                    "{status} {mismatch}: a refused adoption must not rewrite state"
+                );
+                assert!(
+                    !dir.join("worker.claim").exists(),
+                    "{status} {mismatch}: a refused adoption must not publish a claim"
+                );
+                assert!(!dir.join(SPAWN_FACT_FILE).exists());
+            }
+        }
+        assert_eq!(child_runs(&worker.counter), 0);
+    }
+
+    #[test]
+    fn a_matching_progressed_job_is_adopted_without_spawning() {
+        let worker = real_worker_fixture();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = directory(&worker.root, &id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let launch = reserved_launch(&worker);
+        save(&dir.join("launch.json"), &launch).unwrap();
+        save(
+            &dir.join("state.json"),
+            &Job {
+                id: id.clone(),
+                foreground: false,
+                parent_session_id: "parent".into(),
+                session_id: "child".into(),
+                title: "fixture".into(),
+                status: "completed".into(),
+                supervisor_pid: Some(11),
+                child_pid: Some(12),
+                started_ms: 1,
+                heartbeat_ms: 1,
+                finished_ms: Some(1234),
+                exit_code: Some(0),
+                error: None,
+                launched: true,
+            },
+        )
+        .unwrap();
+        let adopted = spawn_reserved(
+            &worker.root,
+            Path::new("/nonexistent-supervisor-must-not-run"),
+            launch,
+            "parent",
+            "child",
+            "fixture",
+            &[],
+            &id,
+        )
+        .unwrap();
+        assert_eq!(adopted.status, "completed");
+        assert_eq!(adopted.finished_ms, Some(1234));
+        assert!(!dir.join("worker.claim").exists());
+        assert_eq!(child_runs(&worker.counter), 0);
+    }
+
+    #[test]
+    fn a_duplicate_supervisor_without_the_claim_token_does_not_execute_the_job() {
+        let worker = real_worker_fixture();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = directory(&worker.root, &id).unwrap();
+        spawn_reserved(
+            &worker.root,
+            &worker.supervisor,
+            reserved_launch(&worker),
+            "parent",
+            "child",
+            "fixture",
+            &[],
+            &id,
+        )
+        .unwrap();
+        wait_for_terminal(&dir).unwrap();
+        assert_eq!(child_runs(&worker.counter), 1);
+        let before = fs::read(dir.join("state.json")).unwrap();
+
+        for token in [None, Some("a-different-token")] {
+            let mut command = Command::new(&worker.supervisor);
+            command
+                .env(WORKER_ENV, &dir)
+                .env_remove(WORKER_TOKEN_ENV)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(token) = token {
+                command.env(WORKER_TOKEN_ENV, token);
+            }
+            let status = command.status().unwrap();
+            assert!(status.success(), "a duplicate supervisor exits cleanly");
+            assert_eq!(
+                child_runs(&worker.counter),
+                1,
+                "the duplicate supervisor must not run the child ({token:?})"
+            );
+            assert_eq!(
+                fs::read(dir.join("state.json")).unwrap(),
+                before,
+                "the duplicate supervisor must not corrupt state"
+            );
+        }
+    }
     #[test]
     fn ordinary_children_never_receive_the_worker_control_variables() {
         let mut command = Command::new("fixture");
@@ -1079,6 +1891,7 @@ mod tests {
             Path::new("fixture"),
             dir,
             &[(WORKER_MODEL_ENV.to_owned(), "explicit-model".to_owned())],
+            Some("reserved-token"),
         );
         let envs: Vec<_> = command.get_envs().collect();
         assert!(envs
@@ -1113,6 +1926,7 @@ mod tests {
             finished_ms: None,
             exit_code: None,
             error: None,
+            launched: false,
         };
         save(&dir.join("state.json"), &job).unwrap();
         save(
@@ -1467,6 +2281,10 @@ mod tests {
         let job = get(root.path(), &id).unwrap();
         assert_eq!(job.status, "failed");
         assert_eq!(job.exit_code, Some(7));
+
+        // A job ID is one-shot: the worker claim prevents re-executing the same
+        // job after a completed run, so the launch-failure case uses a new job.
+        let (root, dir, id) = fixture("");
         save(
             &dir.join("launch.json"),
             &Launch {
@@ -1478,5 +2296,18 @@ mod tests {
         .unwrap();
         run_worker(&dir).unwrap();
         assert!(get(root.path(), &id).unwrap().error.is_some());
+    }
+
+    #[test]
+    fn a_second_supervisor_does_not_execute_the_same_job() {
+        let (root, dir, id) = fixture("process.stdout.write('once')");
+        run_worker(&dir).unwrap();
+        let first_output = output(root.path(), &id).unwrap().0;
+        assert_eq!(first_output.matches("once").count(), 1);
+        // The claim is durable, so a repeated supervisor run is a no-op.
+        fs::write(dir.join("output.jsonl"), b"").unwrap();
+        run_worker(&dir).unwrap();
+        assert_eq!(output(root.path(), &id).unwrap().0, "");
+        assert!(dir.join("worker.claim").exists());
     }
 }

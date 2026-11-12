@@ -46,7 +46,7 @@ pub(super) async fn start_pending(
     // An automatic idle turn owns admission exactly like an explicit one, so a
     // prompt that arrives after its completion waits for this release instead
     // of being refused as busy.
-    *current_turn.lock().unwrap_or_else(|e|e.into_inner())=Some(id.clone());
+    *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
     if let Err(error) = service::begin_job(
         worker,
         &id,
@@ -56,7 +56,7 @@ pub(super) async fn start_pending(
             format!("Resume owned child {child} from inbox")
         },
     ) {
-        *current_turn.lock().unwrap_or_else(|e|e.into_inner())=None;
+        *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
         active.store(false, Ordering::Release);
         return Err(error);
     }
@@ -76,7 +76,7 @@ pub(super) async fn start_pending(
     })();
     if let Err(error) = publish {
         let _ = service::finish_job(worker, &id, Some(error.to_string())).await;
-        *current_turn.lock().unwrap_or_else(|e|e.into_inner())=None;
+        *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
         active.store(false, Ordering::Release);
         return Err(error);
     }
@@ -127,8 +127,10 @@ pub(super) async fn start_pending(
         active.store(false, Ordering::Release);
         admission_released.notify_one();
         // Clear this turn's identity only if no newer submission replaced it.
-        let mut current=current_turn.lock().unwrap_or_else(|e|e.into_inner());
-        if current.as_deref()==Some(&id) { *current=None; }
+        let mut current = current_turn.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() == Some(&id) {
+            *current = None;
+        }
     });
     Ok(())
 }

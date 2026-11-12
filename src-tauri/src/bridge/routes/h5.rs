@@ -122,6 +122,7 @@ async fn h5_chat_handler(
                 provider_id: None, effort: None,
                 conversation_id: conv_id.clone(),
                 context_boundary: None,
+                assistant_message_id: None,
                 messages: vec![serde_json::json!({
                     "role": "user",
                     "content": message
@@ -193,6 +194,14 @@ async fn h5_chat_handler(
                     Some(serde_json::json!({
                         "type": "thinking",
                         "thinking": thinking,
+                    }))
+                }
+                crate::native_engine::tool_loop::EngineEvent::NestedToolCall { tool_use_id, parent_tool_use_id, sequence } => {
+                    Some(serde_json::json!({
+                        "type": "nested_tool_call",
+                        "tool_use_id": tool_use_id,
+                        "parent_tool_use_id": parent_tool_use_id,
+                        "sequence": sequence,
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {

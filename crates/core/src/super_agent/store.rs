@@ -1,0 +1,3054 @@
+//! SQLite persistence for Super Agent tasks, events, approvals, reports and locks.
+//!
+//! Every mutation that can be retried carries an `operation_id`. The operation
+//! table makes those identifiers globally idempotent: replaying the same request
+//! returns the original result, while reusing an identifier for a different
+//! task, kind or payload is an explicit conflict.
+use super::delivery::{
+    DeliveryDispatch, DeliveryObservationSource, DeliveryPlan, RepositoryDeliveryObservation,
+};
+use super::model::{
+    AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus, Event, EventType,
+    GateDeliveryEvidence, GateDeliveryTarget, GateEvidence, HarnessAnalysisReport,
+    ImplementationReport, IntegrationReport, IntegrationStatus, NewEvent, NonGitStatus,
+    NonGitSubmission, NonGitTarget, Phase, PlanReport, RepoTarget, Report, ReportKind, SessionRef,
+    Status, TaskRecord, TaskReviewReport, TaskSpec, VerificationStatus,
+};
+use super::state::{self, StateError, StatePolicy};
+use crate::db::DbManager;
+use anyhow::{ensure, Context, Result as AnyResult};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use thiserror::Error;
+
+const MAX_REPORT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const WRITE_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("operation {operation_id} was already used for a different {kind} request")]
+    OperationConflict { operation_id: String, kind: String },
+    #[error("task not found: {0}")]
+    TaskNotFound(String),
+    #[error("approval {0} is already resolved")]
+    AlreadyResolved(String),
+    #[error("lock {0} is held by another task")]
+    LockBusy(String),
+    #[error("completion gate is not satisfied: {0:?}")]
+    Gate(Vec<super::model::Unmet>),
+    #[error("invalid super agent request: {0}")]
+    Invalid(String),
+    #[error(transparent)]
+    Transition(#[from] StateError),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Internal(anyhow::Error::new(error))
+    }
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Internal(anyhow::Error::new(error))
+    }
+}
+
+impl From<serde_json::Error> for StoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Internal(anyhow::Error::new(error))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventAppend {
+    pub event: Event,
+    pub inserted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockOutcome {
+    Acquired,
+    /// The same operation is replayed while it still holds the lock.
+    AlreadyOwned,
+    /// The operation is known but no longer owns the lock. A fresh operation
+    /// is required for a new acquisition.
+    Released,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalDraft {
+    pub source_session_id: String,
+    pub parent_session_id: String,
+    pub request_type: ApprovalType,
+    pub request: Value,
+    pub task_spec_version: u32,
+    pub permission_policy_version: u32,
+}
+
+#[derive(Clone)]
+pub struct TaskStore {
+    db: Arc<DbManager>,
+    data_dir: PathBuf,
+}
+
+impl TaskStore {
+    pub fn new(db: Arc<DbManager>, data_dir: PathBuf) -> Self {
+        Self { db, data_dir }
+    }
+
+    pub fn from_context(context: &crate::services::ServiceContext) -> Self {
+        Self::new(context.db.clone(), context.paths.data_dir.clone())
+    }
+
+    pub fn db(&self) -> &Arc<DbManager> {
+        &self.db
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    fn run_tx<T>(
+        &self,
+        label: &str,
+        mut operation: impl FnMut(&Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let inner = self
+            .db
+            .with_conn(|connection| {
+                crate::db::write_tx(connection, label, WRITE_DEADLINE, |tx| {
+                    operation(tx).map_err(anyhow::Error::new)
+                })
+            })
+            .map_err(StoreError::Internal)?
+            .map_err(|error| match error.downcast::<StoreError>() {
+                Ok(error) => error,
+                Err(error) => StoreError::Internal(error),
+            })?;
+        Ok(inner)
+    }
+
+    fn run_read<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        match self.db.with_conn(read) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(StoreError::Internal(error)),
+        }
+    }
+
+    pub fn create_task(
+        &self,
+        router_session_id: &str,
+        spec: TaskSpec,
+        operation_id: &str,
+    ) -> Result<TaskRecord, StoreError> {
+        validate_operation_id(operation_id)?;
+        if router_session_id.trim().is_empty() {
+            return Err(StoreError::Invalid("Router session is required".into()));
+        }
+        spec.validate().map_err(StoreError::Internal)?;
+        let hash = hash_json(&json!({"router":router_session_id,"spec":spec}));
+        self.run_tx("super-agent create task", |tx| {
+            if let Some((kind, task_id, stored)) = operation_row(tx, operation_id)? {
+                if kind == "task.create" && stored == hash {
+                    return load_record_conn(tx, &task_id)?
+                        .ok_or_else(|| StoreError::TaskNotFound(task_id));
+                }
+                return Err(StoreError::OperationConflict {
+                    operation_id: operation_id.into(),
+                    kind,
+                });
+            }
+            let number = next_task_number(tx)?;
+            let task_id = format!("task-{number:03}");
+            let pair_id = format!("crp-{number:03}");
+            let now = chrono::Utc::now().to_rfc3339();
+            let record = TaskRecord {
+                task_id: task_id.clone(),
+                pair_id: pair_id.clone(),
+                router_session_id: router_session_id.into(),
+                title: spec.title.clone(),
+                spec: spec.clone(),
+                spec_version: 1,
+                phase: Phase::Discovering,
+                status: Status::Queued,
+                review_round: 0,
+                parent_task_id: None,
+                depends_on: Vec::new(),
+                coder: SessionRef::default(),
+                reviewer: SessionRef::default(),
+                cleanup_status: CleanupStatus::NotStarted,
+                permission_policy_version: 1,
+                created_at: now.clone(),
+                updated_at: now,
+                repositories: Vec::new(),
+                non_git_targets: Vec::new(),
+            };
+            insert_task_conn(tx, &record)?;
+            claim_operation(tx, operation_id, "task.create", &task_id, &hash)?;
+            let event = Event {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.clone(),
+                pair_id,
+                session_id: Some(router_session_id.into()),
+                run_id: None,
+                sequence: 1,
+                event_type: EventType::TaskCreated,
+                causation_id: None,
+                operation_id: operation_id.into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                payload: json!({"spec":spec,"router_session_id":router_session_id}),
+                // The task row already is the created state; the event is the
+                // durable record of it, not a transition to apply later.
+                processed: true,
+                spec_version: 1,
+                review_round: 0,
+            };
+            insert_event_conn(tx, &event)?;
+            Ok(record)
+        })
+    }
+
+    pub fn get_task(&self, task_id: &str) -> Result<Option<TaskRecord>, StoreError> {
+        self.run_read(|connection| load_record_conn(connection, task_id))
+    }
+
+    pub fn list_tasks(
+        &self,
+        router_session_id: &str,
+        status: Option<Status>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.run_read(|tx| {
+            let mut statement = tx.prepare(
+                "SELECT task_id FROM sa_tasks WHERE router_session_id=?1 ORDER BY task_id",
+            )?;
+            let ids = statement
+                .query_map([router_session_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut records = Vec::new();
+            for id in ids {
+                if let Some(record) = load_record_conn(tx, &id)? {
+                    if status.is_none_or(|wanted| record.status == wanted) {
+                        records.push(record);
+                    }
+                }
+            }
+            Ok(records)
+        })
+    }
+
+    pub fn apply_event(
+        &self,
+        task_id: &str,
+        event: NewEvent,
+        policy: &StatePolicy,
+    ) -> Result<EventAppend, StoreError> {
+        validate_operation_id(&event.operation_id)?;
+        self.run_tx("super-agent apply event", |tx| {
+            let (stored, inserted) = append_event_conn(tx, task_id, &event)?;
+            if inserted {
+                apply_transition_conn(tx, &self.data_dir, &stored, policy)?;
+            }
+            Ok(EventAppend {
+                event: stored,
+                inserted,
+            })
+        })
+    }
+
+    /// Appends a pending event without applying it. A member tool records what
+    /// happened; only the host-owned orchestrator turns it into state.
+    pub fn ingest_event(&self, task_id: &str, event: NewEvent) -> Result<EventAppend, StoreError> {
+        validate_operation_id(&event.operation_id)?;
+        self.run_tx("super-agent ingest event", |tx| {
+            let (stored, inserted) = append_event_conn(tx, task_id, &event)?;
+            Ok(EventAppend {
+                event: stored,
+                inserted,
+            })
+        })
+    }
+
+    /// Deterministically applies one pending event. Replaying a processed
+    /// event is a no-op, so two orchestrator ticks cannot apply it twice.
+    pub fn process_event(
+        &self,
+        event_id: &str,
+        policy: &StatePolicy,
+    ) -> Result<Option<TaskRecord>, StoreError> {
+        self.run_tx("super-agent process event", |tx| {
+            let event = event_by_id(tx, event_id)?
+                .ok_or_else(|| StoreError::Invalid(format!("event {event_id} not found")))?;
+            if event.processed {
+                return Ok(None);
+            }
+            let record = apply_transition_conn(tx, &self.data_dir, &event, policy)?;
+            Ok(Some(record))
+        })
+    }
+
+    /// Processes every pending event belonging to one Router, in sequence
+    /// order. The whole batch is one transaction: a rejected transition leaves
+    /// the earlier events pending rather than half-applied.
+    pub fn process_pending(
+        &self,
+        router_session: &str,
+        policy: &StatePolicy,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.run_tx("super-agent process pending", |tx| {
+            let mut statement = tx.prepare(
+                "SELECT e.event_id FROM sa_events e JOIN sa_tasks t ON t.task_id=e.task_id WHERE t.router_session_id=?1 AND e.processed=0 ORDER BY e.task_id, e.sequence",
+            )?;
+            let ids = statement
+                .query_map([router_session], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut records = Vec::new();
+            for id in ids {
+                let event = event_by_id(tx, &id)?
+                    .ok_or_else(|| StoreError::Invalid(format!("event {id} not found")))?;
+                if event.processed {
+                    continue;
+                }
+                records.push(apply_transition_conn(tx, &self.data_dir, &event, policy)?);
+            }
+            Ok(records)
+        })
+    }
+
+    pub fn approval(&self, approval_id: &str) -> Result<Option<Approval>, StoreError> {
+        self.run_read(|connection| approval_by_id(connection, approval_id))
+    }
+
+    pub fn complete_task(
+        &self,
+        task_id: &str,
+        operation_id: &str,
+        policy: &StatePolicy,
+    ) -> Result<TaskRecord, StoreError> {
+        self.apply_event(
+            task_id,
+            NewEvent {
+                session_id: None,
+                run_id: None,
+                event_type: EventType::TaskCompleted,
+                causation_id: None,
+                operation_id: operation_id.into(),
+                payload: json!({}),
+            },
+            policy,
+        )?;
+        self.get_task(task_id)?
+            .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))
+    }
+
+    pub fn set_sessions(
+        &self,
+        task_id: &str,
+        coder_session_id: Option<&str>,
+        reviewer_session_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.run_tx("super-agent set sessions", |tx| {
+            let mut record = load_record_conn(tx, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            if let Some(session) = coder_session_id {
+                record.coder.session_id = Some(session.into());
+            }
+            if let Some(session) = reviewer_session_id {
+                record.reviewer.session_id = Some(session.into());
+            }
+            record.updated_at = chrono::Utc::now().to_rfc3339();
+            update_task_conn(tx, &record)
+        })
+    }
+
+    pub fn replace_coder_session(&self, task_id: &str, session_id: &str) -> Result<(), StoreError> {
+        self.run_tx("super-agent replace coder", |tx| {
+            let mut record = load_record_conn(tx, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            if let Some(previous) = record.coder.session_id.replace(session_id.into()) {
+                record.coder.previous_session_ids.push(previous);
+            }
+            record.updated_at = chrono::Utc::now().to_rfc3339();
+            update_task_conn(tx, &record)
+        })
+    }
+
+    /// Recheck the same durable completion gate before archiving/removing assets.
+    /// Git and process liveness are checked by the cleanup executor separately.
+    pub(crate) fn validate_cleanup_evidence(&self, task_id: &str) -> Result<(), StoreError> {
+        self.run_read(|conn| {
+            let record = load_record_conn(conn, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            if record.status != Status::Completed {
+                return Err(StoreError::Invalid("Cleanup requires COMPLETED".into()));
+            }
+            let evidence = gate_evidence_conn(conn, &self.data_dir, &record)?;
+            state::completion_gate(
+                &record,
+                &record.repositories,
+                &load_reports_conn(conn, task_id)?,
+                &load_approvals_conn(conn, task_id)?,
+                &evidence,
+            )
+            .map_err(StoreError::Gate)
+        })
+    }
+
+    pub fn set_cleanup_status(
+        &self,
+        task_id: &str,
+        status: CleanupStatus,
+    ) -> Result<(), StoreError> {
+        self.run_tx("super-agent cleanup status", |tx| {
+            tx.execute(
+                "UPDATE sa_tasks SET cleanup_status=?2, updated_at=?3 WHERE task_id=?1 AND NOT (cleanup_status='COMPLETED' AND ?2='PENDING')",
+                params![task_id, status.as_str(), chrono::Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn events(&self, task_id: &str) -> Result<Vec<Event>, StoreError> {
+        self.run_read(|tx| {
+            let mut statement = tx.prepare(
+                "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE task_id=?1 ORDER BY sequence",
+            )?;
+            let events = statement
+                .query_map([task_id], event_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                result.push(event?);
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn add_report(
+        &self,
+        operation_id: &str,
+        task_id: &str,
+        kind: ReportKind,
+        spec_version: u32,
+        round: u32,
+        body: Value,
+    ) -> Result<Report, StoreError> {
+        validate_operation_id(operation_id)?;
+        if spec_version == 0 {
+            return Err(StoreError::Invalid(
+                "Report spec version must be positive".into(),
+            ));
+        }
+        let encoded = serde_json::to_vec(&body)?;
+        if encoded.len() > MAX_REPORT_BYTES {
+            return Err(StoreError::Invalid("Report exceeds 2 MiB".into()));
+        }
+        let hash = hash_json(
+            &json!({"task":task_id,"kind":kind,"spec":spec_version,"round":round,"body":body}),
+        );
+        self.run_tx("super-agent add report", |tx| {
+            if let Some((stored_kind, stored_task, stored_hash)) =
+                operation_row(tx, operation_id)?
+            {
+                if stored_kind == "report.add" && stored_task == task_id && stored_hash == hash {
+                    return report_by_operation(tx, operation_id)?
+                        .ok_or_else(|| StoreError::Invalid("report operation is missing".into()));
+                }
+                return Err(StoreError::OperationConflict {
+                    operation_id: operation_id.into(),
+                    kind: stored_kind,
+                });
+            }
+            let record = load_record_conn(tx, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            validate_report_body(&record, kind, spec_version, round, &body)?;
+            let report = Report {
+                report_id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.into(),
+                kind,
+                spec_version,
+                round,
+                body: body.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                invalidated: false,
+            };
+            claim_operation(tx, operation_id, "report.add", task_id, &hash)?;
+            tx.execute(
+                "INSERT INTO sa_reports(report_id,operation_id,task_id,kind,spec_version,round,body_json,created_at,invalidated) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0)",
+                params![
+                    report.report_id,
+                    operation_id,
+                    report.task_id,
+                    report.kind.as_str(),
+                    report.spec_version,
+                    report.round,
+                    serde_json::to_string(&report.body)?,
+                    report.created_at
+                ],
+            )?;
+            Ok(report)
+        })
+    }
+
+    pub fn reports(&self, task_id: &str) -> Result<Vec<Report>, StoreError> {
+        self.run_read(|tx| load_reports_conn(tx, task_id))
+    }
+
+    pub fn request_approval(
+        &self,
+        operation_id: &str,
+        task_id: &str,
+        draft: ApprovalDraft,
+    ) -> Result<Approval, StoreError> {
+        validate_operation_id(operation_id)?;
+        let encoded = serde_json::to_vec(&draft.request)?;
+        if encoded.len() > MAX_REPORT_BYTES {
+            return Err(StoreError::Invalid("Approval request exceeds 2 MiB".into()));
+        }
+        let hash = hash_json(&json!({"task":task_id,"draft":{
+            "source":draft.source_session_id,
+            "parent":draft.parent_session_id,
+            "type":draft.request_type,
+            "request":draft.request,
+            "spec":draft.task_spec_version,
+            "policy":draft.permission_policy_version
+        }}));
+        self.run_tx("super-agent request approval", |tx| {
+            if let Some((stored_kind, stored_task, stored_hash)) =
+                operation_row(tx, operation_id)?
+            {
+                if stored_kind == "approval.request" && stored_task == task_id && stored_hash == hash
+                {
+                    return approval_by_operation(tx, operation_id)?.ok_or_else(|| {
+                        StoreError::Invalid("approval operation is missing".into())
+                    });
+                }
+                return Err(StoreError::OperationConflict {
+                    operation_id: operation_id.into(),
+                    kind: stored_kind,
+                });
+            }
+            let record = load_record_conn(tx, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            let approval = Approval {
+                approval_id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.into(),
+                pair_id: record.pair_id,
+                source_session_id: draft.source_session_id.clone(),
+                parent_session_id: draft.parent_session_id.clone(),
+                request_type: draft.request_type,
+                request: draft.request.clone(),
+                task_spec_version: draft.task_spec_version,
+                permission_policy_version: draft.permission_policy_version,
+                status: ApprovalStatus::Pending,
+                answer: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                resolved_at: None,
+            };
+            claim_operation(tx, operation_id, "approval.request", task_id, &hash)?;
+            tx.execute(
+                "INSERT INTO sa_approvals(approval_id,operation_id,task_id,pair_id,source_session_id,parent_session_id,request_type,request_json,task_spec_version,permission_policy_version,status,answer_json,created_at,resolved_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,NULL)",
+                params![
+                    approval.approval_id,
+                    operation_id,
+                    approval.task_id,
+                    approval.pair_id,
+                    approval.source_session_id,
+                    approval.parent_session_id,
+                    approval.request_type.as_str(),
+                    serde_json::to_string(&approval.request)?,
+                    approval.task_spec_version,
+                    approval.permission_policy_version,
+                    approval.status.as_str(),
+                    approval.created_at
+                ],
+            )?;
+            Ok(approval)
+        })
+    }
+
+    pub fn resolve_approval(
+        &self,
+        operation_id: &str,
+        approval_id: &str,
+        decision: ApprovalStatus,
+        note: Option<&str>,
+    ) -> Result<Approval, StoreError> {
+        validate_operation_id(operation_id)?;
+        if !matches!(
+            decision,
+            ApprovalStatus::Approved | ApprovalStatus::Rejected
+        ) {
+            return Err(StoreError::Invalid(
+                "Approval decisions are APPROVED or REJECTED".into(),
+            ));
+        }
+        let hash = hash_json(&json!({"approval":approval_id,"decision":decision,"note":note}));
+        self.run_tx("super-agent resolve approval", |tx| {
+            let mut approval = approval_by_id(tx, approval_id)?
+                .ok_or_else(|| StoreError::Invalid(format!("approval {approval_id} not found")))?;
+            if let Some((stored_kind, stored_task, stored_hash)) =
+                operation_row(tx, operation_id)?
+            {
+                if stored_kind == "approval.resolve"
+                    && stored_task == approval.task_id
+                    && stored_hash == hash
+                {
+                    // The operation row records this exact resolution; the
+                    // approval row already holds its durable outcome.
+                    return Ok(approval);
+                }
+                return Err(StoreError::OperationConflict {
+                    operation_id: operation_id.into(),
+                    kind: stored_kind,
+                });
+            }
+            if approval.status != ApprovalStatus::Pending {
+                return Err(StoreError::AlreadyResolved(approval_id.into()));
+            }
+            claim_operation(
+                tx,
+                operation_id,
+                "approval.resolve",
+                &approval.task_id,
+                &hash,
+            )?;
+            let answer = json!({"decision": decision.as_str(), "note": note});
+            let resolved_at = chrono::Utc::now().to_rfc3339();
+            tx.execute(
+                "UPDATE sa_approvals SET status=?2, answer_json=?3, resolved_at=?4 WHERE approval_id=?1",
+                params![
+                    approval_id,
+                    decision.as_str(),
+                    serde_json::to_string(&answer)?,
+                    resolved_at
+                ],
+            )?;
+            approval.status = decision;
+            approval.answer = Some(answer);
+            approval.resolved_at = Some(resolved_at);
+            Ok(approval)
+        })
+    }
+
+    pub fn approvals(&self, task_id: &str) -> Result<Vec<Approval>, StoreError> {
+        self.run_read(|tx| load_approvals_conn(tx, task_id))
+    }
+
+    pub fn try_lock(
+        &self,
+        operation_id: &str,
+        lock_key: &str,
+        task_id: &str,
+    ) -> Result<LockOutcome, StoreError> {
+        validate_operation_id(operation_id)?;
+        validate_lock_key(lock_key)?;
+        let lock_key = normalize_lock_key(lock_key)?;
+        let hash = hash_json(&json!({"key":lock_key}));
+        self.run_tx("super-agent acquire lock", |tx| {
+            // Ownership is decided from the lock table, never from the fact
+            // that an operation once recorded an acquisition.
+            let owned_now: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT task_id,owner_operation_id FROM sa_locks WHERE lock_key=?1",
+                    [&lock_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((stored_kind, stored_task, stored_hash)) =
+                operation_row(tx, operation_id)?
+            {
+                if stored_kind != "lock" || stored_task != task_id || stored_hash != hash {
+                    return Err(StoreError::OperationConflict {
+                        operation_id: operation_id.into(),
+                        kind: stored_kind,
+                    });
+                }
+                if owned_now
+                    .as_ref()
+                    .is_some_and(|(task, operation)| task == task_id && operation == operation_id)
+                {
+                    return Ok(LockOutcome::AlreadyOwned);
+                }
+                return Ok(LockOutcome::Released);
+            }
+            if let Some(conflict) = conflicting_lock(tx, &lock_key)? {
+                return Err(StoreError::LockBusy(conflict));
+            }
+            claim_operation(tx, operation_id, "lock", task_id, &hash)?;
+            tx.execute(
+                "INSERT INTO sa_locks(lock_key,task_id,owner_operation_id,acquired_at) VALUES(?1,?2,?3,?4)",
+                params![lock_key, task_id, operation_id, chrono::Utc::now().to_rfc3339()],
+            )?;
+            Ok(LockOutcome::Acquired)
+        })
+    }
+
+    pub fn unlock(
+        &self,
+        lock_key: &str,
+        task_id: &str,
+        owner_operation_id: &str,
+    ) -> Result<bool, StoreError> {
+        let lock_key = normalize_lock_key(lock_key)?;
+        self.run_tx("super-agent release lock", |tx| {
+            let removed = tx.execute(
+                "DELETE FROM sa_locks WHERE lock_key=?1 AND task_id=?2 AND owner_operation_id=?3",
+                params![lock_key, task_id, owner_operation_id],
+            )?;
+            Ok(removed > 0)
+        })
+    }
+
+    pub fn locks(&self, task_id: &str) -> Result<Vec<String>, StoreError> {
+        self.run_read(|tx| {
+            let mut statement =
+                tx.prepare("SELECT lock_key FROM sa_locks WHERE task_id=?1 ORDER BY lock_key")?;
+            let locks = statement
+                .query_map([task_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(locks)
+        })
+    }
+
+    /// Records a host-verified delivery plan. The operation ID is deterministic
+    /// for one evidence version, so replaying the same plan is a no-op while a
+    /// different plan under the same ID is rejected instead of silently
+    /// refreshing the captured old OID.
+    pub fn save_delivery_plan(&self, plan: &DeliveryPlan) -> Result<(), StoreError> {
+        let encoded = serde_json::to_string(plan)?;
+        self.run_tx("super-agent save delivery plan", |tx| {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT plan_json FROM sa_delivery_plans WHERE operation_id=?1",
+                    [&plan.operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing == encoded {
+                    return Ok(());
+                }
+                return Err(StoreError::Invalid(format!(
+                    "delivery plan {} is already recorded with different facts",
+                    plan.operation_id
+                )));
+            }
+            tx.execute(
+                "INSERT INTO sa_delivery_plans(operation_id,task_id,spec_version,review_round,created_at,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    plan.operation_id,
+                    plan.task_id,
+                    plan.spec_version,
+                    plan.review_round,
+                    plan.created_at,
+                    encoded
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delivery_plan(
+        &self,
+        task_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<DeliveryPlan>, StoreError> {
+        self.run_read(|tx| {
+            let encoded: Option<String> = tx
+                .query_row(
+                    "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 AND operation_id=?2",
+                    params![task_id, operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            encoded
+                .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+                .transpose()
+        })
+    }
+
+    pub fn delivery_plans(&self, task_id: &str) -> Result<Vec<DeliveryPlan>, StoreError> {
+        self.run_read(|tx| {
+            let mut statement = tx.prepare(
+                "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 ORDER BY created_at,operation_id",
+            )?;
+            let encoded = statement
+                .query_map([task_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            encoded
+                .into_iter()
+                .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+                .collect()
+        })
+    }
+
+    /// The durable attempt number for one content identity. It starts at 1 and
+    /// is advanced only after an attempt that did not leave a plan, so a
+    /// conflicted lock can be retried with fresh operation IDs without
+    /// refreshing the immutable content evidence.
+    pub fn current_delivery_attempt(
+        &self,
+        task_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<u32, StoreError> {
+        self.run_tx("super-agent delivery attempt", |tx| {
+            tx.execute(
+                "INSERT INTO sa_delivery_attempts(task_id,content_fingerprint,attempt,created_at) VALUES(?1,?2,1,?3) ON CONFLICT(task_id,content_fingerprint) DO NOTHING",
+                params![task_id, content_fingerprint, chrono::Utc::now().to_rfc3339()],
+            )?;
+            let attempt: i64 = tx.query_row(
+                "SELECT attempt FROM sa_delivery_attempts WHERE task_id=?1 AND content_fingerprint=?2",
+                params![task_id, content_fingerprint],
+                |row| row.get(0),
+            )?;
+            Ok(attempt as u32)
+        })
+    }
+
+    /// Consumes the current attempt because it ended without a durable plan.
+    /// The content fingerprint and plan operation ID are unchanged.
+    pub fn advance_delivery_attempt(
+        &self,
+        task_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<u32, StoreError> {
+        self.run_tx("super-agent advance delivery attempt", |tx| {
+            tx.execute(
+                "INSERT INTO sa_delivery_attempts(task_id,content_fingerprint,attempt,created_at) VALUES(?1,?2,2,?3) ON CONFLICT(task_id,content_fingerprint) DO UPDATE SET attempt=attempt+1",
+                params![task_id, content_fingerprint, chrono::Utc::now().to_rfc3339()],
+            )?;
+            let attempt: i64 = tx.query_row(
+                "SELECT attempt FROM sa_delivery_attempts WHERE task_id=?1 AND content_fingerprint=?2",
+                params![task_id, content_fingerprint],
+                |row| row.get(0),
+            )?;
+            Ok(attempt as u32)
+        })
+    }
+
+    /// Records a legacy single-repository delivery dispatch receipt.
+    ///
+    /// The old table has no columns for a repository identity, so this entry
+    /// point accepts only a legacy-shaped receipt. A caller that carries
+    /// repository/OID/attempt facts must use [`TaskStore::begin_repository_dispatch`],
+    /// which persists and validates them; silently dropping those fields here
+    /// would make a replay look different from what was stored.
+    pub fn begin_delivery_dispatch(
+        &self,
+        dispatch: &DeliveryDispatch,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        if dispatch.repository_id.is_some()
+            || dispatch.old_oid.is_some()
+            || dispatch.new_oid.is_some()
+            || dispatch.attempt != 0
+        {
+            return Err(StoreError::Invalid(
+                "begin_delivery_dispatch records only a legacy single-repository receipt without repository scope; use begin_repository_dispatch to persist repository, OIDs and attempt".into(),
+            ));
+        }
+        self.run_tx("super-agent begin delivery dispatch", |tx| {
+            let existing = load_delivery_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+            )?;
+            if let Some(existing) = existing {
+                if existing.spec_version != dispatch.spec_version
+                    || existing.review_round != dispatch.review_round
+                    || existing.coder_session_id != dispatch.coder_session_id
+                    || existing.purpose != dispatch.purpose
+                    || existing
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "delivery dispatch for {} was already recorded with different facts",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(existing);
+            }
+            tx.execute(
+                "INSERT INTO sa_delivery_dispatches(task_id,plan_operation_id,spec_version,review_round,coder_session_id,purpose,job_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    dispatch.task_id,
+                    dispatch.plan_operation_id,
+                    dispatch.spec_version,
+                    dispatch.review_round,
+                    dispatch.coder_session_id,
+                    dispatch.purpose,
+                    dispatch.job_id,
+                    dispatch.created_at
+                ],
+            )?;
+            Ok(dispatch.clone())
+        })
+    }
+
+    /// Binds the reserved background job to an already recorded dispatch. The
+    /// same job is idempotent; a different one is a conflict.
+    pub fn set_delivery_dispatch_job(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        job_id: &str,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        self.run_tx("super-agent record delivery job", |tx| {
+            let dispatch = load_delivery_dispatch_conn(tx, task_id, plan_operation_id)?
+                .ok_or_else(|| {
+                    StoreError::Invalid("delivery dispatch was not recorded before the child".into())
+                })?;
+            if let Some(existing) = &dispatch.job_id {
+                if existing == job_id {
+                    return Ok(dispatch);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "delivery dispatch for {plan_operation_id} already bound job {existing}, not {job_id}"
+                )));
+            }
+            tx.execute(
+                "UPDATE sa_delivery_dispatches SET job_id=?3 WHERE task_id=?1 AND plan_operation_id=?2",
+                params![task_id, plan_operation_id, job_id],
+            )?;
+            Ok(DeliveryDispatch {
+                job_id: Some(job_id.to_owned()),
+                ..dispatch
+            })
+        })
+    }
+
+    pub fn delivery_dispatch(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+    ) -> Result<Option<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| load_delivery_dispatch_conn(tx, task_id, plan_operation_id))
+    }
+
+    /// Records one repository's delivery dispatch intent before any child is
+    /// started. The identity is keyed by the repository, so repositories A and
+    /// B of the same plan never collide. Replaying the same facts returns the
+    /// stored receipt; a different repository, OID, attempt or session is an
+    /// explicit conflict and the old receipt is preserved.
+    pub fn begin_repository_dispatch(
+        &self,
+        dispatch: &DeliveryDispatch,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        let repository_id = dispatch.repository_id.clone().ok_or_else(|| {
+            StoreError::Invalid("a repository dispatch must name its repository".into())
+        })?;
+        let old_oid = dispatch.old_oid.clone().ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "{repository_id}: a repository dispatch must record the approved old OID"
+            ))
+        })?;
+        let new_oid = dispatch.new_oid.clone().ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "{repository_id}: a repository dispatch must record the approved new OID"
+            ))
+        })?;
+        // Only the legacy purpose or a well-formed typed delivery purpose is
+        // accepted; arbitrary purposes are never treated as a delivery.
+        if !crate::super_agent::delivery::is_delivery_purpose(&dispatch.purpose) {
+            return Err(StoreError::Invalid(format!(
+                "{repository_id}: delivery dispatch purpose {:?} is not a supported delivery identity",
+                dispatch.purpose
+            )));
+        }
+        self.run_tx("super-agent begin repository dispatch", |tx| {
+            let plan = load_repository_dispatch_plan(tx, dispatch)?;
+            validate_repository_dispatch_conn(
+                tx,
+                &plan,
+                dispatch,
+                &repository_id,
+                &old_oid,
+                &new_oid,
+            )?;
+            if let Some(existing) = load_repository_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+                &repository_id,
+            )? {
+                if existing.spec_version != dispatch.spec_version
+                    || existing.review_round != dispatch.review_round
+                    || existing.coder_session_id != dispatch.coder_session_id
+                    || existing.purpose != dispatch.purpose
+                    || existing.old_oid.as_deref() != Some(old_oid.as_str())
+                    || existing.new_oid.as_deref() != Some(new_oid.as_str())
+                    || existing.attempt != dispatch.attempt
+                    || existing
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "repository dispatch for {} and {repository_id} was already recorded with different facts",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(existing);
+            }
+            // A receipt written before repository-scoped tables existed is the
+            // sole identity for this repository when the complete immutable
+            // plan uniquely binds it. Do not create a second, conflicting row.
+            if let Some(legacy) = legacy_repository_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+                &repository_id,
+            )? {
+                if legacy.spec_version != dispatch.spec_version
+                    || legacy.review_round != dispatch.review_round
+                    || legacy.coder_session_id != dispatch.coder_session_id
+                    || legacy.purpose != dispatch.purpose
+                    || legacy
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "legacy repository dispatch for {} and {repository_id} conflicts with the requested identity",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(legacy);
+            }
+            tx.execute(
+                "INSERT INTO sa_repository_dispatches(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    dispatch.task_id,
+                    dispatch.plan_operation_id,
+                    repository_id,
+                    dispatch.spec_version,
+                    dispatch.review_round,
+                    dispatch.coder_session_id,
+                    dispatch.purpose,
+                    old_oid,
+                    new_oid,
+                    dispatch.attempt,
+                    dispatch.job_id,
+                    dispatch.created_at
+                ],
+            )?;
+            Ok(dispatch.clone())
+        })
+    }
+
+    /// Binds the reserved background job to an already recorded repository
+    /// dispatch. The same job is idempotent; a different one is a conflict.
+    /// A uniquely bound legacy single-repository receipt is updated in place,
+    /// so a host that stopped before recording its job can recover it without
+    /// creating a second identity or replaying the side effect.
+    pub fn set_repository_dispatch_job(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+        job_id: &str,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        self.run_tx("super-agent record repository delivery job", |tx| {
+            let (mut dispatch, legacy) = match load_repository_dispatch_conn(
+                tx,
+                task_id,
+                plan_operation_id,
+                repository_id,
+            )? {
+                Some(dispatch) => (dispatch, false),
+                None => match legacy_repository_dispatch_conn(
+                    tx,
+                    task_id,
+                    plan_operation_id,
+                    repository_id,
+                )? {
+                    Some(dispatch) => (dispatch, true),
+                    None => {
+                        return Err(StoreError::Invalid(format!(
+                            "{repository_id}: repository dispatch was not recorded before the child"
+                        )))
+                    }
+                },
+            };
+            if let Some(existing) = &dispatch.job_id {
+                if existing == job_id {
+                    return Ok(dispatch);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "repository dispatch for {plan_operation_id} and {repository_id} already bound job {existing}, not {job_id}"
+                )));
+            }
+            if legacy {
+                tx.execute(
+                    "UPDATE sa_delivery_dispatches SET job_id=?3 WHERE task_id=?1 AND plan_operation_id=?2",
+                    params![task_id, plan_operation_id, job_id],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE sa_repository_dispatches SET job_id=?4 WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+                    params![task_id, plan_operation_id, repository_id, job_id],
+                )?;
+            }
+            dispatch.job_id = Some(job_id.to_owned());
+            Ok(dispatch)
+        })
+    }
+
+    /// Reads the repository-scoped dispatch. A receipt recorded by the old
+    /// single-repository schema is read only when the complete immutable plan
+    /// uniquely binds it; no row is migrated or guessed.
+    pub fn repository_dispatch(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+    ) -> Result<Option<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| {
+            if let Some(found) =
+                load_repository_dispatch_conn(tx, task_id, plan_operation_id, repository_id)?
+            {
+                return Ok(Some(found));
+            }
+            legacy_repository_dispatch_conn(tx, task_id, plan_operation_id, repository_id)
+        })
+    }
+
+    /// Every durable delivery receipt recorded for a task, in deterministic
+    /// order. Both the typed repository-scoped table and the legacy
+    /// single-repository table are returned; callers reconcile each row against
+    /// its persisted plan instead of guessing which schema produced it.
+    pub fn delivery_dispatches(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| {
+            let mut dispatches = Vec::new();
+            {
+                let mut statement = tx.prepare(
+                    "SELECT plan_operation_id,spec_version,review_round,coder_session_id,purpose,job_id,created_at FROM sa_delivery_dispatches WHERE task_id=?1 ORDER BY created_at,plan_operation_id",
+                )?;
+                let rows = statement.query_map([task_id], |row| {
+                    Ok(DeliveryDispatch {
+                        task_id: task_id.to_owned(),
+                        spec_version: row.get::<_, i64>(1)? as u32,
+                        review_round: row.get::<_, i64>(2)? as u32,
+                        plan_operation_id: row.get(0)?,
+                        coder_session_id: row.get(3)?,
+                        purpose: row.get(4)?,
+                        repository_id: None,
+                        old_oid: None,
+                        new_oid: None,
+                        attempt: 0,
+                        job_id: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                })?;
+                for row in rows {
+                    dispatches.push(row?);
+                }
+            }
+            {
+                let mut statement = tx.prepare(
+                    "SELECT plan_operation_id,repository_id,spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at FROM sa_repository_dispatches WHERE task_id=?1 ORDER BY created_at,plan_operation_id,repository_id",
+                )?;
+                let rows = statement.query_map([task_id], |row| {
+                    Ok(DeliveryDispatch {
+                        task_id: task_id.to_owned(),
+                        spec_version: row.get::<_, i64>(2)? as u32,
+                        review_round: row.get::<_, i64>(3)? as u32,
+                        plan_operation_id: row.get(0)?,
+                        coder_session_id: row.get(4)?,
+                        purpose: row.get(5)?,
+                        repository_id: Some(row.get(1)?),
+                        old_oid: row.get(6)?,
+                        new_oid: row.get(7)?,
+                        attempt: row.get::<_, i64>(8)? as u32,
+                        job_id: row.get(9)?,
+                        created_at: row.get(10)?,
+                    })
+                })?;
+                for row in rows {
+                    dispatches.push(row?);
+                }
+            }
+            Ok(dispatches)
+        })
+    }
+
+    /// Records one repository's host-verified delivery observation. It binds
+    /// the persisted approved plan and its exact target, marks only that
+    /// repository `COMPLETED`, and never appends a task-wide completion event.
+    /// The same facts replay idempotently; conflicting facts are rejected and
+    /// the old observation is preserved.
+    pub fn record_repository_delivery_observed(
+        &self,
+        observation: &RepositoryDeliveryObservation,
+    ) -> Result<bool, StoreError> {
+        if !observation.verified {
+            return Err(StoreError::Invalid(
+                "a repository delivery observation must be host-verified".into(),
+            ));
+        }
+        self.run_tx("super-agent record repository delivery", |tx| {
+            let plan = load_delivery_plan_conn(
+                tx,
+                &observation.task_id,
+                &observation.plan_operation_id,
+            )?
+            .ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "the approved delivery plan {} for task {} is not recorded",
+                    observation.plan_operation_id, observation.task_id
+                ))
+            })?;
+            if plan.spec_version != observation.spec_version
+                || plan.review_round != observation.review_round
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the persisted plan version",
+                    observation.repository_id
+                )));
+            }
+            let Some(target) = plan
+                .repositories
+                .iter()
+                .find(|target| target.repository_id == observation.repository_id)
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the persisted plan does not contain this repository",
+                    observation.repository_id
+                )));
+            };
+            if target.old_oid != observation.old_oid
+                || target.new_oid != observation.new_oid
+                || target.target_ref != observation.target_ref
+                || target.attempt != observation.attempt
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the approved target OIDs or attempt",
+                    observation.repository_id
+                )));
+            }
+            let record = load_record_conn(tx, &observation.task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(observation.task_id.clone()))?;
+            if record.spec_version != observation.spec_version
+                || record.review_round != observation.review_round
+                || record.coder.session_id.as_deref()
+                    != Some(observation.coder_session_id.as_str())
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the current task version or Coder session",
+                    observation.repository_id
+                )));
+            }
+            if let Some(existing) = load_repository_observation_conn(
+                tx,
+                &observation.task_id,
+                &observation.plan_operation_id,
+                &observation.repository_id,
+            )? {
+                // The first observation time is durable evidence. A retry after
+                // a restart is idempotent when every identity fact matches,
+                // even though the caller generated a new timestamp.
+                if existing.task_id == observation.task_id
+                    && existing.spec_version == observation.spec_version
+                    && existing.review_round == observation.review_round
+                    && existing.plan_operation_id == observation.plan_operation_id
+                    && existing.repository_id == observation.repository_id
+                    && existing.old_oid == observation.old_oid
+                    && existing.new_oid == observation.new_oid
+                    && existing.target_ref == observation.target_ref
+                    && existing.coder_session_id == observation.coder_session_id
+                    && existing.attempt == observation.attempt
+                    && existing.verified == observation.verified
+                {
+                    return Ok(false);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "{}: a repository delivery observation is already recorded with different facts",
+                    observation.repository_id
+                )));
+            }
+            if record.phase != Phase::DeliveryPending {
+                return Err(StoreError::Invalid(format!(
+                    "a repository delivery can only be observed while the task is DELIVERY_PENDING, found {}",
+                    record.phase.as_str()
+                )));
+            }
+            tx.execute(
+                "INSERT INTO sa_repository_delivery_observations(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at,source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    observation.task_id,
+                    observation.plan_operation_id,
+                    observation.repository_id,
+                    observation.spec_version,
+                    observation.review_round,
+                    observation.coder_session_id,
+                    observation.old_oid,
+                    observation.new_oid,
+                    observation.target_ref,
+                    observation.attempt,
+                    observation.observed_at,
+                    observation_source_name(observation.source)
+                ],
+            )?;
+            let updated = tx.execute(
+                "UPDATE sa_task_repos SET integration_status=?3 WHERE task_id=?1 AND repository_id=?2 AND integrated_commit=?4",
+                params![
+                    observation.task_id,
+                    observation.repository_id,
+                    IntegrationStatus::Completed.as_str(),
+                    observation.new_oid
+                ],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the recorded integrated commit is no longer {}",
+                    observation.repository_id, observation.new_oid
+                )));
+            }
+            Ok(true)
+        })
+    }
+
+    pub fn repository_delivery_observation(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+    ) -> Result<Option<RepositoryDeliveryObservation>, StoreError> {
+        self.run_read(|tx| {
+            load_repository_observation_conn(tx, task_id, plan_operation_id, repository_id)
+        })
+    }
+
+    /// True only when every repository of the immutable plan has a durable,
+    /// host-verified observation matching the approved target. This is the
+    /// gate for recording a task-wide delivery completion.
+    pub fn delivery_plan_observations_complete(
+        &self,
+        plan: &DeliveryPlan,
+    ) -> Result<bool, StoreError> {
+        self.run_read(|tx| delivery_plan_observations_complete_conn(tx, plan))
+    }
+
+    /// Current holder of one cooperative lock, or `None`. It never acquires.
+    pub fn lock_holder(&self, lock_key: &str) -> Result<Option<(String, String)>, StoreError> {
+        let lock_key = normalize_lock_key(lock_key)?;
+        self.run_read(|tx| {
+            Ok(tx
+                .query_row(
+                    "SELECT task_id,owner_operation_id FROM sa_locks WHERE lock_key=?1",
+                    [&lock_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Records a host-verified delivery in one transaction: every planned
+    /// repository becomes `COMPLETED` and the delivery observation event is
+    /// appended. A replay of the same event is a no-op. This never emits
+    /// `TASK_COMPLETED`; completion stays a separate gate.
+    pub fn record_delivery_completed(
+        &self,
+        plan: &DeliveryPlan,
+        operation_id: &str,
+        payload: Value,
+    ) -> Result<EventAppend, StoreError> {
+        if payload["complete"].as_bool() != Some(true) {
+            return Err(StoreError::Invalid(
+                "a recorded delivery must be complete".into(),
+            ));
+        }
+        self.run_tx("super-agent record delivered target", |tx| {
+            if let Some(existing) = event_by_operation(tx, operation_id)? {
+                // An operation ID is global. A replay may only return this
+                // task's own event, never another task's completed delivery.
+                if existing.task_id != plan.task_id {
+                    return Err(StoreError::Invalid(format!(
+                        "delivery operation {operation_id} belongs to task {}, not {}",
+                        existing.task_id, plan.task_id
+                    )));
+                }
+                return Ok(EventAppend {
+                    event: existing,
+                    inserted: false,
+                });
+            }
+            // Only one delivery observation exists for a spec version and
+            // round. A different operation replaying the same fact returns the
+            // recorded event instead of appending a second one.
+            let recorded: Option<String> = tx
+                .query_row(
+                    "SELECT event_id FROM sa_events WHERE task_id=?1 AND event_type=?2 AND spec_version=?3 AND review_round=?4 ORDER BY sequence LIMIT 1",
+                    params![
+                        plan.task_id,
+                        EventType::IntegrationCompleted.as_str(),
+                        plan.spec_version,
+                        plan.review_round
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(event_id) = recorded {
+                let event = event_by_id(tx, &event_id)?
+                    .ok_or_else(|| StoreError::Invalid("delivery event disappeared".into()))?;
+                return Ok(EventAppend {
+                    event,
+                    inserted: false,
+                });
+            }
+            // A task-wide delivery completion requires the persisted immutable
+            // plan, and every repository in that plan, to have its own durable
+            // host-verified observation. The caller cannot narrow the set.
+            let Some(persisted) = load_delivery_plan_conn(tx, &plan.task_id, &plan.operation_id)?
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "the delivery plan {} for task {} is not recorded",
+                    plan.operation_id, plan.task_id
+                )));
+            };
+            if !caller_plan_matches_persisted(&persisted, plan) {
+                return Err(StoreError::Invalid(format!(
+                    "the supplied plan {} is not the persisted immutable plan for task {}",
+                    plan.operation_id, plan.task_id
+                )));
+            }
+            if !delivery_plan_observations_complete_conn(tx, &persisted)? {
+                return Err(StoreError::Invalid(format!(
+                    "cannot complete delivery of plan {} before every planned repository has a host-verified observation",
+                    plan.operation_id
+                )));
+            }
+            let record = load_record_conn(tx, &persisted.task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(persisted.task_id.clone()))?;
+            if record.spec_version != persisted.spec_version
+                || record.review_round != persisted.review_round
+            {
+                return Err(StoreError::Invalid(format!(
+                    "delivery plan describes spec version {} round {} but the task is {} round {}",
+                    persisted.spec_version,
+                    persisted.review_round,
+                    record.spec_version,
+                    record.review_round
+                )));
+            }
+            if record.phase != Phase::DeliveryPending {
+                return Err(StoreError::Invalid(format!(
+                    "delivery can only be recorded while the task is DELIVERY_PENDING, found {}",
+                    record.phase.as_str()
+                )));
+            }
+            // Use the authoritative targets for the update, never a caller
+            // subset that could leave other repositories unmarked.
+            for target in &persisted.repositories {
+                let updated = tx.execute(
+                    "UPDATE sa_task_repos SET integration_status=?3 WHERE task_id=?1 AND repository_id=?2 AND integrated_commit=?4",
+                    params![
+                        persisted.task_id,
+                        target.repository_id,
+                        IntegrationStatus::Completed.as_str(),
+                        target.new_oid
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(StoreError::Invalid(format!(
+                        "{}: the recorded integrated commit is no longer {}",
+                        target.repository_id, target.new_oid
+                    )));
+                }
+            }
+            let (event, inserted) = append_event_conn(
+                tx,
+                &persisted.task_id,
+                &NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type: EventType::IntegrationCompleted,
+                    causation_id: None,
+                    operation_id: operation_id.to_owned(),
+                    payload: payload.clone(),
+                },
+            )?;
+            Ok(EventAppend { event, inserted })
+        })
+    }
+
+    pub fn save_repo(&self, repo: &RepoTarget) -> Result<(), StoreError> {
+        self.run_tx("super-agent save repository", |tx| {
+            upsert_repo_conn(tx, repo)
+        })
+    }
+
+    /// Records all prepared targets in one transaction so a partially created
+    /// environment never leaves a subset of targets behind.
+    pub fn record_environment(
+        &self,
+        repos: &[RepoTarget],
+        non_git_targets: &[NonGitTarget],
+    ) -> Result<(), StoreError> {
+        self.run_tx("super-agent record environment", |tx| {
+            for repo in repos {
+                upsert_repo_conn(tx, repo)?;
+            }
+            for target in non_git_targets {
+                upsert_non_git_conn(tx, target)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn repos(&self, task_id: &str) -> Result<Vec<RepoTarget>, StoreError> {
+        self.run_read(|tx| load_repos_conn(tx, task_id))
+    }
+
+    pub fn save_non_git_target(&self, target: &NonGitTarget) -> Result<(), StoreError> {
+        self.run_tx("super-agent save non-Git target", |tx| {
+            upsert_non_git_conn(tx, target)
+        })
+    }
+
+    pub fn non_git_targets(&self, task_id: &str) -> Result<Vec<NonGitTarget>, StoreError> {
+        self.run_read(|tx| load_non_git_conn(tx, task_id))
+    }
+
+    /// Writes a large artifact (log, diff, test output) atomically under the
+    /// task's data directory. The report record keeps only a reference.
+    pub fn write_artifact(
+        &self,
+        task_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, StoreError> {
+        validate_task_id(task_id)?;
+        validate_artifact_name(name)?;
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(StoreError::Invalid("Artifact exceeds 64 MiB".into()));
+        }
+        let directory = self
+            .data_dir
+            .join("super-agent")
+            .join(task_id)
+            .join("artifacts");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(name);
+        let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+        std::io::Write::write_all(&mut temporary, bytes)?;
+        std::io::Write::flush(&mut temporary)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&path)
+            .map_err(|error| StoreError::Internal(error.error.into()))?;
+        #[cfg(unix)]
+        std::fs::File::open(&directory)?.sync_all()?;
+        Ok(path)
+    }
+}
+
+/// Validates a report against its typed schema and the task's active contract.
+/// A report that describes another specification version or review round is
+/// rejected instead of being stored where a later gate could trust it.
+fn validate_report_body(
+    record: &TaskRecord,
+    kind: ReportKind,
+    spec_version: u32,
+    round: u32,
+    body: &Value,
+) -> Result<(), StoreError> {
+    if spec_version != record.spec_version {
+        return Err(StoreError::Invalid(format!(
+            "{kind} report describes spec version {spec_version}, current version is {}",
+            record.spec_version
+        )));
+    }
+    if round != record.review_round {
+        return Err(StoreError::Invalid(format!(
+            "{kind} report describes round {round}, current round is {}",
+            record.review_round
+        )));
+    }
+    let invalid = |error: serde_json::Error| {
+        StoreError::Invalid(format!("Invalid {kind} report body: {error}"))
+    };
+    let check = |body_spec: u32, body_round: u32| -> Result<(), StoreError> {
+        if body_spec != spec_version || body_round != round {
+            return Err(StoreError::Invalid(format!(
+                "{kind} report body names version {body_spec} round {body_round}, envelope says version {spec_version} round {round}"
+            )));
+        }
+        Ok(())
+    };
+    match kind {
+        ReportKind::Review => {
+            let parsed: TaskReviewReport = serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Harness => {
+            let parsed: HarnessAnalysisReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+            // A harness report carries a review-stage identity. Only the
+            // matching stage may be recorded while a review is being decided,
+            // so an implementation-stage analysis can never satisfy the final
+            // delivery review. Legacy bodies default to IMPLEMENTATION.
+            let expected = match record.phase {
+                Phase::Reviewing => Some(super::model::ReviewStage::Implementation),
+                Phase::FinalReview => Some(super::model::ReviewStage::FinalDelivery),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                if parsed.stage != expected {
+                    return Err(StoreError::Invalid(format!(
+                        "Harness report stage {} does not match the current review stage {}",
+                        parsed.stage.as_str(),
+                        expected.as_str()
+                    )));
+                }
+            }
+        }
+        ReportKind::Implementation => {
+            let parsed: ImplementationReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Plan => {
+            let parsed: PlanReport = serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Integration => {
+            let parsed: IntegrationReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+    }
+    Ok(())
+}
+
+/// Collects the durable facts the pure gate cannot read, inside the same
+/// transaction that will commit the completion.
+fn gate_evidence_conn(
+    conn: &Connection,
+    data_dir: &Path,
+    record: &TaskRecord,
+) -> Result<GateEvidence, StoreError> {
+    let mut evidence = GateEvidence::default();
+    for session in [
+        record.coder.session_id.as_deref(),
+        record.reviewer.session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let id = session.trim();
+        if id.is_empty() {
+            continue;
+        }
+        // A durable member is an existing, unarchived Code session with a
+        // real transcript. An empty conversation row is not execution proof.
+        let row: Option<(i64, i64, String)> = conn
+            .query_row(
+                "SELECT archived, (SELECT COUNT(*) FROM messages WHERE conversation_id=conversations.id), workspace_mode FROM conversations WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((0, messages, mode)) = row {
+            if messages > 0 && mode == "code" {
+                evidence.verified_sessions.insert(id.to_owned());
+            }
+        }
+    }
+    // Only events from the task's current specification version and review
+    // round count as execution evidence. Historical rounds stay in the trace
+    // without satisfying the current gate.
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT event_type FROM sa_events WHERE task_id=?1 AND spec_version=?2 AND review_round=?3",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                &record.task_id,
+                record.spec_version as i64,
+                record.review_round as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        if let Ok(event) = EventType::parse(&row) {
+            evidence.event_types.insert(event);
+        }
+    }
+    for target in &record.non_git_targets {
+        let path = target.path.display().to_string();
+        let mut verification =
+            super::isolation::verify_snapshot(&target.snapshot_dir, &target.path);
+        if verification.valid {
+            let stored = serde_json::from_str::<super::isolation::SnapshotManifest>(
+                &target.snapshot_manifest_json,
+            );
+            match stored {
+                Ok(stored) => match super::isolation::load_snapshot(&target.snapshot_dir) {
+                    Ok(disk) if stored == disk => {}
+                    Ok(_) => {
+                        verification.payload_verified = false;
+                        verification.error =
+                            Some("the recorded manifest differs from the snapshot on disk".into());
+                    }
+                    Err(error) => {
+                        verification.valid = false;
+                        verification.error = Some(format!("{error:#}"));
+                    }
+                },
+                Err(error) => {
+                    verification.valid = false;
+                    verification.error = Some(format!("the recorded manifest is invalid: {error}"));
+                }
+            }
+        }
+        // The immutable submission artifact the Reviewer read, plus the fact
+        // that the working target still equals it. A later edit blocks delivery
+        // instead of being treated as already approved.
+        match super::review::verify_pinned_submission(data_dir, record, target) {
+            Ok(manifest) => {
+                verification.submission_valid = true;
+                match super::review::submission_matches_target(target, &manifest) {
+                    Ok(true) => verification.submission_matches_target = true,
+                    Ok(false) => {
+                        verification.submission_error = Some(
+                            "the working target no longer matches the reviewed submission".into(),
+                        )
+                    }
+                    Err(error) => {
+                        verification.submission_error = Some(format!(
+                        "cannot compare the working target with the reviewed submission: {error:#}"
+                    ))
+                    }
+                }
+            }
+            Err(error) => {
+                verification.submission_error =
+                    Some(format!("the reviewed submission is invalid: {error:#}"));
+            }
+        }
+        evidence.non_git_manifests.insert(path, verification);
+    }
+    evidence.delivery = gate_delivery_evidence_conn(conn, record)?;
+    Ok(evidence)
+}
+
+/// The authoritative delivery record the completion gate may rely on. It is
+/// read and validated inside the completion transaction with the same rules a
+/// delivery dispatch uses: the persisted complete plan must bind this exact
+/// task version and repository set, its integration-preparation and approval
+/// events must still be current, the task's recorded reviewed/integrated
+/// commits must equal the plan, and every planned repository must have its own
+/// matching durable observation. Anything else yields `None`, so a caller
+/// cannot substitute a plan, a refreshed OID or an unrelated reviewed commit.
+///
+/// The current record is never guessed: an unreadable current-round plan is an
+/// explicit error instead of silently falling back to an older plan.
+fn gate_delivery_evidence_conn(
+    conn: &Connection,
+    record: &TaskRecord,
+) -> Result<Option<GateDeliveryEvidence>, StoreError> {
+    let repos = load_repos_conn(conn, &record.task_id)?;
+    if repos.is_empty() {
+        return Ok(None);
+    }
+    let plans = load_delivery_plans_conn(
+        conn,
+        &record.task_id,
+        record.spec_version,
+        record.review_round,
+    )?;
+    let Some(plan) = plans.into_iter().max_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then(left.operation_id.cmp(&right.operation_id))
+    }) else {
+        return Ok(None);
+    };
+    let repo_ids: BTreeSet<&str> = repos
+        .iter()
+        .map(|repo| repo.repository_id.as_str())
+        .collect();
+    let planned: BTreeSet<&str> = plan
+        .repositories
+        .iter()
+        .map(|target| target.repository_id.as_str())
+        .collect();
+    if plan.task_id != record.task_id
+        || plan.repositories.is_empty()
+        || planned.len() != plan.repositories.len()
+        || planned != repo_ids
+        || plan.repositories.len() != repos.len()
+    {
+        return Ok(None);
+    }
+    for target in &plan.repositories {
+        let Some(repo) = repos
+            .iter()
+            .find(|repo| repo.repository_id == target.repository_id)
+        else {
+            return Ok(None);
+        };
+        if repo.reviewed_commit.as_deref() != Some(target.reviewed_commit.as_str())
+            || repo.integrated_commit.as_deref() != Some(target.new_oid.as_str())
+            || repo.target_branch != target.target_branch
+        {
+            return Ok(None);
+        }
+    }
+    let events = load_events_conn(conn, &record.task_id)?;
+    if super::delivery::verify_plan_binding_events(record, &plan, &events).is_some() {
+        return Ok(None);
+    }
+    if !delivery_plan_observations_complete_conn(conn, &plan)? {
+        return Ok(None);
+    }
+    Ok(Some(GateDeliveryEvidence {
+        operation_id: plan.operation_id.clone(),
+        task_id: plan.task_id.clone(),
+        spec_version: plan.spec_version,
+        review_round: plan.review_round,
+        repositories: plan
+            .repositories
+            .iter()
+            .map(|target| GateDeliveryTarget {
+                repository_id: target.repository_id.clone(),
+                reviewed_commit: target.reviewed_commit.clone(),
+                new_oid: target.new_oid.clone(),
+                target_ref: target.target_ref.clone(),
+            })
+            .collect(),
+    }))
+}
+
+/// Current-round delivery plans for one task. A malformed persisted record is
+/// an explicit error: dropping it would silently fall back to an older plan.
+fn load_delivery_plans_conn(
+    conn: &Connection,
+    task_id: &str,
+    spec_version: u32,
+    review_round: u32,
+) -> Result<Vec<DeliveryPlan>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT operation_id, plan_json FROM sa_delivery_plans WHERE task_id=?1 AND spec_version=?2 AND review_round=?3 ORDER BY created_at,operation_id",
+    )?;
+    let encoded = statement
+        .query_map(
+            params![task_id, spec_version as i64, review_round as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut plans = Vec::with_capacity(encoded.len());
+    for (operation_id, json) in encoded {
+        plans.push(serde_json::from_str::<DeliveryPlan>(&json).map_err(|error| {
+            StoreError::Invalid(format!(
+                "the persisted delivery plan {operation_id} for task {task_id} is unreadable: {error}"
+            ))
+        })?);
+    }
+    Ok(plans)
+}
+
+fn load_events_conn(conn: &Connection, task_id: &str) -> Result<Vec<Event>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE task_id=?1 ORDER BY sequence",
+    )?;
+    let events = statement
+        .query_map([task_id], event_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::with_capacity(events.len());
+    for event in events {
+        result.push(event?);
+    }
+    Ok(result)
+}
+
+fn upsert_repo_conn(conn: &Connection, repo: &RepoTarget) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO sa_task_repos(task_id,repository_id,repo_root,git_common_dir,target_path,target_branch,task_branch,worktree_path,working_path,base_commit,submitted_commit,reviewed_commit,integrated_commit,integration_status,verification_status,source_state_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(task_id,repository_id) DO UPDATE SET repo_root=excluded.repo_root,git_common_dir=excluded.git_common_dir,target_path=excluded.target_path,target_branch=excluded.target_branch,task_branch=excluded.task_branch,worktree_path=excluded.worktree_path,working_path=excluded.working_path,base_commit=excluded.base_commit,submitted_commit=excluded.submitted_commit,reviewed_commit=excluded.reviewed_commit,integrated_commit=excluded.integrated_commit,integration_status=excluded.integration_status,verification_status=excluded.verification_status,source_state_json=excluded.source_state_json",
+        params![
+            repo.task_id,
+            repo.repository_id,
+            repo.repo_root.to_string_lossy(),
+            repo.git_common_dir.to_string_lossy(),
+            repo.target_path.to_string_lossy(),
+            repo.target_branch,
+            repo.task_branch,
+            repo.worktree_path.to_string_lossy(),
+            repo.working_path.to_string_lossy(),
+            repo.base_commit,
+            repo.submitted_commit,
+            repo.reviewed_commit,
+            repo.integrated_commit,
+            repo.integration_status.as_str(),
+            repo.verification_status.as_str(),
+            serde_json::to_string(&repo.source_state)?
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_non_git_conn(conn: &Connection, target: &NonGitTarget) -> Result<(), StoreError> {
+    let submission = target
+        .submission
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StoreError::Invalid(format!("Invalid non-Git submission: {error}")))?;
+    conn.execute(
+        "INSERT INTO sa_non_git_targets(task_id,path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key,submission_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(task_id,path) DO UPDATE SET snapshot_dir=excluded.snapshot_dir,snapshot_manifest_json=excluded.snapshot_manifest_json,diff_ref=excluded.diff_ref,status=excluded.status,lock_key=excluded.lock_key,submission_json=excluded.submission_json",
+        params![
+            target.task_id,
+            target.path.to_string_lossy(),
+            target.snapshot_dir.to_string_lossy(),
+            target.snapshot_manifest_json,
+            target.diff_ref,
+            target.status.as_str(),
+            target.lock_key,
+            submission
+        ],
+    )?;
+    Ok(())
+}
+
+/// Canonical path locks let ancestor and descendant directories conflict while
+/// sibling names such as `/target` and `/target2` stay independent. Other lock
+/// kinds compare exactly.
+fn normalize_lock_key(key: &str) -> Result<String, StoreError> {
+    let Some(path) = key.strip_prefix("path:") else {
+        return Ok(key.to_owned());
+    };
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(StoreError::Invalid(
+            "Non-Git path locks must use an absolute path".into(),
+        ));
+    }
+    Ok(format!("path:{}", canonical_lock_path(path)?.display()))
+}
+
+fn canonical_lock_path(path: &Path) -> Result<PathBuf, StoreError> {
+    let mut existing = path.to_path_buf();
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| StoreError::Invalid("Invalid path lock".into()))?
+            .to_owned();
+        if name == "." || name == ".." {
+            return Err(StoreError::Invalid("Invalid path lock".into()));
+        }
+        remainder.push(name);
+        existing = existing
+            .parent()
+            .ok_or_else(|| StoreError::Invalid("Invalid path lock".into()))?
+            .to_path_buf();
+    }
+    let mut canonical =
+        std::fs::canonicalize(&existing).map_err(|error| StoreError::Internal(error.into()))?;
+    for name in remainder.into_iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn lock_path(key: &str) -> Option<&Path> {
+    key.strip_prefix("path:").map(Path::new)
+}
+
+/// Returns the key of a lock that overlaps the requested one, if any. Path
+/// locks conflict when either canonical path contains the other; component-wise
+/// `Path::starts_with` keeps `/target2` outside `/target`.
+fn conflicting_lock(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {
+    let requested = lock_path(key);
+    let mut statement = conn.prepare("SELECT lock_key,task_id,owner_operation_id FROM sa_locks")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (existing, _task, _operation) in rows {
+        let conflicts = match (requested, lock_path(&existing)) {
+            (Some(left), Some(right)) => left.starts_with(right) || right.starts_with(left),
+            _ => existing == key,
+        };
+        if conflicts {
+            return Ok(Some(existing));
+        }
+    }
+    Ok(None)
+}
+
+fn append_event_conn(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    event: &NewEvent,
+) -> Result<(Event, bool), StoreError> {
+    if let Some(existing) = event_by_operation(tx, &event.operation_id)? {
+        if existing.task_id == task_id
+            && existing.event_type == event.event_type
+            && existing.payload == event.payload
+            && existing.session_id == event.session_id
+            && existing.run_id == event.run_id
+            && existing.causation_id == event.causation_id
+        {
+            return Ok((existing, false));
+        }
+        return Err(StoreError::OperationConflict {
+            operation_id: event.operation_id.clone(),
+            kind: format!("event:{}", existing.event_type),
+        });
+    }
+    let record =
+        load_record_conn(tx, task_id)?.ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0)+1 FROM sa_events WHERE task_id=?1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let stored = Event {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        task_id: task_id.into(),
+        pair_id: record.pair_id.clone(),
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        sequence: sequence as u64,
+        event_type: event.event_type,
+        causation_id: event.causation_id.clone(),
+        operation_id: event.operation_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        payload: event.payload.clone(),
+        processed: false,
+        spec_version: record.spec_version,
+        review_round: record.review_round,
+    };
+    claim_operation(
+        tx,
+        &event.operation_id,
+        &format!("event:{}", event.event_type),
+        task_id,
+        &event_hash(task_id, event),
+    )?;
+    insert_event_conn(tx, &stored)?;
+    Ok((stored, true))
+}
+
+fn apply_transition_conn(
+    tx: &Transaction<'_>,
+    data_dir: &Path,
+    event: &Event,
+    policy: &StatePolicy,
+) -> Result<TaskRecord, StoreError> {
+    let record = load_record_conn(tx, &event.task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(event.task_id.clone()))?;
+    if event.event_type == EventType::TaskCompleted {
+        let repos = load_repos_conn(tx, &event.task_id)?;
+        let reports = load_reports_conn(tx, &event.task_id)?;
+        let approvals = load_approvals_conn(tx, &event.task_id)?;
+        let evidence = gate_evidence_conn(tx, data_dir, &record)?;
+        if let Err(unmet) = state::completion_gate(&record, &repos, &reports, &approvals, &evidence)
+        {
+            return Err(StoreError::Gate(unmet));
+        }
+    }
+    let draft = NewEvent {
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        event_type: event.event_type,
+        causation_id: event.causation_id.clone(),
+        operation_id: event.operation_id.clone(),
+        payload: event.payload.clone(),
+    };
+    let transition = state::apply(&record, &draft, policy)?;
+    let mut updated = record;
+    updated.phase = transition.phase;
+    updated.status = transition.status;
+    updated.review_round = transition.review_round;
+    if let Some(spec) = transition.spec {
+        updated.spec = spec;
+        updated.title = updated.spec.title.clone();
+    }
+    updated.spec_version = transition.spec_version;
+    for (role, agent_status) in &transition.agent_updates {
+        match role {
+            super::model::AgentRole::Coder => updated.coder.agent_status = *agent_status,
+            super::model::AgentRole::Reviewer => updated.reviewer.agent_status = *agent_status,
+        }
+    }
+    if let Some(cleanup) = transition.cleanup_status {
+        updated.cleanup_status = cleanup;
+    }
+    updated.updated_at = chrono::Utc::now().to_rfc3339();
+    update_task_conn(tx, &updated)?;
+    if !transition.invalidated.is_empty() {
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE sa_reports SET invalidated=1 WHERE task_id=?1 AND spec_version < ?2",
+            params![event.task_id, transition.spec_version],
+        )?;
+        tx.execute(
+            "UPDATE sa_approvals SET status=?2, resolved_at=?3 WHERE task_id=?1 AND status=?4 AND task_spec_version < ?5",
+            params![
+                event.task_id,
+                ApprovalStatus::Expired.as_str(),
+                now,
+                ApprovalStatus::Pending.as_str(),
+                transition.spec_version
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE sa_events SET processed=1 WHERE event_id=?1",
+        [&event.event_id],
+    )?;
+    Ok(updated)
+}
+
+fn event_by_id(conn: &Connection, event_id: &str) -> Result<Option<Event>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE event_id=?1",
+            [event_id],
+            event_from_row,
+        )
+        .optional()?;
+    match row {
+        Some(event) => Ok(Some(event?)),
+        None => Ok(None),
+    }
+}
+
+fn validate_operation_id(value: &str) -> Result<(), StoreError> {
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(StoreError::Invalid(
+            "Operation ID must contain 1-256 non-control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_task_id(value: &str) -> Result<(), StoreError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !valid {
+        return Err(StoreError::Invalid("Invalid task ID".into()));
+    }
+    Ok(())
+}
+
+fn validate_lock_key(value: &str) -> Result<(), StoreError> {
+    if value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(StoreError::Invalid("Invalid lock key".into()));
+    }
+    Ok(())
+}
+
+fn validate_artifact_name(value: &str) -> Result<(), StoreError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && !value.starts_with('.')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+    if !valid {
+        return Err(StoreError::Invalid("Invalid artifact name".into()));
+    }
+    Ok(())
+}
+
+fn hash_json(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn event_hash(task_id: &str, event: &NewEvent) -> String {
+    hash_json(&json!({
+        "task":task_id,
+        "type":event.event_type,
+        "session":event.session_id,
+        "run":event.run_id,
+        "causation":event.causation_id,
+        "payload":event.payload
+    }))
+}
+
+fn operation_row(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<(String, String, String)>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT kind,task_id,payload_hash FROM sa_operations WHERE operation_id=?1",
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?)
+}
+
+fn claim_operation(
+    conn: &Connection,
+    operation_id: &str,
+    kind: &str,
+    task_id: &str,
+    payload_hash: &str,
+) -> Result<(), StoreError> {
+    match operation_row(conn, operation_id)? {
+        Some((stored_kind, stored_task, stored_hash))
+            if stored_kind == kind && stored_task == task_id && stored_hash == payload_hash =>
+        {
+            Ok(())
+        }
+        Some((stored_kind, _, _)) => Err(StoreError::OperationConflict {
+            operation_id: operation_id.into(),
+            kind: stored_kind,
+        }),
+        None => {
+            conn.execute(
+                "INSERT INTO sa_operations(operation_id,kind,task_id,payload_hash,created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![operation_id, kind, task_id, payload_hash, chrono::Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn next_task_number(conn: &Connection) -> Result<u32, StoreError> {
+    let mut maximum = 0u32;
+    for column in ["task_id", "pair_id"] {
+        let mut statement = conn.prepare(&format!("SELECT {column} FROM sa_tasks"))?;
+        let values = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for value in values {
+            if let Some((_, number)) = value.rsplit_once('-') {
+                if let Ok(number) = number.parse::<u32>() {
+                    maximum = maximum.max(number);
+                }
+            }
+        }
+    }
+    maximum
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Invalid("Task ID space exhausted".into()))
+}
+
+struct RawTask {
+    task_id: String,
+    router_session_id: String,
+    pair_id: String,
+    title: String,
+    spec_json: String,
+    spec_version: u32,
+    phase: String,
+    status: String,
+    review_round: u32,
+    parent_task_id: Option<String>,
+    depends_on_json: String,
+    coder_session_id: Option<String>,
+    coder_previous_json: String,
+    coder_agent_status: String,
+    reviewer_session_id: Option<String>,
+    reviewer_agent_status: String,
+    cleanup_status: String,
+    permission_policy_version: u32,
+    created_at: String,
+    updated_at: String,
+}
+
+fn load_record_conn(conn: &Connection, task_id: &str) -> Result<Option<TaskRecord>, StoreError> {
+    let raw = conn
+        .query_row(
+            "SELECT task_id,router_session_id,pair_id,title,spec_json,spec_version,phase,status,review_round,parent_task_id,depends_on_json,coder_session_id,coder_previous_json,coder_agent_status,reviewer_session_id,reviewer_agent_status,cleanup_status,permission_policy_version,created_at,updated_at FROM sa_tasks WHERE task_id=?1",
+            [task_id],
+            |row| {
+                Ok(RawTask {
+                    task_id: row.get(0)?,
+                    router_session_id: row.get(1)?,
+                    pair_id: row.get(2)?,
+                    title: row.get(3)?,
+                    spec_json: row.get(4)?,
+                    spec_version: row.get::<_, i64>(5)? as u32,
+                    phase: row.get(6)?,
+                    status: row.get(7)?,
+                    review_round: row.get::<_, i64>(8)? as u32,
+                    parent_task_id: row.get(9)?,
+                    depends_on_json: row.get(10)?,
+                    coder_session_id: row.get(11)?,
+                    coder_previous_json: row.get(12)?,
+                    coder_agent_status: row.get(13)?,
+                    reviewer_session_id: row.get(14)?,
+                    reviewer_agent_status: row.get(15)?,
+                    cleanup_status: row.get(16)?,
+                    permission_policy_version: row.get::<_, i64>(17)? as u32,
+                    created_at: row.get(18)?,
+                    updated_at: row.get(19)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let spec: TaskSpec = serde_json::from_str(&raw.spec_json)
+        .with_context(|| format!("Invalid task spec for {}", raw.task_id))?;
+    let mut record = TaskRecord {
+        task_id: raw.task_id,
+        pair_id: raw.pair_id,
+        router_session_id: raw.router_session_id,
+        title: raw.title,
+        spec,
+        spec_version: raw.spec_version,
+        phase: Phase::parse(&raw.phase)?,
+        status: Status::parse(&raw.status)?,
+        review_round: raw.review_round,
+        parent_task_id: raw.parent_task_id,
+        depends_on: serde_json::from_str(&raw.depends_on_json)
+            .context("Invalid task dependencies")?,
+        coder: SessionRef {
+            session_id: raw.coder_session_id,
+            previous_session_ids: serde_json::from_str(&raw.coder_previous_json)
+                .context("Invalid coder session history")?,
+            agent_status: AgentStatus::parse(&raw.coder_agent_status)?,
+        },
+        reviewer: SessionRef {
+            session_id: raw.reviewer_session_id,
+            previous_session_ids: Vec::new(),
+            agent_status: AgentStatus::parse(&raw.reviewer_agent_status)?,
+        },
+        cleanup_status: CleanupStatus::parse(&raw.cleanup_status)?,
+        permission_policy_version: raw.permission_policy_version,
+        created_at: raw.created_at,
+        updated_at: raw.updated_at,
+        repositories: load_repos_conn(conn, task_id)?,
+        non_git_targets: load_non_git_conn(conn, task_id)?,
+    };
+    // The reviewer history is stored with the coder's key layout only in older
+    // databases; this row is authoritative, so keep the field deterministic.
+    record.reviewer.previous_session_ids = Vec::new();
+    Ok(Some(record))
+}
+
+fn insert_task_conn(conn: &Connection, record: &TaskRecord) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO sa_tasks(task_id,router_session_id,pair_id,title,spec_json,spec_version,phase,status,review_round,parent_task_id,depends_on_json,coder_session_id,coder_previous_json,coder_agent_status,reviewer_session_id,reviewer_agent_status,cleanup_status,permission_policy_version,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        params![
+            record.task_id,
+            record.router_session_id,
+            record.pair_id,
+            record.title,
+            serde_json::to_string(&record.spec)?,
+            record.spec_version,
+            record.phase.as_str(),
+            record.status.as_str(),
+            record.review_round,
+            record.parent_task_id,
+            serde_json::to_string(&record.depends_on)?,
+            record.coder.session_id,
+            serde_json::to_string(&record.coder.previous_session_ids)?,
+            record.coder.agent_status.as_str(),
+            record.reviewer.session_id,
+            record.reviewer.agent_status.as_str(),
+            record.cleanup_status.as_str(),
+            record.permission_policy_version,
+            record.created_at,
+            record.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_task_conn(conn: &Connection, record: &TaskRecord) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE sa_tasks SET title=?2,spec_json=?3,spec_version=?4,phase=?5,status=?6,review_round=?7,parent_task_id=?8,depends_on_json=?9,coder_session_id=?10,coder_previous_json=?11,coder_agent_status=?12,reviewer_session_id=?13,reviewer_agent_status=?14,cleanup_status=?15,permission_policy_version=?16,updated_at=?17 WHERE task_id=?1",
+        params![
+            record.task_id,
+            record.title,
+            serde_json::to_string(&record.spec)?,
+            record.spec_version,
+            record.phase.as_str(),
+            record.status.as_str(),
+            record.review_round,
+            record.parent_task_id,
+            serde_json::to_string(&record.depends_on)?,
+            record.coder.session_id,
+            serde_json::to_string(&record.coder.previous_session_ids)?,
+            record.coder.agent_status.as_str(),
+            record.reviewer.session_id,
+            record.reviewer.agent_status.as_str(),
+            record.cleanup_status.as_str(),
+            record.permission_policy_version,
+            record.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_event_conn(conn: &Connection, event: &Event) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO sa_events(event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![
+            event.event_id,
+            event.task_id,
+            event.pair_id,
+            event.session_id,
+            event.run_id,
+            event.sequence as i64,
+            event.event_type.as_str(),
+            event.causation_id,
+            event.operation_id,
+            event.timestamp,
+            serde_json::to_string(&event.payload)?,
+            event.processed as i64,
+            event.spec_version as i64,
+            event.review_round as i64
+        ],
+    )?;
+    Ok(())
+}
+
+type StoredEvent = Result<Event, StoreError>;
+
+fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
+    let payload: String = row.get(10)?;
+    let event_type: String = row.get(6)?;
+    Ok((|| -> Result<Event, StoreError> {
+        Ok(Event {
+            event_id: row.get(0)?,
+            task_id: row.get(1)?,
+            pair_id: row.get(2)?,
+            session_id: row.get(3)?,
+            run_id: row.get(4)?,
+            sequence: row.get::<_, i64>(5)? as u64,
+            event_type: EventType::parse(&event_type)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+            causation_id: row.get(7)?,
+            operation_id: row.get(8)?,
+            timestamp: row.get(9)?,
+            payload: serde_json::from_str(&payload)?,
+            processed: row.get::<_, i64>(11)? != 0,
+            spec_version: row.get::<_, i64>(12)? as u32,
+            review_round: row.get::<_, i64>(13)? as u32,
+        })
+    })())
+}
+
+fn load_delivery_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,purpose,job_id,created_at FROM sa_delivery_dispatches WHERE task_id=?1 AND plan_operation_id=?2",
+            params![task_id, plan_operation_id],
+            |row| {
+                Ok(DeliveryDispatch {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    purpose: row.get(3)?,
+                    repository_id: None,
+                    old_oid: None,
+                    new_oid: None,
+                    attempt: 0,
+                    job_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn load_repository_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at FROM sa_repository_dispatches WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+            params![task_id, plan_operation_id, repository_id],
+            |row| {
+                Ok(DeliveryDispatch {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    purpose: row.get(3)?,
+                    repository_id: Some(repository_id.to_owned()),
+                    old_oid: row.get(4)?,
+                    new_oid: row.get(5)?,
+                    attempt: row.get::<_, i64>(6)? as u32,
+                    job_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn load_delivery_plan_conn(
+    conn: &Connection,
+    task_id: &str,
+    operation_id: &str,
+) -> Result<Option<DeliveryPlan>, StoreError> {
+    let encoded: Option<String> = conn
+        .query_row(
+            "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 AND operation_id=?2",
+            params![task_id, operation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    encoded
+        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .transpose()
+}
+
+fn load_repository_observation_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<RepositoryDeliveryObservation>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at,source FROM sa_repository_delivery_observations WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+            params![task_id, plan_operation_id, repository_id],
+            |row| {
+                Ok(RepositoryDeliveryObservation {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    repository_id: repository_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    old_oid: row.get(3)?,
+                    new_oid: row.get(4)?,
+                    target_ref: row.get(5)?,
+                    attempt: row.get::<_, i64>(6)? as u32,
+                    verified: true,
+                    source: parse_observation_source(&row.get::<_, String>(8)?),
+                    observed_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Durable spelling of the observation provenance. An unrecognized or missing
+/// value is read back as Unknown, never as a no-dispatch proof.
+fn observation_source_name(source: DeliveryObservationSource) -> &'static str {
+    match source {
+        DeliveryObservationSource::Unknown => "unknown",
+        DeliveryObservationSource::HostVerifiedAlreadyAtTarget => "host_verified_already_at_target",
+        DeliveryObservationSource::DeliveryJob => "delivery_job",
+    }
+}
+
+fn parse_observation_source(value: &str) -> DeliveryObservationSource {
+    match value {
+        "host_verified_already_at_target" => DeliveryObservationSource::HostVerifiedAlreadyAtTarget,
+        "delivery_job" => DeliveryObservationSource::DeliveryJob,
+        _ => DeliveryObservationSource::Unknown,
+    }
+}
+
+/// A legacy receipt may bind only when the complete immutable plan has exactly
+/// one repository and names the requested one. A multi-repository legacy
+/// receipt is never guessed or migrated.
+fn legacy_repository_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    let Some(legacy) = load_delivery_dispatch_conn(conn, task_id, plan_operation_id)? else {
+        return Ok(None);
+    };
+    let Some(plan) = load_delivery_plan_conn(conn, task_id, plan_operation_id)? else {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} has no immutable plan and cannot be bound"
+        )));
+    };
+    if plan.repositories.len() != 1 {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} is not bound to a single-repository plan; refusing to guess its repository"
+        )));
+    }
+    let target = &plan.repositories[0];
+    if target.repository_id != repository_id || legacy.purpose != "delivery" {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} cannot be bound to repository {repository_id}"
+        )));
+    }
+    if legacy.spec_version != plan.spec_version || legacy.review_round != plan.review_round {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} does not match the immutable plan version"
+        )));
+    }
+    let record = load_record_conn(conn, task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(task_id.to_owned()))?;
+    if record.spec_version != plan.spec_version
+        || record.review_round != plan.review_round
+        || record.coder.session_id.as_deref() != Some(legacy.coder_session_id.as_str())
+    {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} does not match the current task version or Coder session"
+        )));
+    }
+    Ok(Some(DeliveryDispatch {
+        repository_id: Some(target.repository_id.clone()),
+        old_oid: Some(target.old_oid.clone()),
+        new_oid: Some(target.new_oid.clone()),
+        attempt: target.attempt,
+        ..legacy
+    }))
+}
+
+/// The caller must present the same immutable plan that is persisted. A
+/// caller-truncated, extended or substituted plan can never gate a task-wide
+/// fact, so this compares the whole repository vector (including each target's
+/// attempt and cooperative lock identity).
+fn caller_plan_matches_persisted(persisted: &DeliveryPlan, plan: &DeliveryPlan) -> bool {
+    persisted.operation_id == plan.operation_id
+        && persisted.task_id == plan.task_id
+        && persisted.spec_version == plan.spec_version
+        && persisted.review_round == plan.review_round
+        && persisted.evidence_event_id == plan.evidence_event_id
+        && persisted.review_event_id == plan.review_event_id
+        && persisted.content_fingerprint == plan.content_fingerprint
+        && persisted.repositories == plan.repositories
+}
+
+fn delivery_plan_observations_complete_conn(
+    conn: &Connection,
+    plan: &DeliveryPlan,
+) -> Result<bool, StoreError> {
+    // The persisted plan is authoritative: never infer the repository set from
+    // the caller, or a subset could gate a global completion for the rest.
+    let Some(persisted) = load_delivery_plan_conn(conn, &plan.task_id, &plan.operation_id)? else {
+        return Ok(false);
+    };
+    if !caller_plan_matches_persisted(&persisted, plan) || persisted.repositories.is_empty() {
+        return Ok(false);
+    }
+    let Some(record) = load_record_conn(conn, &persisted.task_id)? else {
+        return Ok(false);
+    };
+    if record.spec_version != persisted.spec_version
+        || record.review_round != persisted.review_round
+    {
+        return Ok(false);
+    }
+    for target in &persisted.repositories {
+        let Some(observation) = load_repository_observation_conn(
+            conn,
+            &persisted.task_id,
+            &persisted.operation_id,
+            &target.repository_id,
+        )?
+        else {
+            return Ok(false);
+        };
+        if !observation.verified
+            || observation.spec_version != persisted.spec_version
+            || observation.review_round != persisted.review_round
+            || observation.old_oid != target.old_oid
+            || observation.new_oid != target.new_oid
+            || observation.target_ref != target.target_ref
+            || observation.attempt != target.attempt
+            // The observation must still belong to the task's current Coder.
+            || record.coder.session_id.as_deref()
+                != Some(observation.coder_session_id.as_str())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn load_repository_dispatch_plan(
+    conn: &Connection,
+    dispatch: &DeliveryDispatch,
+) -> Result<DeliveryPlan, StoreError> {
+    load_delivery_plan_conn(conn, &dispatch.task_id, &dispatch.plan_operation_id)?.ok_or_else(
+        || {
+            StoreError::Invalid(format!(
+                "the approved delivery plan {} for task {} is not recorded",
+                dispatch.plan_operation_id, dispatch.task_id
+            ))
+        },
+    )
+}
+
+fn validate_repository_dispatch_conn(
+    conn: &Connection,
+    plan: &DeliveryPlan,
+    dispatch: &DeliveryDispatch,
+    repository_id: &str,
+    old_oid: &str,
+    new_oid: &str,
+) -> Result<(), StoreError> {
+    if plan.task_id != dispatch.task_id
+        || plan.spec_version != dispatch.spec_version
+        || plan.review_round != dispatch.review_round
+    {
+        return Err(StoreError::Invalid(format!(
+            "the delivery plan {} does not belong to task {} spec {} round {}",
+            plan.operation_id, dispatch.task_id, dispatch.spec_version, dispatch.review_round
+        )));
+    }
+    let Some(target) = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == repository_id)
+    else {
+        return Err(StoreError::Invalid(format!(
+            "the delivery plan {} does not contain repository {repository_id}",
+            plan.operation_id
+        )));
+    };
+    if target.old_oid != old_oid || target.new_oid != new_oid || target.attempt != dispatch.attempt
+    {
+        return Err(StoreError::Invalid(format!(
+            "{repository_id}: the dispatch identity does not match the approved plan"
+        )));
+    }
+    let record = load_record_conn(conn, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(dispatch.task_id.clone()))?;
+    if record.spec_version != dispatch.spec_version
+        || record.review_round != dispatch.review_round
+        || record.coder.session_id.as_deref() != Some(dispatch.coder_session_id.as_str())
+    {
+        return Err(StoreError::Invalid(format!(
+            "{repository_id}: the dispatch does not match the current task version or Coder session"
+        )));
+    }
+    Ok(())
+}
+
+fn event_by_operation(conn: &Connection, operation_id: &str) -> Result<Option<Event>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE operation_id=?1",
+            [operation_id],
+            event_from_row,
+        )
+        .optional()?;
+    match row {
+        Some(event) => Ok(Some(event?)),
+        None => Ok(None),
+    }
+}
+
+fn load_repos_conn(conn: &Connection, task_id: &str) -> Result<Vec<RepoTarget>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT repository_id,repo_root,git_common_dir,target_path,target_branch,task_branch,worktree_path,working_path,base_commit,submitted_commit,reviewed_commit,integrated_commit,integration_status,verification_status,source_state_json FROM sa_task_repos WHERE task_id=?1 ORDER BY repository_id",
+    )?;
+    let raw = statement
+        .query_map([task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    raw.into_iter()
+        .map(
+            |(
+                repository_id,
+                repo_root,
+                git_common_dir,
+                target_path,
+                target_branch,
+                task_branch,
+                worktree_path,
+                working_path,
+                base_commit,
+                submitted_commit,
+                reviewed_commit,
+                integrated_commit,
+                integration_status,
+                verification_status,
+                source_state_json,
+            )| {
+                Ok(RepoTarget {
+                    task_id: task_id.into(),
+                    repository_id,
+                    repo_root: repo_root.into(),
+                    git_common_dir: git_common_dir.into(),
+                    target_path: target_path.into(),
+                    target_branch,
+                    task_branch,
+                    worktree_path: worktree_path.into(),
+                    working_path: working_path.into(),
+                    base_commit,
+                    submitted_commit,
+                    reviewed_commit,
+                    integrated_commit,
+                    integration_status: IntegrationStatus::parse(&integration_status)
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?,
+                    verification_status: VerificationStatus::parse(&verification_status)
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?,
+                    source_state: serde_json::from_str(&source_state_json)?,
+                })
+            },
+        )
+        .collect()
+}
+
+fn load_non_git_conn(conn: &Connection, task_id: &str) -> Result<Vec<NonGitTarget>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key,submission_json FROM sa_non_git_targets WHERE task_id=?1 ORDER BY path",
+    )?;
+    let raw = statement
+        .query_map([task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    raw.into_iter()
+        .map(
+            |(
+                path,
+                snapshot_dir,
+                snapshot_manifest_json,
+                diff_ref,
+                status,
+                lock_key,
+                submission,
+            )| {
+                let submission = submission
+                    .map(|raw| {
+                        serde_json::from_str::<NonGitSubmission>(&raw).map_err(|error| {
+                            StoreError::Invalid(format!(
+                                "Invalid non-Git submission for {path}: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                Ok(NonGitTarget {
+                    task_id: task_id.into(),
+                    path: path.into(),
+                    snapshot_dir: snapshot_dir.into(),
+                    snapshot_manifest_json,
+                    diff_ref,
+                    status: NonGitStatus::parse(&status)
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?,
+                    lock_key,
+                    submission,
+                })
+            },
+        )
+        .collect()
+}
+
+fn load_reports_conn(conn: &Connection, task_id: &str) -> Result<Vec<Report>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT report_id,kind,spec_version,round,body_json,created_at,invalidated FROM sa_reports WHERE task_id=?1 ORDER BY created_at, report_id",
+    )?;
+    let raw = statement
+        .query_map([task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u32,
+                row.get::<_, i64>(3)? as u32,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)? != 0,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    raw.into_iter()
+        .map(
+            |(report_id, kind, spec_version, round, body_json, created_at, invalidated)| {
+                Ok(Report {
+                    report_id,
+                    task_id: task_id.into(),
+                    kind: ReportKind::parse(&kind)
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?,
+                    spec_version,
+                    round,
+                    body: serde_json::from_str(&body_json)?,
+                    created_at,
+                    invalidated,
+                })
+            },
+        )
+        .collect()
+}
+
+fn report_by_operation(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<Report>, StoreError> {
+    let row: Option<(String, String, String, u32, u32, String, String, bool)> = conn
+        .query_row(
+            "SELECT report_id,task_id,kind,spec_version,round,body_json,created_at,invalidated FROM sa_reports WHERE operation_id=?1",
+            [operation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? as u32,
+                    row.get::<_, i64>(4)? as u32,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get::<_, i64>(7)? != 0,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(report_id, task_id, kind, spec_version, round, body_json, created_at, invalidated)| {
+            Ok(Report {
+                report_id,
+                task_id,
+                kind: ReportKind::parse(&kind)
+                    .map_err(|error| StoreError::Invalid(error.to_string()))?,
+                spec_version,
+                round,
+                body: serde_json::from_str(&body_json)?,
+                created_at,
+                invalidated,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn load_approvals_conn(conn: &Connection, task_id: &str) -> Result<Vec<Approval>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT approval_id,task_id,pair_id,source_session_id,parent_session_id,request_type,request_json,task_spec_version,permission_policy_version,status,answer_json,created_at,resolved_at FROM sa_approvals WHERE task_id=?1 ORDER BY created_at, approval_id",
+    )?;
+    let rows = statement
+        .query_map([task_id], approval_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::with_capacity(rows.len());
+    for approval in rows {
+        result.push(approval?);
+    }
+    Ok(result)
+}
+
+fn approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Approval, StoreError>> {
+    let request_type: String = row.get(5)?;
+    let status: String = row.get(9)?;
+    let request_json: String = row.get(6)?;
+    let answer_json: Option<String> = row.get(10)?;
+    Ok((|| -> Result<Approval, StoreError> {
+        Ok(Approval {
+            approval_id: row.get(0)?,
+            task_id: row.get(1)?,
+            pair_id: row.get(2)?,
+            source_session_id: row.get(3)?,
+            parent_session_id: row.get(4)?,
+            request_type: ApprovalType::parse(&request_type)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+            request: serde_json::from_str(&request_json)?,
+            task_spec_version: row.get::<_, i64>(7)? as u32,
+            permission_policy_version: row.get::<_, i64>(8)? as u32,
+            status: ApprovalStatus::parse(&status)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+            answer: answer_json
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
+            created_at: row.get(11)?,
+            resolved_at: row.get(12)?,
+        })
+    })())
+}
+
+fn approval_by_id(conn: &Connection, approval_id: &str) -> Result<Option<Approval>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT approval_id,task_id,pair_id,source_session_id,parent_session_id,request_type,request_json,task_spec_version,permission_policy_version,status,answer_json,created_at,resolved_at FROM sa_approvals WHERE approval_id=?1",
+            [approval_id],
+            approval_from_row,
+        )
+        .optional()?;
+    match row {
+        Some(approval) => Ok(Some(approval?)),
+        None => Ok(None),
+    }
+}
+
+fn approval_by_operation(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<Approval>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT approval_id,task_id,pair_id,source_session_id,parent_session_id,request_type,request_json,task_spec_version,permission_policy_version,status,answer_json,created_at,resolved_at FROM sa_approvals WHERE operation_id=?1",
+            [operation_id],
+            approval_from_row,
+        )
+        .optional()?;
+    match row {
+        Some(approval) => Ok(Some(approval?)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests;

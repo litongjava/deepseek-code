@@ -1,4 +1,5 @@
-﻿use crate::{
+use crate::terminal::input::TerminalInput;
+use crate::{
     args::{Cli, OutputFormat, PermissionModeArg},
     config::Selection,
 };
@@ -20,7 +21,6 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
-use crate::terminal::input::TerminalInput;
 
 /// One stdin reader for the entire REPL, also used for tool questions. A detached
 /// OS thread avoids Tokio's uncancellable stdin read blocking runtime shutdown.
@@ -35,7 +35,11 @@ pub fn terminal_input() -> TerminalInput {
 /// The lease is taken for the settlement itself only, so two resumed terminals
 /// cannot settle concurrently; it is dropped before the caller displays
 /// anything and is not observation.
-fn settle_abandoned_turns(paths: &RuntimePaths, store: &SessionStore, id: &str) -> Vec<deepseek_code_core::db::turn_repo::TurnRecord> {
+fn settle_abandoned_turns(
+    paths: &RuntimePaths,
+    store: &SessionStore,
+    id: &str,
+) -> Vec<deepseek_code_core::db::turn_repo::TurnRecord> {
     use deepseek_code_core::services::session_messages;
     if session_messages::execution_active(&paths.data_dir, id).unwrap_or(true) {
         return Vec::new();
@@ -61,8 +65,7 @@ pub struct Session {
     pub(crate) sdk_content: Option<Value>,
     /// Stream-json user frames steered into the running turn, keyed by their
     /// handoff message id, replayed when the engine delivers them.
-    pub(crate) sdk_steered_replays:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
+    pub(crate) sdk_steered_replays: Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
     pub(crate) initial_hook_message: Option<String>,
     pub(crate) sdk_overrides: crate::sdk_initialization::Overrides,
     pub(crate) sdk_hooks: Option<crate::sdk_hooks::Runtime>,
@@ -92,12 +95,25 @@ pub struct Session {
 
 /// Takes back what the model has not read, steered or Tab-queued, in the order
 /// it was sent. Background task notifications are not the user's to take back.
-pub(crate) fn recall_queued(session: &Session, input: &mut Option<TerminalInput>, shown: &[String]) -> Result<Vec<String>> {
-    let mut recalled = deepseek_code_core::services::input_queue::take_where(&session.store.db, &session.id, |text| !crate::background_commands::is_notification(text))?;
+pub(crate) fn recall_queued(
+    session: &Session,
+    input: &mut Option<TerminalInput>,
+    shown: &[String],
+) -> Result<Vec<String>> {
+    let mut recalled = deepseek_code_core::services::input_queue::take_where(
+        &session.store.db,
+        &session.id,
+        |text| !crate::background_commands::is_notification(text),
+    )?;
     if let Some(input) = input.as_mut() {
         recalled.extend(input.take_prompts(shown));
     }
-    recalled.sort_by_key(|text| shown.iter().position(|sent| sent == text).unwrap_or(usize::MAX));
+    recalled.sort_by_key(|text| {
+        shown
+            .iter()
+            .position(|sent| sent == text)
+            .unwrap_or(usize::MAX)
+    });
     Ok(recalled)
 }
 
@@ -205,20 +221,31 @@ fn merge_attempt_results(previous: Option<Value>, next: Option<Value>) -> Value 
 
 impl Session {
     /// Remote Control channel for tool approvals and interrupts during turns.
-    pub(crate) fn set_remote_relay(&self, relay: Option<deepseek_code_core::services::remote_control::Relay>) {
+    pub(crate) fn set_remote_relay(
+        &self,
+        relay: Option<deepseek_code_core::services::remote_control::Relay>,
+    ) {
         *self.remote_relay.lock().unwrap() = relay;
     }
 
-    pub(crate) fn remote_relay(&self) -> Option<deepseek_code_core::services::remote_control::Relay> {
+    pub(crate) fn remote_relay(
+        &self,
+    ) -> Option<deepseek_code_core::services::remote_control::Relay> {
         self.remote_relay.lock().unwrap().clone()
     }
 
-    pub(crate) fn remote_interrupts(&self) -> deepseek_code_core::services::remote_control::Interrupts {
-        self.remote_relay().map(|relay| relay.interrupts()).unwrap_or_default()
+    pub(crate) fn remote_interrupts(
+        &self,
+    ) -> deepseek_code_core::services::remote_control::Interrupts {
+        self.remote_relay()
+            .map(|relay| relay.interrupts())
+            .unwrap_or_default()
     }
 
     pub(crate) async fn validate_sdk_mcp_servers(&self, names: &[String]) -> Result<()> {
-        if names.is_empty() { return Ok(()); }
+        if names.is_empty() {
+            return Ok(());
+        }
         // Initialization validates persisted names without starting any process.
         let path = self.paths.data_dir.join("mcp-servers.json");
         match std::fs::read(&path) {
@@ -227,15 +254,26 @@ impl Session {
                 if let Some(servers) = config["mcpServers"].as_object() {
                     for (id, server) in servers {
                         let name = server["name"].as_str().unwrap_or(id);
-                        anyhow::ensure!(!names.iter().any(|entry| entry == id || entry == name || format!("sdk:{entry}") == *id), "SDK MCP server conflicts with configured server: {name}");
+                        anyhow::ensure!(
+                            !names.iter().any(|entry| entry == id
+                                || entry == name
+                                || format!("sdk:{entry}") == *id),
+                            "SDK MCP server conflicts with configured server: {name}"
+                        );
                     }
                 }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         for server in self.mcp.list_servers_full().await {
-            anyhow::ensure!(!names.iter().any(|name| name == &server.config.name || name == &server.config.id || format!("sdk:{name}") == server.config.id), "SDK MCP server conflicts with configured server: {}", server.config.name);
+            anyhow::ensure!(
+                !names.iter().any(|name| name == &server.config.name
+                    || name == &server.config.id
+                    || format!("sdk:{name}") == server.config.id),
+                "SDK MCP server conflicts with configured server: {}",
+                server.config.name
+            );
         }
         Ok(())
     }
@@ -269,20 +307,44 @@ impl Session {
 
     /// Reference `system/init` message describing this session to SDK clients.
     pub(crate) async fn sdk_init_message(&self) -> Result<Value> {
-        let mut tools = deepseek_code_core::tools::get_tool_definitions().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        tools.extend(self.mcp.get_all_tools().await.into_iter().map(|tool| format!("mcp__{}__{}", tool.server_name, tool.name)));
+        let mut tools = deepseek_code_core::tools::get_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        tools.extend(
+            self.mcp
+                .get_all_tools()
+                .await
+                .into_iter()
+                .map(|tool| format!("mcp__{}__{}", tool.server_name, tool.name)),
+        );
         // SDK-hosted servers are listed through the host; their names are already qualified.
-        tools.extend(self.sdk_mcp.tools().await?.into_iter().map(|tool| tool.name));
-        let skills = crate::skill_commands::load_for_workspace(&self.paths, &self.workspace).await?;
-        let commands = crate::skill_commands::catalog(&skills).into_iter().map(|(name, _)| name.trim_start_matches('/').to_owned()).collect::<Vec<_>>();
+        tools.extend(
+            self.sdk_mcp
+                .tools()
+                .await?
+                .into_iter()
+                .map(|tool| tool.name),
+        );
+        let skills =
+            crate::skill_commands::load_for_workspace(&self.paths, &self.workspace).await?;
+        let commands = crate::skill_commands::catalog(&skills)
+            .into_iter()
+            .map(|(name, _)| name.trim_start_matches('/').to_owned())
+            .collect::<Vec<_>>();
         let context = crate::services::context(&self.paths)?;
-        let agents = deepseek_code_core::services::agents::list(&context)?.into_iter().map(|agent| agent.id).collect::<Vec<_>>();
-        Ok(json!({"type":"system","subtype":"init","cwd":self.workspace,"session_id":self.id,"tools":tools,
+        let agents = deepseek_code_core::services::agents::list(&context)?
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"type":"system","subtype":"init","cwd":self.workspace,"session_id":self.id,"tools":tools,
             "mcp_servers":self.sdk_mcp_status().await,"model":self.model,
             "permissionMode":crate::sdk_messages::reference_mode(self.permission_mode()),
             "slash_commands":commands,"agents":agents,"apiKeySource":"none",
             "version":env!("CARGO_PKG_VERSION"),"output_style":crate::display_commands::load(self)?.output_style,
-            "uuid":uuid::Uuid::new_v4().to_string()}))
+            "uuid":uuid::Uuid::new_v4().to_string()}),
+        )
     }
 
     /// Reference MCP server status entries: configured servers plus SDK-hosted ones.
@@ -293,7 +355,9 @@ impl Session {
             if let Some(error) = server.error { entry["error"] = json!(error); }
             entry
         }).collect::<Vec<_>>();
-        servers.extend(self.sdk_mcp.names().into_iter().map(|name| json!({"name":name,"status":"connected","config":{"type":"sdk","name":name}})));
+        servers.extend(self.sdk_mcp.names().into_iter().map(
+            |name| json!({"name":name,"status":"connected","config":{"type":"sdk","name":name}}),
+        ));
         servers
     }
 
@@ -309,15 +373,23 @@ impl Session {
     }
 
     pub(crate) async fn sdk_set_model(&mut self, name: &str) -> Result<()> {
-        let providers=self.providers.lock().await;
-        let (provider,model)=name.split_once("::").unwrap_or((&self.provider_id,name));
-        let resolved=providers.resolve_selected(provider,model).context("SDK model is not configured")?;
-        let selection=Selection {providers:providers.list_providers().to_vec(),provider_id:resolved.provider.id,model:model.to_owned()};
+        let providers = self.providers.lock().await;
+        let (provider, model) = name.split_once("::").unwrap_or((&self.provider_id, name));
+        let resolved = providers
+            .resolve_selected(provider, model)
+            .context("SDK model is not configured")?;
+        let selection = Selection {
+            providers: providers.list_providers().to_vec(),
+            provider_id: resolved.provider.id,
+            model: model.to_owned(),
+        };
         drop(providers);
-        let paths=self.paths.clone();
-        self.switch(&paths,selection).await
+        let paths = self.paths.clone();
+        self.switch(&paths, selection).await
     }
-    pub fn runtime_status_source(&self) -> deepseek_code_core::services::runtime_status::RuntimeSource {
+    pub fn runtime_status_source(
+        &self,
+    ) -> deepseek_code_core::services::runtime_status::RuntimeSource {
         deepseek_code_core::services::runtime_status::RuntimeSource {
             mcp: self.mcp.clone(),
             mcp_ready: self.mcp_ready.clone(),
@@ -326,17 +398,28 @@ impl Session {
         }
     }
 
-    pub async fn selected_provider(&self) -> Result<deepseek_code_core::native_engine::provider_manager::ResolvedProvider> {
-        self.providers.lock().await.resolve_selected(&self.provider_id, &self.model).context("Selected provider/model is unavailable")
+    pub async fn selected_provider(
+        &self,
+    ) -> Result<deepseek_code_core::native_engine::provider_manager::ResolvedProvider> {
+        self.providers
+            .lock()
+            .await
+            .resolve_selected(&self.provider_id, &self.model)
+            .context("Selected provider/model is unavailable")
     }
 
     pub async fn set_fast(&self, enabled: bool) -> Result<()> {
-        self.providers.lock().await.set_model_fast(&self.provider_id, &self.model, enabled)
+        self.providers
+            .lock()
+            .await
+            .set_model_fast(&self.provider_id, &self.model, enabled)
     }
 
     pub async fn reload_plugins(&self) -> Result<()> {
         let context = crate::services::context(&self.paths)?;
-        if self.mcp_ready.get().is_some() { deepseek_code_core::services::plugins::sync_mcp(&context, &self.mcp).await?; }
+        if self.mcp_ready.get().is_some() {
+            deepseek_code_core::services::plugins::sync_mcp(&context, &self.mcp).await?;
+        }
         deepseek_code_core::tools::configure_lsp_servers(
             &self.workspace.to_string_lossy(),
             deepseek_code_core::services::plugins::all_language_servers(&context)?,
@@ -345,18 +428,31 @@ impl Session {
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
-        self.mcp_ready.get_or_try_init(|| async {
-            self.mcp.initialize().await?;
-            for server in self.mcp.list_servers().await.into_iter().filter(|server|server.enabled && !server.running) {
-                if let Err(error) = self.mcp.start_server(&server.id).await { eprintln!("MCP {}: {error}",server.name); }
-            }
-            Ok::<(), anyhow::Error>(())
-        }).await?;
+        self.mcp_ready
+            .get_or_try_init(|| async {
+                self.mcp.initialize().await?;
+                for server in self
+                    .mcp
+                    .list_servers()
+                    .await
+                    .into_iter()
+                    .filter(|server| server.enabled && !server.running)
+                {
+                    if let Err(error) = self.mcp.start_server(&server.id).await {
+                        eprintln!("MCP {}: {error}", server.name);
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?;
         Ok(())
     }
 
     pub async fn context_window(&self) -> Option<u32> {
-        self.providers.lock().await.resolve_selected(&self.provider_id, &self.model)
+        self.providers
+            .lock()
+            .await
+            .resolve_selected(&self.provider_id, &self.model)
             .and_then(|resolved| resolved.model.context_window)
     }
     pub async fn open(
@@ -375,34 +471,72 @@ impl Session {
         let db = paths.open_database()?;
         let store = SessionStore::new(db.clone());
         let id = if let Some(id) = resumed_id {
-            store.resume(id).map_err(|error| crate::session_trust::diagnose(&store.db, paths, id, error))?;
+            store
+                .resume(id)
+                .map_err(|error| crate::session_trust::diagnose(&store.db, paths, id, error))?;
             id.to_owned()
         } else {
-            store.create_with_id(
-                &std::env::current_dir()?,
-                &selection.model,
-                &selection.provider_id,
-                &cli.session_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),
-            ).context("Creating CLI session")?
+            store
+                .create_with_id(
+                    &std::env::current_dir()?,
+                    &selection.model,
+                    &selection.provider_id,
+                    &cli.session_id
+                        .clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                )
+                .context("Creating CLI session")?
         };
         let id = if cli.fork_session {
             store.fork(&id)?
         } else {
             id
         };
-        let internal_worker = deepseek_code_core::services::background_sessions::worker_directory(&paths.data_dir, &id)?.is_some();
-        let auto_route = if internal_worker { std::env::var("DEEPSEEK_CODE_WORKER_AUTO_ROUTE").as_deref() == Ok("true") } else { cli.auto_route };
+        let internal_worker = deepseek_code_core::services::background_sessions::worker_directory(
+            &paths.data_dir,
+            &id,
+        )?
+        .is_some();
+        let auto_route = if internal_worker {
+            std::env::var("DEEPSEEK_CODE_WORKER_AUTO_ROUTE").as_deref() == Ok("true")
+        } else {
+            cli.auto_route
+        };
         if internal_worker {
             if let Ok(value) = std::env::var("DEEPSEEK_CODE_WORKER_MODEL") {
-                let model: deepseek_code_core::native_engine::provider_manager::ModelConfig = serde_json::from_str(&value)?;
-                let provider = selection.providers.iter_mut().find(|provider|provider.id == selection.provider_id).context("Worker provider unavailable")?;
-                let expected=deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&provider.models,&selection.model).context("Worker model unavailable")?;
-                anyhow::ensure!(model.id == expected.id, "Worker model snapshot does not match the selected model");
-                let existing = provider.models.iter_mut().find(|existing|existing.id == model.id).context("Worker model unavailable")?;
+                let model: deepseek_code_core::native_engine::provider_manager::ModelConfig =
+                    serde_json::from_str(&value)?;
+                let provider = selection
+                    .providers
+                    .iter_mut()
+                    .find(|provider| provider.id == selection.provider_id)
+                    .context("Worker provider unavailable")?;
+                let expected =
+                    deepseek_code_core::native_engine::provider_manager::resolve_model_selection(
+                        &provider.models,
+                        &selection.model,
+                    )
+                    .context("Worker model unavailable")?;
+                anyhow::ensure!(
+                    model.id == expected.id,
+                    "Worker model snapshot does not match the selected model"
+                );
+                let existing = provider
+                    .models
+                    .iter_mut()
+                    .find(|existing| existing.id == model.id)
+                    .context("Worker model unavailable")?;
                 *existing = model;
             }
         }
-        let workspace = store.workspace(&id, &paths.data_dir.join("workspaces")).map_err(|error| crate::session_trust::diagnose(&store.db, paths, &id, error))?;
+        // The role is durable per session; an explicit --role on a resume
+        // updates it, otherwise the stored role is kept.
+        if let Some(role) = cli.role {
+            deepseek_code_core::super_agent::role::set(&store.db, &id, role.into())?;
+        }
+        let workspace = store
+            .workspace(&id, &paths.data_dir.join("workspaces"))
+            .map_err(|error| crate::session_trust::diagnose(&store.db, paths, &id, error))?;
         store.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE conversations SET model = ?1, provider = ?2 WHERE id = ?3",
@@ -410,7 +544,8 @@ impl Session {
             )
         })??;
         let permissions = runtime::default_permissions();
-        permissions.set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
+        permissions
+            .set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
         let loaded = deepseek_code_core::services::permission_updates::load_settings(
             &paths.data_dir,
             &workspace,
@@ -428,7 +563,10 @@ impl Session {
         permissions.set_launch_rules(&id, merged)?;
         permissions.set_session_directories(&id, loaded.directories);
         if let Some(crate::args::Commands::Agent { agent_type, .. }) = &cli.command {
-            let definition = deepseek_code_core::services::agents::resolve(&crate::services::context(paths)?, agent_type)?;
+            let definition = deepseek_code_core::services::agents::resolve(
+                &crate::services::context(paths)?,
+                agent_type,
+            )?;
             deepseek_code_core::services::agents::bind(&store.db, &id, &definition)?;
         }
         let selected_mode = match cli.permission_mode {
@@ -439,9 +577,15 @@ impl Session {
             PermissionModeArg::DontAsk => PermissionMode::DontAsk,
             PermissionModeArg::Auto => PermissionMode::Auto,
         };
-        let explicit_mode = cli.permission_mode_explicit || cli.dangerously_skip_permissions || !matches!(cli.permission_mode, PermissionModeArg::Ask);
+        let explicit_mode = cli.permission_mode_explicit
+            || cli.dangerously_skip_permissions
+            || !matches!(cli.permission_mode, PermissionModeArg::Ask);
         // Clear what exited processes left behind, so a crash cannot block this resume.
-        let settled = if internal_worker { None } else { deepseek_code_core::services::session_worker::settle_session(&paths.data_dir, &id).ok() };
+        let settled = if internal_worker {
+            None
+        } else {
+            deepseek_code_core::services::session_worker::settle_session(&paths.data_dir, &id).ok()
+        };
         // A direct print/json run leaves no worker job; settle its abandoned turn
         // so the resumed screen reports an interruption instead of a live turn.
         if resumed_id.is_some() && !internal_worker {
@@ -452,7 +596,18 @@ impl Session {
                 );
             }
         }
-        let active_job = if internal_worker { None } else if let Some(settled) = settled { settled.active } else { deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?.into_iter().find(|job|job.session_id == id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) };
+        let active_job = if internal_worker {
+            None
+        } else if let Some(settled) = settled {
+            settled.active
+        } else {
+            deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?
+                .into_iter()
+                .find(|job| {
+                    job.session_id == id
+                        && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")
+                })
+        };
         if let Some(job) = &active_job {
             anyhow::ensure!(cli.allowed_tools.is_empty() && cli.disallowed_tools.is_empty(), "This session has active background work; attach without launch tool rules, or stop the worker before changing them");
             anyhow::ensure!(!explicit_mode, "This session has active background work; resume without an explicit permission mode and use /tasks attach {} to change its mode", job.id);
@@ -460,15 +615,40 @@ impl Session {
         let selected_mode = if explicit_mode {
             selected_mode
         } else {
-            deepseek_code_core::services::session_permission_mode::load(&store.db, &id)?.filter(|mode| *mode != PermissionMode::BypassPermissions).unwrap_or(selected_mode)
+            deepseek_code_core::services::session_permission_mode::load(&store.db, &id)?
+                .filter(|mode| *mode != PermissionMode::BypassPermissions)
+                .unwrap_or(selected_mode)
         };
         if selected_mode == PermissionMode::Auto {
-            let provider = selection.providers.iter().find(|p|p.id == selection.provider_id).context("Main provider unavailable")?;
-            let model = deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&provider.models, &selection.model).context("Main model unavailable")?;
-            deepseek_code_core::native_engine::auto_permissions::configured(&crate::services::context(paths)?, &deepseek_code_core::native_engine::provider_manager::ResolvedProvider { provider:provider.clone(),model })?;
+            let provider = selection
+                .providers
+                .iter()
+                .find(|p| p.id == selection.provider_id)
+                .context("Main provider unavailable")?;
+            let model =
+                deepseek_code_core::native_engine::provider_manager::resolve_model_selection(
+                    &provider.models,
+                    &selection.model,
+                )
+                .context("Main model unavailable")?;
+            deepseek_code_core::native_engine::auto_permissions::configured(
+                &crate::services::context(paths)?,
+                &deepseek_code_core::native_engine::provider_manager::ResolvedProvider {
+                    provider: provider.clone(),
+                    model,
+                },
+            )?;
         }
-        if active_job.is_some() { permissions.set_mode(selected_mode); }
-        else { deepseek_code_core::services::session_permission_mode::set(&store.db, &id, &permissions, selected_mode)?; }
+        if active_job.is_some() {
+            permissions.set_mode(selected_mode);
+        } else {
+            deepseek_code_core::services::session_permission_mode::set(
+                &store.db,
+                &id,
+                &permissions,
+                selected_mode,
+            )?;
+        }
         let api_format = selection
             .providers
             .iter()
@@ -492,7 +672,11 @@ impl Session {
             permissions.clone(),
             Arc::new(FileCache::new()),
         )
-        .with_mcp_registry(Arc::new(McpToolRegistry::new(mcp.clone()).with_ide(ide.clone()).with_sdk(sdk_mcp.clone())))
+        .with_mcp_registry(Arc::new(
+            McpToolRegistry::new(mcp.clone())
+                .with_ide(ide.clone())
+                .with_sdk(sdk_mcp.clone()),
+        ))
         .with_skills_manager(Arc::new(Mutex::new(
             deepseek_code_core::skills::SkillsManager::with_path(paths.data_dir.join("skills")),
         )));
@@ -597,13 +781,17 @@ impl Session {
             return;
         }
         let context = self.hook_service_context();
-        for warning in crate::hook_progress::during(&self.id, true, deepseek_code_core::services::session_hooks::end(
-            &context,
-            &self.workspace,
+        for warning in crate::hook_progress::during(
             &self.id,
-            reason,
-            deepseek_code_core::services::session_hooks::end_timeout(),
-        ))
+            true,
+            deepseek_code_core::services::session_hooks::end(
+                &context,
+                &self.workspace,
+                &self.id,
+                reason,
+                deepseek_code_core::services::session_hooks::end_timeout(),
+            ),
+        )
         .await
         {
             eprintln!("Hook: {warning}");
@@ -624,7 +812,8 @@ impl Session {
         let lifecycle_owned = self.lifecycle_owned;
         self.end_hooks("clear").await;
         self.id = id.clone();
-        self.waiting_for_continue.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.waiting_for_continue
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if lifecycle_owned {
             self.start_hooks("clear").await?;
         }
@@ -633,11 +822,21 @@ impl Session {
 
     /// Validate the project and provider before replacing the current session.
     pub async fn resume_saved(&mut self, paths: &RuntimePaths, id: &str) -> Result<()> {
-        let saved = self.store.resume(id).map_err(|error| crate::session_trust::diagnose(&self.store.db, paths, id, error))?;
-        let workspace = self.store.workspace(id, &paths.data_dir.join("workspaces")).map_err(|error| crate::session_trust::diagnose(&self.store.db, paths, id, error))?;
+        let saved = self
+            .store
+            .resume(id)
+            .map_err(|error| crate::session_trust::diagnose(&self.store.db, paths, id, error))?;
+        let workspace = self
+            .store
+            .workspace(id, &paths.data_dir.join("workspaces"))
+            .map_err(|error| crate::session_trust::diagnose(&self.store.db, paths, id, error))?;
         let model = saved.model.context("Saved session has no model")?;
         let provider_id = saved.provider.context("Saved session has no provider")?;
-        let resolved = self.providers.lock().await.resolve_selected(&provider_id, &model)
+        let resolved = self
+            .providers
+            .lock()
+            .await
+            .resolve_selected(&provider_id, &model)
             .context("Saved provider/model is unavailable; current session retained")?;
         let lifecycle_owned = self.lifecycle_owned;
         // As in the reference CLI, the resumed conversation keeps the mode in use.
@@ -649,25 +848,44 @@ impl Session {
         self.provider_id = provider_id;
         self.auto_route = false;
         self.id = id.to_owned();
-        self.waiting_for_continue.store(true, std::sync::atomic::Ordering::Relaxed);
-        deepseek_code_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
-        if lifecycle_owned { self.start_hooks("resume").await?; }
+        self.waiting_for_continue
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        deepseek_code_core::services::session_permission_mode::set(
+            &self.store.db,
+            &self.id,
+            &self.permissions,
+            mode,
+        )?;
+        if lifecycle_owned {
+            self.start_hooks("resume").await?;
+        }
         Ok(())
     }
 
     /// A separate engine on the same providers, for side requests such as
     /// naming the session's topic while a turn runs.
     pub fn side_engine(&self) -> NativeEngine {
-        runtime::create_engine(&self.paths, self.store.db.clone(), self.providers.clone(), self.permissions.clone(), Arc::new(FileCache::new()))
+        runtime::create_engine(
+            &self.paths,
+            self.store.db.clone(),
+            self.providers.clone(),
+            self.permissions.clone(),
+            Arc::new(FileCache::new()),
+        )
     }
 
     pub async fn branch_saved(&mut self, paths: &RuntimePaths, title: &str) -> Result<String> {
-        anyhow::ensure!(title.chars().count() <= 200, "Session titles must be at most 200 characters");
+        anyhow::ensure!(
+            title.chars().count() <= 200,
+            "Session titles must be at most 200 characters"
+        );
         let id = self.store.fork(&self.id)?;
         crate::session_commands::copy_settings(&self.store.db, &self.id, &id)?;
         if !title.is_empty() {
             self.store.db.with_conn(|conn| {
-                deepseek_code_core::db::conversation_repo::update_conversation_title(conn, &id, title)
+                deepseek_code_core::db::conversation_repo::update_conversation_title(
+                    conn, &id, title,
+                )
             })??;
         }
         self.resume_saved(paths, &id).await?;
@@ -693,16 +911,29 @@ impl Session {
 
     pub async fn cycle_permission_mode(&self) -> Result<&'static str> {
         // Auto mode needs its classifier; without one the cycle goes on to ask.
-        if self.set_permission_mode(self.next_permission_mode()).await.is_err() {
+        if self
+            .set_permission_mode(self.next_permission_mode())
+            .await
+            .is_err()
+        {
             self.set_permission_mode("ask").await?;
         }
         Ok(self.permission_mode())
     }
 
-    pub(crate) async fn check_host_shell_permission(&self, input: &Value, user_prompt: &str, interactive: bool, hooks: &deepseek_code_core::services::tool_hooks::HookRunner, tool_use_id: &str) -> Result<deepseek_code_core::permissions::PermissionResult> {
+    pub(crate) async fn check_host_shell_permission(
+        &self,
+        input: &Value,
+        user_prompt: &str,
+        interactive: bool,
+        hooks: &deepseek_code_core::services::tool_hooks::HookRunner,
+        tool_use_id: &str,
+    ) -> Result<deepseek_code_core::permissions::PermissionResult> {
         let context = crate::services::context(&self.paths)?;
         let provider = self.selected_provider().await?;
-        let mut history = self.store.model_history(&self.id, &provider.provider.api_format)?;
+        let mut history = self
+            .store
+            .model_history(&self.id, &provider.provider.api_format)?;
         history.push(json!({"role":"user","content":user_prompt}));
         let tool = deepseek_code_core::permissions::PermissionContext {
             mcp_read_only: false,
@@ -736,7 +967,10 @@ impl Session {
             return false;
         };
         match self.selected_provider().await {
-            Ok(provider) => deepseek_code_core::native_engine::auto_permissions::configured(&context, &provider).is_ok(),
+            Ok(provider) => {
+                deepseek_code_core::native_engine::auto_permissions::configured(&context, &provider)
+                    .is_ok()
+            }
             Err(_) => false,
         }
     }
@@ -768,22 +1002,48 @@ impl Session {
     }
 
     pub(crate) async fn approval_auto_available(&self) -> bool {
-        self.permissions.get_mode() != PermissionMode::Auto && self.approval_auto_config().await.is_ok()
+        self.permissions.get_mode() != PermissionMode::Auto
+            && self.approval_auto_config().await.is_ok()
     }
 
     pub async fn set_permission_mode(&self, value: &str) -> Result<()> {
-        if deepseek_code_core::services::background_sessions::worker_directory(&self.paths.data_dir, &self.id)?.is_none() {
-            if let Some(job) = deepseek_code_core::services::background_sessions::list(&self.paths.data_dir, None)?.into_iter().find(|job|job.session_id == self.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) {
+        if deepseek_code_core::services::background_sessions::worker_directory(
+            &self.paths.data_dir,
+            &self.id,
+        )?
+        .is_none()
+        {
+            if let Some(job) =
+                deepseek_code_core::services::background_sessions::list(&self.paths.data_dir, None)?
+                    .into_iter()
+                    .find(|job| {
+                        job.session_id == self.id
+                            && matches!(
+                                job.status.as_str(),
+                                "starting" | "running" | "unresponsive"
+                            )
+                    })
+            {
                 anyhow::bail!("This session has active background work; use /tasks attach {} to change its permission mode", job.id);
             }
         }
         let mode = deepseek_code_core::services::session_permission_mode::parse(value)?;
         if mode == PermissionMode::Auto {
-            deepseek_code_core::native_engine::auto_permissions::configured(&crate::services::context(&self.paths)?, &self.selected_provider().await?)?;
+            deepseek_code_core::native_engine::auto_permissions::configured(
+                &crate::services::context(&self.paths)?,
+                &self.selected_provider().await?,
+            )?;
         }
         anyhow::ensure!(mode != PermissionMode::BypassPermissions || self.bypass_available, "Bypass permissions mode needs a launch with --dangerously-skip-permissions or --allow-dangerously-skip-permissions");
-        deepseek_code_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
-        deepseek_code_core::permissions::set_full_access(self.full_access && mode == PermissionMode::BypassPermissions);
+        deepseek_code_core::services::session_permission_mode::set(
+            &self.store.db,
+            &self.id,
+            &self.permissions,
+            mode,
+        )?;
+        deepseek_code_core::permissions::set_full_access(
+            self.full_access && mode == PermissionMode::BypassPermissions,
+        );
         Ok(())
     }
 
@@ -810,7 +1070,8 @@ impl Session {
     }
 
     pub async fn close(&self) -> Result<()> {
-        deepseek_code_core::services::async_hooks::cancel_shared(&self.paths.data_dir, &self.id).await;
+        deepseek_code_core::services::async_hooks::cancel_shared(&self.paths.data_dir, &self.id)
+            .await;
         self.engine.cancel_turn(&self.id).await;
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
@@ -823,9 +1084,17 @@ impl Session {
         let target = match deepseek_code_core::worktree::hooks::status(&self.store.db, &self.id)? {
             Some(state) => state["path"].as_str().map(std::path::PathBuf::from),
             // A worktree checkout has a .git file; the main checkout a directory.
-            None if self.workspace.join(".git").is_file() => self.store.db.with_conn(|conn| {
-                conn.query_row("SELECT workspace_path FROM conversations WHERE id=?1", [&self.id], |row| row.get::<_, Option<String>>(0))
-            })??.map(std::path::PathBuf::from),
+            None if self.workspace.join(".git").is_file() => self
+                .store
+                .db
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT workspace_path FROM conversations WHERE id=?1",
+                        [&self.id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                })??
+                .map(std::path::PathBuf::from),
             None => None,
         };
         if let Some(target) = target.filter(|path| path.is_dir() && *path != self.workspace) {
@@ -836,7 +1105,8 @@ impl Session {
     }
 
     pub(crate) fn waiting_for_continue(&self) -> bool {
-        self.waiting_for_continue.load(std::sync::atomic::Ordering::Relaxed)
+        self.waiting_for_continue
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether a local terminal owns this turn: it either passed its input
@@ -853,7 +1123,8 @@ impl Session {
     }
 
     pub(crate) fn allow_automatic_wake(&self) {
-        self.waiting_for_continue.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.waiting_for_continue
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn turn(
@@ -868,7 +1139,9 @@ impl Session {
         self.allow_automatic_wake();
         // Attach @-mentioned files once, in the frontend; a worker receives the
         // expanded prompt and must not attach them again.
-        let frontend = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_none();
+        let frontend =
+            std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+                .is_none();
         let mentioned = (frontend && self.sdk_content.is_none())
             .then(|| crate::mentions::expand(&self.workspace, prompt))
             .flatten();
@@ -878,12 +1151,20 @@ impl Session {
         }
         // Frontends record original human input before skill expansion/worker handoff.
         // A worker receives synthesized context and must never re-label it as user intent.
-        if std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_none() {
-            deepseek_code_core::services::permission_authority::record_user(&self.store.db, &self.id, self.sdk_content.as_ref().unwrap_or(&json!(prompt)))?;
+        if std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+            .is_none()
+        {
+            deepseek_code_core::services::permission_authority::record_user(
+                &self.store.db,
+                &self.id,
+                self.sdk_content.as_ref().unwrap_or(&json!(prompt)),
+            )?;
         }
         // Keep engine/goal futures out of the outer host stack. Debug builds on
         // Windows otherwise exhaust the process stack before a worker can run.
-        if self.sdk_content.is_some() {return Box::pin(self.run_turn(cli,prompt,input)).await;}
+        if self.sdk_content.is_some() {
+            return Box::pin(self.run_turn(cli, prompt, input)).await;
+        }
         let hook_session = self.id.clone();
         let hook_interactive = input.is_some() && cli.output_format == OutputFormat::Text;
         let prepared = tokio::select! {
@@ -893,63 +1174,124 @@ impl Session {
         let expanded;
         let prompt = match prepared {
             crate::skill_commands::PreparedInvocation::NotHandled => prompt,
-            crate::skill_commands::PreparedInvocation::Inline(value) => { expanded = value; expanded.as_str() },
+            crate::skill_commands::PreparedInvocation::Inline(value) => {
+                expanded = value;
+                expanded.as_str()
+            }
             crate::skill_commands::PreparedInvocation::Background(job) => {
                 return crate::skill_commands::finish_background(cli, self, job, input).await;
-            },
+            }
         };
         crate::session_commands::migrate_goal(self)?;
         deepseek_code_core::services::session_goals::begin_input(&self.store.db, &self.id)?;
-        if !crate::terminal::screen_reader() && input.is_some() && cli.output_format == OutputFormat::Text && !cli.print && !cli.print_short
-            && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
-            && std::env::var("TERM").as_deref() != Ok("dumb") && !crate::display_commands::load(self)?.focus {
+        if !crate::terminal::screen_reader()
+            && input.is_some()
+            && cli.output_format == OutputFormat::Text
+            && !cli.print
+            && !cli.print_short
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+            && std::env::var("TERM").as_deref() != Ok("dumb")
+            && !crate::display_commands::load(self)?.focus
+        {
             return crate::worker_frontend::turn(cli, self, prompt, input).await;
         }
         let mut next = prompt.to_owned();
         loop {
-            let goal = deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
+            let goal =
+                deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
             if let (Some(goal), Some(limit)) = (&goal, cli.max_turns) {
                 if goal.model_requests.saturating_sub(goal.run_start_requests) >= u64::from(limit) {
-                    deepseek_code_core::services::session_goals::pause(&self.store.db, &self.id, &goal.id, "Maximum turns reached")?;
-                    crate::session_commands::goal_notice("Goal paused: maximum turns reached. Send a message to continue.");
+                    deepseek_code_core::services::session_goals::pause(
+                        &self.store.db,
+                        &self.id,
+                        &goal.id,
+                        "Maximum turns reached",
+                    )?;
+                    crate::session_commands::goal_notice(
+                        "Goal paused: maximum turns reached. Send a message to continue.",
+                    );
                     break;
                 }
             }
             let result = async {
                 Box::pin(self.run_turn(cli, &next, input)).await?;
-                if (input.is_none() || cli.output_format != OutputFormat::Text) && std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_none() {
-                    return Ok::<Option<String>,anyhow::Error>(None);
+                if (input.is_none() || cli.output_format != OutputFormat::Text)
+                    && std::env::var_os(
+                        deepseek_code_core::services::background_sessions::CONTROL_ENV,
+                    )
+                    .is_none()
+                {
+                    return Ok::<Option<String>, anyhow::Error>(None);
                 }
-                if let Some(kickoff) = deepseek_code_core::services::goal_proposals::activate(&self.store.db, &self.id, &self.paths.data_dir, &self.workspace, &self.permissions)? {
+                if let Some(kickoff) = deepseek_code_core::services::goal_proposals::activate(
+                    &self.store.db,
+                    &self.id,
+                    &self.paths.data_dir,
+                    &self.workspace,
+                    &self.permissions,
+                )? {
                     crate::session_commands::goal_notice("Approved session goal is now active.");
-                    return Ok::<Option<String>,anyhow::Error>(Some(kickoff));
+                    return Ok::<Option<String>, anyhow::Error>(Some(kickoff));
                 }
                 Box::pin(crate::session_commands::goal_check(self)).await
-            }.await;
+            }
+            .await;
             match result {
                 Ok(Some(followup)) => next = followup,
                 Ok(None) => break,
                 Err(error) => {
-                    deepseek_code_core::services::goal_proposals::discard(&self.store.db, &self.id)?;
+                    deepseek_code_core::services::goal_proposals::discard(
+                        &self.store.db,
+                        &self.id,
+                    )?;
                     if let Some(goal) = goal {
-                        if crate::session_commands::retryable_goal_error(&error, std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some()) {
-                            if let Some(retry) = deepseek_code_core::services::session_goals::arm_retry(&self.store.db, &self.id, &goal.id, &error.to_string())? {
-                                let seconds = (retry.retry_after_ms.unwrap_or_default() - chrono::Utc::now().timestamp_millis()).max(0) / 1000;
+                        if crate::session_commands::retryable_goal_error(
+                            &error,
+                            std::env::var_os(
+                                deepseek_code_core::services::background_sessions::CONTROL_ENV,
+                            )
+                            .is_some(),
+                        ) {
+                            if let Some(retry) =
+                                deepseek_code_core::services::session_goals::arm_retry(
+                                    &self.store.db,
+                                    &self.id,
+                                    &goal.id,
+                                    &error.to_string(),
+                                )?
+                            {
+                                let seconds = (retry.retry_after_ms.unwrap_or_default()
+                                    - chrono::Utc::now().timestamp_millis())
+                                .max(0)
+                                    / 1000;
                                 crate::session_commands::goal_notice(&format!("Goal still active: transient connection failure. Retrying in {seconds}s ({}/3). Send a message to retry now, or /goal clear to stop.", retry.retry_attempts));
-                                match crate::session_commands::wait_goal_retry(self, &goal.id).await {
+                                match crate::session_commands::wait_goal_retry(self, &goal.id).await
+                                {
                                     Ok(true) => {
                                         next = format!("Resume unfinished work toward the explicitly authorized goal: {}. Review existing progress first and do not repeat completed operations. Stay within existing permissions.", goal.condition);
                                         continue;
-                                    },
+                                    }
                                     Ok(false) => break,
                                     Err(cancelled) => {
-                                        deepseek_code_core::services::session_goals::pause(&self.store.db, &self.id, &goal.id, &cancelled.to_string())?;
+                                        deepseek_code_core::services::session_goals::pause(
+                                            &self.store.db,
+                                            &self.id,
+                                            &goal.id,
+                                            &cancelled.to_string(),
+                                        )?;
                                         return Err(cancelled);
                                     }
                                 }
                             }
                         }
-                        if deepseek_code_core::services::session_goals::pause(&self.store.db, &self.id, &goal.id, &error.to_string())? {
+                        if deepseek_code_core::services::session_goals::pause(
+                            &self.store.db,
+                            &self.id,
+                            &goal.id,
+                            &error.to_string(),
+                        )? {
                             crate::session_commands::goal_notice("Goal paused. Send a message to continue, or /goal clear to remove it.");
                         }
                     }
@@ -981,7 +1323,8 @@ impl Session {
         prompt: &str,
         input: &mut Option<TerminalInput>,
     ) -> Result<()> {
-        self.run_turn_origin(cli, prompt, input, false, false, true).await
+        self.run_turn_origin(cli, prompt, input, false, false, true)
+            .await
     }
 
     pub(crate) async fn turn_initial_hook(
@@ -1087,7 +1430,11 @@ impl Session {
                 result => result,
             }
         }.await;
-        if self.sdk_interrupt.as_ref().is_some_and(|interrupt| *interrupt.borrow()) {
+        if self
+            .sdk_interrupt
+            .as_ref()
+            .is_some_and(|interrupt| *interrupt.borrow())
+        {
             result = Err(anyhow::anyhow!("Interrupted by SDK host"));
         }
         let status = match &result {
@@ -1176,12 +1523,20 @@ impl Session {
         publish: bool,
         turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
         completion: &mut TurnCompletion,
-        execution_lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
+        execution_lease: Option<
+            std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>,
+        >,
     ) -> Result<()> {
-        self.sdk_cancellable(deepseek_code_core::services::lifecycle_events::check_configuration(
-            &self.hook_service_context(), &self.workspace, &self.id,
-        )).await?;
-        let turn_goal = deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
+        self.sdk_cancellable(
+            deepseek_code_core::services::lifecycle_events::check_configuration(
+                &self.hook_service_context(),
+                &self.workspace,
+                &self.id,
+            ),
+        )
+        .await?;
+        let turn_goal =
+            deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
         if let Err(error) = crate::ide_commands::restore(self).await {
             eprintln!("IDE connection unavailable: {error:#}");
             self.ide.disconnect().await;
@@ -1197,8 +1552,9 @@ impl Session {
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
         // Read the history and its compaction boundary in one store view, so the
         // request reports the context it actually sends.
-        let (mut history, context_boundary) =
-            self.store.model_history_with_boundary(&self.id, &self.api_format)?;
+        let (mut history, context_boundary) = self
+            .store
+            .model_history_with_boundary(&self.id, &self.api_format)?;
         crate::session_commands::microcompact(self, &mut history, self.context_window().await)?;
         if !hook_wake {
             history.push(json!({"role":"user","content":self.sdk_content.as_ref().cloned().unwrap_or(json!(prompt))}));
@@ -1212,8 +1568,15 @@ impl Session {
             None => cli.response_schema()?,
         };
         let structured_output = response_schema.is_some();
-        let hook_context = deepseek_code_core::services::session_hooks::context(&self.hook_service_context(), &self.id)?;
-        if !hook_context.is_empty() { system.push_str("\nSessionStart hook context:\n"); system.push_str(&hook_context); system.push('\n'); }
+        let hook_context = deepseek_code_core::services::session_hooks::context(
+            &self.hook_service_context(),
+            &self.id,
+        )?;
+        if !hook_context.is_empty() {
+            system.push_str("\nSessionStart hook context:\n");
+            system.push_str(&hook_context);
+            system.push('\n');
+        }
         system.push_str(&crate::display_commands::style_prompt(self)?);
         system.push_str(&crate::ide_commands::selection_prompt(self).await?);
         if let Some(goal) = crate::session_commands::goal_prompt(self)? {
@@ -1252,7 +1615,9 @@ impl Session {
         };
         let mut assistant_id = turn.ensure_segment()?;
         if cli.output_format == OutputFormat::StreamJson {
-            emit_json(&json!({"type":"turn_timing","turn":turn.record(),"assistant_id":assistant_id}))?;
+            emit_json(
+                &json!({"type":"turn_timing","turn":turn.record(),"assistant_id":assistant_id}),
+            )?;
         }
         let interactive_display = input.is_some()
             && cli.output_format == OutputFormat::Text
@@ -1297,6 +1662,7 @@ impl Session {
         let chat_request = ChatRequest {
             conversation_id: self.id.clone(),
             context_boundary,
+            assistant_message_id: Some(assistant_id.clone()),
             messages: history,
             model: self.model.clone(),
             provider_id: if self.auto_route {
@@ -1327,17 +1693,30 @@ impl Session {
         let request = Box::pin(async {
             if hook_wake {
                 match execution_lease {
-                    Some(lease) => self.engine.send_hook_wake_with_lease(chat_request, false, lease).await,
+                    Some(lease) => {
+                        self.engine
+                            .send_hook_wake_with_lease(chat_request, false, lease)
+                            .await
+                    }
                     None => self.engine.send_hook_wake(chat_request, false).await,
                 }
             } else {
                 match execution_lease {
-                    Some(lease) => self.engine.send_message_with_lease(chat_request, false, lease).await,
-                    None => self.engine.send_message_with_history(chat_request, false).await,
+                    Some(lease) => {
+                        self.engine
+                            .send_message_with_lease(chat_request, false, lease)
+                            .await
+                    }
+                    None => {
+                        self.engine
+                            .send_message_with_history(chat_request, false)
+                            .await
+                    }
                 }
             }
         });
-        let worker_cancel = deepseek_code_core::services::background_sessions::wait_for_cancellation();
+        let worker_cancel =
+            deepseek_code_core::services::background_sessions::wait_for_cancellation();
         tokio::pin!(worker_cancel);
         let mut events = tokio::select! {
             biased;
@@ -1349,18 +1728,35 @@ impl Session {
             result = crate::hook_progress::during(&self.id, interactive_display, request) => result?,
             _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
         };
-        let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
+        let mut progress = crate::terminal::live::TurnDisplay::new(
+            interactive_display,
+            self.permission_mode(),
+            &self.paths.data_dir.join("keybindings.json"),
+            self.store
+                .history(&self.id)?
+                .iter()
+                .filter(|row| row["role"] == "user")
+                .filter_map(|row| row["content"].as_str().map(str::to_owned))
+                .filter(|text| !crate::background_commands::is_notification(text))
+                .collect(),
+        )?
+        .with_workspace(&self.workspace);
         progress.restore_numbers(self)?;
         progress.set_shell_context(&self.paths.data_dir, &self.id);
         if progress.is_live() {
             progress.set_model_label(&crate::session_commands::model_label(self).await);
             progress.set_pinned_prompt(prompt);
             progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
-            progress.set_todos(crate::background_commands::todo_items(&self.paths, &self.id));
+            progress.set_todos(crate::background_commands::todo_items(
+                &self.paths,
+                &self.id,
+            ));
         }
         let mut hook_progress = deepseek_code_core::services::hook_progress::subscribe(&self.id);
         progress.hook_snapshot(hook_progress.snapshot());
-        let mut side_request: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>> = None;
+        let mut side_request: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
+        > = None;
         let mut text = String::new();
         // Set when a tool runs, so text from the next model round starts on its own paragraph.
         let mut separate_text = false;
@@ -1370,16 +1766,23 @@ impl Session {
         let mut completed = false;
         let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
-        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
+        best_effort_live_write(
+            "request",
+            crate::session_commands::save_live_requests(self, &[]),
+        );
         let mut goal_requests = crate::session_commands::GoalRequests::default();
-        let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
+        let mut observed_plan_boundary =
+            deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tool_started = std::collections::HashMap::<String, std::time::Instant>::new();
         let mut tool_durations = std::collections::HashMap::<String, u64>::new();
         let mut tools = Vec::<message_repo::ToolCallRow>::new();
         // Notes added to approvals reach the model after the result and are
         // saved apart from it, as the user's words.
         let mut approval_notes = std::collections::HashMap::<String, Vec<String>>::new();
-        let mut queued_inputs_by_tool = std::collections::HashMap::<String, Vec<deepseek_code_core::services::input_queue::DeliveredInput>>::new();
+        let mut queued_inputs_by_tool = std::collections::HashMap::<
+            String,
+            Vec<deepseek_code_core::services::input_queue::DeliveredInput>,
+        >::new();
         // Messages typed during this turn that the model has not read yet.
         let mut pending_inputs = Vec::<String>::new();
         // The mode chosen with a plan, applied once the engine has approved it.
@@ -1393,9 +1796,11 @@ impl Session {
         // A worker publishes progress for its frontend. A direct print/json owner
         // does too, so a resumed terminal can observe the turn while it runs;
         // only an interactive terminal turn has its own live display.
-        let background_transcript = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some()
-            || input.is_none()
-            || cli.output_format != OutputFormat::Text;
+        let background_transcript =
+            std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+                .is_some()
+                || input.is_none()
+                || cli.output_format != OutputFormat::Text;
         let mut live_transcript = BackgroundTranscript::default();
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1495,8 +1900,10 @@ impl Session {
                     EngineEvent::Text(_) | EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::MessageStop { .. } => round_open = false,
                     _ => {}
                 }
+                // Track pending calls for every host so cancellation can settle
+                // them; only background/JSON hosts publish intermediate rows.
+                live_transcript.observe(&event, &mut tools);
                 if background_transcript {
-                    live_transcript.observe(&event, &mut tools);
                     if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
                         best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                     }
@@ -1845,7 +2252,9 @@ impl Session {
             Ok(())
         }.await;
         progress.clear();
-        if let Some(translator) = sdk_messages.as_mut() { translator.finish()?; }
+        if let Some(translator) = sdk_messages.as_mut() {
+            translator.finish()?;
+        }
         // Join before persisting; only interruption cancels background hooks.
         if completed && turn_result.is_ok() && error.is_none() {
             self.engine.finish_turn(&self.id).await;
@@ -1855,22 +2264,49 @@ impl Session {
         // After joining, drain the last reported snapshots for every frontend.
         {
             while let Ok(event) = events.try_recv() {
-                if background_transcript { live_transcript.observe(&event, &mut tools); }
+                live_transcript.observe(&event, &mut tools);
                 match event {
                     EngineEvent::Text(delta) => {
-                        if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { text.push_str("\n\n"); }
+                        if std::mem::take(&mut separate_text)
+                            && !text.is_empty()
+                            && !text.ends_with('\n')
+                        {
+                            text.push_str("\n\n");
+                        }
                         text.push_str(&delta);
                     }
                     EngineEvent::Thinking(delta) => thinking_text.push_str(&delta),
                     EngineEvent::ToolUseStart { .. } => separate_text = true,
                     EngineEvent::MessageStop { full_text, .. } => {
-                        if structured_output || text.is_empty() { text = full_text; }
+                        if structured_output || text.is_empty() {
+                            text = full_text;
+                        }
                     }
-                    EngineEvent::ContextReset { session_id, boundary_id } if session_id == self.id => {
-                        deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary_id, Some(&assistant_id), &text, &thinking_text, &tools, &snapshots)?;
-                        save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
+                    EngineEvent::ContextReset {
+                        session_id,
+                        boundary_id,
+                    } if session_id == self.id => {
+                        deepseek_code_core::services::plan_approval::archive_segment(
+                            &self.store.db,
+                            &self.id,
+                            &boundary_id,
+                            Some(&assistant_id),
+                            &text,
+                            &thinking_text,
+                            &tools,
+                            &snapshots,
+                        )?;
+                        save_queued_turn_inputs(
+                            &self.store.db,
+                            &assistant_id,
+                            &tools,
+                            &queued_inputs_by_tool,
+                        )?;
                         assistant_id = turn.new_segment()?;
-                        text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
+                        text.clear();
+                        thinking_text.clear();
+                        tools.clear();
+                        snapshots.clear();
                         live_transcript = BackgroundTranscript::default();
                         separate_text = false;
                         observed_plan_boundary = Some(boundary_id);
@@ -1878,20 +2314,46 @@ impl Session {
                     EngineEvent::RequestSnapshot(snapshot) => {
                         request_usage.observe(&snapshot);
                         goal_requests.observe(&snapshot);
-                        if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
+                        if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"])
+                        {
+                            *old = snapshot;
+                        } else {
+                            snapshots.push(snapshot);
+                        }
                     }
                     EngineEvent::QueuedInput(delivered) => {
                         // Durable deliveries already have their own transcript row.
                         if !delivered.origin.starts_with("queue-input-") {
-                            if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                            if let Some(tool) = tools.last() {
+                                queued_inputs_by_tool
+                                    .entry(tool.id.clone())
+                                    .or_default()
+                                    .push(delivered);
+                            }
                         }
                     }
                     _ => {}
                 }
             }
+            // The executor has stopped and reported completions have been
+            // drained. Only now may unreported calls receive an unknown-outcome
+            // error; never overwrite a real result with cancellation bookkeeping.
+            if !completed || turn_result.is_err() || error.is_some() {
+                live_transcript.finish_interrupted(&mut tools);
+            }
             if background_transcript {
                 live_transcript.dirty = true;
-                best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
+                best_effort_live_write(
+                    "transcript",
+                    live_transcript.flush(
+                        &self.store.db,
+                        &self.id,
+                        &assistant_id,
+                        &text,
+                        &thinking_text,
+                        &tools,
+                    ),
+                );
             }
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
@@ -1899,13 +2361,35 @@ impl Session {
             deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         if latest_boundary != observed_plan_boundary {
             if let Some(boundary) = latest_boundary {
-                deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary, Some(&assistant_id), &text, &thinking_text, &tools, &snapshots)?;
-                save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
+                deepseek_code_core::services::plan_approval::archive_segment(
+                    &self.store.db,
+                    &self.id,
+                    &boundary,
+                    Some(&assistant_id),
+                    &text,
+                    &thinking_text,
+                    &tools,
+                    &snapshots,
+                )?;
+                save_queued_turn_inputs(
+                    &self.store.db,
+                    &assistant_id,
+                    &tools,
+                    &queued_inputs_by_tool,
+                )?;
                 assistant_id = turn.new_segment()?;
-                text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
+                text.clear();
+                thinking_text.clear();
+                tools.clear();
+                snapshots.clear();
             }
         }
-        if deepseek_code_core::services::background_sessions::worker_directory(&self.paths.data_dir, &self.id)?.is_none() {
+        if deepseek_code_core::services::background_sessions::worker_directory(
+            &self.paths.data_dir,
+            &self.id,
+        )?
+        .is_none()
+        {
             if let Err(error) = self.set_permission_mode(self.permission_mode()).await {
                 progress.notice(&format!("Could not save permission mode: {error:#}"));
             }
@@ -1938,7 +2422,12 @@ impl Session {
                     std::time::Duration::from_secs(30),
                     |tx| {
                         message_repo::update_message_content(tx, &message_id, &text)?;
-                        if !thinking_text.is_empty() { tx.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [&thinking_text, &message_id])?; }
+                        if !thinking_text.is_empty() {
+                            tx.execute(
+                                "UPDATE messages SET thinking = ?1 WHERE id = ?2",
+                                [&thinking_text, &message_id],
+                            )?;
+                        }
                         for tool in &tools {
                             let call_id = format!("{message_id}:{}", tool.id);
                             message_repo::insert_tool_call(
@@ -1951,12 +2440,20 @@ impl Session {
                                 tool.is_error,
                                 tool.sort_order,
                             )?;
-                            if let Some(duration) = tool_durations.get(&tool.id) { message_repo::set_tool_duration(tx, &call_id, *duration)?; }
+                            if let Some(duration) = tool_durations.get(&tool.id) {
+                                message_repo::set_tool_duration(tx, &call_id, *duration)?;
+                            }
                             if let Some(inputs) = queued_inputs_by_tool.get(&tool.id) {
-                                deepseek_code_core::services::input_queue::save_delivered(tx, &call_id, inputs)?;
+                                deepseek_code_core::services::input_queue::save_delivered(
+                                    tx, &call_id, inputs,
+                                )?;
                             }
                             if let Some(notes) = approval_notes.get(&tool.id) {
-                                message_repo::set_tool_call_note(tx, &call_id, &notes.join("\n\n"))?;
+                                message_repo::set_tool_call_note(
+                                    tx,
+                                    &call_id,
+                                    &notes.join("\n\n"),
+                                )?;
                             }
                         }
                         message_repo::save_request_snapshots(tx, &message_id, &json!(snapshots))?;
@@ -1965,7 +2462,10 @@ impl Session {
                 )
             })??;
         }
-        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
+        best_effort_live_write(
+            "request",
+            crate::session_commands::save_live_requests(self, &[]),
+        );
         if let Some(goal) = turn_goal {
             let (tokens, requests, unreported) = goal_requests.usage();
             deepseek_code_core::services::session_goals::record_turn(
@@ -1977,16 +2477,24 @@ impl Session {
                 unreported,
             )?;
         }
-        let terminal_status = if transport_cancelled || error.as_deref().is_some_and(is_turn_cancellation) {
-            deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
-        } else {
-            deepseek_code_core::db::turn_repo::terminal_status(stop.as_deref(), error.is_some() || !completed)
-        };
+        let terminal_status =
+            if transport_cancelled || error.as_deref().is_some_and(is_turn_cancellation) {
+                deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
+            } else {
+                deepseek_code_core::db::turn_repo::terminal_status(
+                    stop.as_deref(),
+                    error.is_some() || !completed,
+                )
+            };
         let usage = request_usage.total();
         completion.requests = snapshots.clone();
         completion.status = Some(terminal_status);
-        completion.failure = snapshots.iter().rev().find_map(|snapshot|
-            snapshot.get("failure").filter(|failure| !failure.is_null()).cloned());
+        completion.failure = snapshots.iter().rev().find_map(|snapshot| {
+            snapshot
+                .get("failure")
+                .filter(|failure| !failure.is_null())
+                .cloned()
+        });
         if publish || error.is_some() {
             match cli.output_format {
                 OutputFormat::Text => {
@@ -1996,13 +2504,20 @@ impl Session {
                     }
                 }
                 _ => {
-                    let cost = deepseek_code_core::services::usage::session_cost(&self.store.db, &self.id, &self.paths.read_config()?)
-                        .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0)).unwrap_or(0.0);
-                    completion.sdk_result = Some(json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
+                    let cost = deepseek_code_core::services::usage::session_cost(
+                        &self.store.db,
+                        &self.id,
+                        &self.paths.read_config()?,
+                    )
+                    .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                    completion.sdk_result = Some(
+                        json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
                             "num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
                             "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or_else(|| denials.clone(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
-                            "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}));
-                },
+                            "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
+                    );
+                }
             }
         }
         if let Some(request) = side_request.take() {
@@ -2029,19 +2544,35 @@ impl Session {
             }
         }
         if progress.is_live() {
-            progress.set_running_shells(crate::background_commands::running_shells(&self.paths, &self.id));
-            progress.set_running_agents(crate::background_commands::running_agents(&self.paths, &self.store.db, &self.id).len());
+            progress.set_running_shells(crate::background_commands::running_shells(
+                &self.paths,
+                &self.id,
+            ));
+            progress.set_running_agents(
+                crate::background_commands::running_agents(&self.paths, &self.store.db, &self.id)
+                    .len(),
+            );
         }
         let save_completion = progress.is_live();
         for action in progress.finish(error.as_deref()) {
-            if let Some(reader)=input.as_mut() {
+            if let Some(reader) = input.as_mut() {
                 match action {
-                    crate::terminal::live::Action::Submit(prompt)|crate::terminal::live::Action::Queue(prompt)=>reader.queue_prompt(prompt),
-                    crate::terminal::live::Action::SideQuestion(question)=>reader.queue_prompt(format!("/btw {question}")),
-                    crate::terminal::live::Action::Draft(draft)=>reader.restore_draft(draft),
-                    crate::terminal::live::Action::CyclePermission => { self.cycle_permission_mode().await?; },
+                    crate::terminal::live::Action::Submit(prompt)
+                    | crate::terminal::live::Action::Queue(prompt) => reader.queue_prompt(prompt),
+                    crate::terminal::live::Action::SideQuestion(question) => {
+                        reader.queue_prompt(format!("/btw {question}"))
+                    }
+                    crate::terminal::live::Action::Draft(draft) => reader.restore_draft(draft),
+                    crate::terminal::live::Action::CyclePermission => {
+                        self.cycle_permission_mode().await?;
+                    }
                     // Unread messages were already queued as the next prompts.
-                    crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }|crate::terminal::live::Action::EditQueued|crate::terminal::live::Action::BackgroundShell|crate::terminal::live::Action::SendNow=>{},
+                    crate::terminal::live::Action::Cancel
+                    | crate::terminal::live::Action::Detach
+                    | crate::terminal::live::Action::GoalDecision { .. }
+                    | crate::terminal::live::Action::EditQueued
+                    | crate::terminal::live::Action::BackgroundShell
+                    | crate::terminal::live::Action::SendNow => {}
                 }
             }
         }
@@ -2068,7 +2599,9 @@ impl Session {
         }
         if let Some(error) = error {
             if cli.output_format != OutputFormat::Text {
-                return Err(crate::output::ReportedError(format!("{error} (session {})", self.id)).into());
+                return Err(
+                    crate::output::ReportedError(format!("{error} (session {})", self.id)).into(),
+                );
             }
             bail!("{error} (session {})", self.id);
         }
@@ -2080,12 +2613,19 @@ fn save_queued_turn_inputs(
     db: &deepseek_code_core::db::DbManager,
     assistant_id: &str,
     tools: &[message_repo::ToolCallRow],
-    inputs: &std::collections::HashMap<String, Vec<deepseek_code_core::services::input_queue::DeliveredInput>>,
+    inputs: &std::collections::HashMap<
+        String,
+        Vec<deepseek_code_core::services::input_queue::DeliveredInput>,
+    >,
 ) -> Result<()> {
     db.with_conn(|conn| -> Result<()> {
         for tool in tools {
             if let Some(inputs) = inputs.get(&tool.id) {
-                deepseek_code_core::services::input_queue::save_delivered(conn, &format!("{assistant_id}:{}", tool.id), inputs)?;
+                deepseek_code_core::services::input_queue::save_delivered(
+                    conn,
+                    &format!("{assistant_id}:{}", tool.id),
+                    inputs,
+                )?;
             }
         }
         Ok(())
@@ -2093,9 +2633,15 @@ fn save_queued_turn_inputs(
 }
 
 fn is_turn_cancel_error(error: &anyhow::Error) -> bool {
-    is_turn_cancellation(&error.to_string()) || error.downcast_ref::<io::Error>().is_some_and(|error| {
-        matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset)
-    })
+    is_turn_cancellation(&error.to_string())
+        || error.downcast_ref::<io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+            )
+        })
 }
 
 fn is_turn_cancellation(error: &str) -> bool {
@@ -2115,7 +2661,10 @@ fn is_turn_cancellation(error: &str) -> bool {
 /// options with their descriptions and previews shown in full, since the
 /// terminal prompt has no per-option focus to reveal them on.
 fn question_prompt(question: &str, options: &[String], input: &Value) -> String {
-    let mut prompt = match input["header"].as_str().filter(|header| !header.trim().is_empty()) {
+    let mut prompt = match input["header"]
+        .as_str()
+        .filter(|header| !header.trim().is_empty())
+    {
         Some(header) => format!("[{header}] {question}"),
         None => question.to_owned(),
     };
@@ -2123,15 +2672,25 @@ fn question_prompt(question: &str, options: &[String], input: &Value) -> String 
     for (index, option) in options.iter().enumerate() {
         prompt.push_str(&format!("\n{}. {option}", index + 1));
         let detail = details.and_then(|details| details.get(index));
-        if let Some(description) = detail.and_then(|d| d["description"].as_str()).filter(|d| !d.trim().is_empty()) {
+        if let Some(description) = detail
+            .and_then(|d| d["description"].as_str())
+            .filter(|d| !d.trim().is_empty())
+        {
             prompt.push_str(&format!(" \u{2014} {description}"));
         }
-        if let Some(preview) = detail.and_then(|d| d["preview"].as_str()).filter(|p| !p.trim().is_empty()) {
-            for line in preview.lines() { prompt.push_str(&format!("\n     \u{2502} {line}")); }
+        if let Some(preview) = detail
+            .and_then(|d| d["preview"].as_str())
+            .filter(|p| !p.trim().is_empty())
+        {
+            for line in preview.lines() {
+                prompt.push_str(&format!("\n     \u{2502} {line}"));
+            }
         }
     }
     if input["multiSelect"] == true {
-        prompt.push_str("\n(Choose one or more: numbers separated by commas, or type your own answer.)");
+        prompt.push_str(
+            "\n(Choose one or more: numbers separated by commas, or type your own answer.)",
+        );
     }
     prompt
 }
@@ -2139,27 +2698,52 @@ fn question_prompt(question: &str, options: &[String], input: &Value) -> String 
 /// Numbers become option labels; several are allowed for multiSelect.
 /// Anything else is the user's own answer.
 fn chosen_options(answer: &str, options: &[String], multi: bool) -> String {
-    let picks: Option<Vec<&String>> = answer.split(',').map(|part| part.trim().parse::<usize>().ok().and_then(|i| i.checked_sub(1)).and_then(|i| options.get(i))).collect();
+    let picks: Option<Vec<&String>> = answer
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| options.get(i))
+        })
+        .collect();
     match picks {
-        Some(picks) if !picks.is_empty() && (multi || picks.len() == 1) => picks.iter().map(|pick| pick.as_str()).collect::<Vec<_>>().join(", "),
+        Some(picks) if !picks.is_empty() && (multi || picks.len() == 1) => picks
+            .iter()
+            .map(|pick| pick.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => answer.to_owned(),
     }
 }
 
-async fn turn_answer(session: &Session, progress: &mut crate::terminal::live::TurnDisplay, input: &mut Option<TerminalInput>, question: String) -> Result<String> {
-    if let Some(live)=progress.live.as_ref() {
-        let answer=live.question(question);
+async fn turn_answer(
+    session: &Session,
+    progress: &mut crate::terminal::live::TurnDisplay,
+    input: &mut Option<TerminalInput>,
+    question: String,
+) -> Result<String> {
+    if let Some(live) = progress.live.as_ref() {
+        let answer = live.question(question);
         return wait_answer(session, progress, input, answer).await;
     }
     progress.clear();
-    let reader=input.as_mut().context("User input required in non-interactive mode; resume this session interactively")?;
+    let reader = input.as_mut().context(
+        "User input required in non-interactive mode; resume this session interactively",
+    )?;
     eprintln!("\n{question}");
     read_answer(reader).await
 }
 
 /// Waits for a live question's reply while handling mode cycling, queued
 /// prompts and cancellation.
-async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::TurnDisplay, input: &mut Option<TerminalInput>, mut answer: tokio::sync::oneshot::Receiver<String>) -> Result<String> {
+async fn wait_answer(
+    session: &Session,
+    progress: &mut crate::terminal::live::TurnDisplay,
+    input: &mut Option<TerminalInput>,
+    mut answer: tokio::sync::oneshot::Receiver<String>,
+) -> Result<String> {
     {
         loop {
             tokio::select! {
@@ -2190,7 +2774,9 @@ async fn read_answer(reader: &mut TerminalInput) -> Result<String> {
 }
 
 pub(crate) fn emit_json(value: &Value) -> Result<()> {
-    if deepseek_code_core::services::session_worker::emit_event(value)? { return Ok(()); }
+    if deepseek_code_core::services::session_worker::emit_event(value)? {
+        return Ok(());
+    }
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, value)?;
     writeln!(stdout)?;
@@ -2202,13 +2788,20 @@ pub(crate) fn emit_json(value: &Value) -> Result<()> {
 /// boundary; commands, shell and memory input wait for the turn to end.
 pub(crate) fn queues_mid_turn(prompt: &str) -> bool {
     let prompt = prompt.trim_start();
-    !prompt.is_empty() && !prompt.starts_with('/') && !prompt.starts_with('!') && !prompt.starts_with("# ")
+    !prompt.is_empty()
+        && !prompt.starts_with('/')
+        && !prompt.starts_with('!')
+        && !prompt.starts_with("# ")
 }
 
 /// Messages the model did not read during the turn become the next prompts.
 pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> Result<()> {
     // Task notifications stay queued for the next turn the prompt starts.
-    for prompt in deepseek_code_core::services::input_queue::take_where(&session.store.db, &session.id, |text| !crate::background_commands::is_notification(text))? {
+    for prompt in deepseek_code_core::services::input_queue::take_where(
+        &session.store.db,
+        &session.id,
+        |text| !crate::background_commands::is_notification(text),
+    )? {
         reader.queue_prompt(prompt);
     }
     Ok(())
@@ -2227,68 +2820,70 @@ fn best_effort_live_write(what: &str, result: Result<()>) {
 #[derive(Default)]
 struct BackgroundTranscript {
     dirty: bool,
+    /// Independent argument assembly for streaming deltas, kept out of the row
+    /// so a late delta cannot rewrite a completed call's input.
     arguments: std::collections::HashMap<String, String>,
+    /// Nested ToolScript calls observed in this turn, keyed by occurrence.
+    origins: deepseek_code_core::services::tool_history::ToolOrigins,
 }
 
 impl BackgroundTranscript {
     fn observe(&mut self, event: &EngineEvent, tools: &mut Vec<message_repo::ToolCallRow>) {
-        let (id, name, input, result) = match event {
-            EngineEvent::Text(_) | EngineEvent::Thinking(_) | EngineEvent::MessageStop { .. } => {
-                self.dirty = true;
-                return;
-            }
-            EngineEvent::ToolArgDelta { tool_use_id, delta } => {
-                let input = self.arguments.entry(tool_use_id.clone()).or_default();
-                input.push_str(delta);
-                (tool_use_id, None, input.clone(), None)
-            }
-            EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } =>
-                (tool_use_id, Some(tool_name), tool_input.to_string(), None),
-            EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
-            | EngineEvent::PipelineToolResult { tool_use_id, tool_name, tool_input, output, is_error, .. } =>
-                (tool_use_id, Some(tool_name), tool_input.to_string(), Some((output, *is_error))),
-            _ => return,
-        };
-        let index = tools.iter().position(|tool| tool.id == *id).unwrap_or_else(|| {
-            tools.push(message_repo::ToolCallRow {
-                id: id.clone(), message_id: String::new(), name: String::new(),
-                input: None, output: None, is_error: false, sort_order: tools.len() as i64,
-            });
-            tools.len() - 1
-        });
-        let row = &mut tools[index];
-        if let Some(name) = name { row.name = name.clone(); }
-        // Late start/delta events must not overwrite a completed call's input,
-        // and a legacy completion without input must not erase the richer
-        // input already seen for this occurrence.
-        let rich = |text: &str| {
-            serde_json::from_str::<Value>(text)
-                .ok()
-                .is_some_and(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
-        };
-        let incoming_rich = rich(&input);
-        let existing_rich = row.input.as_deref().is_some_and(rich);
-        if (row.output.is_none() || result.is_some()) && (incoming_rich || !existing_rich) {
-            row.input = Some(input);
+        if matches!(
+            event,
+            EngineEvent::Text(_) | EngineEvent::Thinking(_) | EngineEvent::MessageStop { .. }
+        ) {
+            self.dirty = true;
+            return;
         }
-        if let Some((output, is_error)) = result {
-            row.output = Some(output.clone());
-            row.is_error = is_error;
+        // The same projector the engine integration tests use, so the real CLI
+        // path and the tests persist tool rows and ToolScript origins alike.
+        if deepseek_code_core::services::tool_history::apply_event(
+            tools,
+            &mut self.origins,
+            &mut self.arguments,
+            event,
+        ) {
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
-    fn flush(&mut self, db: &deepseek_code_core::db::DbManager, session_id: &str, assistant_id: &str, text: &str, thinking: &str, tools: &[message_repo::ToolCallRow]) -> Result<()> {
-        if !self.dirty { return Ok(()); }
+    /// Called after the executor is joined and its final events are consumed.
+    /// Missing output proves no result was reported, not that no effects ran.
+    fn finish_interrupted(&mut self, tools: &mut [message_repo::ToolCallRow]) {
+        for tool in tools.iter_mut().filter(|tool| tool.output.is_none()) {
+            tool.output = Some(message_repo::UNFINISHED_TOOL_RESULT.to_owned());
+            tool.is_error = true;
+            self.dirty = true;
+        }
+    }
+
+    fn flush(
+        &mut self,
+        db: &deepseek_code_core::db::DbManager,
+        session_id: &str,
+        assistant_id: &str,
+        text: &str,
+        thinking: &str,
+        tools: &[message_repo::ToolCallRow],
+    ) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
         db.with_conn(|conn| -> Result<()> {
             message_repo::update_message_content(conn, assistant_id, text)?;
-            conn.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [thinking, assistant_id])?;
-            for tool in tools {
-                let mut row = tool.clone();
-                row.id = format!("{assistant_id}:{}", tool.id);
-                row.message_id = assistant_id.to_owned();
-                message_repo::save_stream_tool_result(conn, session_id, assistant_id, text, &row)?;
-            }
+            conn.execute(
+                "UPDATE messages SET thinking = ?1 WHERE id = ?2",
+                [thinking, assistant_id],
+            )?;
+            deepseek_code_core::services::tool_history::save(
+                conn,
+                session_id,
+                assistant_id,
+                text,
+                tools,
+                &self.origins,
+            )?;
             Ok(())
         })??;
         self.dirty = false;
@@ -2301,6 +2896,55 @@ mod background_transcript_tests {
     use super::*;
 
     #[test]
+    fn interruption_settles_only_unreported_calls_after_draining_results() {
+        let mut live = BackgroundTranscript::default();
+        let mut tools: Vec<_> = ["Bash", "Write", "Read", "ApplyPatch"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| message_repo::ToolCallRow {
+                id: format!("inv-{index}"),
+                message_id: String::new(),
+                name: name.into(),
+                input: Some("{}".into()),
+                output: None,
+                is_error: false,
+                sort_order: index as i64,
+            })
+            .collect();
+        tools[1].output = Some(String::new()); // Empty is still a real success.
+        tools[2].output = Some("Permission denied".into());
+        tools[2].is_error = true;
+        // A completion already in the event queue wins over the fallback.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-3".into(),
+                tool_name: "ApplyPatch".into(),
+                tool_input: json!({"patch":"reviewed input"}),
+                output: "Actual completed result".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        let completed = serde_json::to_value(&tools[1..]).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(live.dirty);
+        assert_eq!(tools[0].id, "inv-0");
+        assert_eq!(tools[0].input.as_deref(), Some("{}"));
+        assert_eq!(
+            tools[0].output.as_deref(),
+            Some(message_repo::UNFINISHED_TOOL_RESULT)
+        );
+        assert!(tools[0].is_error);
+        assert_eq!(serde_json::to_value(&tools[1..]).unwrap(), completed);
+        let settled = serde_json::to_value(&tools).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(!live.dirty);
+        assert_eq!(serde_json::to_value(&tools).unwrap(), settled);
+    }
+
+    #[test]
     fn worker_snapshot_retains_full_text_thinking_and_updates_one_tool() {
         let temp = tempfile::tempdir().unwrap();
         let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
@@ -2311,27 +2955,69 @@ mod background_transcript_tests {
         let mut tools = Vec::new();
         let text = "full text ".repeat(2000);
         live.observe(&EngineEvent::Text(text.clone()), &mut tools);
-        live.observe(&EngineEvent::ToolArgDelta { tool_use_id: "call".into(), delta: "{\"path\":".into() }, &mut tools);
-        live.flush(&context.db, &session, &assistant, &text, "private reasoning", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
-            assert_eq!(message.content, text);
-            let thinking: String = conn.query_row("SELECT thinking FROM messages WHERE id=?1", [&assistant], |row| row.get(0)).unwrap();
-            assert_eq!(thinking, "private reasoning");
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls[0].input.as_deref(), Some("{\"path\":"));
-        }).unwrap();
-        let done = EngineEvent::ToolUseDone { tool_use_id: "call".into(), tool_name: "Read".into(), tool_input: json!({"path":"file"}), output: "complete".into(), is_error: false };
+        live.observe(
+            &EngineEvent::ToolArgDelta {
+                tool_use_id: "call".into(),
+                delta: "{\"path\":".into(),
+            },
+            &mut tools,
+        );
+        live.flush(
+            &context.db,
+            &session,
+            &assistant,
+            &text,
+            "private reasoning",
+            &tools,
+        )
+        .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let message = message_repo::get_message(conn, &assistant)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(message.content, text);
+                let thinking: String = conn
+                    .query_row(
+                        "SELECT thinking FROM messages WHERE id=?1",
+                        [&assistant],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(thinking, "private reasoning");
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls[0].input.as_deref(), Some("{\"path\":"));
+            })
+            .unwrap();
+        let done = EngineEvent::ToolUseDone {
+            tool_use_id: "call".into(),
+            tool_name: "Read".into(),
+            tool_input: json!({"path":"file"}),
+            output: "complete".into(),
+            is_error: false,
+        };
         live.observe(&done, &mut tools);
         live.observe(&done, &mut tools);
-        live.flush(&context.db, &session, &assistant, &text, "private reasoning", &tools).unwrap();
+        live.flush(
+            &context.db,
+            &session,
+            &assistant,
+            &text,
+            "private reasoning",
+            &tools,
+        )
+        .unwrap();
         assert!(!live.dirty);
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].id, format!("{assistant}:call"));
-            assert_eq!(calls[0].output.as_deref(), Some("complete"));
-        }).unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, format!("{assistant}:call"));
+                assert_eq!(calls[0].output.as_deref(), Some("complete"));
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2345,7 +3031,10 @@ mod background_transcript_tests {
         let mut tools = Vec::new();
         for index in 0..5 {
             let (name, input) = if index < 3 {
-                ("Bash", json!({"command":format!("printf 'RESULT_{index}'")}))
+                (
+                    "Bash",
+                    json!({"command":format!("printf 'RESULT_{index}'")}),
+                )
             } else {
                 ("Read", json!({"file_path":format!("file-{index}.txt")}))
             };
@@ -2382,14 +3071,24 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 5);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RESULT_0'"}"#));
-            assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
-            assert_eq!(calls[3].input.as_deref(), Some(r#"{"file_path":"file-3.txt"}"#));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 5);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'RESULT_0'"}"#)
+                );
+                assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
+                assert_eq!(
+                    calls[3].input.as_deref(),
+                    Some(r#"{"file_path":"file-3.txt"}"#)
+                );
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2421,12 +3120,19 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RICH_INPUT'"}"#));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'RICH_INPUT'"}"#)
+                );
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2474,13 +3180,20 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'REVISED'"}"#));
-            assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'REVISED'"}"#)
+                );
+                assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2494,17 +3207,28 @@ mod background_transcript_tests {
         let mut tools = Vec::new();
         live.observe(&EngineEvent::Text("streamed".into()), &mut tools);
         // Hold the writer like another process mid-checkpoint would.
-        let blocker = rusqlite::Connection::open(temp.path().join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
+        let blocker = rusqlite::Connection::open(
+            temp.path().join(deepseek_code_core::runtime::DATABASE_FILE),
+        )
+        .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert!(live.flush(&context.db, &session, &assistant, "streamed", "", &tools).is_err());
+        assert!(live
+            .flush(&context.db, &session, &assistant, "streamed", "", &tools)
+            .is_err());
         assert!(live.dirty, "a failed flush must retry on the next tick");
         blocker.execute_batch("COMMIT").unwrap();
-        live.flush(&context.db, &session, &assistant, "streamed", "", &tools).unwrap();
+        live.flush(&context.db, &session, &assistant, "streamed", "", &tools)
+            .unwrap();
         assert!(!live.dirty);
-        context.db.with_conn(|conn| {
-            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
-            assert_eq!(message.content, "streamed");
-        }).unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let message = message_repo::get_message(conn, &assistant)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(message.content, "streamed");
+            })
+            .unwrap();
     }
 }
 
@@ -2545,13 +3269,23 @@ pub(crate) fn event_json(event: &EngineEvent) -> Option<Value> {
 /// SDK `agentProgressSummaries` adds a concise human-readable summary.
 pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Value> {
     Some(match event {
-        EngineEvent::ContextReset { session_id, boundary_id } => json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id}),
+        EngineEvent::ContextReset {
+            session_id,
+            boundary_id,
+        } => json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id}),
         EngineEvent::Text(delta) => json!({"type":"text","delta":delta}),
-        EngineEvent::QueuedInput(input) => json!({"type":"queued_input","text":input.text,"content":input.content,"origin":input.origin}),
+        EngineEvent::QueuedInput(input) => {
+            json!({"type":"queued_input","text":input.text,"content":input.content,"origin":input.origin})
+        }
         EngineEvent::Thinking(delta) => json!({"type":"thinking","delta":delta}),
         EngineEvent::Usage(usage) => json!({"type":"usage","usage":usage}),
         EngineEvent::MessageStart { model } => json!({"type":"message_start","model":model}),
-        EngineEvent::AgentProgress { session_id, agent_type, status, tool_name } => {
+        EngineEvent::AgentProgress {
+            session_id,
+            agent_type,
+            status,
+            tool_name,
+        } => {
             let mut value = json!({"type":"agent_progress","session_id":session_id,"agent_type":agent_type,"status":status,"tool_name":tool_name});
             if summaries {
                 value["summary"] = json!(match tool_name {
@@ -2568,7 +3302,9 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
             tool_input,
             display_title,
             ..
-        } => json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input,"display_title":display_title}),
+        } => {
+            json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input,"display_title":display_title})
+        }
         EngineEvent::ToolUseDone {
             tool_use_id,
             tool_name,
@@ -2647,26 +3383,60 @@ mod event_tests {
     fn shift_tab_cycles_like_the_reference_cli() {
         let cycle = |bypass| {
             let mut mode = "ask";
-            (0..5).map(|_| { mode = super::next_mode(mode, bypass); mode }).collect::<Vec<_>>()
+            (0..5)
+                .map(|_| {
+                    mode = super::next_mode(mode, bypass);
+                    mode
+                })
+                .collect::<Vec<_>>()
         };
-        assert_eq!(cycle(false), ["accept-edits", "plan", "auto", "ask", "accept-edits"]);
-        assert_eq!(cycle(true), ["accept-edits", "plan", "bypass", "auto", "ask"]);
+        assert_eq!(
+            cycle(false),
+            ["accept-edits", "plan", "auto", "ask", "accept-edits"]
+        );
+        assert_eq!(
+            cycle(true),
+            ["accept-edits", "plan", "bypass", "auto", "ask"]
+        );
     }
 
     #[test]
     fn launch_flags_choose_bypass_and_keep_it_in_the_cycle() {
-        let parse = |args: &[&str]| { let mut cli = Cli::try_parse_with_mode_source(std::iter::once("dcl").chain(args.iter().copied())).unwrap(); cli.normalize(); cli };
+        let parse = |args: &[&str]| {
+            let mut cli =
+                Cli::try_parse_with_mode_source(std::iter::once("dcl").chain(args.iter().copied()))
+                    .unwrap();
+            cli.normalize();
+            cli
+        };
         let full = parse(&["--full-access"]);
-        assert!(matches!(full.permission_mode, crate::args::PermissionModeArg::Bypass) && full.allow_dangerously_skip_permissions);
+        assert!(
+            matches!(full.permission_mode, crate::args::PermissionModeArg::Bypass)
+                && full.allow_dangerously_skip_permissions
+        );
         let skip = parse(&["--dangerously-skip-permissions"]);
         assert!(skip.allow_dangerously_skip_permissions && !skip.full_access);
         // A worker job keeps the mode in use alongside --full-access.
-        let worker = parse(&["--permission-mode", "plan", "--full-access", "--allow-dangerously-skip-permissions"]);
-        assert!(matches!(worker.permission_mode, crate::args::PermissionModeArg::Plan) && worker.full_access);
+        let worker = parse(&[
+            "--permission-mode",
+            "plan",
+            "--full-access",
+            "--allow-dangerously-skip-permissions",
+        ]);
+        assert!(
+            matches!(worker.permission_mode, crate::args::PermissionModeArg::Plan)
+                && worker.full_access
+        );
         let default = parse(&[]);
         assert!(default.allow_dangerously_skip_permissions && !default.full_access);
-        assert!(matches!(default.permission_mode, crate::args::PermissionModeArg::Ask));
-        assert_eq!(next_mode("plan", default.allow_dangerously_skip_permissions), "bypass");
+        assert!(matches!(
+            default.permission_mode,
+            crate::args::PermissionModeArg::Ask
+        ));
+        assert_eq!(
+            next_mode("plan", default.allow_dangerously_skip_permissions),
+            "bypass"
+        );
     }
     #[test]
     fn duplicate_pipeline_completion_does_not_hide_distinct_results() {
@@ -2749,39 +3519,60 @@ mod event_tests {
     async fn persisted_permission_mode_restores_unless_explicit_cli_overrides() {
         let root = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
-        let selection = || Selection {
+        let selection = || {
+            Selection {
             providers: vec![serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap()],
             provider_id:"fixture".into(), model:"fixture".into(),
+        }
         };
         let cli = Cli::try_parse_with_mode_source(["dcl"]).unwrap();
-        let first = Session::open(&cli, &paths, selection(), None).await.unwrap();
+        let first = Session::open(&cli, &paths, selection(), None)
+            .await
+            .unwrap();
         first.set_permission_mode("plan").await.unwrap();
         let saved = first.id.clone();
         first.close().await.unwrap();
-        let resumed = Session::open(&cli, &paths, selection(), Some(&saved)).await.unwrap();
+        let resumed = Session::open(&cli, &paths, selection(), Some(&saved))
+            .await
+            .unwrap();
         assert_eq!(resumed.permission_mode(), "plan");
         resumed.set_permission_mode("dontAsk").await.unwrap();
         assert!(resumed.set_permission_mode("auto").await.is_err());
         assert_eq!(resumed.permission_mode(), "dont-ask");
         resumed.close().await.unwrap();
-        let restored = Session::open(&cli, &paths, selection(), Some(&saved)).await.unwrap();
+        let restored = Session::open(&cli, &paths, selection(), Some(&saved))
+            .await
+            .unwrap();
         assert_eq!(restored.permission_mode(), "dont-ask");
         restored.cycle_permission_mode().await.unwrap();
         assert_eq!(restored.permission_mode(), "ask");
         restored.close().await.unwrap();
-        let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"]).unwrap();
-        let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();
+        let explicit =
+            Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"]).unwrap();
+        let overridden = Session::open(&explicit, &paths, selection(), Some(&saved))
+            .await
+            .unwrap();
         assert_eq!(overridden.permission_mode(), "ask");
         // Ordinary launches can select bypass without acquiring Full Access.
         overridden.set_permission_mode("bypass").await.unwrap();
         assert_eq!(overridden.permission_mode(), "bypass");
         assert!(!overridden.full_access);
         overridden.close().await.unwrap();
-        let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask", "--allow-dangerously-skip-permissions"]).unwrap();
-        let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();
+        let explicit = Cli::try_parse_with_mode_source([
+            "dcl",
+            "--permission-mode",
+            "ask",
+            "--allow-dangerously-skip-permissions",
+        ])
+        .unwrap();
+        let overridden = Session::open(&explicit, &paths, selection(), Some(&saved))
+            .await
+            .unwrap();
         overridden.set_permission_mode("bypass").await.unwrap();
         overridden.close().await.unwrap();
-        let safe_resume = Session::open(&cli, &paths, selection(), Some(&saved)).await.unwrap();
+        let safe_resume = Session::open(&cli, &paths, selection(), Some(&saved))
+            .await
+            .unwrap();
         assert_eq!(safe_resume.permission_mode(), "ask");
         safe_resume.close().await.unwrap();
     }
@@ -2803,7 +3594,12 @@ mod event_tests {
             .await
             .unwrap();
         assert_eq!(session.permission_mode(), "plan");
-        deepseek_code_core::services::plans::save(&paths.data_dir, &session.id, "# Plan\nUTF-8 检查").unwrap();
+        deepseek_code_core::services::plans::save(
+            &paths.data_dir,
+            &session.id,
+            "# Plan\nUTF-8 检查",
+        )
+        .unwrap();
         crate::extended_commands::handle("/plan", "", &paths, &mut session)
             .await
             .unwrap();
@@ -2815,32 +3611,59 @@ mod event_tests {
             .await
             .unwrap();
         assert_eq!(session.permission_mode(), "ask");
-        let task = crate::extended_commands::plan_task("  add a cache  ", &paths, &mut session).await.unwrap();
+        let task = crate::extended_commands::plan_task("  add a cache  ", &paths, &mut session)
+            .await
+            .unwrap();
         assert_eq!(task.as_deref(), Some("add a cache"));
         assert_eq!(session.permission_mode(), "plan");
         // Already planning: the description is reported, never submitted twice.
-        assert!(crate::extended_commands::plan_task("other task", &paths, &mut session).await.unwrap().is_none());
+        assert!(
+            crate::extended_commands::plan_task("other task", &paths, &mut session)
+                .await
+                .unwrap()
+                .is_none()
+        );
         session.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn context_suffix_survives_session_switch_resume_and_worker_snapshot(){
+    async fn context_suffix_survives_session_switch_resume_and_worker_snapshot() {
         use clap::Parser;
-        let dir=tempfile::tempdir().unwrap();let paths=RuntimePaths::new(dir.path().join("data")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
         let provider=serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"flash","name":"Flash","enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":128000}]})).unwrap();
-        let selection=Selection{providers:vec![provider],provider_id:"fixture".into(),model:"flash[1m]".into()};
-        let cli=Cli::parse_from(["dcl","--print"]);
-        let mut session=Session::open(&cli,&paths,selection,None).await.unwrap();
-        assert_eq!(session.context_window().await,Some(1_000_000));assert_eq!(session.model,"flash[1m]");
-        let resolved=session.selected_provider().await.unwrap();
-        assert_eq!(resolved.model.id,"flash");
-        let env=crate::background_commands::worker_environment(false,&resolved).unwrap();
-        let snapshot:Value=serde_json::from_str(&env.iter().find(|(key,_)|key=="DEEPSEEK_CODE_WORKER_MODEL").unwrap().1).unwrap();
-        assert_eq!(snapshot["id"],"flash");assert_eq!(snapshot["context_window"],1_000_000);
-        let saved=session.id.clone();session.sdk_set_model("flash").await.unwrap();assert_eq!(session.context_window().await,Some(128000));
-        session.sdk_set_model("flash[1m]").await.unwrap();assert_eq!(session.model,"flash[1m]");
-        session.resume_saved(&paths,&saved).await.unwrap();assert_eq!(session.context_window().await,Some(1_000_000));
-        assert_eq!(session.store.resume(&saved).unwrap().model.as_deref(),Some("flash[1m]"));
+        let selection = Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "flash[1m]".into(),
+        };
+        let cli = Cli::parse_from(["dcl", "--print"]);
+        let mut session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        assert_eq!(session.context_window().await, Some(1_000_000));
+        assert_eq!(session.model, "flash[1m]");
+        let resolved = session.selected_provider().await.unwrap();
+        assert_eq!(resolved.model.id, "flash");
+        let env = crate::background_commands::worker_environment(false, &resolved).unwrap();
+        let snapshot: Value = serde_json::from_str(
+            &env.iter()
+                .find(|(key, _)| key == "DEEPSEEK_CODE_WORKER_MODEL")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(snapshot["id"], "flash");
+        assert_eq!(snapshot["context_window"], 1_000_000);
+        let saved = session.id.clone();
+        session.sdk_set_model("flash").await.unwrap();
+        assert_eq!(session.context_window().await, Some(128000));
+        session.sdk_set_model("flash[1m]").await.unwrap();
+        assert_eq!(session.model, "flash[1m]");
+        session.resume_saved(&paths, &saved).await.unwrap();
+        assert_eq!(session.context_window().await, Some(1_000_000));
+        assert_eq!(
+            session.store.resume(&saved).unwrap().model.as_deref(),
+            Some("flash[1m]")
+        );
     }
 
     /// A second top-level turn for the same session must be rejected at
@@ -3076,18 +3899,41 @@ mod event_tests {
         let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(|| async {
             ([ ("content-type", "text/event-stream") ], "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
         }));
-        let server = tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let provider = serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":format!("http://{address}/v1"),"api_key":"fixture-only","api_format":"openai","enabled":true,"web_search_strategy":null,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":64,"supports_vision":false,"supports_web_search":false}]})).unwrap();
-        let selection = Selection { providers:vec![provider],provider_id:"fixture".into(),model:"fixture-model".into() };
-        let cli = Cli::try_parse_from(["dcl", "--print", "--output-format", "stream-json"]).unwrap();
+        let selection = Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli =
+            Cli::try_parse_from(["dcl", "--print", "--output-format", "stream-json"]).unwrap();
         let store = SessionStore::new(paths.open_database().unwrap());
-        let id = store.create(directory.path(), "fixture-model", "fixture").unwrap();
-        let session = Session::open(&cli, &paths, selection, Some(&id)).await.unwrap();
-        assert!(!marker.exists(), "opening the foreground must not start MCP children");
+        let id = store
+            .create(directory.path(), "fixture-model", "fixture")
+            .unwrap();
+        let session = Session::open(&cli, &paths, selection, Some(&id))
+            .await
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "opening the foreground must not start MCP children"
+        );
         session.reload_plugins().await.unwrap();
-        assert!(!marker.exists(), "metadata refresh must not start unused MCP children");
+        assert!(
+            !marker.exists(),
+            "metadata refresh must not start unused MCP children"
+        );
         for prompt in ["first SDK turn", "second SDK turn"] {
-            tokio::time::timeout(std::time::Duration::from_secs(15), session.run_turn(&cli,prompt,&mut None)).await.unwrap().unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                session.run_turn(&cli, prompt, &mut None),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
         }
         session.close().await.unwrap();
@@ -3106,7 +3952,10 @@ mod event_tests {
             event_json_with(&event, true).unwrap()["summary"],
             "reviewer: running (Read)"
         );
-        assert!(event_json_with(&event, false).unwrap().get("summary").is_none());
+        assert!(event_json_with(&event, false)
+            .unwrap()
+            .get("summary")
+            .is_none());
     }
 
     #[test]
@@ -3116,11 +3965,15 @@ mod event_tests {
             agent_type: "reviewer".into(),
             status: "tool_failed".into(),
             tool_name: Some("Read".into()),
-        }).unwrap();
-        assert_eq!(value, json!({
-            "type": "agent_progress", "session_id": "child-42",
-            "agent_type": "reviewer", "status": "tool_failed", "tool_name": "Read"
-        }));
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "agent_progress", "session_id": "child-42",
+                "agent_type": "reviewer", "status": "tool_failed", "tool_name": "Read"
+            })
+        );
     }
 }
 
@@ -3134,6 +3987,7 @@ mod compaction_cancellation_tests {
             "Interrupted",
             "Interrupted: automatic compaction cancelled before it was saved",
             "Interrupted: automatic compaction cancelled after commit",
+            "Interrupted by SDK host (session fixture)",
         ] {
             assert!(
                 super::is_turn_cancel_error(&anyhow::anyhow!(message)),
@@ -3145,6 +3999,7 @@ mod compaction_cancellation_tests {
             "Hook failed",
             "Hook failed: cancel requested",
             "Autocompact task cancelled unexpectedly by provider",
+            "SDK turn interrupted unexpectedly by provider",
         ] {
             assert!(
                 !super::is_turn_cancel_error(&anyhow::anyhow!(message)),

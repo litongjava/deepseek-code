@@ -15,10 +15,17 @@ mod permission_denied_tests;
 mod plan_tool;
 #[path = "script_workflow.rs"]
 mod script_workflow;
+// The embedded QuickJS bridge is unavailable where rquickjs is not linked.
 #[path = "skill_tool.rs"]
 mod skill_tool;
 #[path = "tool_approval.rs"]
 mod tool_approval;
+#[cfg(not(target_os = "android"))]
+#[path = "toolscript_bridge.rs"]
+mod toolscript_bridge;
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "toolscript_bridge_tests.rs"]
+mod toolscript_bridge_tests;
 
 use super::mcp_output::McpOutput;
 use crate::mcp::states::McpState;
@@ -42,7 +49,7 @@ use crate::streaming::sse_parser::{
     consume_sse_payloads, merge_tool_args, recover_malformed_tool_input,
 };
 use crate::tools::get_tool_definitions;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context as _, Result};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -102,11 +109,11 @@ mod durable_input_tests;
 mod goal_proposal_tests;
 
 #[cfg(test)]
-#[path = "tool_loading_tests.rs"]
-mod tool_loading_tests;
-#[cfg(test)]
 #[path = "tool_loading_policy_tests.rs"]
 mod tool_loading_policy_tests;
+#[cfg(test)]
+#[path = "tool_loading_tests.rs"]
+mod tool_loading_tests;
 
 #[cfg(test)]
 #[path = "tool_loading_restore_tests.rs"]
@@ -196,6 +203,15 @@ pub enum EngineEvent {
         usage: u64,
         limit: u64,
     },
+    /// A call made by an embedded ToolScript run. It is a real executor
+    /// occurrence (its own `tool_use_id`), not a provider protocol item: the
+    /// provider never emitted it, so hosts must persist it as history only and
+    /// never replay it as an assistant `tool_use` / `tool_result` pair.
+    NestedToolCall {
+        tool_use_id: String,
+        parent_tool_use_id: String,
+        sequence: u64,
+    },
 }
 
 /// Lowercase words of a tool name, splitting CamelCase and separators
@@ -256,6 +272,10 @@ pub struct ToolLoopExecutor {
     on_demand_prompt: Option<String>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
+    /// The assistant message that owns this turn's tool rows, when the host
+    /// persists them. A ToolScript job uses it to write nested history
+    /// records independently of the parent's ended turn.
+    parent_message_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     permission_mailbox: crate::native_engine::permission_response::Mailbox,
     permission_interrupted: std::sync::Mutex<Option<String>>,
@@ -319,6 +339,10 @@ pub struct ToolLoopExecutor {
     /// A tool the host is running itself (a bundled skill may drive one), which
     /// the loading gate must not refuse.
     host_tool: Option<String>,
+    /// Durable Super Agent identity of this session, resolved by the host.
+    super_agent_role: crate::super_agent::Role,
+    super_agent_member: Option<crate::super_agent::MemberRole>,
+    super_agent: Option<crate::super_agent::crp::ToolRuntime>,
     /// Unique per executor/turn, so an occurrence never collides with saved
     /// history or with a later turn after a resume.
     turn_scope: String,
@@ -574,7 +598,7 @@ fn uses_independent_deepseek_search(provider: &ResolvedProvider) -> bool {
         "deepseek_native" | "deepseek" => true,
         "auto" | "" => {
             provider.model.id.to_ascii_lowercase().contains("deepseek")
-            || provider.provider.builtin_id.as_deref() == Some("deepseek")
+                || provider.provider.builtin_id.as_deref() == Some("deepseek")
                 || reqwest::Url::parse(&provider.provider.base_url)
                     .ok()
                     .and_then(|url| url.host_str().map(String::from))
@@ -643,7 +667,7 @@ fn collect_file_tool_paths(value: &Value, out: &mut Vec<String>) {
                     .unwrap_or_else(|| function["arguments"].clone());
                 if let Some(path) = arguments["file_path"].as_str() {
                     out.push(path.to_owned());
-            }
+                }
             }
             map.values()
                 .for_each(|item| collect_file_tool_paths(item, out));
@@ -711,7 +735,7 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
                 .filter(|q| !q.trim().is_empty())
                 .ok_or_else(|| anyhow!("Each question needs question text"))?
                 .to_owned();
-        anyhow::ensure!(seen.insert(text), "Question texts must be unique");
+            anyhow::ensure!(seen.insert(text), "Question texts must be unique");
             let options = question["options"]
                 .as_array()
                 .ok_or_else(|| anyhow!("Each question needs options"))?;
@@ -728,9 +752,384 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
             if question["multiSelect"].is_null() {
                 question["multiSelect"] = json!(false);
             }
-        Ok(question)
+            Ok(question)
         })
         .collect()
+}
+
+/// The saved foreground-shell working directory of one session, staged for a
+/// host-authorized workspace move.
+///
+/// Candidates are listed and validated before any rename. Only the exact plain
+/// session file and the exact WSL-suffixed file that `safe_cwd` creates are
+/// staged; stale backups and other sessions are never touched. A staging
+/// failure restores every entry staged so far and reports both the original
+/// error and any rollback problem. Committing removes the backups; after a
+/// committed database move a cleanup failure is reported but never restores a
+/// cache that no longer matches the database. This is not a claim of
+/// crash-atomicity across the database and filesystem.
+pub struct ShellCwdReset {
+    backups: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+/// Filesystem operations used while staging the saved shell state. Tests inject
+/// deterministic failures through this seam instead of relying on permissions
+/// or timing.
+pub(crate) trait ShellCwdFs {
+    /// Returns every entry name in `directory`, or `None` when the directory
+    /// does not exist. Every entry is read before the caller mutates anything.
+    fn list(&self, directory: &std::path::Path) -> Result<Option<Vec<std::ffi::OsString>>>;
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>;
+    fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>;
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()>;
+    fn exists(&self, path: &std::path::Path) -> bool;
+}
+
+#[derive(Default)]
+pub(crate) struct RealShellCwdFs;
+
+impl ShellCwdFs for RealShellCwdFs {
+    fn list(&self, directory: &std::path::Path) -> Result<Option<Vec<std::ffi::OsString>>> {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Cannot list the shell state directory {}",
+                        directory.display()
+                    )
+                })
+            }
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            names.push(
+                entry
+                    .with_context(|| {
+                        format!("Cannot read a shell state entry in {}", directory.display())
+                    })?
+                    .file_name(),
+            );
+        }
+        Ok(Some(names))
+    }
+
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::hard_link(from, to)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn exists(&self, path: &std::path::Path) -> bool {
+        // An unreadable destination is treated as present: rolling back must
+        // never overwrite state that might have been recreated.
+        path.try_exists().unwrap_or(true)
+    }
+}
+
+/// Mirrors the production state name: `safe_cwd` uses
+/// `Path::with_extension("wsl-<16 lowercase hex>")` only for a plain session
+/// id. An id containing a dot would share that WSL name with another session,
+/// so only the unambiguous plain form is accepted (conversation ids are UUIDs).
+fn shell_state_name_is_ours(session: &str, name: &std::ffi::OsStr) -> bool {
+    if name == std::ffi::OsStr::new(session) {
+        return true;
+    }
+    if std::path::Path::new(session).extension().is_some() {
+        return false;
+    }
+    let Some(text) = name.to_str() else {
+        return false;
+    };
+    let Some(hash) = text
+        .strip_prefix(session)
+        .and_then(|rest| rest.strip_prefix(".wsl-"))
+    else {
+        return false;
+    };
+    hash.len() == 16
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Restores one staged file without overwriting an active state that was
+/// created again while the move was in flight. A hard link is the no-clobber
+/// primitive: it fails atomically if the destination appeared. There is no
+/// overwrite-capable fallback; an unavailable filesystem reports an explicit
+/// recovery error and keeps the staged copy.
+fn restore_shell_state(
+    fs: &dyn ShellCwdFs,
+    original: &std::path::Path,
+    backup: &std::path::Path,
+) -> Result<()> {
+    let conflict = || {
+        anyhow!(
+            "the active shell state was created again; refusing to overwrite it (staged copy at {})",
+            backup.display()
+        )
+    };
+    if fs.exists(original) {
+        return Err(conflict());
+    }
+    match fs.link(backup, original) {
+        Ok(()) => fs.remove_file(backup).with_context(|| {
+            format!(
+                "the shell state {} was restored but its staged duplicate {} could not be removed",
+                original.display(),
+                backup.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(conflict()),
+        Err(link_error) => Err(anyhow!(
+            "Cannot restore the shell state {} without replacing it: the filesystem cannot create a no-clobber link ({link_error}); the staged copy remains at {}",
+            original.display(),
+            backup.display()
+        )),
+    }
+}
+
+impl ShellCwdReset {
+    pub fn prepare(data_dir: &std::path::Path, session: &str) -> Result<Self> {
+        Self::prepare_with(&RealShellCwdFs, data_dir, session)
+    }
+
+    pub(crate) fn prepare_with(
+        fs: &dyn ShellCwdFs,
+        data_dir: &std::path::Path,
+        session: &str,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !session.is_empty()
+                && session != "."
+                && session != ".."
+                && !session.contains(['/', '\\']),
+            "Invalid session ID for shell state"
+        );
+        let directory = data_dir.join("shell-cwd");
+        let Some(names) = fs.list(&directory)? else {
+            return Ok(Self {
+                backups: Vec::new(),
+            });
+        };
+        let mut candidates: Vec<_> = names
+            .into_iter()
+            .filter(|name| shell_state_name_is_ours(session, name))
+            .map(|name| directory.join(name))
+            .collect();
+        // A stable order makes which entry fails deterministic; the directory
+        // is not read again after the first rename.
+        candidates.sort();
+        let mut reset = Self {
+            backups: Vec::new(),
+        };
+        for original in candidates {
+            let name = original
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let backup = original.with_file_name(format!("{name}.stale-{}", uuid::Uuid::new_v4()));
+            if let Err(error) = fs.rename(&original, &backup) {
+                let primary = anyhow::Error::new(error).context(format!(
+                    "Cannot stage the shell state {}",
+                    original.display()
+                ));
+                let rollback = reset.rollback(fs);
+                return Err(if rollback.is_empty() {
+                    primary
+                } else {
+                    primary.context(format!(
+                        "rolling back the staged shell state also failed: {}",
+                        rollback.join("; ")
+                    ))
+                });
+            }
+            reset.backups.push((original, backup));
+        }
+        Ok(reset)
+    }
+
+    /// Undoes every staged rename, attempting all of them. Failures are
+    /// returned as text; each failed backup stays where it is.
+    fn rollback(&mut self, fs: &dyn ShellCwdFs) -> Vec<String> {
+        let staged = std::mem::take(&mut self.backups);
+        let mut failures = Vec::new();
+        for (original, backup) in staged {
+            if let Err(error) = restore_shell_state(fs, &original, &backup) {
+                let kept = if fs.exists(&backup) {
+                    format!("; the staged copy remains at {}", backup.display())
+                } else {
+                    String::new()
+                };
+                failures.push(format!("{}: {error:#}{kept}", original.display()));
+            }
+        }
+        failures
+    }
+
+    /// Puts every staged file back after the database move failed.
+    pub fn restore(self) -> Result<()> {
+        self.restore_with(&RealShellCwdFs)
+    }
+
+    pub(crate) fn restore_with(mut self, fs: &dyn ShellCwdFs) -> Result<()> {
+        let failures = self.rollback(fs);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "the shell state could not be fully restored: {}",
+                failures.join("; ")
+            ))
+        }
+    }
+
+    /// Drops the staged caches after the database move committed. It never
+    /// renames a cache back into place.
+    pub fn commit(self) -> Result<()> {
+        self.commit_with(&RealShellCwdFs)
+    }
+
+    pub(crate) fn commit_with(mut self, fs: &dyn ShellCwdFs) -> Result<()> {
+        let staged = std::mem::take(&mut self.backups);
+        let mut failures = Vec::new();
+        for (_, backup) in staged {
+            if let Err(error) = fs.remove_file(&backup) {
+                failures.push(format!("{}: {error}", backup.display()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "the workspace move was committed, but the staged shell state could not be removed: {}",
+                failures.join("; ")
+            ))
+        }
+    }
+}
+
+/// Deterministic filesystem failures for the shell-state tests. Production
+/// always uses `RealShellCwdFs`.
+#[cfg(test)]
+pub(crate) mod shell_cwd_faults {
+    use super::{RealShellCwdFs, ShellCwdFs};
+
+    #[derive(Default)]
+    pub(crate) struct FaultyFs {
+        inner: RealShellCwdFs,
+        fail_list: bool,
+        /// Fails every rename once this many renames have succeeded.
+        fail_rename_after: Option<usize>,
+        /// Fails links whose destination has one of these file names.
+        fail_link_names: Vec<String>,
+        /// Written to the destination before an injected link failure, to model
+        /// an active state created at exactly that moment.
+        link_failure_destination: Option<String>,
+        fail_all_removals: bool,
+        renames: std::cell::Cell<usize>,
+    }
+
+    impl FaultyFs {
+        pub(crate) fn failing_list() -> Self {
+            Self {
+                fail_list: true,
+                ..Self::default()
+            }
+        }
+
+        pub(crate) fn failing_renames_after(limit: usize) -> Self {
+            Self {
+                fail_rename_after: Some(limit),
+                ..Self::default()
+            }
+        }
+
+        pub(crate) fn failing_links(mut self, names: &[&str]) -> Self {
+            self.fail_link_names = names.iter().map(|name| (*name).to_owned()).collect();
+            self
+        }
+
+        pub(crate) fn failing_links_after_creating_destination(
+            mut self,
+            names: &[&str],
+            content: &str,
+        ) -> Self {
+            self = self.failing_links(names);
+            self.link_failure_destination = Some(content.to_owned());
+            self
+        }
+
+        pub(crate) fn failing_removals(mut self) -> Self {
+            self.fail_all_removals = true;
+            self
+        }
+
+        fn named(path: &std::path::Path) -> String {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
+    }
+
+    impl ShellCwdFs for FaultyFs {
+        fn list(
+            &self,
+            directory: &std::path::Path,
+        ) -> anyhow::Result<Option<Vec<std::ffi::OsString>>> {
+            if self.fail_list {
+                anyhow::bail!("injected shell state listing failure");
+            }
+            self.inner.list(directory)
+        }
+
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            let count = self.renames.get() + 1;
+            self.renames.set(count);
+            if self.fail_rename_after.is_some_and(|limit| count > limit) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            self.inner.rename(from, to)
+        }
+
+        fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            if self
+                .fail_link_names
+                .iter()
+                .any(|name| name == &Self::named(to))
+            {
+                if let Some(content) = &self.link_failure_destination {
+                    if !self.inner.exists(to) {
+                        std::fs::write(to, content).map_err(|error| {
+                            std::io::Error::other(format!(
+                                "injected destination write failure: {error}"
+                            ))
+                        })?;
+                    }
+                }
+                return Err(std::io::Error::other("injected link failure"));
+            }
+            self.inner.link(from, to)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            if self.fail_all_removals {
+                return Err(std::io::Error::other("injected removal failure"));
+            }
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &std::path::Path) -> bool {
+            self.inner.exists(path)
+        }
+    }
 }
 
 /// Bash keeps its working directory per session in a file the tool reads and
@@ -1028,6 +1427,7 @@ impl ToolLoopExecutor {
             on_demand_prompt: None,
             streaming_tool_args: HashMap::new(),
             conv_id: None,
+            parent_message_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
             permission_mailbox: Default::default(),
             permission_interrupted: std::sync::Mutex::new(None),
@@ -1073,6 +1473,9 @@ impl ToolLoopExecutor {
             exposed_tools: None,
             builtin_names: Default::default(),
             host_tool: None,
+            super_agent_role: crate::super_agent::Role::Agent,
+            super_agent_member: None,
+            super_agent: None,
             turn_scope: uuid::Uuid::new_v4().to_string(),
             invocation_counter: 0,
         }
@@ -1297,13 +1700,8 @@ impl ToolLoopExecutor {
                 (CallStep::Builtin(_, _), None) => unreachable!("every prepared builtin ran"),
             };
             results.push(
-                self.complete_tool_call_with(
-                    &call.name,
-                    &call.id,
-                    prepared.pre_contexts,
-                    ran,
-                )
-                .await,
+                self.complete_tool_call_with(&call.name, &call.id, prepared.pre_contexts, ran)
+                    .await,
             );
         }
         results
@@ -1322,6 +1720,159 @@ impl ToolLoopExecutor {
         (input.clone(), output, failed)
     }
 
+    /// Runs one ToolScript job through its durable owner.
+    ///
+    /// A background call returns the task id after admission. A foreground call
+    /// waits a bounded time for the result without ever cancelling the script;
+    /// if the wait elapses it returns the running task id instead.
+    async fn execute_toolscript_tool(&mut self, input: &Value, id: &str) -> (Value, String, bool) {
+        let failed = |message: String| (input.clone(), message, true);
+        let Some(root) = self
+            .search_config_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf)
+        else {
+            return failed("ToolScript needs an interactive session data directory.".into());
+        };
+        let Some(session) = self.conv_id.clone() else {
+            return failed("ToolScript needs a session.".into());
+        };
+        let source = input["source"].as_str().unwrap_or_default();
+        if source.trim().is_empty() {
+            return failed("ToolScript source is required.".into());
+        }
+        if source.len() > 64 * 1024 {
+            return failed("ToolScript source exceeds the 64 KiB limit.".into());
+        }
+        let background = input["run_in_background"] == true;
+        let mode = self
+            .permission_manager
+            .as_ref()
+            .map(|manager| manager.get_mode())
+            .unwrap_or(crate::permissions::PermissionMode::AskPermissions);
+        let spec = crate::native_engine::toolscript_job::JobSpec {
+            id: String::new(),
+            session: session.clone(),
+            workspace: self.workspace_cwd.clone(),
+            assistant_id: self.parent_message_id.clone(),
+            parent_tool_use_id: id.to_owned(),
+            provider_id: self.provider.provider.id.clone(),
+            model: self.provider.model.id.clone(),
+            source: source.to_owned(),
+            args: input.get("args").cloned().unwrap_or(Value::Null),
+            data_dir: root.to_string_lossy().into_owned(),
+            settings_path: self
+                .search_config_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            loaded_tools: self.loaded_tools.iter().cloned().collect(),
+            reasoning: self.reasoning_mode.clone(),
+            permission_mode: crate::services::session_permission_mode::name(mode).to_owned(),
+            allowed_tools: self.allowed_tools.clone(),
+            exposed_tools: self
+                .exposed_tools
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            source_sha256: ring::digest::digest(&ring::digest::SHA256, source.as_bytes())
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            // Only a foreground call on a live host can answer prompts.
+            interactive: !background && self.permission_host_available,
+        };
+        let start = match crate::native_engine::toolscript_job::start_job(&root, spec).await {
+            Ok(start) => start,
+            Err(error) => return failed(format!("ToolScript could not start: {error:#}")),
+        };
+        if background {
+            return (
+                input.clone(),
+                json!({
+                    "task_id": start.id,
+                    "status": "running",
+                    "message": "ToolScript is running in the background. To read its paged output, load TaskGet with ToolSearch (block:true waits); TaskStop stops it.",
+                })
+                .to_string(),
+                false,
+            );
+        }
+        let deadline =
+            tokio::time::Instant::now() + crate::native_engine::toolscript_job::FOREGROUND_WAIT;
+        loop {
+            // A live host answers the owner's permission requests while this
+            // call waits; without one the owner denies them itself.
+            self.service_toolscript_approvals(&start.directory).await;
+            let state = match crate::native_engine::toolscript_job::state(&start.directory) {
+                Ok(state) => state,
+                Err(error) => return failed(format!("ToolScript state is unreadable: {error:#}")),
+            };
+            if state.is_terminal() {
+                let value = crate::native_engine::toolscript_job::terminal_output(
+                    &start.directory,
+                    &start.id,
+                );
+                return (
+                    input.clone(),
+                    serde_json::to_string(&value).unwrap_or_default(),
+                    state.status != "completed",
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return (
+                    input.clone(),
+                    json!({
+                        "task_id": start.id,
+                        "status": state.status,
+                        "message": "ToolScript is still running. To read its paged output, load TaskGet with ToolSearch; TaskStop stops it.",
+                    })
+                    .to_string(),
+                    false,
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Forwards pending owner approval requests to the live host and records
+    /// the answer. A failure is written as an explicit denial.
+    async fn service_toolscript_approvals(&self, directory: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(directory.join("approvals")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".request.json") else {
+                continue;
+            };
+            let response = path.with_file_name(format!("{stem}.response.json"));
+            if response.exists() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            let tool = value["tool"].as_str().unwrap_or_default().to_owned();
+            let tool_input = value.get("input").cloned().unwrap_or(Value::Null);
+            let body = match self
+                .request_tool_approval_with(&tool, &tool_input, stem)
+                .await
+            {
+                Ok(updated) => json!({"decision": "allow", "updated_input": updated}),
+                Err(error) => json!({"decision": "deny", "message": format!("{error:#}")}),
+            };
+            let _ = std::fs::write(&response, body.to_string());
+        }
+    }
+
     /// Whether a call only reads, so it may run alongside neighbouring calls.
     fn is_concurrency_safe(&self, name: &str, input: &Value) -> bool {
         match name {
@@ -1329,7 +1880,7 @@ impl ToolLoopExecutor {
             | "git_status" | "git_diff" | "git_log" => true,
             "Bash" => {
                 !self.skill_shell_active
-                && input["run_in_background"] != true
+                    && input["run_in_background"] != true
                     && input["command"]
                         .as_str()
                         .is_some_and(crate::permissions::shell_read_only::is_read_only)
@@ -1975,8 +2526,8 @@ impl ToolLoopExecutor {
             for context in contexts.drain(..) {
                 output.push('\n');
                 output.push_str(&context);
+            }
         }
-                }
         let event = if failed {
             HookEvent::PostToolUseFailure
         } else {
@@ -2123,6 +2674,64 @@ impl ToolLoopExecutor {
         self
     }
 
+    /// Identity used to authorize Super Agent tools. Passing a runtime also
+    /// makes the CRP tools reachable; the role decides which schemas appear.
+    pub fn with_super_agent(
+        mut self,
+        role: crate::super_agent::Role,
+        member: Option<crate::super_agent::MemberRole>,
+        runtime: crate::super_agent::crp::ToolRuntime,
+    ) -> Self {
+        self.super_agent_role = role;
+        self.super_agent_member = member;
+        self.super_agent = Some(runtime);
+        self
+    }
+
+    /// Bind the same durable authority for direct turns and private workers.
+    /// Missing roles mean an ordinary Agent; unreadable or invalid authority
+    /// must fail startup instead of silently dropping Router/Coder gates.
+    pub fn with_durable_super_agent(
+        self,
+        runtime: crate::super_agent::crp::ToolRuntime,
+    ) -> anyhow::Result<Self> {
+        let role = crate::super_agent::role::load(&runtime.db, &runtime.session_id)?;
+        let member = crate::super_agent::role::membership(&runtime.db, &runtime.session_id)?
+            .map(|(_, role)| role);
+        Ok(self.with_super_agent(role, member, runtime))
+    }
+
+    pub fn with_parent_message_id(mut self, message_id: String) -> Self {
+        self.parent_message_id = Some(message_id);
+        self
+    }
+
+    pub fn with_parent_message_id_option(mut self, message_id: Option<String>) -> Self {
+        self.parent_message_id = message_id;
+        self
+    }
+
+    /// Treat these built-ins as already loaded, as a resumed session or a
+    /// durable job must. The loading gate is never widened beyond this set.
+    pub(super) fn with_loaded_tools(mut self, loaded: std::collections::BTreeSet<String>) -> Self {
+        self.loaded_tools = loaded;
+        self
+    }
+
+    /// The tool names this request actually carried, so a resident call is
+    /// gated exactly as it was for the originating request.
+    pub(super) fn with_exposed_tools(mut self, exposed: std::collections::HashSet<String>) -> Self {
+        self.exposed_tools = Some(exposed);
+        self
+    }
+
+    /// A durable owner answers permission prompts through its own channel.
+    pub(super) fn permission_mailbox_handle(
+        &self,
+    ) -> crate::native_engine::permission_response::Mailbox {
+        self.permission_mailbox.clone()
+    }
+
     pub fn with_answer_waiters(
         mut self,
         waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -2240,7 +2849,7 @@ impl ToolLoopExecutor {
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             tokio::task::spawn_blocking(move || {
-            crate::tools::tasks::display_title(&root, &session, &input)
+                crate::tools::tasks::display_title(&root, &session, &input)
             }),
         )
         .await
@@ -2405,8 +3014,7 @@ impl ToolLoopExecutor {
             // The model cannot choose a type it was never told exists. The
             // block depends only on the saved definitions, so repeated
             // requests carry the same text and keep the prompt cache valid.
-            if let Some(listing) =
-                self.agent_type_listing("Available agent types (subagent_type):")
+            if let Some(listing) = self.agent_type_listing("Available agent types (subagent_type):")
             {
                 for definition in &mut definitions {
                     definition.description.push_str(&listing);
@@ -2498,8 +3106,7 @@ impl ToolLoopExecutor {
                 .filter(|tool| !customization.is_disabled(&tool.name))
                 .filter(|tool| match crate::mcp::states::server_of(&tool.name) {
                     None => true,
-                    Some(server) => match crate::mcp::states::effective(&self.mcp_states, server)
-                    {
+                    Some(server) => match crate::mcp::states::effective(&self.mcp_states, server) {
                         McpState::User => true,
                         McpState::OnDemand => self.loaded_tools.contains(&tool.name),
                         McpState::Off | McpState::UserOnly => false,
@@ -2520,6 +3127,21 @@ impl ToolLoopExecutor {
                 }),
         );
         tools.retain(|tool| allowed(&tool.name));
+        if self.super_agent_role.is_router() {
+            tools.retain(|tool| !crate::super_agent::crp::is_forbidden_router_tool(&tool.name));
+        }
+        if self.super_agent.is_some() {
+            let names: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name.clone()).collect();
+            tools.extend(
+                crate::super_agent::crp::definitions(
+                    self.super_agent_role,
+                    self.super_agent_member,
+                )
+                .into_iter()
+                .filter(|tool| !names.contains(&tool.name)),
+            );
+        }
         // Agent is deferred by default, so a model that wants to pick a type
         // cannot see the list. While Agent is absent from this request but the
         // model could still load it, ToolSearch carries the same list. Once
@@ -2531,9 +3153,9 @@ impl ToolLoopExecutor {
             && !tools.iter().any(|tool| tool.name == "Agent")
             && tools.iter().any(|tool| tool.name == "ToolSearch")
         {
-            if let Some(listing) = self.agent_type_listing(
-                "Agent types (subagent_type), available after loading Agent:",
-            ) {
+            if let Some(listing) = self
+                .agent_type_listing("Agent types (subagent_type), available after loading Agent:")
+            {
                 for tool in &mut tools {
                     if tool.name == "ToolSearch" {
                         tool.description.push_str(&listing);
@@ -2621,6 +3243,43 @@ impl ToolLoopExecutor {
         tool_use_id: &str,
     ) -> PermissionResult {
         self.sync_parent_permission_mode();
+        // ApplyPatch names many files in one patch. A tool-level decision does
+        // not distinguish them, so aggregate the explicit rules for every
+        // canonical target (both move endpoints included) before the normal
+        // tool check. Deny always refuses; an explicit ask requests this exact
+        // call's approval instead of inheriting a mode's automatic edit grant.
+        if tool_name == "ApplyPatch" {
+            use crate::tools::apply_patch_tool::PathAuthorization;
+            if let Some(authorization) = crate::tools::apply_patch_tool::path_authorization(
+                &self.workspace_cwd,
+                tool_input,
+                self.conv_id.as_deref(),
+            ) {
+                match authorization {
+                    PathAuthorization::Denied { path, reason } => {
+                        return PermissionResult::Denied(format!(
+                            "'{path}' cannot be changed: {reason}"
+                        ));
+                    }
+                    PathAuthorization::ConfirmationRequired { paths } => {
+                        let approved_this_call =
+                            self.approved_call.as_ref().is_some_and(|approval| {
+                                !approval.pre_tool_hook
+                                    && approval.tool == tool_name
+                                    && approval.input == *tool_input
+                                    && approval.id == tool_use_id
+                            });
+                        if !approved_this_call {
+                            return PermissionResult::RequiresConfirmation(format!(
+                                "ApplyPatch requires confirmation before changing these files: {}",
+                                paths.join(", ")
+                            ));
+                        }
+                    }
+                    PathAuthorization::Allowed => {}
+                }
+            }
+        }
         if let Some(approval) = self.approved_call.as_ref().filter(|approval| {
             approval.tool == tool_name
                 && approval.input == *tool_input
@@ -2995,14 +3654,14 @@ impl ToolLoopExecutor {
             .scope(crate::performance::retry_events::scope(
                 self.event_tx.clone(),
                 crate::tools::background_shell::scope(
-            context,
+                    context,
                     crate::tools::path_scope::with_permissions(
                         self.permission_manager.clone(),
                         crate::tools::path_scope::scope(directories, self.execute_scoped()),
                     ),
                 ),
             ))
-        .await;
+            .await;
         if result.is_ok() {
             async_hook_guard.0 = None;
         }
@@ -3167,7 +3826,7 @@ impl ToolLoopExecutor {
                     .map(|blocks| {
                         blocks
                             .iter()
-                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                            .filter_map(|block| block.get("text").and_then(Value::as_str))
                             .collect::<Vec<_>>()
                             .join("\n")
                     })
@@ -3286,14 +3945,14 @@ impl ToolLoopExecutor {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
             Ok(None) => match self.provider.provider.api_format {
-            ApiFormat::Anthropic => {
-                tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
-                self.execute_anthropic_loop().await
-            }
-            ApiFormat::OpenAI => {
-                tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
-                self.execute_openai_loop().await
-            }
+                ApiFormat::Anthropic => {
+                    tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
+                    self.execute_anthropic_loop().await
+                }
+                ApiFormat::OpenAI => {
+                    tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
+                    self.execute_openai_loop().await
+                }
             },
         };
 
@@ -3331,13 +3990,26 @@ impl ToolLoopExecutor {
         }
         let loop_result = loop_result.and_then(|(mut text, stop_reason)| {
             if let Some(schema) = &self.response_schema {
-                if !matches!(stop_reason.as_deref(),Some("stream_error"|"error"|"interrupted"|"failed"|"cancelled"|"max_iterations"|"max_tokens"|"length"|"incomplete")) {
-                    crate::structured_output::validate_result(schema,&text)?;
+                if !matches!(
+                    stop_reason.as_deref(),
+                    Some(
+                        "stream_error"
+                            | "error"
+                            | "interrupted"
+                            | "failed"
+                            | "cancelled"
+                            | "max_iterations"
+                            | "max_tokens"
+                            | "length"
+                            | "incomplete"
+                    )
+                ) {
+                    crate::structured_output::validate_result(schema, &text)?;
                     // Hand back the bare JSON even when the model fenced it.
                     text = crate::structured_output::strip_code_fence(&text).to_string();
                 }
             }
-            Ok((text,stop_reason))
+            Ok((text, stop_reason))
         });
         match &loop_result {
             Ok((full_text, stop_reason)) => {
@@ -3370,8 +4042,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: stop_reason.clone(),
+                        full_text: full_text.clone(),
+                        stop_reason: stop_reason.clone(),
                     })
                     .await;
                 tracing::info!(module = "ToolLoop", "[E7] MessageStop sent (success)");
@@ -3389,6 +4061,24 @@ impl ToolLoopExecutor {
         _tool_use_id: &str,
         provider_id: &str,
     ) -> CallStep {
+        // Hard denials are enforced before any permission prompt. A pending
+        // Super Agent plan approval, a Router edit, or an agent tool allowlist
+        // must not become a user-confirmable prompt that could authorize it.
+        // A pre-tool hook that already allowed this exact call keeps the
+        // existing prompt-mode semantics, but not the hard gates above.
+        let hook_allowed = self.approved_call.as_ref().is_some_and(|approval| {
+            approval.pre_tool_hook
+                && approval.tool == tool_name
+                && approval.input == *tool_input
+                && approval.id == _tool_use_id
+        });
+        if let Some(reason) = self.permission_hard_denial_for(tool_name, tool_input, hook_allowed) {
+            return CallStep::Finished((
+                tool_input.clone(),
+                format!("Permission denied: {reason}"),
+                true,
+            ));
+        }
         // Defense in depth: `prepare_tool_call` already rejects the retired
         // duplicate plan entry before hooks or permission checks, so a direct
         // call here must also fail without reaching legacy or task storage.
@@ -3422,6 +4112,26 @@ impl ToolLoopExecutor {
                     true,
                 ));
             }
+        }
+        if crate::super_agent::crp::handles(tool_name) {
+            // Authority is verified from durable records inside the tool, so a
+            // stale or forged call is rejected even if it bypassed the schema.
+            let output = match &self.super_agent {
+                Some(runtime) => {
+                    match crate::super_agent::crp::execute(
+                        runtime,
+                        tool_name,
+                        tool_input.clone(),
+                        _tool_use_id,
+                    ) {
+                        Ok(value) => value.to_string(),
+                        Err(error) => format!("Error: {error:#}"),
+                    }
+                }
+                None => "Error: Super Agent tools are unavailable in this session".into(),
+            };
+            let is_error = output.starts_with("Error:");
+            return CallStep::Finished((tool_input.clone(), output, is_error));
         }
         if self.is_plan_document_tool(tool_name, tool_input)
             || (self
@@ -3498,7 +4208,7 @@ impl ToolLoopExecutor {
                             &message,
                         )
                         .await
-        }
+                }
                 PermissionResult::Granted => {}
             }
             let result = if tool_name == "TeamSpawn" {
@@ -3518,71 +4228,179 @@ impl ToolLoopExecutor {
                         std::path::Path::new(&self.workspace_cwd),
                         Some(&self.provider.model.id),
                     ),
-                    _ => Err(anyhow::anyhow!("Team tools require an active session and runtime directory")),
+                    _ => Err(anyhow::anyhow!(
+                        "Team tools require an active session and runtime directory"
+                    )),
                 }
             };
             let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "ListAgents" {
-            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
-                (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::list_agents(&context, session)),
+            let result = match (
+                self.search_config_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent),
+                self.conv_id.as_deref(),
+            ) {
+                (Some(root), Some(session)) => crate::services::session_messages::context(root)
+                    .and_then(|context| {
+                        crate::tools::agent_messages::list_agents(&context, session)
+                    }),
                 _ => Err(anyhow!("ListAgents needs an interactive session")),
             };
-            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err()));
+            return CallStep::Finished((
+                tool_input.clone(),
+                match &result {
+                    Ok(value) => value.to_string(),
+                    Err(error) => format!("Error: {error:#}"),
+                },
+                result.is_err(),
+            ));
         }
         if tool_name == "SendMessage" && tool_input["notify_when_idle"] == true {
-            return CallStep::Finished((tool_input.clone(), "Error: notify_when_idle is not supported by this runtime yet; send without it.".into(), true));
+            return CallStep::Finished((
+                tool_input.clone(),
+                "Error: notify_when_idle is not supported by this runtime yet; send without it."
+                    .into(),
+                true,
+            ));
         }
         // Like the reference CLI, a bare {to, message} is a send.
         let normalized_message;
         let tool_input = if tool_name == "SendMessage" && tool_input["operation"].is_null() {
             let mut input = tool_input.clone();
             input["operation"] = json!("send");
-            if let Some(object) = input.as_object_mut() { object.remove("summary"); object.remove("notify_when_idle"); }
+            if let Some(object) = input.as_object_mut() {
+                object.remove("summary");
+                object.remove("notify_when_idle");
+            }
             normalized_message = input;
             &normalized_message
-        } else { tool_input };
+        } else {
+            tool_input
+        };
         if tool_name == "SendMessage" {
-            match self.check_permission_with(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Team message access denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation_with(tool_name, tool_input, _tool_use_id, provider_id, &message).await,
+            match self
+                .check_permission_with(tool_name, tool_input, _tool_use_id)
+                .await
+            {
+                PermissionResult::Denied(reason) => {
+                    return CallStep::Finished((
+                        tool_input.clone(),
+                        format!("Team message access denied: {reason}"),
+                        true,
+                    ))
+                }
+                PermissionResult::RequiresConfirmation(message) => {
+                    return self
+                        .prepare_after_confirmation_with(
+                            tool_name,
+                            tool_input,
+                            _tool_use_id,
+                            provider_id,
+                            &message,
+                        )
+                        .await
+                }
                 PermissionResult::Granted => {}
             }
-            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
-                (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::execute_live(&context, session, tool_input.clone())),
-                _ => Err(anyhow::anyhow!("Session-local message routing is unavailable")),
+            let result = match (
+                self.search_config_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent),
+                self.conv_id.as_deref(),
+            ) {
+                (Some(root), Some(session)) => crate::services::session_messages::context(root)
+                    .and_then(|context| {
+                        crate::tools::agent_messages::execute_live(
+                            &context,
+                            session,
+                            tool_input.clone(),
+                        )
+                    }),
+                _ => Err(anyhow::anyhow!(
+                    "Session-local message routing is unavailable"
+                )),
             };
             let failed = result.is_err();
             let mut result = result;
-            if matches!(tool_input["operation"].as_str(), Some("send" | "shutdown_request" | "shutdown_response" | "plan_approval_response")) {
+            if matches!(
+                tool_input["operation"].as_str(),
+                Some("send" | "shutdown_request" | "shutdown_response" | "plan_approval_response")
+            ) {
                 if let Ok(value) = &mut result {
-                    let targets: Vec<String> = value["delivered"].as_array().map(|items| items.iter().filter_map(|item| item["session_id"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+                    let targets: Vec<String> = value["delivered"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item["session_id"].as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let mut resumes = Vec::new();
                     for recipient in targets {
-                        let owned={let registry=self.owned_children.lock().unwrap_or_else(|e|e.into_inner());registry.get(&recipient).is_some_and(|entry|Some(entry.parent.as_str())==self.conv_id.as_deref())};
-                        if !owned { continue; }
-                        match Box::pin(self.resume_owned_child(&recipient,None,true)).await {
-                            Ok(resumed)=>{resumes.push(json!({"session_id":recipient,"status":"resumed_in_owner_turn","resume":resumed}));},
-                            Err(error)=>{resumes.push(json!({"session_id":recipient,"status":"needs_resume","reason":error.to_string()}));}
+                        let owned = {
+                            let registry = self
+                                .owned_children
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            registry.get(&recipient).is_some_and(|entry| {
+                                Some(entry.parent.as_str()) == self.conv_id.as_deref()
+                            })
+                        };
+                        if !owned {
+                            continue;
+                        }
+                        match Box::pin(self.resume_owned_child(&recipient, None, true)).await {
+                            Ok(resumed) => {
+                                resumes.push(json!({"session_id":recipient,"status":"resumed_in_owner_turn","resume":resumed}));
+                            }
+                            Err(error) => {
+                                resumes.push(json!({"session_id":recipient,"status":"needs_resume","reason":error.to_string()}));
+                            }
                         }
                     }
-                    if !resumes.is_empty() { value["resumes"] = json!(resumes); value["delivery"] = json!("resumed_in_owner_turn"); }
+                    if !resumes.is_empty() {
+                        value["resumes"] = json!(resumes);
+                        value["delivery"] = json!("resumed_in_owner_turn");
+                    }
                 }
             }
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "Agent" {
-            let normalized = if tool_name == "Agent" { delegation::normalize_agent_input(tool_input, self.delegation_depth == 0 && self.conv_id.is_some()) } else { tool_input.clone() };
-            let result = Box::pin(self.execute_delegated_invocation(&normalized, _tool_use_id)).await;
+            let normalized = if tool_name == "Agent" {
+                delegation::normalize_agent_input(
+                    tool_input,
+                    self.delegation_depth == 0 && self.conv_id.is_some(),
+                )
+            } else {
+                tool_input.clone()
+            };
+            let result =
+                Box::pin(self.execute_delegated_invocation(&normalized, _tool_use_id)).await;
             let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => format!("Delegation failed: {error}") };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => format!("Delegation failed: {error}"),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "AskUserQuestion" {
-            return CallStep::Finished(self.execute_ask_user_question(tool_input, _tool_use_id).await);
+            return CallStep::Finished(
+                self.execute_ask_user_question(tool_input, _tool_use_id)
+                    .await,
+            );
         }
         if tool_name == "CompactContext" {
             let result = (|| -> Result<String> {
@@ -3597,17 +4415,54 @@ impl ToolLoopExecutor {
         if tool_name == "ProposeGoal" {
             let result = (|| -> Result<Value> {
                 anyhow::ensure!(self.goal_proposals_available(), "ProposeGoal is only available in an attached local main session outside plan mode");
-                crate::services::goal_proposals::propose(self.goal_db.as_ref().unwrap(), self.conv_id.as_deref().unwrap(), self.search_config_path.as_deref().unwrap().parent().unwrap(), std::path::Path::new(&self.workspace_cwd), self.permission_manager.as_ref().unwrap(), tool_input)
+                crate::services::goal_proposals::propose(
+                    self.goal_db.as_ref().unwrap(),
+                    self.conv_id.as_deref().unwrap(),
+                    self.search_config_path
+                        .as_deref()
+                        .unwrap()
+                        .parent()
+                        .unwrap(),
+                    std::path::Path::new(&self.workspace_cwd),
+                    self.permission_manager.as_ref().unwrap(),
+                    tool_input,
+                )
             })();
             let failed = result.is_err();
-            return CallStep::Finished((tool_input.clone(), match result { Ok(value) => value.to_string(), Err(error) => error.to_string() }, failed));
+            return CallStep::Finished((
+                tool_input.clone(),
+                match result {
+                    Ok(value) => value.to_string(),
+                    Err(error) => error.to_string(),
+                },
+                failed,
+            ));
         }
 
         if matches!(tool_name, "memory_search" | "memory_ingest") {
-            match self.check_permission_with(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation_with(tool_name, tool_input, _tool_use_id, provider_id, &message).await,
-                PermissionResult::Granted => {},
+            match self
+                .check_permission_with(tool_name, tool_input, _tool_use_id)
+                .await
+            {
+                PermissionResult::Denied(reason) => {
+                    return CallStep::Finished((
+                        tool_input.clone(),
+                        format!("Permission denied: {reason}"),
+                        true,
+                    ))
+                }
+                PermissionResult::RequiresConfirmation(message) => {
+                    return self
+                        .prepare_after_confirmation_with(
+                            tool_name,
+                            tool_input,
+                            _tool_use_id,
+                            provider_id,
+                            &message,
+                        )
+                        .await
+                }
+                PermissionResult::Granted => {}
             }
         }
         // Route memory_search and memory_ingest directly to MemEx backend
@@ -3641,6 +4496,12 @@ impl ToolLoopExecutor {
                     .await;
             }
             PermissionResult::Granted => {}
+        }
+
+        if crate::tools::toolscript::is_toolscript(tool_name) {
+            return CallStep::Finished(
+                self.execute_toolscript_tool(tool_input, _tool_use_id).await,
+            );
         }
 
         if tool_name == "ToolSearch" {
@@ -3892,7 +4753,7 @@ impl ToolLoopExecutor {
                         } else {
                             output_str =
                                 serde_json::to_string_pretty(&result.value).unwrap_or_default();
-                            }
+                        }
                     }
                     Err(e) => {
                         output_str = format!("Error: {}", e);
@@ -4092,11 +4953,11 @@ impl ToolLoopExecutor {
         let _ = self
             .event_tx
             .send(EngineEvent::AskUser {
-            request_id: request_id.clone(),
-            tool_use_id: tool_use_id.to_owned(),
-            tool_input: question,
-            question: text,
-            options,
+                request_id: request_id.clone(),
+                tool_use_id: tool_use_id.to_owned(),
+                tool_input: question,
+                question: text,
+                options,
             })
             .await;
         match self.wait_for_user_answer(rx).await {
@@ -4331,11 +5192,11 @@ impl ToolLoopExecutor {
                             .collect::<std::result::Result<_, _>>()?;
                         let (compressed, metadata) = compressor
                             .compress(
-                            conv_values,
-                            // The client adds the base prompt separately; keep existing system messages intact.
-                            None,
-                            level,
-                            Some(&self.provider),
+                                conv_values,
+                                // The client adds the base prompt separately; keep existing system messages intact.
+                                None,
+                                level,
+                                Some(&self.provider),
                             )
                             .await;
                         if metadata.was_compressed {
@@ -4490,8 +5351,8 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::MessageStop {
-                            full_text: full_text.clone(),
-                            stop_reason: Some("stream_error".to_string()),
+                                full_text: full_text.clone(),
+                                stop_reason: Some("stream_error".to_string()),
                             })
                             .await;
                         drop(stream);
@@ -4511,7 +5372,10 @@ impl ToolLoopExecutor {
 
                     request_trace.observe_anthropic(&event);
                     if event["usage"].is_object() || event["message"]["usage"].is_object() {
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+                        let _ = self
+                            .event_tx
+                            .send(EngineEvent::RequestSnapshot(request_trace.started()))
+                            .await;
                     }
                     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -4662,11 +5526,11 @@ impl ToolLoopExecutor {
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::ToolUseStart {
-                                    tool_use_id: invocation.clone(),
-                                    tool_name: name.clone(),
-                                    tool_input: input.clone(),
-                                    text_before: full_text.clone(),
-                                    display_title: self.task_display_title(&name, &input).await,
+                                        tool_use_id: invocation.clone(),
+                                        tool_name: name.clone(),
+                                        tool_input: input.clone(),
+                                        text_before: full_text.clone(),
+                                        display_title: self.task_display_title(&name, &input).await,
                                     })
                                     .await;
 
@@ -4735,12 +5599,12 @@ impl ToolLoopExecutor {
             // failure. The send layer knows the real HTTP attempt count.
             let stream_failure =
                 (!interrupted && snapshot["status"] == "stream_error").then(|| {
-                crate::performance::RequestFailure::stream_incomplete(
-                    http_attempts.attempts(),
+                    crate::performance::RequestFailure::stream_incomplete(
+                        http_attempts.attempts(),
                         http_attempts.status(),
-                    !full_text.is_empty() || !assistant_blocks.is_empty(),
-                )
-            });
+                        !full_text.is_empty() || !assistant_blocks.is_empty(),
+                    )
+                });
             if let Some(failure) = &stream_failure {
                 snapshot["failure"] = failure.as_json();
                 snapshot["error"] = json!(failure.diagnostic());
@@ -4821,7 +5685,7 @@ impl ToolLoopExecutor {
                         for block in &mut assistant_blocks {
                             if let ContentBlock::ToolUse { id, input, .. } = block {
                                 if id == &tc.provider_id {
-                                // Keep the rejected call paired with its error in valid API history.
+                                    // Keep the rejected call paired with its error in valid API history.
                                     *input = if actual_input.is_object() {
                                         actual_input.clone()
                                     } else {
@@ -4841,11 +5705,11 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::ToolUseDone {
-                            tool_use_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            tool_input: actual_input,
-                            output: output_str.clone(),
-                            is_error,
+                                tool_use_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                tool_input: actual_input,
+                                output: output_str.clone(),
+                                is_error,
                             })
                             .await;
                         let content = mcp.map(|value| value.content).unwrap_or_else(|| {
@@ -4945,8 +5809,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: Some("max_iterations".to_string()),
+                        full_text: full_text.clone(),
+                        stop_reason: Some("max_iterations".to_string()),
                     })
                     .await;
                 break;
@@ -5077,29 +5941,29 @@ impl ToolLoopExecutor {
                             provider_content: compacted.native,
                         }];
                     } else {
-                    let compressor = ContextCompressor::new(None);
-                    let context_window = ContextWindow {
-                        model_id: model_id.clone(),
-                        total_tokens: estimated as u64,
-                        reserved_for_completion: (self.max_tokens as u64) * 2,
-                        context_window: model_context_limit as u64,
-                    };
-                    let level = compressor.determine_compression_level(&context_window);
-                    if level != CompressionLevel::None {
+                        let compressor = ContextCompressor::new(None);
+                        let context_window = ContextWindow {
+                            model_id: model_id.clone(),
+                            total_tokens: estimated as u64,
+                            reserved_for_completion: (self.max_tokens as u64) * 2,
+                            context_window: model_context_limit as u64,
+                        };
+                        let level = compressor.determine_compression_level(&context_window);
+                        if level != CompressionLevel::None {
                             let conv_values: Vec<Value> = conversation_messages
                                 .iter()
                                 .map(serde_json::to_value)
                                 .collect::<std::result::Result<_, _>>()?;
                             let (compressed, metadata) = compressor
                                 .compress(
-                            conv_values,
-                            // The client adds the base prompt separately; keep existing system messages intact.
-                            None,
-                            level,
-                            Some(&self.provider),
+                                    conv_values,
+                                    // The client adds the base prompt separately; keep existing system messages intact.
+                                    None,
+                                    level,
+                                    Some(&self.provider),
                                 )
                                 .await;
-                        if metadata.was_compressed {
+                            if metadata.was_compressed {
                                 conversation_messages = compressed
                                     .into_iter()
                                     .map(serde_json::from_value)
@@ -5111,8 +5975,8 @@ impl ToolLoopExecutor {
                                     metadata.compressed_count,
                                     metadata.token_reduction
                                 );
+                            }
                         }
-                    }
                     }
                 }
             }
@@ -5248,8 +6112,8 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::MessageStop {
-                            full_text: full_text.clone(),
-                            stop_reason: Some("stream_error".to_string()),
+                                full_text: full_text.clone(),
+                                stop_reason: Some("stream_error".to_string()),
                             })
                             .await;
                         drop(stream);
@@ -5278,7 +6142,10 @@ impl ToolLoopExecutor {
                     }
                     // Usage-only final chunks have no choices and must still be recorded.
                     if let Some(usage) = event.get("usage").filter(|usage| usage.is_object()) {
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+                        let _ = self
+                            .event_tx
+                            .send(EngineEvent::RequestSnapshot(request_trace.started()))
+                            .await;
                         if let Some(tokens) = usage.get("prompt_tokens").and_then(|v| v.as_f64()) {
                             crate::metrics::TOKENS_CONSUMED.inc_by(tokens);
                         }
@@ -5373,7 +6240,7 @@ impl ToolLoopExecutor {
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::MessageDelta {
-                                    stop_reason: Some(finish.to_string()),
+                                        stop_reason: Some(finish.to_string()),
                                     })
                                     .await;
                             }
@@ -5397,14 +6264,14 @@ impl ToolLoopExecutor {
             // failure. The send layer knows the real HTTP attempt count.
             let stream_failure =
                 (!interrupted && snapshot["status"] == "stream_error").then(|| {
-                crate::performance::RequestFailure::stream_incomplete(
-                    http_attempts.attempts(),
+                    crate::performance::RequestFailure::stream_incomplete(
+                        http_attempts.attempts(),
                         http_attempts.status(),
-                    !full_text.is_empty()
-                        || assistant_content.is_some()
-                        || !assistant_tool_calls.is_empty(),
-                )
-            });
+                        !full_text.is_empty()
+                            || assistant_content.is_some()
+                            || !assistant_tool_calls.is_empty(),
+                    )
+                });
             if let Some(failure) = &stream_failure {
                 snapshot["failure"] = failure.as_json();
                 snapshot["error"] = json!(failure.diagnostic());
@@ -5478,8 +6345,11 @@ impl ToolLoopExecutor {
 
                 for idx in &indices {
                     let (raw_id, name, args_str) = &openai_tool_args[idx];
-                    let provider_id =
-                        canonical_provider_id(raw_id, &mut response_tool_ids, pending_tool_calls.len());
+                    let provider_id = canonical_provider_id(
+                        raw_id,
+                        &mut response_tool_ids,
+                        pending_tool_calls.len(),
+                    );
                     provider_id_pairs.push((raw_id.clone(), provider_id.clone()));
                     let invocation = self.next_invocation_id();
                     let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
@@ -5489,11 +6359,11 @@ impl ToolLoopExecutor {
                     let _ = self
                         .event_tx
                         .send(EngineEvent::ToolUseStart {
-                        tool_use_id: invocation.clone(),
-                        tool_name: name.clone(),
-                        tool_input: input.clone(),
-                        text_before: full_text.clone(),
-                        display_title: self.task_display_title(name, &input).await,
+                            tool_use_id: invocation.clone(),
+                            tool_name: name.clone(),
+                            tool_input: input.clone(),
+                            text_before: full_text.clone(),
+                            display_title: self.task_display_title(name, &input).await,
                         })
                         .await;
 
@@ -5501,12 +6371,12 @@ impl ToolLoopExecutor {
 
                     assistant_tool_calls.push(
                         crate::native_engine::openai_client::OpenAIToolCall {
-                        id: provider_id.clone(),
-                        call_type: "function".to_string(),
-                        function: crate::native_engine::openai_client::FunctionCall {
-                            name: name.clone(),
-                            arguments: args_str.clone(),
-                        },
+                            id: provider_id.clone(),
+                            call_type: "function".to_string(),
+                            function: crate::native_engine::openai_client::FunctionCall {
+                                name: name.clone(),
+                                arguments: args_str.clone(),
+                            },
                         },
                     );
 
@@ -5554,11 +6424,11 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::ToolUseDone {
-                            tool_use_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            tool_input: actual_input,
-                            output: output_str.clone(),
-                            is_error,
+                                tool_use_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                tool_input: actual_input,
+                                output: output_str.clone(),
+                                is_error,
                             })
                             .await;
                         if let Some(content) = &mcp {
@@ -5696,8 +6566,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: Some("max_iterations".to_string()),
+                        full_text: full_text.clone(),
+                        stop_reason: Some("max_iterations".to_string()),
                     })
                     .await;
                 break;
@@ -5715,38 +6585,38 @@ impl ToolLoopExecutor {
             .iter()
             .enumerate()
             .filter_map(|(index, msg)| {
-            let role = msg.get("role")?.as_str()?;
-            let content = msg.get("content")?;
+                let role = msg.get("role")?.as_str()?;
+                let content = msg.get("content")?;
 
-            let anthropic_content = if content.is_string() {
-                AnthropicContent::Text(content.as_str()?.to_string())
-            } else if content.is_array() {
+                let anthropic_content = if content.is_string() {
+                    AnthropicContent::Text(content.as_str()?.to_string())
+                } else if content.is_array() {
                     let blocks: Vec<ContentBlock> = content
                         .as_array()?
                         .iter()
                         .filter_map(|block| {
-                    let block_type = block.get("type")?.as_str()?;
-                    match block_type {
-                        "text" => {
-                            let text = block.get("text")?.as_str()?.to_string();
-                            Some(ContentBlock::Text { text })
-                        }
-                        "image_url" => {
-                            let url = block.get("image_url")?.get("url")?.as_str()?;
+                            let block_type = block.get("type")?.as_str()?;
+                            match block_type {
+                                "text" => {
+                                    let text = block.get("text")?.as_str()?.to_string();
+                                    Some(ContentBlock::Text { text })
+                                }
+                                "image_url" => {
+                                    let url = block.get("image_url")?.get("url")?.as_str()?;
                                     let (media_type, data) =
                                         url.strip_prefix("data:")?.split_once(";base64,")?;
-                            Some(ContentBlock::Image {
+                                    Some(ContentBlock::Image {
                                         source:
                                             crate::native_engine::anthropic_client::ImageSource {
                                                 source_type: "base64".into(),
                                                 media_type: media_type.into(),
                                                 data: data.into(),
-                                },
-                            })
-                        }
-                        "image" => {
-                            let source = block.get("source")?;
-                            Some(ContentBlock::Image {
+                                            },
+                                    })
+                                }
+                                "image" => {
+                                    let source = block.get("source")?;
+                                    Some(ContentBlock::Image {
                                         source:
                                             crate::native_engine::anthropic_client::ImageSource {
                                                 source_type: source
@@ -5757,53 +6627,53 @@ impl ToolLoopExecutor {
                                                     .get("media_type")?
                                                     .as_str()?
                                                     .to_string(),
-                                    data: source.get("data")?.as_str()?.to_string(),
-                                },
-                            })
-                        }
+                                                data: source.get("data")?.as_str()?.to_string(),
+                                            },
+                                    })
+                                }
                                 "tool_result" => Some(ContentBlock::ToolResult {
-                                tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
-                                content: block.get("content")?.clone(),
-                                is_error: block.get("is_error").and_then(|v| v.as_bool()),
+                                    tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
+                                    content: block.get("content")?.clone(),
+                                    is_error: block.get("is_error").and_then(|v| v.as_bool()),
                                 }),
-                        "tool_use" => Some(ContentBlock::ToolUse {
-                            id: block.get("id")?.as_str()?.to_string(),
-                            name: block.get("name")?.as_str()?.to_string(),
-                            input: block.get("input")?.clone(),
-                        }),
-                        _ => None,
-                    }
+                                "tool_use" => Some(ContentBlock::ToolUse {
+                                    id: block.get("id")?.as_str()?.to_string(),
+                                    name: block.get("name")?.as_str()?.to_string(),
+                                    input: block.get("input")?.clone(),
+                                }),
+                                _ => None,
+                            }
                         })
                         .collect();
-                AnthropicContent::Blocks(blocks)
-            } else {
-                return None;
-            };
-            let (before, after) = &additions[index];
+                    AnthropicContent::Blocks(blocks)
+                } else {
+                    return None;
+                };
+                let (before, after) = &additions[index];
                 let anthropic_content = if before.is_empty() && after.is_empty() {
                     anthropic_content
                 } else {
-                // One text block per addition, around the message's own content.
+                    // One text block per addition, around the message's own content.
                     let mut blocks: Vec<ContentBlock> = before
                         .iter()
                         .map(|text| ContentBlock::Text { text: text.clone() })
                         .collect();
-                match anthropic_content {
-                    AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
-                    AnthropicContent::Blocks(rest) => blocks.extend(rest),
-                }
+                    match anthropic_content {
+                        AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
+                        AnthropicContent::Blocks(rest) => blocks.extend(rest),
+                    }
                     blocks.extend(
                         after
                             .iter()
                             .map(|text| ContentBlock::Text { text: text.clone() }),
                     );
-                AnthropicContent::Blocks(blocks)
-            };
+                    AnthropicContent::Blocks(blocks)
+                };
 
-            Some(AnthropicMessage {
-                role: role.to_string(),
-                content: anthropic_content,
-            })
+                Some(AnthropicMessage {
+                    role: role.to_string(),
+                    content: anthropic_content,
+                })
             })
             .collect())
     }
@@ -5816,19 +6686,19 @@ impl ToolLoopExecutor {
             .iter()
             .enumerate()
             .filter_map(|(index, msg)| {
-            let role = msg.get("role")?.as_str()?;
-            let content = msg.get("content")?;
+                let role = msg.get("role")?.as_str()?;
+                let content = msg.get("content")?;
 
-            let openai_content = if content.is_string() {
-                OpenAIContent::Text(content.as_str()?.to_string())
-            } else if content.is_array() {
+                let openai_content = if content.is_string() {
+                    OpenAIContent::Text(content.as_str()?.to_string())
+                } else if content.is_array() {
                     let parts: Vec<crate::native_engine::openai_client::OpenAIContentPart> =
                         content
                             .as_array()?
                             .iter()
                             .filter_map(|part| {
-                    let part_type = part.get("type")?.as_str()?;
-                    match part_type {
+                                let part_type = part.get("type")?.as_str()?;
+                                match part_type {
                         "text" => {
                             Some(crate::native_engine::openai_client::OpenAIContentPart::Text {
                                 text: part.get("text")?.as_str()?.to_string(),
@@ -5846,17 +6716,17 @@ impl ToolLoopExecutor {
                     }
                             })
                             .collect();
-                OpenAIContent::Multi(parts)
-            } else {
-                return None;
-            };
-            let (before, after) = &additions[index];
+                    OpenAIContent::Multi(parts)
+                } else {
+                    return None;
+                };
+                let (before, after) = &additions[index];
                 let openai_content = if before.is_empty() && after.is_empty() {
                     openai_content
                 } else {
-                // Plain-string content stays a string: some compatible servers
-                // accept only strings for user messages.
-                match openai_content {
+                    // Plain-string content stays a string: some compatible servers
+                    // accept only strings for user messages.
+                    match openai_content {
                         OpenAIContent::Text(text) => OpenAIContent::Text(
                             before
                                 .iter()
@@ -5866,7 +6736,7 @@ impl ToolLoopExecutor {
                                 .collect::<Vec<_>>()
                                 .join("\n\n"),
                         ),
-                    OpenAIContent::Multi(rest) => {
+                        OpenAIContent::Multi(rest) => {
                             let part = |text: &String| {
                                 crate::native_engine::openai_client::OpenAIContentPart::Text {
                                     text: text.clone(),
@@ -5880,9 +6750,9 @@ impl ToolLoopExecutor {
                                     .chain(after.iter().map(part))
                                     .collect(),
                             )
+                        }
                     }
-                }
-            };
+                };
 
                 let tool_calls = msg
                     .get("tool_calls")
@@ -5898,11 +6768,11 @@ impl ToolLoopExecutor {
                     .and_then(|r| r.as_str())
                     .map(String::from);
 
-            Some(OpenAIMessage {
-                role: role.to_string(),
-                content: openai_content,
-                tool_calls,
-                tool_call_id,
+                Some(OpenAIMessage {
+                    role: role.to_string(),
+                    content: openai_content,
+                    tool_calls,
+                    tool_call_id,
                     reasoning_content,
                     provider_content: msg.get("provider_content").cloned(),
                 })
@@ -5914,7 +6784,12 @@ impl ToolLoopExecutor {
         &self.workspace_cwd
     }
 
-    fn handle_streaming_tool_arg_delta(&mut self, invocation_id: &str, tool_name: &str, delta: &str) {
+    fn handle_streaming_tool_arg_delta(
+        &mut self,
+        invocation_id: &str,
+        tool_name: &str,
+        delta: &str,
+    ) {
         let prev_args = self
             .streaming_tool_args
             .get(invocation_id)
@@ -5992,5 +6867,317 @@ fn ask_user_questions_accept_the_reference_and_legacy_shapes() {
         json!({"questions":[{"question":"Q?","options":[option("A"),option("B")]},{"question":"Q?","options":[option("A"),option("B")]}]}),
     ] {
         assert!(ask_user_questions(&invalid).is_err(), "{invalid}");
+    }
+}
+
+#[cfg(test)]
+mod shell_cwd_tests {
+    use super::shell_cwd_faults::FaultyFs;
+    use super::ShellCwdReset;
+
+    fn names(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn stale_names(directory: &std::path::Path) -> Vec<String> {
+        names(directory)
+            .into_iter()
+            .filter(|name| name.contains(".stale-"))
+            .collect()
+    }
+
+    fn read(directory: &std::path::Path, name: &str) -> String {
+        std::fs::read_to_string(directory.join(name)).unwrap()
+    }
+
+    fn write(directory: &std::path::Path, name: &str, content: &str) {
+        std::fs::write(directory.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn an_authorized_move_stages_only_that_sessions_shell_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        let untouched = [
+            ("session-a.stale-6f1c2d3e", "/old/stale"),
+            ("session-a.wsl-0123456789ABCDEF", "/upper"),
+            ("session-a.wsl-0123456789abcde", "/short"),
+            ("session-a.wsl-0123456789abcdef0", "/long"),
+            ("session-a.wsl-0123456789abcdeg", "/non-hex"),
+            ("session-b", "/other/workspace"),
+            ("session-b.wsl-0123456789abcdef", "/other/wsl"),
+        ];
+        for (name, content) in untouched {
+            write(&directory, name, content);
+        }
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        assert!(!directory.join("session-a").exists());
+        assert!(!directory.join("session-a.wsl-0123456789abcdef").exists());
+        for (name, content) in untouched {
+            assert_eq!(read(&directory, name), content, "{name} must not be staged");
+        }
+        reset.commit().unwrap();
+        let mut expected: Vec<String> =
+            untouched.iter().map(|(name, _)| name.to_string()).collect();
+        expected.sort();
+        assert_eq!(names(&directory), expected);
+
+        // A missing state directory means "no state", not an error.
+        ShellCwdReset::prepare(&temp.path().join("missing"), "session-a")
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert!(ShellCwdReset::prepare(temp.path(), "../escape").is_err());
+        assert!(ShellCwdReset::prepare(temp.path(), "").is_err());
+    }
+
+    #[test]
+    fn a_failed_move_restores_the_exact_shell_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        reset.restore().unwrap();
+
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(
+            stale_names(&directory).is_empty(),
+            "staged files left behind: {:?}",
+            stale_names(&directory)
+        );
+    }
+
+    #[test]
+    fn a_second_staging_failure_restores_every_staged_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        // The first (plain) rename succeeds; the WSL rename fails.
+        let fs = FaultyFs::failing_renames_after(1);
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("the second staging rename must fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("Cannot stage the shell state"), "{text}");
+
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(
+            stale_names(&directory).is_empty(),
+            "the first staged entry was not rolled back: {:?}",
+            stale_names(&directory)
+        );
+    }
+
+    #[test]
+    fn a_staging_failure_reports_rollback_failures_and_keeps_the_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        // The plain rename succeeds, the WSL rename fails, and restoring the
+        // plain entry fails too (link and rename both injected).
+        let fs = FaultyFs::failing_renames_after(1).failing_links(&["session-a"]);
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("the second staging rename must fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("Cannot stage the shell state"), "{text}");
+        assert!(
+            text.contains("rolling back the staged shell state also failed"),
+            "{text}"
+        );
+        assert!(text.contains("the staged copy remains at"), "{text}");
+
+        assert!(!directory.join("session-a").exists());
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "remaining backups: {stale:?}");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+    }
+
+    #[test]
+    fn a_listing_failure_leaves_every_shell_state_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let fs = FaultyFs::failing_list();
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("a listing failure must abort preparation");
+        assert!(
+            format!("{error:#}").contains("injected shell state listing failure"),
+            "{error:#}"
+        );
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(stale_names(&directory).is_empty());
+    }
+
+    #[test]
+    fn one_failed_restore_still_attempts_the_remaining_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        let fs = FaultyFs::default().failing_links(&["session-a"]);
+        let error = reset
+            .restore_with(&fs)
+            .err()
+            .expect("the plain entry cannot be restored");
+        let text = format!("{error:#}");
+        assert!(text.contains("could not be fully restored"), "{text}");
+
+        assert!(!directory.join("session-a").exists());
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "remaining backups: {stale:?}");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl",
+            "the independent WSL state is still restored"
+        );
+    }
+
+    #[test]
+    fn a_recreated_active_state_is_not_overwritten_by_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        write(&directory, "session-a", "/new/review-2");
+        let error = reset
+            .restore()
+            .err()
+            .expect("an active state created again must not be overwritten");
+        let text = format!("{error:#}");
+        assert!(text.contains("created again"), "{text}");
+        assert!(text.contains("refusing to overwrite"), "{text}");
+
+        assert_eq!(
+            read(&directory, "session-a"),
+            "/new/review-2",
+            "the recreated active state survives"
+        );
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "the exact previous bytes stay recoverable");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+    }
+
+    #[test]
+    fn a_link_failure_never_replaces_a_state_created_at_that_moment() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        // The no-clobber link fails, and a new active state appears at exactly
+        // that moment. There is no overwrite-capable fallback to reach.
+        let fs = FaultyFs::default()
+            .failing_links_after_creating_destination(&["session-a"], "/new/review-2");
+        let error = reset
+            .restore_with(&fs)
+            .err()
+            .expect("a failed no-clobber link must be reported");
+        let text = format!("{error:#}");
+        assert!(text.contains("cannot create a no-clobber link"), "{text}");
+
+        assert_eq!(
+            read(&directory, "session-a"),
+            "/new/review-2",
+            "the state created at that moment is never replaced"
+        );
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "the exact previous bytes stay recoverable");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl",
+            "the independent WSL state is still restored"
+        );
+    }
+
+    #[test]
+    fn a_commit_cleanup_failure_never_restores_the_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        let fs = FaultyFs::default().failing_removals();
+        let error = reset
+            .commit_with(&fs)
+            .err()
+            .expect("the staged caches cannot be removed");
+        let text = format!("{error:#}");
+        assert!(text.contains("workspace move was committed"), "{text}");
+
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 2, "both removals were attempted: {stale:?}");
+        for name in &stale {
+            assert!(text.contains(name), "{name} is not reported: {text}");
+        }
+        assert!(!directory.join("session-a").exists());
+        assert!(!directory.join("session-a.wsl-0123456789abcdef").exists());
+        let mut contents: Vec<String> = stale.iter().map(|name| read(&directory, name)).collect();
+        contents.sort();
+        assert_eq!(contents, vec!["/old/review-1", "/old/wsl"]);
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
     }
 }
