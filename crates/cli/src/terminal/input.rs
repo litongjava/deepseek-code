@@ -137,8 +137,8 @@ enum Message {
     Keybindings(crate::keybindings::Keybindings),
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
-    Shells(usize),
-    ShellCounter(Box<dyn Fn() -> usize + Send>),
+    Background(usize, usize),
+    BackgroundCounter(Box<dyn Fn() -> (usize, usize) + Send>),
     Subagents(deepseek_code_core::services::ServiceContext, String),
     AgentDetails(Box<dyn Fn(&str) -> String + Send>),
     AgentRows(Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>),
@@ -245,12 +245,12 @@ impl TerminalInput {
                         editor.set_context_note(note);
                         continue;
                     }
-                    Message::Shells(count) => {
-                        editor.set_shells(count);
+                    Message::Background(shells, monitors) => {
+                        editor.set_background(shells, monitors);
                         continue;
                     }
-                    Message::ShellCounter(counter) => {
-                        editor.set_shell_counter(counter);
+                    Message::BackgroundCounter(counter) => {
+                        editor.set_background_counter(counter);
                         continue;
                     }
                     Message::Subagents(context, session) => {
@@ -365,9 +365,10 @@ impl TerminalInput {
         let _ = self.requests.send(Message::ContextNote(note));
     }
 
-    /// Background shells still running, for "1 shell · ↓ to manage".
-    pub fn set_shells(&self, count: usize) {
-        let _ = self.requests.send(Message::Shells(count));
+    /// Background shells and monitors still running, for
+    /// "1 shell, 1 monitor · ↓ to manage".
+    pub fn set_background(&self, shells: usize, monitors: usize) {
+        let _ = self.requests.send(Message::Background(shells, monitors));
     }
 
     /// The model and reasoning effort at the right of the footer, as
@@ -404,10 +405,10 @@ impl TerminalInput {
         let _ = self.requests.send(Message::Todos(todos));
     }
 
-    /// Recounts running shells while the prompt waits, so the footer drops
-    /// a shell once it finishes.
-    pub fn set_shell_counter(&self, counter: Box<dyn Fn() -> usize + Send>) {
-        let _ = self.requests.send(Message::ShellCounter(counter));
+    /// Recounts running shells and monitors while the prompt waits, so the
+    /// footer drops one once it finishes.
+    pub fn set_background_counter(&self, counter: Box<dyn Fn() -> (usize, usize) + Send>) {
+        let _ = self.requests.send(Message::BackgroundCounter(counter));
     }
 
     /// The project whose files `@` completes.

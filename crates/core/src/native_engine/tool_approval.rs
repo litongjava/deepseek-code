@@ -181,6 +181,15 @@ impl ToolLoopExecutor {
         input: &Value,
         id: &str,
     ) -> Result<Value> {
+        self.request_tool_approval_with(tool, input, id).await
+    }
+
+    pub(super) async fn request_tool_approval_with(
+        &self,
+        tool: &str,
+        input: &Value,
+        id: &str,
+    ) -> Result<Value> {
         // Hook execution holds a substantial async state machine. Keep it out
         // of every enclosing tool/model-loop future on Windows debug stacks.
         Box::pin(self.request_tool_approval_inner(tool, input, id)).await
@@ -487,7 +496,7 @@ impl ToolLoopExecutor {
                     Some(updated) => updated,
                     None => input.clone(),
                 };
-                if matches!(tool, "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
+                if matches!(tool, "EnterPlanMode" | "ExitPlanMode") {
                     anyhow::ensure!(actual == *input, "Plan transitions require their original reviewed input and dedicated plan choice");
                 }
                 if edit_grant {
@@ -551,9 +560,24 @@ impl ToolLoopExecutor {
         tool: &str,
         input: &Value,
         id: &str,
+        message: &str,
+    ) -> CallStep {
+        self.prepare_after_confirmation_with(tool, input, id, id, message)
+            .await
+    }
+
+    pub(super) async fn prepare_after_confirmation_with(
+        &mut self,
+        tool: &str,
+        input: &Value,
+        id: &str,
+        provider_id: &str,
         _message: &str,
     ) -> CallStep {
-        let actual = match self.request_tool_approval(tool, input, id).await {
+        let actual = match self
+            .request_tool_approval_with(tool, input, id)
+            .await
+        {
             Ok(actual) => actual,
             Err(error) => {
                 return CallStep::Finished((
@@ -569,7 +593,7 @@ impl ToolLoopExecutor {
             id: id.into(),
             pre_tool_hook: false,
         });
-        let result = Box::pin(self.execute_tool_call_inner(tool, &actual, id)).await;
+        let result = Box::pin(self.execute_tool_call_inner(tool, &actual, id, provider_id)).await;
         self.approved_call = None;
         result
     }

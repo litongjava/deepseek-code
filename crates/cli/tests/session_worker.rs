@@ -61,7 +61,11 @@ async fn live_mode_change_applies_to_tool_after_inflight_model_request() {
     assert_eq!(completed(&paths.data_dir,&id).await.status,"completed");
     assert!(!workspace.join("must-not-exist.txt").exists());
     let (_,_,events)=jobs::events_since(&paths.data_dir,&id,&session,0).unwrap();
-    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]=="mode-write" && event["is_error"]==true));
+    let started = events.iter().find(|event| event["type"] == "tool_start" && event["name"] == "Write")
+        .expect("the denied Write call starts");
+    let occurrence = started["id"].as_str().unwrap();
+    assert!(!occurrence.is_empty());
+    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]==occurrence && event["is_error"]==true));
     worker::shutdown(&paths.data_dir,&session).await.unwrap();
     server.abort();
 }
@@ -146,6 +150,46 @@ async fn completed(root: &Path, id: &str) -> jobs::Job {
     })
     .await
     .expect("job did not finish")
+}
+
+/// End-to-end coverage of the common case: a submission that follows a
+/// published completion is admitted with no pause between turns. This exercises
+/// the real protocol path; it does not force the host's finalization window, so
+/// it is not a deterministic reproduction of that race. Completion is published
+/// before the host releases admission, and the host waits for the release.
+#[tokio::test]
+async fn turns_submitted_right_after_completion_are_admitted() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) { "immediate.exe" } else { "immediate" });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    for index in 0..3 {
+        let id = submit(&host, &endpoint, &format!("turn {index}"), "fixture", 128).await;
+        let job = completed(&paths.data_dir, &id).await;
+        assert_eq!(job.status, "completed", "turn {index}: {:?}", job.error);
+    }
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -342,7 +386,7 @@ async fn submit_in_mode(
     {
         environment.push(("DEEPSEEK_CODE_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
     }
-    worker::call(
+    let result = worker::call(
         host,
         &worker::Request::Submit {
             id: id.clone(),
@@ -351,9 +395,40 @@ async fn submit_in_mode(
             environment,
         },
     )
-    .await
-    .unwrap();
+    .await;
+    if let Err(error) = result {
+        // Distinguish the two admission states: the previous turn is still
+        // recorded as active (its finalization has not removed `active.json`)
+        // from the recorder already being cleared while admission is still held.
+        panic!(
+            "submit failed: {error:#}\n{}",
+            admission_diagnostics(host, &id)
+        );
+    }
     id
+}
+
+/// What the worker directory says about admission at the moment a submit failed.
+fn admission_diagnostics(host: &worker::Worker, id: &str) -> String {
+    let dir = worker::directory(host);
+    let active = std::fs::read(dir.join("active.json"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|error| format!("<{error}>"));
+    let recorded = std::fs::read(dir.join("active.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+        .and_then(|active| jobs::get(&host.root, &active).ok())
+        .map(|job| format!("status={} finished_ms={:?}", job.status, job.finished_ms))
+        .unwrap_or_else(|| "<none>".into());
+    let this = jobs::get(&host.root, id)
+        .map(|job| format!("status={} finished_ms={:?}", job.status, job.finished_ms))
+        .unwrap_or_else(|error| format!("<{error}>"));
+    let stderr = std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default();
+    let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+    format!(
+        "active.json={active} recorded_job={recorded} this_job={this} stderr_tail={:?}",
+        tail
+    )
 }
 
 fn assert_no_secret(path: &Path) {
@@ -730,7 +805,6 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
             .unwrap();
     }
     assert_eq!(completed(&paths.data_dir, &crash).await.status, "failed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let recovered = worker::ensure_worker(&paths.data_dir, executable, &session, &workspace)
         .await
         .unwrap();
@@ -755,6 +829,113 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     assert_no_secret(&paths.data_dir.join("session-workers"));
     assert_no_secret(&paths.data_dir.join("background-tasks"));
     server.abort();
+}
+
+/// A frontend can start waiting for a recorded worker exactly when that
+/// worker's supervisor notices its host exited. Before this fix the wait
+/// returned the predecessor's "stopped" record as a startup failure, so the
+/// caller never started a replacement.
+///
+/// The stop is published only after `ensure_worker` has taken its startup lock
+/// plus a one-second margin, which reproduces the observed "stops just before
+/// readiness" race. This is a timing fixture, not a handshake with the exact
+/// predecessor-record read: on an extremely slow start the stop could still be
+/// observed first, and the replacement assertion would then hold without
+/// exercising the new wait branch. The original source fails this fixture
+/// because it reports the predecessor's stop as a startup failure.
+#[tokio::test]
+async fn ensure_worker_replaces_a_predecessor_that_stops_before_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let executable = temp.path().join(if cfg!(windows) {
+        "recovery-fixture.exe"
+    } else {
+        "recovery-fixture"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let base = paths.data_dir.join("session-workers").join(&session);
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = base.join(&id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(base.join("current.json"), serde_json::to_vec(&id).unwrap()).unwrap();
+    let heartbeat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let record = |status: &str| {
+        json!({
+            "id": id, "session_id": session, "root": paths.data_dir,
+            "workspace": workspace, "executable": executable, "endpoint": "fixture",
+            "status": status, "supervisor_pid": null, "child_pid": null,
+            "heartbeat_ms": heartbeat, "active_job": null, "error": null
+        })
+    };
+    // Publish records the way the supervisor does, so a reader never sees
+    // half-written JSON.
+    let publish = |path: std::path::PathBuf, value: Value| {
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::rename(&temporary, &path).unwrap();
+    };
+    publish(dir.join("worker.json"), record("starting"));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = done.clone();
+    let stopped = record("stopped");
+    let (startup_lock, stop_dir) = (base.join("startup.lock"), dir.clone());
+    let (stop_data, stop_executable, stop_session, stop_workspace) = (
+        paths.data_dir.clone(),
+        executable.clone(),
+        session.clone(),
+        workspace.clone(),
+    );
+    let stopper = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !startup_lock.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ensure_worker never took its startup lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Seeing the lock means startup has begun. A one-second margin from
+        // here reproduces the recorded race; it is a timing fixture, not a
+        // deterministic signal that the predecessor record was already read.
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            !done.load(std::sync::atomic::Ordering::SeqCst),
+            "ensure_worker returned before the predecessor stopped"
+        );
+        publish(stop_dir.join("worker.json"), stopped);
+    });
+    let assembling = tokio::spawn(async move {
+        let result =
+            worker::ensure_worker(&stop_data, &stop_executable, &stop_session, &stop_workspace)
+                .await;
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        result
+    });
+    let fresh = assembling
+        .await
+        .unwrap()
+        .expect("a predecessor that stops before readiness must be replaced");
+    stopper.join().unwrap();
+    let mut cleanup = Cleanup(vec![fresh.supervisor_pid.unwrap()]);
+    assert_ne!(fresh.id, id);
+    assert_eq!(fresh.status, "running");
+    // Ownership: the live worker is reused rather than duplicated, and the
+    // predecessor's record is preserved.
+    let again = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    assert_eq!(again.id, fresh.id);
+    assert_eq!(again.child_pid, fresh.child_pid);
+    assert_eq!(worker::read_worker(&dir).unwrap().status, "stopped");
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    cleanup.0.clear();
 }
 
 #[path = "support/session_worker_launch_rules.rs"]

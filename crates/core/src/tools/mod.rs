@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 mod lsp;
 pub mod macros;
 mod notebook;
+pub mod plan_import;
 mod read;
 mod search;
 pub mod tasks;
@@ -44,6 +45,7 @@ mod worktrees;
 pub use utf8::powershell_command;
 pub mod background_shell;
 mod bash_process;
+pub mod monitor;
 pub mod file_change;
 pub(crate) mod image_generation;
 pub(crate) mod path_scope;
@@ -132,7 +134,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it.
 - When a call finishes it cleans up the command's whole process tree, including children the command started. A service that must outlive the call (a local server, a daemon) needs `detach: true`, which starts it outside that tree and returns its pid and log files.
 - With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
@@ -147,6 +149,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh, wsl (explicit configured WSL distribution; default: shell.toolDefault, otherwise bash)", "type": "string" }
                 },
                 "required": ["command"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "Monitor".to_string(),
+            description: "Runs a shell script in the background for this session and streams its output to you: every stdout line becomes a notification that wakes you, so you never poll. Lines within 200 ms arrive together. Use it to watch logs, builds, CI or any condition over time: write a script that prints a line only when something you would act on happens (for example `tail -f app.log | grep --line-buffered ERROR`, or a polling loop that echoes on change). Each pipe stage must flush per line. stderr is logged, not notified. The monitor stops after timeout_ms (default 1800000 = 30 min, max 3600000); you are notified when it exits, expires or is stopped, and can start it again. More than 30 events a minute stops it, so filter tightly. It runs only while this session runs. TaskStop with its task_id stops it. For a single 'tell me when X finishes', use Bash run_in_background instead.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "description": "The shell script to run in the background", "type": "string" },
+                    "description": { "description": "Short description shown in notifications", "type": "string" },
+                    "timeout_ms": { "description": "How long the monitor runs, in milliseconds", "type": "integer", "minimum": 1000, "maximum": 3600000, "default": 1800000 },
+                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh, wsl (explicit configured WSL distribution; default: shell.toolDefault, otherwise bash)", "type": "string" }
+                },
+                "required": ["command", "description"],
                 "additionalProperties": false
             }),
         },
@@ -433,7 +450,10 @@ macro_rules! tool_dispatch {
         match $name {
             "NotebookEdit" => notebook::execute($input, $cwd),
             "SendMessage" => agent_messages::execute($input, $cwd),
-            "team" | "plan_mode" => coordination::execute($name, $input, $cwd),
+            "team" => coordination::execute($name, $input, $cwd),
+            // Retired duplicate plan entry: fail like an unknown tool, before
+            // any legacy plan database is opened.
+            "plan_mode" => Err(anyhow::anyhow!("Unknown tool: plan_mode")),
             "cron" => scheduled::execute($input, $cwd),
             "Config" | "brief" | "SyntheticOutput" => content_compat::execute($name, &$input, $cwd),
             "ToolSearch" => tool_search($input),
@@ -484,6 +504,12 @@ fn directory_input(
 
 pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     let input = directory_input(name, input, cwd)?;
+    // A monitor keeps running after this call, so it needs an async runtime
+    // that outlives it; the synchronous entry point would drop it.
+    anyhow::ensure!(
+        name != "Monitor",
+        "Monitor requires the asynchronous tool entry point"
+    );
     tool_dispatch!(name, input, cwd,
         Bash => tool_bash(input, cwd),
         WebFetch => tool_web_fetch_blocking(input),
@@ -497,6 +523,9 @@ pub async fn execute_tool_async(
     cwd: &str,
 ) -> Result<serde_json::Value> {
     let input = directory_input(name, input, cwd)?;
+    if name == "Monitor" {
+        return tool_bash_async(monitor_input(input)?, cwd).await;
+    }
     if name == "computer_use" {
         return tool_computer_use_async(input).await;
     }
@@ -1061,6 +1090,25 @@ fn pipeline_failure_flag(flag: &str, shell: &str, wsl: bool) -> bool {
     flag == "-c" && !wsl && matches!(shell, "bash" | "zsh")
 }
 
+/// Monitor is a Bash `run_in_background` call with a different finishing step.
+/// The model's input becomes the Bash-shaped input the shell path expects;
+/// `__monitor_timeout_ms` tells that path to start a monitor instead.
+fn monitor_input(mut input: serde_json::Value) -> Result<serde_json::Value> {
+    if input.get("detach").and_then(serde_json::Value::as_bool) == Some(true) {
+        anyhow::bail!("Monitor does not accept detach: it already runs in the background");
+    }
+    let timeout_ms = match input.get("timeout_ms").filter(|value| !value.is_null()) {
+        Some(value) => value
+            .as_u64()
+            .filter(|ms| (1_000..=3_600_000).contains(ms))
+            .ok_or_else(|| anyhow!("Monitor timeout_ms must be between 1000 and 3600000"))?,
+        None => 1_800_000,
+    };
+    input["run_in_background"] = serde_json::json!(true);
+    input["__monitor_timeout_ms"] = serde_json::json!(timeout_ms);
+    Ok(input)
+}
+
 async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     let command = input["command"]
         .as_str()
@@ -1302,6 +1350,20 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
     } else if background {
+        if let Some(timeout_ms) = input
+            .get("__monitor_timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+        {
+            let mut result = monitor::start(
+                cmd,
+                &description,
+                &command,
+                std::time::Duration::from_millis(timeout_ms),
+                wsl_guard,
+            )?;
+            result["shell_path"] = serde_json::json!(shell);
+            return Ok(result);
+        }
         let mut result = background_shell::start(
             cmd,
             input

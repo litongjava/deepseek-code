@@ -19,7 +19,7 @@ mod file_state;
 mod utf8_stream;
 mod stream_retry;
 
-pub use engine_core::NativeEngine;
+pub use engine_core::{ExecutorWait, NativeEngine};
 
 pub mod request_context;
 

@@ -3,6 +3,8 @@
 mod interrupt_usage;
 #[path = "sdk/recovery_interrupt.rs"]
 mod recovery_interrupt;
+#[path = "sdk/steering.rs"]
+mod steering;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -26,7 +28,7 @@ fn permission_hook_settings(root: &Path, case: &str) {
     let response = if case == "no-decision" {json!({})} else {json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"file_path":"hook.txt","content":"HOOK_WINNER"},"updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow","rules":[{"toolName":"Write"}]}]}}})};
     let seconds = if case == "host" {3} else {1};
     let command = if cfg!(windows) {
-        format!("$v=[Console]::In.ReadToEnd() | ConvertFrom-Json; if ($v.tool_use_id -ne 'write-1' -or $v.tool_name -ne 'Write') {{exit 7}}; [IO.File]::WriteAllText('hook-started','yes'); Start-Sleep -Seconds {seconds}; [IO.File]::WriteAllText('hook-finished','yes'); [Console]::Out.Write('{}')", response.to_string().replace('\'', "''"))
+        format!("$v=[Console]::In.ReadToEnd() | ConvertFrom-Json; if (-not $v.tool_use_id.ToString().StartsWith('inv-') -or $v.tool_name -ne 'Write') {{exit 7}}; [IO.File]::WriteAllText('hook-started','yes'); Start-Sleep -Seconds {seconds}; [IO.File]::WriteAllText('hook-finished','yes'); [Console]::Out.Write('{}')", response.to_string().replace('\'', "''"))
     } else { format!("read input; printf yes > hook-started; sleep {seconds}; printf yes > hook-finished; printf '%s' '{}'", response.to_string().replace('\'', "'\\''")) };
     std::fs::create_dir_all(root.join("data")).unwrap();
     std::fs::write(root.join("data/settings.json"), json!({"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","shell":if cfg!(windows) {"powershell"} else {"sh"},"command":command}]}]}}).to_string()).unwrap();
@@ -42,7 +44,10 @@ async fn permission_request_hooks_race_sdk_and_cancel_only_the_losing_request() 
             let mut client = Client::start(root.path(), &server, &["--permission-mode", "ask"]);
             client.send(user("Write the fixture file")).await;
             let request = client.frame("control_request").await;
-            assert_eq!(request["request"]["tool_use_id"], "write-1");
+            // The permission prompt carries the occurrence identity, not the
+            // provider's raw fixture id.
+            assert!(!request["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+            assert_ne!(request["request"]["tool_use_id"], "write-1");
             assert!(!root.path().join("hook-finished").exists(), "hook must not delay SDK prompt publication");
             if winner == "hook" {
                 let cancel = client.frame("control_cancel_request").await;
@@ -96,17 +101,31 @@ enum Mode {
     ReadThenTruncated,
     ReadThenText,
     SlowText,
+    /// The first response streams its first frame, then waits for the test.
+    HeldText,
+    SlowTool,
     Tool,
     SchemaGood,
     SchemaBad,
     SchemaRejected,
     ToolSearch,
+    RoleEveryChunk,
 }
 #[derive(Clone)]
 struct Fixture {
     anthropic: bool,
     mode: Mode,
     requests: Arc<Mutex<Vec<Value>>>,
+    /// Releases `Mode::HeldText`'s completion frames; bounded in the handler.
+    release: Arc<tokio::sync::Notify>,
+}
+
+/// Releases a held response even when the test returns early or panics.
+struct ReleaseHeld(Arc<tokio::sync::Notify>);
+impl Drop for ReleaseHeld {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Response {
@@ -145,11 +164,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
+        || matches!(state.mode, Mode::SlowTool) && count == 1
         || matches!(
             state.mode,
             Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval | Mode::Question
         ) && count % 2 == 1;
-    let stream = if state.anthropic {
+    let chunks: Vec<String> = if state.anthropic {
         let mut frames = vec![
             json!({"type":"message_start","message":{"id":"fixture","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":10,"output_tokens":0}}}),
         ];
@@ -195,6 +215,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     "Write",
                     json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
                 )
+            } else if matches!(state.mode, Mode::SlowTool) {
+                (
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}),
+                )
             } else {
                 ("read-1", "Read", json!({"file_path":"fixture.txt"}))
             };
@@ -213,7 +239,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     frame["type"].as_str().unwrap()
                 )
             })
-            .collect::<String>()
+            .collect()
     } else {
         let delta = if tool {
             if matches!(state.mode, Mode::RuntimeAgent) {
@@ -245,6 +271,8 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(state.mode, Mode::SlowTool) {
+                json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}).to_string()}}]})
             } else {
                 json!({"tool_calls":[{"index":0,"id":"read-1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"fixture.txt\"}"}}]})
             }
@@ -253,13 +281,65 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         } else {
             json!({"content":text})
         };
-        format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-            json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+        // Some providers repeat "role":"assistant" in every delta chunk.
+        let deltas = if !tool && matches!(state.mode, Mode::RoleEveryChunk) {
+            let chars: Vec<char> = text.chars().collect();
+            let third = chars.len() / 3;
+            let piece = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+            vec![
+                json!({"role":"assistant","reasoning_content":"think-a"}),
+                json!({"role":"assistant","reasoning_content":"think-b"}),
+                json!({"role":"assistant","content":piece(0, third)}),
+                json!({"role":"assistant","content":piece(third, third * 2)}),
+                json!({"role":"assistant","content":piece(third * 2, chars.len())}),
+            ]
+        } else {
+            vec![delta]
+        };
+        let mut chunks = Vec::new();
+        for delta in &deltas {
+            chunks.push(format!(
+                "data: {}\n\n",
+                json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]})
+            ));
+        }
+        chunks.push(format!(
+            "data: {}\n\ndata: [DONE]\n\n",
             json!({"choices":[{"index":0,"delta":{},"finish_reason":if truncated {"length"} else if tool {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":4}})
-        )
+        ));
+        chunks
     };
-    ([("content-type", "text/event-stream")], stream).into_response()
+    if matches!(state.mode, Mode::HeldText) && count == 1 {
+        // One live turn is held across the control exchange: the protocol's
+        // first frame is streamed, the completion frames wait for the test.
+        use futures::StreamExt;
+        let mut chunks = chunks.into_iter();
+        let first = chunks.next().unwrap_or_default();
+        let rest = chunks.collect::<String>();
+        let release = state.release.clone();
+        let stream = futures::stream::once(async move {
+            Ok::<_, std::io::Error>(first)
+        })
+        .chain(futures::stream::once(async move {
+            // A fixture that was never released must fail loudly instead of
+            // falling back to the old completion timing.
+            tokio::time::timeout(Duration::from_secs(30), release.notified())
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "held response gate was not released within 30s",
+                    )
+                })?;
+            Ok::<_, std::io::Error>(rest)
+        }));
+        return (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(stream),
+        )
+            .into_response();
+    }
+    ([("content-type", "text/event-stream")], chunks.concat()).into_response()
 }
 
 struct Server {
@@ -278,6 +358,7 @@ impl Server {
             anthropic,
             mode,
             requests: Arc::new(Mutex::new(Vec::new())),
+            release: Arc::new(tokio::sync::Notify::new()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -515,6 +596,15 @@ impl Client {
     async fn send(&mut self, value: Value) {
         self.raw(&format!("{value}\n")).await;
     }
+    /// The next line the CLI prints, whatever it is; used to observe ordering.
+    async fn next_frame(&mut self) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(20), self.output.next_line())
+            .await
+            .expect("CLI produced no frame")
+            .unwrap()
+            .expect("CLI ended before the expected frame");
+        serde_json::from_str(&line).unwrap_or_else(|_| panic!("Non-JSON stdout: {line}"))
+    }
     async fn raw(&mut self, text: &str) {
         let input = self.input.as_mut().unwrap();
         input.write_all(text.as_bytes()).await.unwrap();
@@ -747,7 +837,8 @@ async fn sdk_question_answers_reach_model_and_history_without_rewriting_question
         client.send(user("Ask my preference")).await;
         let request = client.frame("control_request").await;
         assert_eq!(request["request"]["tool_name"], "AskUserQuestion");
-        assert_eq!(request["request"]["tool_use_id"], "question-1");
+        assert!(!request["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+        assert_ne!(request["request"]["tool_use_id"], "question-1");
         assert_eq!(
             request["request"]["input"]["questions"][0]["multiSelect"],
             true
@@ -921,7 +1012,8 @@ async fn controls_replay_and_live_permission_decisions_use_actual_engine() {
         assert_eq!(client.frame("user").await["uuid"], "retained-user-uuid");
         let permission = client.frame("control_request").await;
         assert_eq!(permission["request"]["tool_name"], "Write");
-        assert_eq!(permission["request"]["tool_use_id"], "write-1");
+        assert!(!permission["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+        assert_ne!(permission["request"]["tool_use_id"], "write-1");
         assert!(!root.path().join("approval.txt").exists());
         let mut updated = permission["request"]["input"].clone();
         if mutate {
@@ -1188,7 +1280,8 @@ async fn dont_ask_control_denies_write_without_sdk_permission_request() {
             let denials = frame["permission_denials"].as_array().unwrap();
             assert_eq!(denials.len(), 1, "{frame}");
             assert_eq!(denials[0]["tool_name"], "Write");
-            assert_eq!(denials[0]["tool_use_id"], "write-1");
+            assert!(!denials[0]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+            assert_ne!(denials[0]["tool_use_id"], "write-1");
             break;
         }
     }
@@ -2179,11 +2272,11 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
         let requests = server.fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let first = request_tool_names(&requests[0], anthropic);
-        // Exactly the 14 built-in defaults, each once. MCP tools keep their own
+        // Exactly the 12 built-in defaults, each once. MCP tools keep their own
         // loading rules and are not part of the switches.
         let mut core = vec![
             "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Skill", "ToolSearch",
-            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "plan_mode", "TaskOutput", "TaskStop",
+            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskStop",
         ];
         let mut seen: Vec<String> = first
             .iter()
@@ -2200,8 +2293,13 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), first.len(), "duplicate tool: {first:?}");
-        for name in ["ListDir", "WebFetch", "Agent", "Workflow"] {
+        for name in ["ListDir", "WebFetch", "Agent", "Workflow", "TaskGet"] {
             assert!(!first.contains(&name.to_owned()), "{name}: {first:?}");
+        }
+        // Retired model-facing tools: plan_mode is gone, and TaskOutput was
+        // merged into TaskGet, so neither may be offered on either protocol.
+        for name in ["plan_mode", "TaskOutput"] {
+            assert!(!first.contains(&name.to_owned()), "retired {name}: {first:?}");
         }
         let second = request_tool_names(&requests[1], anthropic);
         assert!(second.contains(&"ListDir".to_owned()), "{second:?}");

@@ -102,7 +102,11 @@ async fn prompt_deny_prevents_real_write() {
     assert_eq!(requests[0]["session_id"], session);
     assert_eq!(requests[0]["hook_event_name"], "PreToolUse");
     assert_eq!(requests[0]["tool_name"], "Write");
-    assert_eq!(requests[0]["tool_use_id"], "prompt-write");
+    // Hooks receive the occurrence id; the raw id is provider provenance.
+    assert!(requests[0]["tool_use_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("inv-")));
+    assert_ne!(requests[0]["tool_use_id"], "prompt-write");
     assert_eq!(requests[0]["tool_input"]["file_path"], "written.txt");
     server.abort();
 }

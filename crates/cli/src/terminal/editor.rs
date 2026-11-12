@@ -81,7 +81,9 @@ pub struct PromptEditor {
     context_note: Option<String>,
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
-    shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// Background monitors still running, shown next to the shells.
+    monitors: usize,
+    background_counter: Option<Box<dyn Fn() -> (usize, usize) + Send>>,
     /// Rows for running background agents at a width, shown above the editor.
     subagent_context: Option<(deepseek_code_core::services::ServiceContext, String)>,
     agent_details: Option<Box<dyn Fn(&str) -> String + Send>>,
@@ -116,7 +118,8 @@ impl Default for PromptEditor {
             files: None,
             context_note: None,
             shells: 0,
-            shell_counter: None,
+            monitors: 0,
+            background_counter: None,
             agent_rows: None,
             agent_details: None,
             subagent_context: None,
@@ -967,6 +970,52 @@ fn read_editor_event(
     }
 }
 
+/// The footer's background hint: running shells and monitors, such as
+/// "4 shells, 2 monitors · ↓ to manage"; nothing when both counts are zero.
+pub(crate) fn background_label(shells: usize, monitors: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if shells > 0 {
+        parts.push(format!("{shells} shell{}", if shells == 1 { "" } else { "s" }));
+    }
+    if monitors > 0 {
+        parts.push(format!("{monitors} monitor{}", if monitors == 1 { "" } else { "s" }));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{} \u{b7} \u{2193} to manage", parts.join(", ")))
+    }
+}
+
+/// The idle prompt's footer: the permission status, the effort label, and the
+/// background hint. The effort label is shortened so the hint always fits;
+/// without a hint the footer is just the status and the effort.
+fn status_footer(status: &str, effort: &str, label: Option<&str>, width: usize) -> String {
+    let Some(label) = label else {
+        return format!("{status} {effort}");
+    };
+    let suffix = format!(" \u{b7} {label}");
+    if status.width() + 1 + effort.width() + suffix.width() <= width {
+        return format!("{status} {effort}{suffix}");
+    }
+    // Leave room for the hint and the ellipsis; a sliver of effort is useless.
+    let room = width.saturating_sub(status.width() + 1 + suffix.width());
+    if room < 4 {
+        return format!("{status}{suffix}");
+    }
+    let mut shortened = String::new();
+    let mut used = 0;
+    for c in effort.chars() {
+        let c_width = c.width().unwrap_or(0);
+        if used + c_width + 1 > room {
+            break;
+        }
+        shortened.push(c);
+        used += c_width;
+    }
+    format!("{status} {shortened}\u{2026}{suffix}")
+}
+
 impl PromptEditor {
     pub fn set_permission_mode(&mut self, mode: String) {
         self.permission_mode = mode;
@@ -1009,11 +1058,34 @@ impl PromptEditor {
     pub fn set_context_note(&mut self, note: Option<String>) {
         self.context_note = note;
     }
-    pub fn set_shells(&mut self, count: usize) {
-        self.shells = count;
+    pub fn set_background(&mut self, shells: usize, monitors: usize) {
+        self.shells = shells;
+        self.monitors = monitors;
     }
-    pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
-        self.shell_counter = Some(counter);
+    pub fn set_background_counter(&mut self, counter: Box<dyn Fn() -> (usize, usize) + Send>) {
+        self.background_counter = Some(counter);
+    }
+    /// Refresh the footer's background counts once a second, also when none are
+    /// shown yet: shells and monitors start during turns, after the prompt took
+    /// its counts, and the footer must pick them up without any input.
+    /// Returns whether the counts changed.
+    fn poll_background(
+        &mut self,
+        last: &mut std::time::Instant,
+        now: std::time::Instant,
+    ) -> bool {
+        if now.saturating_duration_since(*last) < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        *last = now;
+        let Some(counter) = &self.background_counter else {
+            return false;
+        };
+        let (shells, monitors) = counter();
+        let changed = (shells, monitors) != (self.shells, self.monitors);
+        self.shells = shells;
+        self.monitors = monitors;
+        changed
     }
     pub fn set_subagents(
         &mut self,
@@ -1137,7 +1209,11 @@ impl PromptEditor {
         let mut menu_hidden = false;
         // `?` on an empty prompt shows shortcuts in place of the footer.
         let mut shortcuts = false;
-        let mut last_shell_count = std::time::Instant::now();
+        // Poll the background counts right away: a task may already be running
+        // when this prompt opens, and the real counts are set during a turn.
+        let mut last_shell_count = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap_or_else(std::time::Instant::now);
         let mut agents: Vec<String> = Vec::new();
         let mut agent_records = Vec::<crate::background_commands::Agent>::new();
         let mut agent_click: Option<(String, std::time::Instant)> = None;
@@ -1212,12 +1288,10 @@ impl PromptEditor {
                     self.suggestion = Some(suggestion);
                 }
             }
-            if self.shells > 0 && last_shell_count.elapsed() >= std::time::Duration::from_secs(1) {
-                last_shell_count = std::time::Instant::now();
-                if let Some(counter) = &self.shell_counter {
-                    self.shells = counter();
-                }
-            }
+            // Tasks start during turns, after this prompt set its counts, so the
+            // counter is polled even when the footer shows none; the frame diff
+            // below repaints the footer whenever the label changes.
+            self.poll_background(&mut last_shell_count, std::time::Instant::now());
             if buffer.chars != last_state.0 {
                 undo.push(std::mem::replace(
                     &mut last_state,
@@ -1449,23 +1523,16 @@ impl PromptEditor {
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
                 }
-                if !agents.is_empty() && self.shells == 0 {
+                if !agents.is_empty() && self.shells == 0 && self.monitors == 0 {
                     parts.insert(1, "\u{2193} to manage".into());
                 }
                 parts.push("\u{2190} for agents".into());
                 if left_press.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["Press \u{2190} again to open agents".into()];
                 }
-                if self.shells > 0 {
+                if let Some(label) = background_label(self.shells, self.monitors) {
                     // Right after the mode label, as in the reference CLI.
-                    parts.insert(
-                        1,
-                        format!(
-                            "{} shell{} \u{b7} \u{2193} to manage",
-                            self.shells,
-                            if self.shells == 1 { "" } else { "s" }
-                        ),
-                    );
+                    parts.insert(1, label);
                 }
                 if kill_hint {
                     parts.push("Ctrl+Y to paste deleted text".into());
@@ -1505,10 +1572,12 @@ impl PromptEditor {
                 }
             };
             let footer = if search.is_none() && !text.starts_with('!') && !text.starts_with("# ") {
-                format!(
-                    "{} {}",
+                // Keep the background hint: the effort label alone can fill the row.
+                status_footer(
                     crate::terminal::style::status_mode(&self.permission_mode),
-                    self.effort.as_deref().unwrap_or_default()
+                    self.effort.as_deref().unwrap_or_default(),
+                    background_label(self.shells, self.monitors).as_deref(),
+                    width,
                 )
             } else {
                 footer
@@ -2421,7 +2490,7 @@ impl PromptEditor {
                             left_press = Some(std::time::Instant::now());
                         }
                         KeyCode::Down
-                            if (self.shells > 0 || !agents.is_empty())
+                            if (self.shells + self.monitors > 0 || !agents.is_empty())
                                 && buffer.chars.is_empty()
                                 && history_pos == self.history.len() =>
                         {
@@ -2623,6 +2692,60 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn background_label_counts_shells_and_monitors() {
+        assert_eq!(background_label(0, 0), None);
+        assert_eq!(background_label(1, 0).as_deref(), Some("1 shell \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(3, 0).as_deref(), Some("3 shells \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(0, 1).as_deref(), Some("1 monitor \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(4, 2).as_deref(), Some("4 shells, 2 monitors \u{b7} \u{2193} to manage"));
+    }
+
+    #[test]
+    fn status_footer_keeps_the_background_label_visible() {
+        let status = "bypass permissions on";
+        let effort = "deepseek-flash default \u{b7} /home/dev/code/deepseek-code-dev/runs/monitor-tool/proj \u{b7} Monitor tool with a long title";
+        let footer = status_footer(status, effort, Some("1 monitor \u{b7} \u{2193} to manage"), 120);
+        assert!(
+            footer.ends_with("\u{b7} 1 monitor \u{b7} \u{2193} to manage"),
+            "hint is clipped: {footer}"
+        );
+        assert!(footer.width() <= 120, "footer is too wide: {footer:?}");
+        assert!(footer.contains('\u{2026}'), "effort is not shortened: {footer}");
+        assert_eq!(status_footer(status, effort, None, 120), format!("{status} {effort}"));
+        assert_eq!(
+            status_footer(status, "flash", Some("1 shell \u{b7} \u{2193} to manage"), 120),
+            "bypass permissions on flash \u{b7} 1 shell \u{b7} \u{2193} to manage"
+        );
+    }
+
+    #[test]
+    fn footer_picks_up_a_monitor_started_after_the_prompt_opened() {
+        let mut editor = PromptEditor::default();
+        assert_eq!((editor.shells, editor.monitors), (0, 0));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        editor.set_background_counter(Box::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (0, 1)
+        }));
+        // The monitor starts after the prompt opened; the first poll catches it.
+        let mut last = std::time::Instant::now();
+        let polled = last + std::time::Duration::from_secs(1);
+        assert!(editor.poll_background(&mut last, polled));
+        assert_eq!(editor.monitors, 1);
+        assert_eq!(
+            background_label(editor.shells, editor.monitors).as_deref(),
+            Some("1 monitor \u{b7} \u{2193} to manage")
+        );
+        // Within the poll interval the counter is not called again.
+        assert!(!editor.poll_background(
+            &mut last,
+            polled + std::time::Duration::from_millis(500)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     fn frame_lines() -> Vec<DisplayLine> {
         vec![
             ("????".into(), TextStyle::Muted),

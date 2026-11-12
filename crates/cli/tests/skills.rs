@@ -432,3 +432,198 @@ async fn doctor_sdk_manual_invocation_uses_shared_native_snapshot() {
     assert!(!prompt.contains("SDK_DOCTOR_SECRET"));
     server.abort();
 }
+
+async fn data_dir_skill_respond(
+    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    Json(body): Json<Value>,
+) -> impl axum::response::IntoResponse {
+    let count = {
+        let mut requests = requests.lock().unwrap();
+        requests.push(body);
+        requests.len()
+    };
+    let delta = if count == 1 {
+        json!({"tool_calls":[{"index":0,"id":"skill-1","type":"function","function":{"name":"Skill","arguments":json!({"skill":"data-dir-listed","args":"the fixture"}).to_string()}}]})
+    } else if count == 2 {
+        json!({"content":"Data directory skill executed"})
+    } else {
+        json!({"content":"Final data directory answer"})
+    };
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":if count == 1 {"tool_calls"} else {"stop"}}]})
+    );
+    ([("content-type", "text/event-stream")], body)
+}
+
+#[tokio::test]
+async fn data_dir_skill_is_listed_for_the_model_and_invoked_with_an_empty_claude_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let data = temp.path().join("data");
+    let directory = data.join("skills/Data Dir Listed");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("SKILL.md"),
+        "---\nname: Data Dir Listed\ndescription: Listed from the data directory\n---\nRead references/setup.md, then inspect $ARGUMENTS",
+    )
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new()
+        .route("/v1/chat/completions", post(data_dir_skill_respond))
+        .with_state(requests.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_dcl"));
+    command
+        .current_dir(&workspace)
+        // Deliberately absent: the skill must come from the data directory.
+        .env("CLAUDE_CONFIG_DIR", temp.path().join("empty-user-config"))
+        .env("SKILL_FIXTURE_KEY", "fixture-not-secret")
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--base-url",
+            &endpoint,
+            "--api-format",
+            "openai",
+            "--api-key-env",
+            "SKILL_FIXTURE_KEY",
+            "--model",
+            "fixture",
+            "--permission-mode",
+            "bypass",
+            "--print",
+            "--output-format",
+            "json",
+            "--",
+            "Use the available data directory skill",
+        ])
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"], "Data directory skill executed");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let listing = requests[0].to_string();
+    assert!(listing.contains("Available skills"), "{listing}");
+    assert_eq!(listing.matches("data-dir-listed").count(), 1, "{listing}");
+    assert!(!listing.contains("Data-Dir-Listed"), "{listing}");
+    let executed = requests[1].to_string();
+    let rendered = directory.to_string_lossy().replace('\\', "/");
+    assert!(executed.contains(&rendered), "{executed}");
+    assert!(executed.contains("the fixture"), "{executed}");
+    server.abort();
+}
+
+#[test]
+fn skills_list_migrates_the_pristine_placeholder_and_lists_one_skill_creator() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let stub = data.join("skills/bundled/skill-creator");
+    std::fs::create_dir_all(stub.join("agents")).unwrap();
+    std::fs::write(
+        stub.join("SKILL.md"),
+        r#"---
+name: skill-creator
+description: A toolkit for creating, evaluating, and improving Claude skills
+whenToUse: When you want to build a new skill, evaluate an existing one, or generate synthetic training data for skills
+---
+
+# Skill Creator
+
+A comprehensive toolkit for creating, evaluating, and improving Claude skills.
+
+## Usage
+
+This skill provides utilities for:
+- Creating new skills from templates
+- Evaluating skill quality
+- Generating training data
+- Packaging skills for distribution
+
+## Files
+
+- `agents/` - Agent definitions for different evaluation tasks
+- `scripts/` - Utility scripts for skill development
+- `eval-viewer/` - Evaluation result visualization
+- `references/` - Schema definitions and documentation
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        stub.join("agents/analyzer.md"),
+        "# Analyzer\n\nAnalyzes skill structure and quality.",
+    )
+    .unwrap();
+    std::fs::write(
+        stub.join("agents/grader.md"),
+        "# Grader\n\nGrades skill performance.",
+    )
+    .unwrap();
+    std::fs::create_dir_all(data.join("skills/bundled/legacy-review")).unwrap();
+    std::fs::write(
+        data.join("skills/bundled/legacy-review/SKILL.md"),
+        "user sibling",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcl"))
+        .args(["--data-dir", data.to_str().unwrap(), "skills", "list"])
+        .env_remove("DEEPSEEK_CODE_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let skills: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let creators: Vec<_> = skills
+        .iter()
+        .filter(|skill| skill["name"] == "skill-creator")
+        .collect();
+    assert_eq!(creators.len(), 1, "{skills:?}");
+    assert_eq!(creators[0]["source"], "bundled");
+    let files = creators[0]["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file["name"] == "scripts"));
+    assert!(files.iter().any(|file| file["name"] == "license.txt"));
+    assert!(!stub.exists());
+    assert!(data.join("skills/bundled/legacy-review/SKILL.md").exists());
+
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_dcl"))
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "skills",
+            "help",
+            "skill-creator",
+        ])
+        .env_remove("DEEPSEEK_CODE_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("name: skill-creator"));
+    assert!(text.contains("DeepSeek Code"));
+    assert!(text.contains("NOTICE.md"));
+    assert!(!text.contains("$CODEX_HOME"));
+}

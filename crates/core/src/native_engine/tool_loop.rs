@@ -82,6 +82,18 @@ mod tool_name_delta_tests;
 mod resumed_stream_tests;
 
 #[cfg(test)]
+#[path = "occurrence_identity_tests.rs"]
+mod occurrence_identity_tests;
+
+#[cfg(test)]
+#[path = "responses_occurrence_tests.rs"]
+mod responses_occurrence_tests;
+
+#[cfg(test)]
+#[path = "reused_id_hooks_tests.rs"]
+mod reused_id_hooks_tests;
+
+#[cfg(test)]
 #[path = "durable_input_tests.rs"]
 mod durable_input_tests;
 #[cfg(test)]
@@ -254,7 +266,12 @@ pub struct ToolLoopExecutor {
     message_inbox: Option<crate::services::session_messages::Target>,
     require_pending_peer_message: bool,
     require_hook_wake: bool,
-    pub(super) execution_lease: Option<crate::services::session_messages::ExecutionLease>,
+    /// Session ownership for this attempt. The executor retains the token for
+    /// its whole lifetime - including the tail after public MessageStop - and
+    /// releases it only when the executor (or its task) is dropped. A host
+    /// that acquired the lease passes a shared `Arc` instead.
+    pub(super) execution_lease:
+        Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
     message_deliveries: usize,
     pending_plan_reset: Option<(String, String)>,
     allowed_directories: Vec<std::path::PathBuf>,
@@ -268,6 +285,11 @@ pub struct ToolLoopExecutor {
     /// A tool the host is running itself (a bundled skill may drive one), which
     /// the loading gate must not refuse.
     host_tool: Option<String>,
+    /// Unique per executor/turn, so an occurrence never collides with saved
+    /// history or with a later turn after a resume.
+    turn_scope: String,
+    /// Monotonic per distinct execution within this turn.
+    invocation_counter: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -277,11 +299,69 @@ struct StreamingToolCall {
 }
 
 struct PendingToolCall {
+    /// Provider's raw id, used only to pair outgoing protocol messages.
+    provider_id: String,
+    /// Unique execution identity used by events, persistence and display.
     id: String,
     name: String,
     input: Value,
     /// Only reads, so it may run alongside its concurrency-safe neighbours.
     concurrent: bool,
+}
+
+/// Give every call in one response a distinct provider id, even when a
+/// provider repeats or omits the raw id. Both sides of the outgoing
+/// call/result pair use this canonical id.
+fn canonical_provider_id(
+    raw: &str,
+    used: &mut std::collections::HashSet<String>,
+    ordinal: usize,
+) -> String {
+    let base = if raw.trim().is_empty() {
+        format!("call_{ordinal}")
+    } else {
+        raw.to_owned()
+    };
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut duplicate = 1;
+    loop {
+        let candidate = format!("{base}__dup{duplicate}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        duplicate += 1;
+    }
+}
+
+/// The Responses protocol replays the provider's native assistant items rather
+/// than the `tool_calls` list, so a canonicalized id must be applied there too.
+/// Otherwise two calls that repeated one raw id would be sent with one id but
+/// two differently identified results.
+fn canonicalize_native_call_ids(native: &mut Value, pairs: &[(String, String)]) {
+    if native["api"] != "openai-responses" {
+        return;
+    }
+    let Some(items) = native["items"].as_array_mut() else {
+        return;
+    };
+    let mut used = vec![false; pairs.len()];
+    for item in items.iter_mut() {
+        if item["type"] != "function_call" {
+            continue;
+        }
+        let raw = item["call_id"].as_str().unwrap_or_default().to_owned();
+        let Some(index) = pairs
+            .iter()
+            .enumerate()
+            .position(|(position, (candidate, _))| !used[position] && candidate == &raw)
+        else {
+            continue;
+        };
+        used[index] = true;
+        item["call_id"] = json!(pairs[index].1);
+    }
 }
 
 /// Consecutive concurrency-safe calls form one batch; any other call is a batch of its own.
@@ -557,7 +637,9 @@ fn shell_state_input(
     mode: crate::permissions::PermissionMode,
 ) -> Value {
     let mut input = input.clone();
-    if name == "Bash" {
+    // Monitor runs through the same shell path, so it gets the same sandbox
+    // policy and cwd handling.
+    if matches!(name, "Bash" | "Monitor") {
         if let (Some(root), Some(session)) = (
             search_config_path.and_then(std::path::Path::parent),
             conv_id,
@@ -878,7 +960,16 @@ impl ToolLoopExecutor {
             exposed_tools: None,
             builtin_names: Default::default(),
             host_tool: None,
+            turn_scope: uuid::Uuid::new_v4().to_string(),
+            invocation_counter: 0,
         }
+    }
+
+    /// One distinct execution of a provider call. The turn scope keeps it
+    /// unique across model responses, turns, compaction segments and resume.
+    fn next_invocation_id(&mut self) -> String {
+        self.invocation_counter += 1;
+        format!("inv-{}-{}", self.turn_scope, self.invocation_counter)
     }
 
     pub fn with_learning_tools(
@@ -992,14 +1083,27 @@ impl ToolLoopExecutor {
         input: &Value,
         id: &str,
     ) -> (Value, String, bool) {
-        let prepared = Box::pin(self.prepare_tool_call(name, input, id)).await;
+        self.execute_tool_call_with(name, input, id, id).await
+    }
+
+    /// `id` is the occurrence identity used by events, persistence, hooks and
+    /// permission prompts; `provider_id` stays the provider's raw id for
+    /// outgoing protocol provenance.
+    async fn execute_tool_call_with(
+        &mut self,
+        name: &str,
+        input: &Value,
+        id: &str,
+        provider_id: &str,
+    ) -> (Value, String, bool) {
+        let prepared = Box::pin(self.prepare_tool_call_with(name, input, id, provider_id)).await;
         let ran = match prepared.step {
             CallStep::Finished(result) => result,
             CallStep::Builtin(input, approved) => {
                 self.run_prepared_builtin(name, &input, id, approved).await
             }
         };
-        self.complete_tool_call(name, id, prepared.pre_contexts, ran)
+        self.complete_tool_call_with(name, id, prepared.pre_contexts, ran)
             .await
     }
 
@@ -1029,16 +1133,28 @@ impl ToolLoopExecutor {
             let mut results = Vec::new();
             for call in calls {
                 results.push(
-                    self.execute_tool_call(&call.name, &call.input, &call.id)
-                        .await,
+                    self.execute_tool_call_with(
+                        &call.name,
+                        &call.input,
+                        &call.id,
+                        &call.provider_id,
+                    )
+                    .await,
                 );
             }
             return results;
         }
         let mut prepared = Vec::with_capacity(calls.len());
         for call in calls {
-            prepared
-                .push(Box::pin(self.prepare_tool_call(&call.name, &call.input, &call.id)).await);
+            prepared.push(
+                Box::pin(self.prepare_tool_call_with(
+                    &call.name,
+                    &call.input,
+                    &call.id,
+                    &call.provider_id,
+                ))
+                .await,
+            );
         }
         let cwd = self.get_workspace_cwd().to_owned();
         let mut pending: Vec<
@@ -1068,8 +1184,13 @@ impl ToolLoopExecutor {
                 (CallStep::Builtin(_, _), None) => unreachable!("every prepared builtin ran"),
             };
             results.push(
-                self.complete_tool_call(&call.name, &call.id, prepared.pre_contexts, ran)
-                    .await,
+                self.complete_tool_call_with(
+                    &call.name,
+                    &call.id,
+                    prepared.pre_contexts,
+                    ran,
+                )
+                .await,
             );
         }
         results
@@ -1226,21 +1347,27 @@ impl ToolLoopExecutor {
         let (Some(db), Some(session)) = (&self.goal_db, self.conv_id.as_deref()) else {
             return Ok(());
         };
-        let loaded = db.with_conn(|conn| -> Result<_> {
-            let mut query = conn.prepare(
-                "SELECT t.output FROM tool_calls t JOIN messages m ON m.id=t.message_id
+        let started = std::time::Instant::now();
+        let loaded = db
+            .with_conn(|conn| -> Result<_> {
+                let mut query = conn.prepare(
+                    "SELECT t.output FROM tool_calls t JOIN messages m ON m.id=t.message_id
                  WHERE m.conversation_id=?1 AND m.role='assistant'
                    AND t.name='ToolSearch' AND t.is_error=0 AND t.output IS NOT NULL
                    AND m.sort_order >= COALESCE((SELECT MAX(sort_order) FROM messages
-                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)"
-            )?;
-            let results = query.query_map([session], |row| row.get::<_, String>(0))?;
-            let mut loaded = std::collections::BTreeSet::new();
-            for result in results {
-                Self::absorb_loaded(&result?, &mut loaded);
-            }
-            Ok(loaded)
-        })??;
+                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)",
+                )?;
+                let results = query.query_map([session], |row| row.get::<_, String>(0))?;
+                let mut loaded = std::collections::BTreeSet::new();
+                for result in results {
+                    Self::absorb_loaded(&result?, &mut loaded);
+                }
+                Ok(loaded)
+            })
+            .and_then(|result| result)
+            .map_err(|error| {
+                crate::db::write_boundary_context("restore loaded tools", session, started, error)
+            })?;
         self.loaded_tools.extend(loaded);
         Ok(())
     }
@@ -1255,11 +1382,13 @@ impl ToolLoopExecutor {
             return;
         }
         if let Some(names) = value["loaded_tools"].as_array() {
-            loaded.extend(
-                names
-                    .iter()
-                    .filter_map(|name| name.as_str().map(str::to_owned)),
-            );
+            loaded.extend(names.iter().filter_map(|name| {
+                let name = name.as_str()?;
+                // TaskOutput was folded into TaskGet and the duplicate
+                // plan_mode entry is retired. An old stored search result must
+                // not make either retired name reachable again.
+                (!matches!(name, "TaskOutput" | "plan_mode")).then(|| name.to_owned())
+            }));
         }
     }
 
@@ -1268,58 +1397,65 @@ impl ToolLoopExecutor {
     /// the user turns into on-demand loses that exposure even though the older
     /// request still lists it, so it must be searched again.
     fn loading_violation(&self, name: &str) -> Option<String> {
+        // A legacy dispatch alias follows the loading policy of the current
+        // name it was folded into; otherwise it would bypass disabled and
+        // not-loaded checks that only know about TaskGet.
+        let canonical = crate::permissions::patterns::canonical_tool_name(name);
         if self.host_tool.as_deref() == Some(name) {
             return None;
         }
         // An agent allowlist is a hard restriction, not a deferred tool: name
         // that instead of promising the tool on a later request.
-        if self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|names| !names.iter().any(|granted| granted == name))
-        {
+        if self.allowed_tools.as_ref().is_some_and(|names| {
+            !names
+                .iter()
+                .any(|granted| granted == name || granted == canonical)
+        }) {
             return Some(format!("{name} is not allowed for this agent."));
         }
         let customization = match self.customization() {
             Ok(customization) => customization,
             Err(error) => return Some(format!("Tool settings could not be read: {error:#}")),
         };
-        if !self.builtin_names().contains(name) {
+        if !self.builtin_names().contains(canonical) {
             // MCP and host names were never part of the switches, but a legacy
             // entry that turned one off still does.
             return customization
                 .is_disabled(name)
                 .then(|| format!("{name} is turned off in the tool settings."));
         }
-        let loading = customization.loading(name);
+        let loading = customization.loading(canonical);
         if !loading.enabled && !loading.on_demand {
-            return Some(format!("{name} is turned off in the tool settings."));
+            return Some(format!("{canonical} is turned off in the tool settings."));
         }
         let in_request = self
             .exposed_tools
             .as_ref()
-            .is_none_or(|names| names.contains(name));
+            .is_none_or(|names| names.contains(canonical));
         if loading.enabled {
             // A resident tool can only be called if this response carried it;
             // one enabled after the request started waits for the next.
             return (!in_request).then(|| {
-                format!("{name} is not part of this response; it becomes available from the next model request.")
+                format!("{canonical} is not part of this response; it becomes available from the next model request.")
             });
         }
         // On demand. A restricted agent with no discovery entry receives its
         // granted tools directly, which is the one case that needs no search.
         let granted_directly = self.restricted_without_discovery()
-            && self
-                .allowed_tools
-                .as_ref()
-                .is_some_and(|names| names.iter().any(|granted| granted == name));
-        if in_request && (granted_directly || self.loaded_tools.contains(name)) {
+            && self.allowed_tools.as_ref().is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|granted| granted == name || granted == canonical)
+            });
+        if in_request && (granted_directly || self.loaded_tools.contains(canonical)) {
             return None;
         }
-        Some(if self.loaded_tools.contains(name) {
-            format!("{name} becomes callable from the next model request.")
+        Some(if self.loaded_tools.contains(canonical) {
+            format!("{canonical} becomes callable from the next model request.")
         } else {
-            format!("{name} is not loaded. Call ToolSearch for it and use it in the next request.")
+            format!(
+                "{canonical} is not loaded. Call ToolSearch for it and use it in the next request."
+            )
         })
     }
 
@@ -1453,10 +1589,25 @@ impl ToolLoopExecutor {
     /// PreToolUse hooks and every permission check, in call order. A call that
     /// is not a plain builtin finishes here.
     async fn prepare_tool_call(&mut self, name: &str, input: &Value, id: &str) -> PreparedCall {
+        self.prepare_tool_call_with(name, input, id, id).await
+    }
+
+    async fn prepare_tool_call_with(
+        &mut self,
+        name: &str,
+        input: &Value,
+        id: &str,
+        provider_id: &str,
+    ) -> PreparedCall {
         let finished = |input: Value, output: String| PreparedCall {
             pre_contexts: None,
             step: CallStep::Finished((input, output, true)),
         };
+        // The retired duplicate plan entry fails before hooks, permission
+        // prompts or dispatch, even if stale settings still enable it.
+        if name == "plan_mode" {
+            return finished(input.clone(), "Unknown tool: plan_mode".into());
+        }
         if !input.is_object() {
             return finished(input.clone(), format!("Invalid {name} arguments: expected a complete JSON object; resend the call with all required fields. Tool was not executed."));
         }
@@ -1473,7 +1624,7 @@ impl ToolLoopExecutor {
         }
         use crate::services::tool_hooks::HookEvent;
         let Some(hooks) = self.hooks.clone() else {
-            let step = Box::pin(self.execute_tool_call_inner(name, input, id)).await;
+            let step = Box::pin(self.execute_tool_call_inner(name, input, id, provider_id)).await;
             return PreparedCall {
                 pre_contexts: None,
                 step,
@@ -1533,7 +1684,7 @@ impl ToolLoopExecutor {
             if let PermissionResult::Denied(reason) = hook_decision {
                 return finished(input, format!("Permission denied: {reason}"));
             }
-            input = match self.request_tool_approval(name, &input, id).await {
+            input = match self.request_tool_approval_with(name, &input, id).await {
                 Ok(actual) => actual,
                 Err(error) => {
                     return finished(input, format!("Hook requested permission: {error:#}"))
@@ -1550,7 +1701,7 @@ impl ToolLoopExecutor {
             && !pre.ask_permission
             && !matches!(
                 name,
-                "AskUserQuestion" | "AskUser" | "EnterPlanMode" | "ExitPlanMode" | "plan_mode"
+                "AskUserQuestion" | "AskUser" | "EnterPlanMode" | "ExitPlanMode"
             )
         {
             let can_replace_prompt = self.permission_manager.as_ref().is_none_or(|manager| {
@@ -1579,7 +1730,7 @@ impl ToolLoopExecutor {
             }
         }
         // Updated arguments pass through the complete normal permission path.
-        let step = Box::pin(self.execute_tool_call_inner(name, &input, id)).await;
+        let step = Box::pin(self.execute_tool_call_inner(name, &input, id, provider_id)).await;
         self.approved_call = None;
         for warning in pre.warnings {
             tracing::warn!("PreToolUse hook: {warning}");
@@ -1597,6 +1748,17 @@ impl ToolLoopExecutor {
 
     /// PostToolUse hooks for a call that went through `prepare_tool_call`.
     async fn complete_tool_call(
+        &mut self,
+        name: &str,
+        id: &str,
+        pre_contexts: Option<Vec<String>>,
+        ran: (Value, String, bool),
+    ) -> (Value, String, bool) {
+        self.complete_tool_call_with(name, id, pre_contexts, ran)
+            .await
+    }
+
+    async fn complete_tool_call_with(
         &mut self,
         name: &str,
         id: &str,
@@ -1724,7 +1886,17 @@ impl ToolLoopExecutor {
             return Ok(None);
         };
         if let (Some(db), Some(session)) = (&self.goal_db, &self.conv_id) {
-            db.with_conn(|conn|content.save(conn, session, id, display, failed))??;
+            let started = std::time::Instant::now();
+            db.with_conn(|conn| content.save(conn, session, id, display, failed))
+                .and_then(|result| result)
+                .map_err(|error| {
+                    crate::db::write_boundary_context(
+                        "save MCP tool output",
+                        session,
+                        started,
+                        error,
+                    )
+                })?;
         }
         // Images and structured blocks must remain real provider content. Only
         // plain text can use the existing spill/preview representation.
@@ -2161,6 +2333,16 @@ impl ToolLoopExecutor {
         tool_input: &Value,
         tool_use_id: &str,
     ) -> PermissionResult {
+        self.check_permission_with(tool_name, tool_input, tool_use_id)
+            .await
+    }
+
+    async fn check_permission_with(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        tool_use_id: &str,
+    ) -> PermissionResult {
         self.sync_parent_permission_mode();
         if let Some(approval) = self.approved_call.as_ref().filter(|approval| {
             approval.tool == tool_name
@@ -2178,7 +2360,9 @@ impl ToolLoopExecutor {
 
             let context = crate::permissions::PermissionContext {
                 mcp_read_only: self.mcp_read_only_tools.contains(tool_name),
-                tool_name: tool_name.to_string(),
+                // A legacy dispatch alias passes the same permission checks as
+                // the current tool name it was folded into.
+                tool_name: crate::permissions::patterns::canonical_tool_name(tool_name).to_owned(),
                 tool_input: tool_input.clone(),
                 conversation_id: conv_id,
                 user_id: None,
@@ -2376,21 +2560,25 @@ impl ToolLoopExecutor {
     }
 
     async fn execute_inner(&mut self) -> Result<(String, Option<String>)> {
-        let _execution_owner = if self.execution_lease.is_some() {
-            self.execution_lease.take()
-        } else {
-            match (
+        // Ownership belongs to this executor for its whole lifetime, not just
+        // this future: the engine may keep the executor while it performs the
+        // cleanup after MessageStop. A host that already acquired shares the
+        // same lease; otherwise the attempt acquires it here, before any model
+        // work. The field is intentionally never taken, so cancellation of
+        // this future or the outer task still releases it by dropping the
+        // executor.
+        if self.execution_lease.is_none() {
+            if let (Some(root), Some(session)) = (
                 self.search_config_path
                     .as_deref()
                     .and_then(std::path::Path::parent),
                 self.conv_id.as_deref(),
             ) {
-                (Some(root), Some(session)) => {
+                self.execution_lease =
                     crate::services::session_messages::ExecutionLease::acquire(root, session)?
-                }
-                _ => None,
+                        .map(std::sync::Arc::new);
             }
-        };
+        }
         let mut async_hook_guard = crate::services::async_hooks::TurnGuard(self.conv_id.clone());
         if self.require_hook_wake {
             let root = self
@@ -2446,7 +2634,17 @@ impl ToolLoopExecutor {
         self.message_deliveries = 0;
         self.child_resumes.store(0, Ordering::Relaxed);
         if self.require_pending_peer_message {
-            let incoming = self.drain_peer_messages()?;
+            // The inbox poll defers for up to 250 ms when the host holds the writer and
+            // then reports nothing. This resume exists because a message is queued, so
+            // retry briefly instead of treating one busy window as "no message".
+            let mut incoming = self.drain_peer_messages()?;
+            for _ in 0..20 {
+                if !incoming.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                incoming = self.drain_peer_messages()?;
+            }
             anyhow::ensure!(
                 !incoming.is_empty(),
                 "No trusted pending peer message remains; needs_resume"
@@ -2753,15 +2951,6 @@ impl ToolLoopExecutor {
         }
         tracing::info!(module = "ToolLoop", "[E4.5] Model check COMPLETED");
 
-        tracing::info!(module = "ToolLoop", "[E5] Sending MessageStart event...");
-        let _ = self
-            .event_tx
-            .send(EngineEvent::MessageStart {
-            model: self.provider.model.id.clone(),
-            })
-            .await;
-        tracing::info!(module = "ToolLoop", "[E5] MessageStart sent");
-
         tracing::info!(
             module = "ToolLoop",
             "[E6] API format: {:?}",
@@ -2770,6 +2959,17 @@ impl ToolLoopExecutor {
 
         let user_skill = self.prepare_user_skill().await;
         let api_request = matches!(user_skill, Ok(None));
+        // A skill answered without a model request is the whole logical
+        // response. Requests answered by a provider emit their start inside the
+        // loop, once per response rather than once per stream chunk.
+        if matches!(user_skill, Ok(Some(_))) {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
+        }
         let loop_result = match user_skill {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
@@ -2875,12 +3075,24 @@ impl ToolLoopExecutor {
         tool_name: &str,
         tool_input: &Value,
         _tool_use_id: &str,
+        provider_id: &str,
     ) -> CallStep {
-        if self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|names| !names.iter().any(|name| name == tool_name))
-        {
+        // Defense in depth: `prepare_tool_call` already rejects the retired
+        // duplicate plan entry before hooks or permission checks, so a direct
+        // call here must also fail without reaching legacy or task storage.
+        if tool_name == "plan_mode" {
+            return CallStep::Finished((
+                tool_input.clone(),
+                "Unknown tool: plan_mode".into(),
+                true,
+            ));
+        }
+        let canonical = crate::permissions::patterns::canonical_tool_name(tool_name);
+        if self.allowed_tools.as_ref().is_some_and(|names| {
+            !names
+                .iter()
+                .any(|name| name == tool_name || name == canonical)
+        }) {
             return CallStep::Finished((
                 tool_input.clone(),
                 "Tool is not allowed by this agent definition".into(),
@@ -2899,10 +3111,7 @@ impl ToolLoopExecutor {
                     .await,
             );
         }
-        if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode")
-            || (tool_name == "plan_mode"
-                && matches!(tool_input["operation"].as_str(), Some("enter" | "exit")))
-        {
+        if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode") {
             return CallStep::Finished(
                 self.execute_plan_transition(tool_name, tool_input, _tool_use_id)
                     .await,
@@ -2910,7 +3119,7 @@ impl ToolLoopExecutor {
         }
         if tool_name == "Agent" || (tool_name == "team" && tool_input["operation"] == "run") {
             match self
-                .check_permission(tool_name, tool_input, _tool_use_id)
+                .check_permission_with(tool_name, tool_input, _tool_use_id)
                 .await
             {
                 PermissionResult::Denied(reason) => {
@@ -2922,7 +3131,13 @@ impl ToolLoopExecutor {
                 }
                 PermissionResult::RequiresConfirmation(message) => {
                     return self
-                        .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                        .prepare_after_confirmation_with(
+                            tool_name,
+                            tool_input,
+                            _tool_use_id,
+                            provider_id,
+                            &message,
+                        )
                         .await
                 }
                 PermissionResult::Granted => {}
@@ -2939,7 +3154,7 @@ impl ToolLoopExecutor {
         }
         if matches!(tool_name, "TeamCreate" | "TeamDelete" | "TeamSpawn") {
             match self
-                .check_permission(tool_name, tool_input, _tool_use_id)
+                .check_permission_with(tool_name, tool_input, _tool_use_id)
                 .await
             {
                 PermissionResult::Denied(reason) => {
@@ -2951,7 +3166,13 @@ impl ToolLoopExecutor {
                 }
                 PermissionResult::RequiresConfirmation(message) => {
                     return self
-                        .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                        .prepare_after_confirmation_with(
+                            tool_name,
+                            tool_input,
+                            _tool_use_id,
+                            provider_id,
+                            &message,
+                        )
                         .await
         }
                 PermissionResult::Granted => {}
@@ -2980,17 +3201,6 @@ impl ToolLoopExecutor {
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
-        if tool_name == "plan_mode" {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
-                PermissionResult::Granted => {}
-            }
-            let result = crate::tools::execute_tool_async(tool_name, tool_input.clone(), &self.workspace_cwd).await;
-            let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return CallStep::Finished((tool_input.clone(), output, failed));
-        }
         if tool_name == "ListAgents" {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::list_agents(&context, session)),
@@ -3011,9 +3221,9 @@ impl ToolLoopExecutor {
             &normalized_message
         } else { tool_input };
         if tool_name == "SendMessage" {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
+            match self.check_permission_with(tool_name, tool_input, _tool_use_id).await {
                 PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Team message access denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation_with(tool_name, tool_input, _tool_use_id, provider_id, &message).await,
                 PermissionResult::Granted => {}
             }
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
@@ -3060,9 +3270,9 @@ impl ToolLoopExecutor {
         }
 
         if matches!(tool_name, "memory_search" | "memory_ingest") {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
+            match self.check_permission_with(tool_name, tool_input, _tool_use_id).await {
                 PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation_with(tool_name, tool_input, _tool_use_id, provider_id, &message).await,
                 PermissionResult::Granted => {},
             }
         }
@@ -3075,7 +3285,7 @@ impl ToolLoopExecutor {
         }
 
         let permission_result = self
-            .check_permission(tool_name, tool_input, _tool_use_id)
+            .check_permission_with(tool_name, tool_input, _tool_use_id)
             .await;
         match permission_result {
             PermissionResult::Denied(reason) => {
@@ -3087,7 +3297,13 @@ impl ToolLoopExecutor {
             }
             PermissionResult::RequiresConfirmation(message) => {
                 return self
-                    .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                    .prepare_after_confirmation_with(
+                        tool_name,
+                        tool_input,
+                        _tool_use_id,
+                        provider_id,
+                        &message,
+                    )
                     .await;
             }
             PermissionResult::Granted => {}
@@ -3878,6 +4094,17 @@ impl ToolLoopExecutor {
                 }
             };
 
+            // One start per logical response, announced once the provider has
+            // accepted the request. Chunk-level roles repeat on many
+            // OpenAI-compatible streams, and a request that fails before any
+            // response must not count as a round; send-layer retries stay
+            // inside this same response.
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
             let mut sse_buffer = String::new();
             let mut has_tool_use = false;
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
@@ -3885,7 +4112,11 @@ impl ToolLoopExecutor {
             let mut current_thinking = String::new();
             let mut current_tool_use_id: Option<String> = None;
             let mut current_tool_name: Option<String> = None;
+            let mut current_tool_invocation: Option<String> = None;
             let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
+            // Provider ids are canonicalized per response so a repeated or
+            // missing raw id cannot cross-wire the outgoing call/result pair.
+            let mut response_tool_ids = std::collections::HashSet::new();
 
             loop {
                 let chunk_result = match stream.next().await {
@@ -3953,14 +4184,6 @@ impl ToolLoopExecutor {
                     match event_type {
                         "message_start" => {
                             if let Some(message) = event.get("message") {
-                                if let Some(model) = message.get("model").and_then(|m| m.as_str()) {
-                                    let _ = self
-                                        .event_tx
-                                        .send(EngineEvent::MessageStart {
-                                        model: model.to_string(),
-                                        })
-                                        .await;
-                                }
                                 if let Some(usage) = message.get("usage") {
                                     if let Some(input_tokens) =
                                         usage.get("input_tokens").and_then(|v| v.as_f64())
@@ -3993,24 +4216,30 @@ impl ToolLoopExecutor {
                                 }
                                 "tool_use" => {
                                     has_tool_use = true;
-                                    let id = block
+                                    let raw_id = block
                                         .and_then(|b| b.get("id"))
                                         .and_then(|i| i.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
+                                        .unwrap_or("");
+                                    let id = canonical_provider_id(
+                                        raw_id,
+                                        &mut response_tool_ids,
+                                        pending_tool_calls.len(),
+                                    );
                                     let name = block
                                         .and_then(|b| b.get("name"))
                                         .and_then(|n| n.as_str())
                                         .unwrap_or("")
                                         .to_string();
+                                    let invocation = self.next_invocation_id();
                                     current_tool_use_id = Some(id.clone());
                                     current_tool_name = Some(name.clone());
+                                    current_tool_invocation = Some(invocation.clone());
                                     if let Some(input) = block
                                         .and_then(|block| block.get("input"))
                                         .filter(|input| input.is_object())
                                     {
                                         self.handle_streaming_tool_arg_delta(
-                                            &id,
+                                            &invocation,
                                             &name,
                                             &input.to_string(),
                                         );
@@ -4062,10 +4291,12 @@ impl ToolLoopExecutor {
                                         .and_then(|d| d.get("partial_json"))
                                         .and_then(|p| p.as_str())
                                         .unwrap_or("");
-                                    if let (Some(ref id), Some(ref name)) =
-                                        (&current_tool_use_id, &current_tool_name)
+                                    if let (Some(ref invocation), Some(ref name)) =
+                                        (&current_tool_invocation, &current_tool_name)
                                     {
-                                        self.handle_streaming_tool_arg_delta(id, name, partial);
+                                        self.handle_streaming_tool_arg_delta(
+                                            invocation, name, partial,
+                                        );
                                     }
                                 }
                                 _ => {}
@@ -4087,14 +4318,17 @@ impl ToolLoopExecutor {
                                 });
                                 current_thinking.clear();
                             } else if current_tool_use_id.is_some() {
-                                let id = current_tool_use_id.clone().unwrap_or_default();
+                                let provider_id = current_tool_use_id.clone().unwrap_or_default();
+                                let invocation = current_tool_invocation
+                                    .take()
+                                    .unwrap_or_else(|| self.next_invocation_id());
                                 let name = current_tool_name.clone().unwrap_or_default();
-                                let input = self.finalize_streaming_tool_args(&id);
+                                let input = self.finalize_streaming_tool_args(&invocation);
 
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::ToolUseStart {
-                                    tool_use_id: id.clone(),
+                                    tool_use_id: invocation.clone(),
                                     tool_name: name.clone(),
                                     tool_input: input.clone(),
                                     text_before: full_text.clone(),
@@ -4105,13 +4339,14 @@ impl ToolLoopExecutor {
                                 let concurrent = self.is_concurrency_safe(&name, &input);
 
                                 assistant_blocks.push(ContentBlock::ToolUse {
-                                    id: id.clone(),
+                                    id: provider_id.clone(),
                                     name: name.clone(),
                                     input: input.clone(),
                                 });
 
                                 pending_tool_calls.push(PendingToolCall {
-                                    id,
+                                    provider_id,
+                                    id: invocation,
                                     name,
                                     input,
                                     concurrent,
@@ -4119,6 +4354,7 @@ impl ToolLoopExecutor {
 
                                 current_tool_use_id = None;
                                 current_tool_name = None;
+                                current_tool_invocation = None;
                             }
                         }
                         "message_delta" => {
@@ -4238,7 +4474,7 @@ impl ToolLoopExecutor {
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 if pending_tool_calls
                     .iter()
-                    .any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode"))
+                    .any(|t| t.name.as_str() == "ExitPlanMode")
                 {
                     for call in &mut pending_tool_calls {
                         call.concurrent = false;
@@ -4250,7 +4486,7 @@ impl ToolLoopExecutor {
                     for (tc, (actual_input, output_str, is_error)) in batch.iter().zip(results) {
                         for block in &mut assistant_blocks {
                             if let ContentBlock::ToolUse { id, input, .. } = block {
-                                if id == &tc.id {
+                                if id == &tc.provider_id {
                                 // Keep the rejected call paired with its error in valid API history.
                                     *input = if actual_input.is_object() {
                                         actual_input.clone()
@@ -4282,7 +4518,7 @@ impl ToolLoopExecutor {
                             json!(self.retained_tool_output(&tc.name, &output_str))
                         });
                         tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tc.id.clone(),
+                            tool_use_id: tc.provider_id.clone(),
                             content,
                             is_error: Some(is_error),
                         });
@@ -4618,6 +4854,17 @@ impl ToolLoopExecutor {
                 }
             };
 
+            // One start per logical response, announced once the provider has
+            // accepted the request. Compatible providers repeat
+            // "role":"assistant" in every chunk; those are deltas of the same
+            // response. A request that fails before any response is not a
+            // round, and send-layer retries do not create a second start.
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
             let mut sse_buffer = String::new();
             let mut has_tool_calls = false;
             let mut assistant_content: Option<OpenAIContent> = None;
@@ -4717,17 +4964,6 @@ impl ToolLoopExecutor {
                             Some(d) => d,
                             None => continue,
                         };
-
-                        if let Some(role) = delta.get("role").and_then(|r| r.as_str()) {
-                            if role == "assistant" {
-                                let _ = self
-                                    .event_tx
-                                    .send(EngineEvent::MessageStart {
-                                    model: self.provider.model.id.clone(),
-                                    })
-                                    .await;
-                            }
-                        }
 
                         if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                             if !content.is_empty() {
@@ -4902,9 +5138,15 @@ impl ToolLoopExecutor {
                 indices.sort();
 
                 let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
+                let mut response_tool_ids = std::collections::HashSet::new();
+                let mut provider_id_pairs: Vec<(String, String)> = Vec::new();
 
                 for idx in &indices {
-                    let (id, name, args_str) = &openai_tool_args[idx];
+                    let (raw_id, name, args_str) = &openai_tool_args[idx];
+                    let provider_id =
+                        canonical_provider_id(raw_id, &mut response_tool_ids, pending_tool_calls.len());
+                    provider_id_pairs.push((raw_id.clone(), provider_id.clone()));
+                    let invocation = self.next_invocation_id();
                     let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
                         recover_malformed_tool_input(name, args_str).unwrap_or(Value::Null)
                     });
@@ -4912,7 +5154,7 @@ impl ToolLoopExecutor {
                     let _ = self
                         .event_tx
                         .send(EngineEvent::ToolUseStart {
-                        tool_use_id: id.clone(),
+                        tool_use_id: invocation.clone(),
                         tool_name: name.clone(),
                         tool_input: input.clone(),
                         text_before: full_text.clone(),
@@ -4924,7 +5166,7 @@ impl ToolLoopExecutor {
 
                     assistant_tool_calls.push(
                         crate::native_engine::openai_client::OpenAIToolCall {
-                        id: id.clone(),
+                        id: provider_id.clone(),
                         call_type: "function".to_string(),
                         function: crate::native_engine::openai_client::FunctionCall {
                             name: name.clone(),
@@ -4934,18 +5176,24 @@ impl ToolLoopExecutor {
                     );
 
                     pending_tool_calls.push(PendingToolCall {
-                        id: id.clone(),
+                        provider_id,
+                        id: invocation,
                         name: name.clone(),
                         input,
                         concurrent,
                     });
+                }
+                // Responses replays these native items instead of tool_calls;
+                // keep their call ids identical to the outgoing tool results.
+                if let Some(native) = assistant_provider_content.as_mut() {
+                    canonicalize_native_call_ids(native, &provider_id_pairs);
                 }
 
                 let mut tool_results: Vec<OpenAIMessage> = Vec::new();
                 let mut tool_images = Vec::new();
                 if pending_tool_calls
                     .iter()
-                    .any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode"))
+                    .any(|t| t.name.as_str() == "ExitPlanMode")
                 {
                     for call in &mut pending_tool_calls {
                         call.concurrent = false;
@@ -4956,7 +5204,7 @@ impl ToolLoopExecutor {
                     let results = self.execute_tool_batch(batch).await;
                     for (tc, (actual_input, output_str, is_error)) in batch.iter().zip(results) {
                         for call in &mut assistant_tool_calls {
-                            if call.id == tc.id {
+                            if call.id == tc.provider_id {
                                 call.function.arguments = actual_input.to_string();
                             }
                         }
@@ -4988,7 +5236,7 @@ impl ToolLoopExecutor {
                             role: "tool".to_string(),
                             content: OpenAIContent::Text(compacted),
                             tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
+                            tool_call_id: Some(tc.provider_id.clone()),
                             reasoning_content: None,
                             provider_content: None,
                         });
@@ -5331,10 +5579,10 @@ impl ToolLoopExecutor {
         &self.workspace_cwd
     }
 
-    fn handle_streaming_tool_arg_delta(&mut self, tool_use_id: &str, tool_name: &str, delta: &str) {
+    fn handle_streaming_tool_arg_delta(&mut self, invocation_id: &str, tool_name: &str, delta: &str) {
         let prev_args = self
             .streaming_tool_args
-            .get(tool_use_id)
+            .get(invocation_id)
             .map(|s| s.accumulated_args.clone())
             .unwrap_or_default();
 
@@ -5351,7 +5599,7 @@ impl ToolLoopExecutor {
         };
 
         self.streaming_tool_args.insert(
-            tool_use_id.to_string(),
+            invocation_id.to_string(),
             StreamingToolCall {
                 name: tool_name.to_string(),
                 accumulated_args: merged,
@@ -5360,14 +5608,14 @@ impl ToolLoopExecutor {
 
         if !delta_to_emit.is_empty() {
             let _ = self.event_tx.try_send(EngineEvent::ToolArgDelta {
-                tool_use_id: tool_use_id.to_string(),
+                tool_use_id: invocation_id.to_string(),
                 delta: delta_to_emit,
             });
         }
     }
 
-    fn finalize_streaming_tool_args(&mut self, tool_use_id: &str) -> Value {
-        if let Some(stc) = self.streaming_tool_args.remove(tool_use_id) {
+    fn finalize_streaming_tool_args(&mut self, invocation_id: &str) -> Value {
+        if let Some(stc) = self.streaming_tool_args.remove(invocation_id) {
             let parsed: Option<Value> = serde_json::from_str(&stc.accumulated_args).ok();
             parsed
                 .or_else(|| recover_malformed_tool_input(&stc.name, &stc.accumulated_args))

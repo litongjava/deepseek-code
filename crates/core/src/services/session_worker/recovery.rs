@@ -1,15 +1,92 @@
 use super::*;
 
-pub(super) fn startup_lock(base: &Path) -> Result<fs::File> {
+/// A lock this process acquired and must release explicitly.
+///
+/// `flock` ownership belongs to the open file description, so dropping the
+/// `File` releases it only when no duplicated descriptor for that description
+/// survives. A `fork` gives the child exactly such a descriptor until it execs,
+/// and another thread of this process can fork at any moment, so a close-only
+/// release can keep `startup.lock` held after the logical owner has returned.
+/// Only the process that took the lock releases it: a forked copy inherits
+/// `owner` and must not unlock a live parent. Descriptor close stays as the
+/// fallback for abnormal exit.
+pub(super) struct OwnedLock {
+    file: fs::File,
+    owner: u32,
+}
+
+impl OwnedLock {
+    /// Wraps a descriptor the caller has opened but not yet locked.
+    fn try_acquire(file: fs::File, context: &'static str) -> Result<Self> {
+        crate::fs::try_lock_file(&file).context(context)?;
+        Ok(Self::already_locked(file))
+    }
+
+    /// Wraps a descriptor whose lock the caller already holds.
+    fn already_locked(file: fs::File) -> Self {
+        #[cfg(test)]
+        lock_observer::inspect(&file);
+        Self {
+            file,
+            owner: std::process::id(),
+        }
+    }
+}
+
+impl Drop for OwnedLock {
+    fn drop(&mut self) {
+        if std::process::id() != self.owner {
+            return;
+        }
+        if let Err(error) = crate::fs::unlock_file(&self.file) {
+            // Reported without panicking; this also runs from `Drop`.
+            tracing::warn!("Could not release session worker lock: {error}");
+        }
+    }
+}
+
+/// Test-only observer for a lock this process has just acquired, so a test can
+/// duplicate the real descriptor at the moment another thread could fork.
+#[cfg(test)]
+pub(super) mod lock_observer {
+    use std::cell::RefCell;
+    use std::fs::File;
+
+    type Hook = Box<dyn FnMut(&File) + Send>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn install(hook: Hook) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+
+    pub(super) fn clear() {
+        HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    /// Called with every descriptor this process locks, before it is released.
+    pub(super) fn inspect(file: &File) {
+        HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(file);
+            }
+        });
+    }
+}
+
+pub(super) fn startup_lock(base: &Path) -> Result<OwnedLock> {
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(base.join("startup.lock"))?;
-    crate::fs::try_lock_file(&lock)
-        .context("Session worker startup or recovery is already in progress; retry shortly")?;
-    Ok(lock)
+    OwnedLock::try_acquire(
+        lock,
+        "Session worker startup or recovery is already in progress; retry shortly",
+    )
 }
 
 pub(super) fn prepare_lifetime_locks(dir: &Path) -> Result<()> {
@@ -141,7 +218,7 @@ pub(super) fn repair(root: &Path, session: &str) -> Result<bool> {
                     .write(true)
                     .open(dir.join(name))?;
                 match crate::fs::try_lock_file(&lock) {
-                    Ok(()) => guards.push(lock),
+                    Ok(()) => guards.push(OwnedLock::already_locked(lock)),
                     Err(std::fs::TryLockError::WouldBlock) => {
                         ensure!(worker.is_some(), "Worker metadata is damaged but its process is still running; retry after it exits");
                         return Ok(false);
@@ -348,6 +425,81 @@ mod tests {
         pid
     }
 
+    /// A duplicated descriptor is what a `fork` gives a child: the same open
+    /// file description, so a close-only release would keep `startup.lock` held
+    /// until that child execs. Recovery must release it when its logical section
+    /// ends, so the caller can start a worker immediately.
+    #[test]
+    fn recovery_releases_the_startup_lock_for_a_retained_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), dead_pid());
+        prepare_lifetime_locks(&directory(&worker)).unwrap();
+        let base = worker_path(root.path(), &worker.session_id).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        lock_observer::install(Box::new(move |file| {
+            if let Ok(clone) = file.try_clone() {
+                let _ = send.send(clone);
+            }
+        }));
+        assert!(recover_session(root.path(), &worker.session_id).unwrap());
+        let duplicate: std::fs::File = receive
+            .try_recv()
+            .expect("recovery never took the startup lock");
+        // Immediate reacquisition: this is what `ensure_worker` does right after
+        // a successful recovery, and what a retained descriptor would block.
+        let next = startup_lock(&base).expect("recovery released the startup lock at once");
+        // A live owner still excludes another frontend.
+        assert!(startup_lock(&base).is_err());
+        drop(next);
+        lock_observer::clear();
+        drop(duplicate);
+        drop(startup_lock(&base).expect("released owner is free"));
+    }
+
+    /// A recovery that fails after taking a lifetime lock must release it too,
+    /// so a retained descriptor cannot block the next recovery as if a worker
+    /// were still running.
+    #[test]
+    fn a_failed_recovery_releases_the_lifetime_locks_it_took() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), dead_pid());
+        let dir = directory(&worker);
+        prepare_lifetime_locks(&dir).unwrap();
+        // Damaged worker metadata plus a host lock this process holds makes
+        // `repair` take the supervisor lock and then refuse.
+        fs::write(dir.join("worker.json"), [0; 478]).unwrap();
+        let host = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join("host.lock"))
+            .unwrap();
+        crate::fs::try_lock_file(&host).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        lock_observer::install(Box::new(move |file| {
+            if let Ok(clone) = file.try_clone() {
+                let _ = send.send(clone);
+            }
+        }));
+        assert!(recover_session(root.path(), &worker.session_id).is_err());
+        // Both the startup lock and the supervisor lock were taken on that path.
+        let mut duplicates = Vec::new();
+        while let Ok(duplicate) = receive.try_recv() {
+            duplicates.push(duplicate);
+        }
+        assert!(duplicates.len() >= 2, "expected startup and supervisor locks");
+        crate::fs::unlock_file(&host).unwrap();
+        drop(host);
+        // Every lock that path took is free immediately, duplicates included.
+        for path in [dir.parent().unwrap().join("startup.lock"), dir.join("supervisor.lock")] {
+            let file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            crate::fs::try_lock_file(&file)
+                .unwrap_or_else(|error| panic!("{} stayed locked: {error:?}", path.display()));
+            crate::fs::unlock_file(&file).unwrap();
+        }
+        lock_observer::clear();
+        drop(duplicates);
+    }
+
     #[test]
     fn corrupt_metadata_recovers_without_replaying_or_discarding_evidence() {
         let root = tempfile::tempdir().unwrap();
@@ -529,6 +681,35 @@ mod tests {
         recover(&worker).unwrap();
         assert_eq!(jobs::get(root.path(), &id).unwrap().status, "failed");
         assert_eq!(read_worker(&directory(&worker)).unwrap().status, "stopped");
+    }
+
+    // A lock released just before this call can stay held briefly by a child
+    // process between fork and exec; startup must wait for it instead of failing.
+    #[cfg(unix)]
+    #[test]
+    fn startup_lock_survives_concurrent_process_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let mut failures = 0;
+        for _ in 0..40 {
+            let first = startup_lock(dir.path()).unwrap();
+            drop(first);
+            match startup_lock(dir.path()) {
+                Ok(second) => drop(second),
+                Err(_) => failures += 1,
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(failures, 0, "startup locks failed {failures} times");
     }
 
     #[tokio::test]

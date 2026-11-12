@@ -247,6 +247,122 @@ impl Fixture {
     fn send(&self, text: &str) {
         session_messages::send(&self.context, &self.peer, &self.child, text).unwrap();
     }
+
+    /// The same wait as the shared `completed` helper, with the fixture state
+    /// attached when it expires. Without this a timeout only says "slow"; the
+    /// dump distinguishes a hung turn (job still running, host alive) from
+    /// bookkeeping that never completed.
+    async fn await_completed(&self, id: &str) -> jobs::Job {
+        let started = std::time::Instant::now();
+        match tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let job = jobs::get(&self.context.paths.data_dir, id).unwrap();
+                if job.finished_ms.is_some() {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        {
+            Ok(job) => job,
+            Err(_) => panic!(
+                "job {id} did not finish after {:?}\n{}",
+                started.elapsed(),
+                self.evidence(id)
+            ),
+        }
+    }
+
+    /// Local fixture state only: no credentials, no other sessions.
+    fn evidence(&self, id: &str) -> String {
+        let root = &self.context.paths.data_dir;
+        let jobs_state: Vec<String> = jobs::list(root, Some(&self.owner))
+            .unwrap_or_default()
+            .iter()
+            .map(|job| {
+                format!(
+                    "{} status={} finished={:?} exit={:?} error={:?} supervisor={:?} child={:?}",
+                    job.id, job.status, job.finished_ms, job.exit_code, job.error,
+                    job.supervisor_pid, job.child_pid
+                )
+            })
+            .collect();
+        let this = jobs::get(root, id)
+            .map(|job| {
+                format!(
+                    "status={} finished={:?} error={:?} supervisor={:?} child={:?}",
+                    job.status, job.finished_ms, job.error, job.supervisor_pid, job.child_pid
+                )
+            })
+            .unwrap_or_else(|error| format!("<{error}>"));
+        let inbox_state = |recipient: &str| {
+            session_messages::inbox(&self.context, recipient, false)
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .map(|m| {
+                            format!(
+                                "state={} read={} blocked={:?} text={:?}",
+                                m.state,
+                                m.read,
+                                m.blocked_reason,
+                                m.content.chars().take(48).collect::<String>()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|error| vec![format!("<{error}>")])
+        };
+        let requests = self.model.requests.lock().unwrap();
+        let last: Vec<String> = requests
+            .iter()
+            .rev()
+            .take(4)
+            .map(|body| {
+                let last = body["messages"].as_array().and_then(|m| m.last()).cloned();
+                format!(
+                    "child={} role={} text={:?}",
+                    child_request(body),
+                    last.as_ref().and_then(|m| m["role"].as_str()).unwrap_or("?"),
+                    last
+                        .as_ref()
+                        .and_then(|m| m["content"].as_str())
+                        .map(|text| prompt_text(text).chars().take(40).collect::<String>())
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
+        let worker_dir = worker::directory(&self.host);
+        let stderr = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .map(|text| {
+                    text.lines()
+                        .rev()
+                        .take(12)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|error| format!("<{error}>"))
+        };
+        format!(
+            "owner={} child={} host={} jobs={jobs_state:?} this={this} \
+             active_json={:?} child_inbox={:?} owner_inbox={:?} \
+             model_requests={} last_requests={last:?} host_stderr={:?}",
+            self.owner,
+            self.child,
+            self.host.id,
+            std::fs::read_to_string(worker_dir.join("active.json")).ok(),
+            inbox_state(&self.child),
+            inbox_state(&self.owner),
+            requests.len(),
+            stderr(&worker_dir.join("stderr.log")),
+        )
+    }
+
     async fn next_job(&self, after: usize) -> jobs::Job {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -406,6 +522,99 @@ async fn owned_child_wakes_without_parent_turn_and_preserves_its_original_runtim
     fixture.stop().await;
 }
 
+/// An inbox-triggered idle wake exists because a message is queued. When the
+/// host briefly holds the session writer, the poll must retry instead of
+/// treating its 250 ms busy window as "no message" and dropping the runtime.
+#[tokio::test]
+async fn inbox_resume_survives_a_briefly_held_writer() {
+    let fixture = Fixture::start("bypass", false).await;
+    let child = fixture.child.clone();
+    let watched = child.clone();
+    let database = fixture
+        .context
+        .paths
+        .data_dir
+        .join(deepseek_code_core::runtime::DATABASE_FILE);
+    // The wake commits its authority, runtime, transcript and consumer rows
+    // before it drains the inbox. Holding the writer from the start would only
+    // delay those writes and release it again before the drain, so the hold is
+    // taken as soon as the consumer row appears: the drain follows it at once.
+    let holder = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let attached: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_inbox_consumers WHERE session_id=?1)",
+                    [&watched],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if attached {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the idle wake never attached its inbox consumer"
+            );
+            std::thread::yield_now();
+        }
+        loop {
+            match connection.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => break,
+                Err(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("could not briefly hold the session writer: {error}"),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    fixture.send("IDLE_WRITE: write the requested file");
+    let job = fixture.next_job(1).await;
+    let finished = completed(&fixture.context.paths.data_dir, &job.id).await;
+    holder.join().unwrap();
+    assert_eq!(
+        finished.status, "completed",
+        "the inbox-triggered resume ended as {:?} with error {:?}",
+        finished.status, finished.error
+    );
+    let saved: Value = fixture
+        .context
+        .setting(&format!("delegation.{child}"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved["status"], "needs_resume", "{saved}");
+    assert_eq!(saved["status"], "completed", "{saved}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("idle.txt")).unwrap(),
+        "IDLE_CHILD_WRITE"
+    );
+    assert_eq!(
+        session_messages::pending_count(&fixture.context, &child).unwrap(),
+        0
+    );
+    let requests = fixture.model.requests.lock().unwrap();
+    assert!(requests.iter().any(|body| {
+        child_request(body)
+            && body["messages"].as_array().unwrap().iter().any(|message| {
+                message["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("IDLE_WRITE")
+            })
+    }));
+    drop(requests);
+    assert_no_secret(&fixture.context.paths.data_dir);
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn idle_child_live_mode_is_scoped_to_child_and_respects_owner_plan() {
     for mode in ["bypass", "plan"] {
@@ -445,12 +654,7 @@ async fn idle_child_live_mode_is_scoped_to_child_and_respects_owner_plan() {
         .await
         .unwrap();
         fixture.model.release.notify_one();
-        assert_eq!(
-            completed(&fixture.context.paths.data_dir, &job.id)
-                .await
-                .status,
-            "completed"
-        );
+        assert_eq!(fixture.await_completed(&job.id).await.status, "completed");
         assert!(!fixture.workspace.join("idle.txt").exists());
         assert_eq!(
             deepseek_code_core::services::session_permission_mode::load(&fixture.store.db, &fixture.owner)
@@ -586,12 +790,7 @@ async fn idle_child_budget_is_shared_with_owner_turn_continuations() {
     for index in 0..7 {
         fixture.send(&format!("IDLE_PING_{index}"));
         let job = fixture.next_job(index + 1).await;
-        assert_eq!(
-            completed(&fixture.context.paths.data_dir, &job.id)
-                .await
-                .status,
-            "completed"
-        );
+        assert_eq!(fixture.await_completed(&job.id).await.status, "completed");
     }
     let count = fixture.model.requests.lock().unwrap().len();
     fixture.send("IDLE_WRITE: exceeds the shared eight-resume budget");

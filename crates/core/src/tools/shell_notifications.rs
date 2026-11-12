@@ -59,8 +59,18 @@ pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
         return Ok(vec![]);
     }
     let mut connection = rusqlite::Connection::open(path)?;
-    connection.busy_timeout(std::time::Duration::from_millis(100))?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // The caller polls about once a second; waiting longer would freeze its loop.
+    connection.busy_timeout(std::time::Duration::from_millis(250))?;
+    let tx = match connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        // Another writer holds the database; the next poll claims these shells.
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+        {
+            return Ok(vec![]);
+        }
+        Err(error) => return Err(error.into()),
+    };
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS shell_notification_claims(task_id TEXT PRIMARY KEY)",
     )?;
@@ -208,6 +218,46 @@ mod tests {
                 1
             );
         }
+        assert!(collect_completed(root.path(), &session).unwrap().is_empty());
+    }
+    #[test]
+    fn busy_tick_is_skipped_and_the_next_tick_delivers() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let task = crate::tools::tasks::execute_for_shell_owner(
+            "TaskCreate",
+            serde_json::json!({"subject":"completed","metadata":{"managed_shell":true}}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let id = task["id"].as_str().unwrap();
+        std::fs::create_dir_all(root.path().join("shell-tasks").join(&session).join(id)).unwrap();
+        crate::tools::tasks::execute_for_shell_owner(
+            "TaskUpdate",
+            serde_json::json!({"id":id,"status":"completed"}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+
+        let holder = rusqlite::Connection::open(
+            root.path().join("tasks").join(format!("{session}.sqlite3")),
+        )
+        .unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let skipped = collect_completed(root.path(), &session).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the busy tick waited {elapsed:?}"
+        );
+        assert!(skipped.is_empty());
+        holder.execute_batch("COMMIT").unwrap();
+        let notices = collect_completed(root.path(), &session).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].starts_with("Background shell completed:"));
         assert!(collect_completed(root.path(), &session).unwrap().is_empty());
     }
 }

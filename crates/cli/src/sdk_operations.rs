@@ -96,13 +96,21 @@ async fn stop_task(session: &Session, request: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
-/// The user message persisted most recently; SDK message UUIDs map onto it.
-pub fn latest_user_message(session: &Session) -> Result<Option<String>> {
+/// The user message the turn itself started, skipping rows that the input
+/// queue delivered during the turn.
+pub fn latest_user_message(
+    session: &Session,
+    delivered: &std::collections::HashSet<String>,
+) -> Result<Option<String>> {
     let messages = session
         .store
         .db
         .with_conn(|conn| message_repo::get_messages_by_conversation(conn, &session.id))??;
-    Ok(messages.into_iter().rev().find(|message| message.role == "user").map(|message| message.id))
+    Ok(messages
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "user" && !delivered.contains(&message.id))
+        .map(|message| message.id))
 }
 
 fn line_count(text: Option<&str>) -> u64 {
