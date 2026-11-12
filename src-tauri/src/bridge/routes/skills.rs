@@ -3,9 +3,14 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use deepseek_code_core::services::{EnvironmentCredentials, ServiceContext};
+use deepseek_code_core::skills::discovery::SkillCommand;
+use deepseek_code_core::skills::states::{self, SkillState};
 use serde::Deserialize;
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::super::AppState;
 use crate::native_engine::engine_core::ChatRequest;
@@ -36,6 +41,75 @@ async fn skills_list(State(state): State<AppState>) -> SkillResponse {
                 Json(serde_json::json!({ "error": error.to_string() })),
             )
         })
+}
+
+#[derive(Deserialize)]
+struct SkillCommandsQuery {
+    workspace: Option<String>,
+}
+
+/// Slash-invocable skills for the chat menu: what `/name` resolves to in a
+/// Desktop turn, with each skill's state. `off` skills are already removed.
+fn skill_command_entries(
+    commands: &BTreeMap<String, SkillCommand>,
+    states: &BTreeMap<String, SkillState>,
+) -> Vec<serde_json::Value> {
+    let mut entries: Vec<serde_json::Value> = commands
+        .values()
+        .filter(|command| command.user_invocable)
+        .map(|command| {
+            let source = if command.path.parent()
+                == Some(std::path::Path::new("__embedded_cli_skills__"))
+            {
+                "built-in".to_owned()
+            } else if command.name.contains(':') {
+                command.name.split(':').next().unwrap_or_default().to_owned()
+            } else {
+                "user".to_owned()
+            };
+            serde_json::json!({
+                "name": command.name,
+                "description": command.description,
+                "state": states::effective(states, &command.name).label(),
+                "source": source,
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["name"].as_str().unwrap_or_default())
+    });
+    entries
+}
+
+async fn skills_commands(
+    State(state): State<AppState>,
+    Query(query): Query<SkillCommandsQuery>,
+) -> SkillResponse {
+    let data_dir: PathBuf = state.data_dir.as_ref().clone();
+    let workspace = query
+        .workspace
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.clone());
+    let context = ServiceContext {
+        paths: deepseek_code_core::runtime::RuntimePaths::new(data_dir.clone())
+            .map_err(skill_error)?,
+        db: state.db_manager.clone(),
+        credentials: Arc::new(EnvironmentCredentials),
+    };
+    // Same merge as a chat turn: plugin skills first, then the shared resolver.
+    let mut commands =
+        deepseek_code_core::services::plugins::skill_commands(&context).map_err(skill_error)?;
+    commands.extend(
+        deepseek_code_core::skills::discovery::discover(&data_dir, &workspace)
+            .map_err(skill_error)?,
+    );
+    let states = states::load(&data_dir);
+    Ok(Json(serde_json::json!({
+        "commands": skill_command_entries(&commands, &states),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -387,6 +461,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/skills", get(skills_list))
         .route("/api/skills", post(skills_create))
+        .route("/api/skills/commands", get(skills_commands))
         .route("/api/skills/{name}", get(skill_get))
         .route("/api/skills/{name}", put(skill_update).patch(skill_update))
         .route("/api/skills/{name}", delete(skill_delete))
@@ -400,4 +475,69 @@ pub fn routes() -> Router<AppState> {
         .route("/api/skills/design/stats", get(design_stats))
         .route("/api/superpowers/install", post(superpowers_install))
         .route("/api/superpowers/categories", get(superpowers_categories))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn command(name: &str, embedded: bool, user_invocable: bool) -> SkillCommand {
+        let path = if embedded {
+            Path::new("__embedded_cli_skills__").join(name)
+        } else {
+            PathBuf::from(format!("/home/user/.claude/skills/{name}/SKILL.md"))
+        };
+        SkillCommand {
+            name: name.to_owned(),
+            description: format!("{name} description"),
+            path,
+            content: String::new(),
+            user_invocable,
+            disable_model_invocation: false,
+            listing_name_only: false,
+            context: None,
+            shell: None,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn skill_command_entries_report_states() {
+        let commands: BTreeMap<String, SkillCommand> = [
+            command("translate-zh-en", true, true),
+            command("simplify", true, true),
+            command("mine", false, true),
+            command("hidden", false, false),
+        ]
+        .into_iter()
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+        let entries = skill_command_entries(&commands, &BTreeMap::new());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries.iter().map(|entry| entry["name"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["mine", "simplify", "translate-zh-en"],
+        );
+        let by_name = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert_eq!(by_name("translate-zh-en")["state"], "user-only");
+        assert_eq!(by_name("translate-zh-en")["source"], "built-in");
+        assert_eq!(by_name("simplify")["state"], "user");
+        assert_eq!(by_name("simplify")["source"], "built-in");
+        assert_eq!(by_name("mine")["source"], "user");
+
+        let states = BTreeMap::from([("translate-zh-en".to_owned(), SkillState::User)]);
+        let entries = skill_command_entries(&commands, &states);
+        let entry = entries
+            .iter()
+            .find(|entry| entry["name"] == "translate-zh-en")
+            .expect("translate-zh-en is user-invocable");
+        assert_eq!(entry["state"], "user");
+    }
 }

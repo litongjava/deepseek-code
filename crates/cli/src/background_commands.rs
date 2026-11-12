@@ -369,9 +369,10 @@ fn job_runtime(job: &background_sessions::Job) -> String {
 #[path = "agent_liveness_tests.rs"]
 mod agent_liveness_tests;
 
-/// One background task: a managed shell or a detached worker job.
+/// One background task: a managed shell, a monitor or a detached worker job.
 enum Task {
     Shell(serde_json::Value),
+    Monitor(serde_json::Value),
     Job(background_sessions::Job),
 }
 
@@ -457,6 +458,26 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 let key = details("Shell details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?;
                 key
             }
+            Task::Monitor(monitor) => {
+                let id = monitor["id"].as_str().unwrap_or_default().to_owned();
+                let status = monitor["status"].as_str().unwrap_or("unknown").to_owned();
+                let output = shell_control(paths, &session.id, &id, false).await.unwrap_or_default();
+                let mut rows = vec![format!("Status:   {status}")];
+                if let Some(started) = monitor["metadata"]["started_ms"].as_u64().filter(|_| status == "running") {
+                    rows.push(format!("Runtime:  {}", runtime(started, None)));
+                }
+                rows.push(format!("Script:   {}", safe_output(monitor["metadata"]["command"].as_str().unwrap_or(""))));
+                rows.push(String::new());
+                rows.push("Output:".into());
+                let text: Vec<String> = output["stdout"].as_str().unwrap_or_default().lines().map(safe_output).collect();
+                if text.is_empty() {
+                    rows.push("No output available".into());
+                } else {
+                    rows.extend(text.iter().rev().take(12).rev().cloned());
+                }
+                let stop = if status == "running" { " \u{b7} x to stop" } else { "" };
+                details("Monitor details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?
+            }
             Task::Job(job) => {
                 let rows = vec![
                     format!("Status:   {}", job.status),
@@ -490,6 +511,12 @@ fn active_tasks(paths: &RuntimePaths, session: &Session) -> Result<Vec<Task>> {
         .map(Task::Shell)
         .collect();
     tasks.extend(
+        monitor_records(paths, &session.id)?
+            .into_iter()
+            .filter(|monitor| monitor["status"] == "running")
+            .map(Task::Monitor),
+    );
+    tasks.extend(
         background_sessions::list(&paths.data_dir, Some(&session.id))?
             .into_iter()
             .filter(|job| !job.foreground && matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
@@ -500,7 +527,7 @@ fn active_tasks(paths: &RuntimePaths, session: &Session) -> Result<Vec<Task>> {
 
 async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Result<()> {
     let id = match task {
-        Task::Shell(shell) => {
+        Task::Shell(shell) | Task::Monitor(shell) => {
             let id = shell["id"].as_str().unwrap_or_default().to_owned();
             shell_control(paths, &session.id, &id, true).await?;
             id
@@ -513,7 +540,7 @@ async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Resu
     // The list redraws only on a key press, so give the stop a moment to land.
     for _ in 0..40 {
         let gone = !active_tasks(paths, session)?.iter().any(|task| match task {
-            Task::Shell(shell) => shell["id"] == id.as_str(),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["id"] == id.as_str(),
             Task::Job(job) => job.id == id,
         });
         if gone { break; }
@@ -525,11 +552,15 @@ async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Resu
 /// The list's subtitle, such as `2 active shells`, and one aligned row per task.
 fn task_rows(tasks: &[Task]) -> (String, Vec<crate::terminal::picker::Entry>) {
     use unicode_width::UnicodeWidthStr;
-    let counted = |shells: bool| tasks.iter().filter(|task| matches!(task, Task::Shell(_)) == shells && task.status() == "running").count();
-    let plural = |count: usize, one: &str, many: &str| format!("{count} active {}", if count == 1 { one } else { many });
+    let count = |wanted: fn(&Task) -> bool| tasks.iter().filter(|task| wanted(task) && task.status() == "running").count();
+    let shells = count(|task| matches!(task, Task::Shell(_)));
+    let monitors = count(|task| matches!(task, Task::Monitor(_)));
+    let jobs = count(|task| matches!(task, Task::Job(_)));
+    let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
     let mut parts = Vec::new();
-    if counted(true) > 0 { parts.push(plural(counted(true), "shell", "shells")); }
-    if counted(false) > 0 { parts.push(plural(counted(false), "task", "tasks")); }
+    if shells > 0 { parts.push(format!("{} active {}", shells, if shells == 1 { "shell" } else { "shells" })); }
+    if monitors > 0 { parts.push(plural(monitors, "monitor", "monitors")); }
+    if jobs > 0 { parts.push(format!("{} active {}", jobs, if jobs == 1 { "task" } else { "tasks" })); }
     let subtitle = if parts.is_empty() { "No active tasks".to_owned() } else { parts.join(", ") };
     let titles: Vec<String> = tasks.iter().map(Task::title).collect();
     let width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
@@ -543,19 +574,20 @@ fn task_rows(tasks: &[Task]) -> (String, Vec<crate::terminal::picker::Entry>) {
 impl Task {
     fn started_ms(&self) -> u64 {
         match self {
-            Task::Shell(shell) => shell["metadata"]["started_ms"].as_u64().unwrap_or(0),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["metadata"]["started_ms"].as_u64().unwrap_or(0),
             Task::Job(job) => job.started_ms,
         }
     }
     fn status(&self) -> &str {
         match self {
-            Task::Shell(shell) => shell["status"].as_str().unwrap_or("unknown"),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["status"].as_str().unwrap_or("unknown"),
             Task::Job(job) => &job.status,
         }
     }
     fn title(&self) -> String {
         match self {
             Task::Shell(shell) => safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or("Background shell")),
+            Task::Monitor(monitor) => safe_output(monitor["subject"].as_str().unwrap_or("Monitor")),
             Task::Job(job) => safe_output(&job.title),
         }
     }
@@ -571,6 +603,17 @@ fn task_rows_align_one_row_per_task_and_count_what_is_active() {
     assert_eq!(rows[2].title, "\u{25cf} ls                  completed");
     assert!(rows.iter().all(|row| row.detail.is_empty()));
     assert_eq!(task_rows(&[shell("ls", "completed")]).0, "No active tasks");
+}
+
+#[cfg(test)]
+#[test]
+fn task_rows_include_monitors() {
+    let shell = Task::Shell(serde_json::json!({"id":"shell-1","subject":"sleep 30","status":"running","metadata":{"managed_shell":true,"command":"sleep 30","started_ms":1}}));
+    let monitor = Task::Monitor(serde_json::json!({"id":"monitor-1","subject":"watch the log","status":"running","metadata":{"monitor":true,"command":"tail -f x","started_ms":2}}));
+    let (subtitle, rows) = task_rows(&[shell, monitor]);
+    assert_eq!(subtitle, "1 active shell, 1 monitor");
+    let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+    assert!(titles.iter().any(|title| title.contains("watch the log") && title.contains("running")), "{titles:?}");
 }
 
 /// The session's todo list as (content, status), for ctrl+t.
@@ -796,6 +839,23 @@ pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
 pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
     managed_shell_records(paths, session)
         .map(|shells| shells.iter().filter(|shell| shell["status"] == "running").count())
+        .unwrap_or(0)
+}
+
+/// Monitors of this session, with the status stored in the task record.
+pub(crate) fn monitor_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {
+    let value = deepseek_code_core::tools::tasks::execute_for_session(
+        "TaskList", serde_json::json!({}), &paths.data_dir, session,
+    )?;
+    Ok(value["tasks"].as_array().into_iter().flatten()
+        .filter(|task| task["metadata"]["monitor"] == true)
+        .cloned().collect())
+}
+
+/// Monitors of this session that are still running.
+pub(crate) fn running_monitors(paths: &RuntimePaths, session: &str) -> usize {
+    monitor_records(paths, session)
+        .map(|monitors| monitors.iter().filter(|monitor| monitor["status"] == "running").count())
         .unwrap_or(0)
 }
 
@@ -1108,6 +1168,17 @@ fn shell_notifications(session: &Session) -> Result<Vec<String>> {
     Ok(notices)
 }
 
+/// Monitor events: each is queued for the model as a task notification and
+/// announced once.
+fn monitor_notifications(session: &Session) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
+    for event in deepseek_code_core::tools::monitor::collect_events(&session.paths.data_dir, &session.id)? {
+        deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &event.notification())?;
+        notices.push(format!("\u{25cf} {}", event.summary()));
+    }
+    Ok(notices)
+}
+
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
@@ -1163,11 +1234,13 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     static WORKER_WARNING: AtomicBool = AtomicBool::new(false);
     static SHELL_WARNING: AtomicBool = AtomicBool::new(false);
     static MESSAGE_WARNING: AtomicBool = AtomicBool::new(false);
+    static MONITOR_WARNING: AtomicBool = AtomicBool::new(false);
     let mut notices = Vec::new();
     for (source, warning, result) in [
         ("messages", &MESSAGE_WARNING, deepseek_code_core::services::session_messages::notices(&deepseek_code_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(deepseek_code_core::services::EnvironmentCredentials) },&session.id)),
         ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).and_then(|reports| reports.into_iter().map(|report| agent_notice(session, report)).collect())),
         ("shells", &SHELL_WARNING, shell_notifications(session)),
+        ("monitors", &MONITOR_WARNING, monitor_notifications(session)),
     ] {
         match result {
             Ok(mut messages) => notices.append(&mut messages),
@@ -1326,6 +1399,134 @@ mod worker_config_tests {
         assert!(collect_completed(&session).is_ok());
         session.close().await.unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn monitor_events_are_queued_once_and_announced() {
+        use clap::Parser;
+        use deepseek_code_core::{
+            services::input_queue,
+            tools::{background_shell::scope, monitor},
+        };
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"anthropic","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::parse_from(["dcl"]);
+        let session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let script = "echo first-event; sleep 0.3";
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script);
+        let owned = (paths.data_dir.clone(), session.id.clone());
+        let task = scope(Some(owned), async move {
+            monitor::start(command, "probe", script, monitor::DEFAULT_TIMEOUT, None).unwrap()
+        })
+        .await;
+        assert_eq!(task["status"], "running", "{task}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut lines = Vec::new();
+        loop {
+            lines.extend(collect_completed(&session).unwrap());
+            if lines.iter().any(|line| line.contains("exited")) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "monitor notices did not arrive: {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Monitor event") && line.contains("first-event")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("exited")), "{lines:?}");
+        assert!(input_queue::any(&session.store.db, &session.id, is_notification).unwrap());
+        let more = collect_completed(&session).unwrap();
+        assert!(
+            !more.iter().any(|line| line.contains("Monitor event")),
+            "{more:?}"
+        );
+        session.close().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_session_wakes_for_a_monitor_event() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use clap::Parser;
+        use deepseek_code_core::tools::{background_shell::scope, monitor};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let app = Router::new().route("/v1/chat/completions", post(
+            |State(requests): State<Arc<Mutex<Vec<serde_json::Value>>>>, Json(body): Json<serde_json::Value>| async move {
+                requests.lock().unwrap().push(body);
+                ([("content-type", "text/event-stream")], "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"continued\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+            },
+        )).with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(
+            paths.data_dir.join("settings.json"),
+            r#"{"disableAllHooks":true}"#,
+        )
+        .unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_tools":true,"supports_web_search":false}]})).unwrap()],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::parse_from(["dcl", "--print", "--permission-mode", "dont-ask"]);
+        let mut session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let script = "echo first-event; sleep 0.3";
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script);
+        let owned = (paths.data_dir.clone(), session.id.clone());
+        scope(Some(owned), async move {
+            monitor::start(command, "probe", script, monitor::DEFAULT_TIMEOUT, None).unwrap()
+        })
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = collect_completed(&session).unwrap();
+            if lines.iter().any(|line| line.contains("first-event")) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the monitor event was not queued: {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0]["messages"].to_string().contains("first-event"),
+                "{}",
+                requests[0]
+            );
+        }
+        session.close().await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn explicit_effort_and_launch_rules_survive_worker_argument_roundtrip() {
         use clap::Parser;
