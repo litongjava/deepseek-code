@@ -105,6 +105,8 @@ enum Mode {
     ReadThenTruncated,
     ReadThenText,
     SlowText,
+    /// The first response streams its first frame, then waits for the test.
+    HeldText,
     SlowTool,
     Tool,
     SchemaGood,
@@ -169,6 +171,16 @@ struct Fixture {
     anthropic: bool,
     mode: Mode,
     requests: Arc<Mutex<Vec<Value>>>,
+    /// Releases `Mode::HeldText`'s completion frames; bounded in the handler.
+    release: Arc<tokio::sync::Notify>,
+}
+
+/// Releases a held response even when the test returns early or panics.
+struct ReleaseHeld(Arc<tokio::sync::Notify>);
+impl Drop for ReleaseHeld {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Response {
@@ -217,7 +229,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
             state.mode,
             Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval | Mode::Question
         ) && count % 2 == 1;
-    let stream = if state.anthropic {
+    let chunks: Vec<String> = if state.anthropic {
         let mut frames = vec![
             json!({"type":"message_start","message":{"id":"fixture","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":10,"output_tokens":0}}}),
         ];
@@ -302,7 +314,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     frame["type"].as_str().unwrap()
                 )
             })
-            .collect::<String>()
+            .collect()
     } else {
         let delta = if tool {
             if matches!(state.mode, Mode::RuntimeAgent) {
@@ -377,20 +389,50 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         } else {
             vec![delta]
         };
-        let mut stream = String::new();
+        let mut chunks = Vec::new();
         for delta in &deltas {
-            stream.push_str(&format!(
+            chunks.push(format!(
                 "data: {}\n\n",
                 json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]})
             ));
         }
-        stream.push_str(&format!(
+        chunks.push(format!(
             "data: {}\n\ndata: [DONE]\n\n",
             json!({"choices":[{"index":0,"delta":{},"finish_reason":if truncated {"length"} else if tool {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":4}})
         ));
-        stream
+        chunks
     };
-    ([("content-type", "text/event-stream")], stream).into_response()
+    if matches!(state.mode, Mode::HeldText) && count == 1 {
+        // One live turn is held across the control exchange: the protocol's
+        // first frame is streamed, the completion frames wait for the test.
+        use futures::StreamExt;
+        let mut chunks = chunks.into_iter();
+        let first = chunks.next().unwrap_or_default();
+        let rest = chunks.collect::<String>();
+        let release = state.release.clone();
+        let stream = futures::stream::once(async move {
+            Ok::<_, std::io::Error>(first)
+        })
+        .chain(futures::stream::once(async move {
+            // A fixture that was never released must fail loudly instead of
+            // falling back to the old completion timing.
+            tokio::time::timeout(Duration::from_secs(30), release.notified())
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "held response gate was not released within 30s",
+                    )
+                })?;
+            Ok::<_, std::io::Error>(rest)
+        }));
+        return (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(stream),
+        )
+            .into_response();
+    }
+    ([("content-type", "text/event-stream")], chunks.concat()).into_response()
 }
 
 struct Server {
@@ -409,6 +451,7 @@ impl Server {
             anthropic,
             mode,
             requests: Arc::new(Mutex::new(Vec::new())),
+            release: Arc::new(tokio::sync::Notify::new()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());

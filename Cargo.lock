@@ -1661,6 +1661,7 @@ dependencies = [
  "crossterm",
  "deepseek-code-core",
  "dirs 5.0.1",
+ "futures",
  "png 0.18.1",
  "portable-pty",
  "pulldown-cmark",
