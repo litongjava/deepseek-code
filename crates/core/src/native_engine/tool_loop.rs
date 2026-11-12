@@ -245,6 +245,8 @@ pub struct ToolLoopExecutor {
     bundled_resources: Arc<crate::skills::bundled_resources::Resources>,
     search_config_path: Option<std::path::PathBuf>,
     allowed_tools: Option<Vec<String>>,
+    /// The bound agent may run only read-only Bash commands, never background ones.
+    read_only_shell: bool,
     learning_tools: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     delegation_depth: usize,
     owned_children: delegation::OwnedChildren,
@@ -375,6 +377,38 @@ fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
         }
     }
     batches
+}
+
+/// The Agent tool's "Available agent types (subagent_type)" block: one line per
+/// built-in or custom definition plus `fork`, sorted by id. The first line of a
+/// description is used, cut at 160 characters; nothing time-dependent enters the
+/// text, so an unchanged set of definitions produces the same request bytes.
+fn agent_type_listing(
+    definitions: &[crate::services::agents::Definition],
+) -> String {
+    fn one_line(description: &str) -> String {
+        let first = description.lines().next().unwrap_or_default().trim();
+        if first.chars().count() <= 160 {
+            return first.to_owned();
+        }
+        let mut cut: String = first.chars().take(160).collect();
+        cut.push('…');
+        cut
+    }
+    let mut lines: std::collections::BTreeMap<String, String> = definitions
+        .iter()
+        .map(|definition| (definition.id.clone(), one_line(&definition.description)))
+        .collect();
+    // "fork" is accepted by name without a stored definition.
+    lines.insert(
+        "fork".into(),
+        "Forks this session; the fork keeps the full history.".into(),
+    );
+    let mut listing = String::from("\n\nAvailable agent types (subagent_type):");
+    for (id, description) in lines {
+        listing.push_str(&format!("\n- {id}: {description}"));
+    }
+    listing
 }
 
 /// Like the reference CLI's DEEPSEEK_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
@@ -933,6 +967,7 @@ impl ToolLoopExecutor {
             bundled_resources: Arc::default(),
             search_config_path: None,
             allowed_tools: None,
+            read_only_shell: false,
             learning_tools: None,
             delegation_depth: 0,
             owned_children: Default::default(),
@@ -2166,6 +2201,11 @@ impl ToolLoopExecutor {
         self
     }
 
+    pub fn with_read_only_shell(mut self, read_only_shell: bool) -> Self {
+        self.read_only_shell = read_only_shell;
+        self
+    }
+
     pub(crate) fn with_runtime_agents(mut self, agents: super::runtime_agents::Catalog) -> Self {
         self.runtime_agents = agents;
         self
@@ -2195,6 +2235,14 @@ impl ToolLoopExecutor {
         }
         if self.search_config_path.is_some() && self.delegation_depth < 2 {
             let mut definitions = delegation::definitions();
+            // The model cannot choose a type it was never told exists. The
+            // block depends only on the saved definitions, so repeated
+            // requests carry the same text and keep the prompt cache valid.
+            if let Some(listing) = self.agent_type_listing() {
+                for definition in &mut definitions {
+                    definition.description.push_str(&listing);
+                }
+            }
             if !self.runtime_agents.is_empty() {
                 let catalog = self
                     .runtime_agents
@@ -2216,6 +2264,21 @@ impl ToolLoopExecutor {
             tools.push(script_workflow::definition());
         }
         adapt_tools(tools, self.prompt_profile)
+    }
+
+    /// The "Available agent types" block for the Agent tool, or None when the
+    /// saved definitions cannot be read so the description stays as it is.
+    fn agent_type_listing(&self) -> Option<String> {
+        let root = self.search_config_path.as_deref()?.parent()?;
+        match crate::services::session_messages::context(root)
+            .and_then(|context| crate::services::agents::list(&context))
+        {
+            Ok(definitions) => Some(agent_type_listing(&definitions)),
+            Err(error) => {
+                tracing::warn!(%error, "Could not list agent types for the Agent tool description");
+                None
+            }
+        }
     }
 
     fn builtin_names(&self) -> &std::collections::HashSet<String> {
@@ -3098,6 +3161,18 @@ impl ToolLoopExecutor {
                 "Tool is not allowed by this agent definition".into(),
                 true,
             ));
+        }
+        if self.read_only_shell && tool_name == "Bash" {
+            let command = tool_input["command"].as_str().unwrap_or_default();
+            let wants_background =
+                tool_input["run_in_background"] == true || tool_input["detach"] == true;
+            if wants_background || !crate::permissions::shell_read_only::is_read_only(command) {
+                return CallStep::Finished((
+                    tool_input.clone(),
+                    "This agent can run read-only shell commands only (for example git log, git blame, ls, find, cat); this command was refused.".into(),
+                    true,
+                ));
+            }
         }
         if self.is_plan_document_tool(tool_name, tool_input)
             || (self

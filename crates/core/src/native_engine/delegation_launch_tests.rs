@@ -39,3 +39,17 @@ fn delegated_child_pins_its_provider_and_does_not_forward_auto_route() {
     // provider this delegation resolved for the request.
     assert!(!names.contains(&crate::services::background_sessions::WORKER_AUTO_ROUTE_ENV));
 }
+
+#[test]
+fn background_child_launch_does_not_repeat_the_agent_role() {
+    // A background child starts with `--resume <child> --print`, and the engine
+    // appends the bound definition as its Agent role when it opens that
+    // session. Passing the prompt again as `--append-system-prompt` would send
+    // it twice, so the launch must not carry that flag. The launch itself needs
+    // a matching `dcl` binary, so this guards the argument assembly in source.
+    let source = include_str!("delegation.rs");
+    assert!(
+        !source.contains("--append-system-prompt"),
+        "the bound definition already reaches the resumed child as its Agent role"
+    );
+}

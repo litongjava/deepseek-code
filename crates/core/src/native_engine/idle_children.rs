@@ -146,7 +146,9 @@ impl QueryEngine {
                     None,
                 )
             })??;
-            let tools = agents::for_session(&self.db_manager, owner)?.and_then(|agent| agent.tools);
+            let agent = agents::for_session(&self.db_manager, owner)?;
+            let tools = agent.as_ref().and_then(|agent| agent.tools.clone());
+            let read_only_shell = agent.as_ref().is_some_and(|agent| agent.read_only_shell);
             let directories = project
                 .map(|project| {
                     project
@@ -163,6 +165,7 @@ impl QueryEngine {
                 events,
             )?
             .with_allowed_tools(tools)
+            .with_read_only_shell(read_only_shell)
             .with_allowed_directories(directories)
             .with_permission_manager(self.permission_manager.clone())
             .with_answer_waiters(self.answer_waiters.clone())

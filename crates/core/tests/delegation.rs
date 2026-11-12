@@ -121,6 +121,7 @@ async fn run_case(cancel: bool, team: bool) {
                     "Read".into(),
                 ]
             }),
+            read_only_shell: false,
             legacy: None,
         },
     )

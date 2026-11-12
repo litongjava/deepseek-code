@@ -966,14 +966,9 @@ impl ToolLoopExecutor {
             "--output-format".into(),
             "stream-json".into(),
         ]);
-        if let Some(definition) = &definition {
-            if !definition.system_prompt.trim().is_empty() {
-                arguments.extend([
-                    "--append-system-prompt".into(),
-                    definition.system_prompt.clone(),
-                ]);
-            }
-        }
+        // The child is started with --resume, so the engine applies the bound
+        // definition as its Agent role; repeating the prompt here would send it
+        // twice.
         if let Some(model) = input["model"]
             .as_str()
             .filter(|model| !model.trim().is_empty())
@@ -1295,6 +1290,7 @@ impl ToolLoopExecutor {
                         "This session retains the tool restrictions of its original SDK child task."
                             .into(),
                     tools: definition.tools.clone(),
+                    read_only_shell: definition.read_only_shell,
                     legacy: None,
                 },
             )?;
@@ -1340,6 +1336,7 @@ impl ToolLoopExecutor {
             .max_tokens
             .min(provider.model.max_tokens.unwrap_or(self.max_tokens));
         let model = provider.model.id.clone();
+        let read_only_shell = definition.read_only_shell;
         let mut child = ToolLoopExecutor::new(
             provider,
             vec![json!({"role":"user","content":prompt})],
@@ -1351,6 +1348,7 @@ impl ToolLoopExecutor {
         )
         .with_runtime_agents(self.runtime_agents.clone())
         .with_allowed_tools(definition.tools)
+        .with_read_only_shell(read_only_shell)
         .with_prompt_profile(self.prompt_profile)
         .with_context_reminders(self.context_reminders.clone())
         .with_conv_id(id.clone())
