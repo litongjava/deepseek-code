@@ -9,6 +9,9 @@ use std::{
 };
 use tokio::process::Command;
 
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
+
 #[derive(Clone, Default)]
 struct Fixture {
     requests: Arc<Mutex<Vec<Value>>>,
@@ -299,6 +302,7 @@ async fn cli_task_get_pages_a_background_shell_to_its_exit_status() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
+    tool_loading::enable(&data, &["TaskGet"]);
     let fixture = Fixture::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

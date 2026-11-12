@@ -28,15 +28,16 @@ pub(crate) const MAX_WRITE_MS: u64 = 60_000;
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
         name: "TaskInput".into(),
-        description: "Write UTF-8 data to the stdin of an interactive background shell started with Bash `interaction:\"pipe\"`. data is written first, then eof:true closes stdin. Each call waits at most timeout milliseconds for pipe capacity (default 10000, maximum 60000) and reports bytes_written as the bytes the operating system accepted, which is not a claim that the process consumed them; a timed-out write returns partial progress and is never retried for you. Repeated eof is harmless, and writing after EOF or to a task that is not running fails without changing the task. This is a mutating operation: it needs the owning session, normal approval and hooks, and it is refused in plan mode. Read output with TaskGet and stop the process with TaskStop.".into(),
+        description: "Write UTF-8 data to a managed Bash pipe or Linux PTY in the owning session. data is written before eof. For pipe, eof permanently closes stdin; for PTY, eof sends the terminal's current canonical VEOF character, which is not a permanent close and may only deliver buffered input. Raw mode/disabled VEOF rejects EOF. PTY resize:{rows,cols} must be a separate call, without data/eof. Validate all arguments before effects. timeout bounds one call (default 10000, max 60000 ms); bytes_written counts OS-accepted bytes, not consumption. Partial/unknown writes are never retried automatically. Normal permissions, hooks and cancellation apply; plan mode refuses input. Use TaskGet for merged PTY output and TaskStop to terminate the session.".into(),
         input_schema: json!({
             "type":"object",
             "properties":{
-                "task_id":{"type":"string","description":"Task ID of the interactive pipe shell."},
+                "task_id":{"type":"string","description":"Task ID of the interactive pipe or PTY shell."},
                 "taskId":{"type":"string","description":"Alias for task_id."},
                 "id":{"type":"string","description":"Alias for task_id."},
                 "data":{"type":"string","description":format!("UTF-8 text to write. At most {MAX_INPUT_BYTES} bytes per call.")},
-                "eof":{"type":"boolean","default":false,"description":"Close stdin after writing data (or immediately when data is omitted)."},
+                "eof":{"type":"boolean","default":false,"description":"Pipe: close stdin. PTY: send canonical VEOF after data; not a permanent close."},
+                "resize":{"type":"object","description":"PTY only; separate from data/eof.","properties":{"rows":{"type":"integer","minimum":1,"maximum":500},"cols":{"type":"integer","minimum":1,"maximum":1000}},"required":["rows","cols"],"additionalProperties":false},
                 "timeout":{"type":"integer","minimum":1,"maximum":60000,"default":10000,"description":"Wait limit in milliseconds for the task lock and pipe capacity."},
             },
             "required":[],
@@ -70,6 +71,41 @@ pub(crate) fn execute_cancellable(
         .filter(|id| !id.trim().is_empty())
         .context("task_id is required")?
         .to_owned();
+    let object = input.as_object().context("TaskInput must be an object")?;
+    for key in object.keys() {
+        ensure!(
+            matches!(
+                key.as_str(),
+                "task_id" | "taskId" | "id" | "data" | "eof" | "resize" | "timeout"
+            ),
+            "Unknown TaskInput parameter: {key}"
+        );
+    }
+    let resize = input.get("resize");
+    if let Some(resize) = resize {
+        ensure!(
+            input.get("data").is_none() && input.get("eof").is_none(),
+            "TaskInput resize must be separate from data/eof"
+        );
+        let dimensions = resize
+            .as_object()
+            .context("TaskInput resize must be an object")?;
+        ensure!(
+            dimensions.len() == 2
+                && dimensions.contains_key("rows")
+                && dimensions.contains_key("cols"),
+            "TaskInput resize requires only rows and cols"
+        );
+        ensure!(
+            resize["rows"]
+                .as_u64()
+                .is_some_and(|n| (1..=500).contains(&n))
+                && resize["cols"]
+                    .as_u64()
+                    .is_some_and(|n| (1..=1000).contains(&n)),
+            "TaskInput resize rows must be 1..=500 and cols 1..=1000"
+        );
+    }
     let data = match input.get("data") {
         None | Some(Value::Null) => None,
         Some(Value::String(text)) => Some(text.clone()),
@@ -81,8 +117,8 @@ pub(crate) fn execute_cancellable(
         Some(_) => bail!("TaskInput eof must be a boolean"),
     };
     ensure!(
-        data.is_some() || eof,
-        "TaskInput needs data and/or eof: true"
+        data.is_some() || eof || resize.is_some(),
+        "TaskInput needs data and/or eof: true, or a separate resize"
     );
     if let Some(data) = &data {
         ensure!(
@@ -110,8 +146,15 @@ pub(crate) fn execute_cancellable(
     let task = super::tasks::read_for_session(&task_id, root, session)?;
     ensure!(
         task["metadata"]["managed_shell"] == true,
-        "Task {task_id} is not a managed shell task; TaskInput only writes to one started with Bash interaction:\"pipe\""
+        "Task {task_id} is not a managed shell task; TaskInput only writes to one started with Bash interaction:\"pipe\" or \"pty\""
     );
+    if task["metadata"]["interaction"] == "pty" {
+        #[cfg(target_os = "linux")]
+        return super::pty_owner::execute(input, root, session, cancelled);
+        #[cfg(not(target_os = "linux"))]
+        bail!("PTY TaskInput is supported only on Linux; Windows/ConPTY and macOS are not implemented");
+    }
+    ensure!(resize.is_none(), "TaskInput resize requires a PTY task");
     ensure!(
         task["metadata"]["interaction"].as_str() == Some("pipe"),
         "Task {task_id} has no stdin pipe; start it with Bash interaction:\"pipe\" and run_in_background:true"
@@ -542,6 +585,28 @@ fn write_stdin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_and_unknown_parameters_fail_before_any_channel_access() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        for input in [
+            json!({"task_id":"missing","data":"do not write","resize":{"rows":24,"cols":80}}),
+            json!({"task_id":"missing","resize":{"rows":0,"cols":80}}),
+            json!({"task_id":"missing","resize":{"rows":24,"cols":1001}}),
+            json!({"task_id":"missing","resize":{"rows":24,"cols":80,"extra":true}}),
+            json!({"task_id":"missing","resize":{"rows":24,"cols":80},"timeout":0}),
+            json!({"task_id":"missing","data":"do not write","metadata":{"interaction":"pty"}}),
+            json!({"task_id":"missing","data":"do not write","stop":true}),
+        ] {
+            let error = execute(&input, root.path(), &session).unwrap_err();
+            assert!(
+                !error.to_string().contains("Task not found"),
+                "{input}: {error}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     /// A lease that exists but is not held proves the owner is gone, so a call
     /// that reaches the write path after the lock must not write anything.

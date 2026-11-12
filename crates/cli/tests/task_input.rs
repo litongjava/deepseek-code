@@ -134,7 +134,7 @@ async fn respond(
         tool_call_frame(
             "call-search",
             "ToolSearch",
-            &json!({"query":"select:TaskInput"}),
+            &json!({"query":"select:TaskInput,TaskGet"}),
         )
     } else if !has_bash {
         tool_call_frame(
@@ -699,7 +699,7 @@ async fn records_respond(
         tool_call_frame(
             "records-search",
             "ToolSearch",
-            &json!({"query":"select:TaskInput"}),
+            &json!({"query":"select:TaskInput,TaskGet"}),
         )
     } else if !has_bash {
         tool_call_frame(
@@ -967,7 +967,7 @@ async fn deny_respond(
         tool_call_frame(
             "deny-search",
             "ToolSearch",
-            &json!({"query":"select:TaskInput"}),
+            &json!({"query":"select:TaskInput,TaskGet"}),
         )
     } else if !has_bash {
         tool_call_frame(

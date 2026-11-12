@@ -625,3 +625,16 @@ env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
 - 只读快照读取沿用该连接原有的 `busy_timeout`（池默认值），250ms 只是有排队消息时“获取写事务”的单次上限，不是一次轮询或整个回合的总时限；模型请求、工具执行和其他写路径不受影响。
 - 仅对 `SQLITE_BUSY`/`SQLITE_LOCKED` 的类型化错误回滚并推迟到下一个边界；所有权、信任、归档和写入错误仍作为错误返回。没有递归重试，也没有全局修改数据库超时。
 - 本轮只证明并修复了收件箱轮询这一条可复现的致命竞争路径。历史长回合退出（Super R27/R01/R28）和独立数据目录下的启动期失败仍未归因；启动期数据库打开/初始化也未加同样的操作名诊断，不能用本场景的通过结果替代。
+
+### Linux PTY 模型入口（Codex P3）
+
+`cargo test --locked -p deepseek-code-cli --test pty_worker -- --nocapture` 使用本地 OpenAI mock、真实 CLI 持久 worker 与隔离会话库：模型通过 ToolSearch/Bash/TaskInput/TaskGet/TaskStop 运行完整链路，日志输出 `PTY_WORKER`、`PTY_ID`、`PTY_CLEANUP`、`PTY_DB_CALLS`、`PTY_TERMINAL` 作为本次精确身份和清理证据。核心回归保留 `tools::pty_owner::tests` 当前 HEAD 的 38 个独立用例（旧任务草稿写 39；backlog 子进程复跑不重复计数）、`owner_loss` 过滤器实际匹配的 4 项、`tools::pty_supervisor::tests` 3 项；另覆盖 `tools::pty_bash`、`tools::shell_input`、`tools::tasks` 与 `permissions::manager::session_rule_tests`。普通管道运行 `task_input`、`task_input_worker`、`task_input_owner_death`，TaskGet 回归运行 `taskget_backends`、`taskget_background`。按本文必跑命令完成 core/CLI 全套及 Desktop all-targets 编译。
+
+- Linux Bash `interaction:"pty"` 必须同时 `run_in_background:true`；初始 `rows` 1..500（默认 24）、`cols` 1..1000（默认 80）。使用普通 Bash 构造完成的 program/argv/environment/cwd，保留 shell 配置、session environment、权限、hooks、path scope。当前配置了 sandbox、显式 Bash 进程 timeout 或 Monitor 时明确拒绝；不回退到无 sandbox。TaskGet 的等待 timeout 不终止进程。
+- OwnerGuard 由运行时持有到真实退出；活跃计数沿用 worker 生命周期。真实 tty 检查覆盖 stdin/stdout/stderr、`/dev/tty`、初始 `stty size`，模型 resize 后必须读到 `40 120`，下一 resume turn 继续输入。活跃时拒绝 worker shutdown；TaskStop 后确认任务 cancelled、清理完成和 PID/start tick 对应的进程退出，再关闭 worker。
+- TaskInput 先完整校验参数，再按所属会话中 owner 写入的 task kind 分派。模型不能通过 TaskUpdate 更改 managed task 的 interaction/log_dir，也不能伪造 managed_shell。resize 必须单独调用；与 data/eof 混用、未知字段、非法尺寸/timeout 都在任何写入前拒绝。
+- PTY eof 发送当前 canonical VEOF；它不是永久关闭 stdin，有缓冲输入时可能仅交付缓冲。真实用例在 read 返回 EOF 后继续 read，下一次模型输入仍成功。非 canonical 或禁用 VEOF 的能力错误、部分写入/取消不重放由既有 owner/transport 套件验证。正常 exit 0、非零退出与 TaskStop 分别检查 completed、failed、cancelled，不手工改 task 状态。
+- 模型入口验证 plan 拒绝 PTY 启动和 TaskInput、PreToolUse deny 拒绝输入、显式 Bash deny 与 sandbox 拒绝启动；marker 不变。外 session 输入拒绝。TaskGet 分页拼接与完整输出完全相等；SQLite 各调用 occurrence ID 独立，成功输入的 hooks ID 与持久行对应。
+- 初始化目录失败不留下 running task 或 child；执行 gate 已启动但目标 exec 失败时，TaskGet 必须给出 failed 与真实清理结果。失败日志保留，不把 Bash 返回 running 当成目标程序已成功 exec。
+
+范围：仅 Linux 接线。Windows/ConPTY、macOS 明确未实现；不以 Linux 编译或内部 owner 测试代替这些平台、Desktop 运行、远程模型或完整长输出压力验收。

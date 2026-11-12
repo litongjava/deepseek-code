@@ -881,6 +881,14 @@ impl PermissionManager {
         // Plan mode permits shell commands except those rejected by the shared
         // danger filter. Explicit ask/deny settings still take precedence.
         let shell = matches!(context.tool_name.as_str(), "Bash" | "PowerShell");
+        if mode == PermissionMode::PlanMode && shell && context.tool_input["interaction"] == "pty" {
+            return decision(
+                PermissionResult::Denied(
+                    "Plan mode: starting an interactive PTY is not allowed".into(),
+                ),
+                PlanBoundary,
+            );
+        }
         if mode == PermissionMode::PlanMode && shell && !plan_document {
             let command = context.tool_input["command"].as_str().unwrap_or_default();
             if crate::tools::is_dangerous_command(command) {
@@ -1293,6 +1301,33 @@ mod session_rule_tests {
             PermissionResult::Denied(_)
         ));
         manager.set_mode(PermissionMode::AskPermissions);
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
+    }
+
+    #[test]
+    fn plan_refuses_pty_launch_even_with_an_explicit_allow() {
+        let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
+        manager.set_mode(PermissionMode::PlanMode);
+        manager.set_session_rules(
+            "one",
+            HashMap::from([("Bash".into(), PermissionAction::Allow)]),
+        );
+        let mut context = PermissionContext {
+            mcp_read_only: false,
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command":"cat", "interaction":"pty", "run_in_background":true}),
+            conversation_id: "one".into(),
+            user_id: None,
+            workspace_path: None,
+        };
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::Denied(_)
+        ));
+        context.tool_input = serde_json::json!({"command":"pwd"});
         assert_eq!(
             manager.check_permission(&context),
             PermissionResult::Granted

@@ -719,6 +719,12 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
             }
             if !shell_owner && task["metadata"]["managed_shell"] == true {
                 ensure!(
+                    ["interaction", "log_dir"]
+                        .iter()
+                        .all(|key| input.get("metadata").and_then(|m| m.get(key)).is_none()),
+                    "Managed shell interaction/log_dir are owned by the running process"
+                );
+                ensure!(
                     input.get("status").is_none() && input.get("output").is_none(),
                     "Managed shell status/output/deletion are owned by the running process; use TaskStop to cancel"
                 );
@@ -1038,6 +1044,43 @@ mod tests {
             .is_err());
         }
     }
+    #[test]
+    fn managed_channel_kind_and_directory_cannot_be_forged() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let task = execute_for_shell_owner(
+            "TaskCreate",
+            json!({"subject":"owned", "metadata":{"managed_shell":true,"interaction":"pty"}}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        for metadata in [
+            json!({"interaction":"pipe"}),
+            json!({"interaction":null}),
+            json!({"log_dir":format!("fg-{}",uuid::Uuid::new_v4())}),
+        ] {
+            let error = execute_for_session(
+                "TaskUpdate",
+                json!({"id":task["id"],"metadata":metadata}),
+                root.path(),
+                &session,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("owned by"), "{error}");
+        }
+        let current =
+            read_for_session(task["id"].as_str().unwrap(), root.path(), &session).unwrap();
+        assert_eq!(current["metadata"], task["metadata"]);
+        assert!(execute_for_session(
+            "TaskCreate",
+            json!({"metadata":{"managed_shell":true,"interaction":"pty"}}),
+            root.path(),
+            &session
+        )
+        .is_err());
+    }
+
     #[test]
     fn task_output_is_not_advertised_and_task_get_carries_wait_parameters() {
         let definitions = definitions();

@@ -1,10 +1,8 @@
 //! Managed Linux PTY owner: durable task record, private cross-process control
 //! channel and merged durable output.
 //!
-//! This is an internal increment. It does not register an `interaction` value,
-//! is not reachable from `Bash` or `TaskInput`, and adds no tool name. The
-//! transport is [`super::pty_transport`]; this module supplies the owner around
-//! it.
+//! Bash and TaskInput reach this owner after their normal authorization. The
+//! transport is [`super::pty_transport`]; this module supplies the owner around it.
 //!
 //! # Ownership model
 //!
@@ -77,9 +75,8 @@ use super::pty_transport::{self, PtyTransport, SpawnSpec, WriteRequest};
 use super::{pty_gate, pty_supervisor};
 use pty_supervisor::SupervisorHandle;
 
-/// The `metadata.interaction` value internal PTY tasks carry. It is deliberately
-/// not `pipe`, so the existing `TaskInput` path refuses these tasks.
-pub(crate) const INTERACTION: &str = "pty_internal";
+/// Reserved owner-written task kind used by TaskInput dispatch.
+pub(crate) const INTERACTION: &str = "pty";
 
 /// Request state cell values. The ordering matters: only `QUEUED` can move to
 /// `CANCELLED_BEFORE_EXECUTION`, and only the owner can move `QUEUED` to
@@ -137,8 +134,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 ///
 /// The child runs on a real controlling terminal; its combined output is
 /// appended to `<task dir>/stdout.log` by the owner thread. Callers must already
-/// have decided the launch is authorized: this starts a process and must not be
-/// reachable from model input. Dropping or joining the returned [`OwnerGuard`]
+/// have decided the launch is authorized through the normal Bash pipeline. Dropping or joining the returned [`OwnerGuard`]
 /// is what ends the owner normally.
 pub(crate) fn start(
     spec: SpawnSpec,
@@ -458,7 +454,7 @@ pub(crate) fn start(
         "stderr_file": directory.join("stderr.log"),
         "terminal_pid": terminal_pid,
         "endpoint": endpoint.socket,
-        "message": "Internal managed PTY task started. It is not exposed as a tool interaction yet."
+        "message": "Managed PTY started. Use TaskInput for data, canonical VEOF or resize; TaskGet reads merged output and TaskStop stops the terminal session."
     });
     Ok((value, guard))
 }
@@ -539,6 +535,10 @@ pub(crate) struct OwnerGuard {
 }
 
 impl OwnerGuard {
+    pub(super) fn is_finished(&self) -> bool {
+        self.join.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
     pub(crate) fn task_id(&self) -> &str {
         &self.id
     }
@@ -2149,7 +2149,7 @@ pub(crate) fn execute(
     );
     ensure!(
         task["metadata"]["interaction"].as_str() == Some(INTERACTION),
-        "Task {task_id} is not an internal managed PTY task; this control API is not exposed as a tool interaction"
+        "Task {task_id} is not a managed PTY task"
     );
     let stored = task["status"].as_str().unwrap_or("unknown");
     ensure!(
