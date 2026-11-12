@@ -256,6 +256,8 @@ pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "Task" => "Agent",
         "KillShell" => "TaskStop",
+        // Monitor runs a shell command; Bash rules, filters and approvals apply.
+        "Monitor" => "Bash",
         // TaskOutput is an old dispatch alias for TaskGet; rules and permission
         // checks treat both names as TaskGet.
         "TaskOutput" | "AgentOutputTool" | "BashOutputTool" => "TaskGet",
