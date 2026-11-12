@@ -637,7 +637,9 @@ fn shell_state_input(
     mode: crate::permissions::PermissionMode,
 ) -> Value {
     let mut input = input.clone();
-    if name == "Bash" {
+    // Monitor runs through the same shell path, so it gets the same sandbox
+    // policy and cwd handling.
+    if matches!(name, "Bash" | "Monitor") {
         if let (Some(root), Some(session)) = (
             search_config_path.and_then(std::path::Path::parent),
             conv_id,

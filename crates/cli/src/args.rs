@@ -608,6 +608,8 @@ pub enum McpCommands {
 pub enum SkillsCommands {
     ImportLegacy { source: PathBuf, #[arg(long)] preview: bool },
     List,
+    /// Show or set a skill's state: off, user, name-only or user-only.
+    State { skill: Option<String>, state: Option<String> },
     Search {
         query: String,
     },

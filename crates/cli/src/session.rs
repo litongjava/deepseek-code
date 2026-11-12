@@ -1343,7 +1343,7 @@ impl Session {
         let mut completed = false;
         let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
-        crate::session_commands::save_live_requests(self, &[])?;
+        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tool_started = std::collections::HashMap::<String, std::time::Instant>::new();
@@ -1385,7 +1385,7 @@ impl Session {
                     _ = refresh.tick() => {
                         progress.tick();
                         if background_transcript {
-                            live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                            best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                         }
                         if interactive_display {
                             for notice in crate::background_commands::collect_completed(self)? { progress.notice(&notice); }
@@ -1471,7 +1471,7 @@ impl Session {
                 if background_transcript {
                     live_transcript.observe(&event, &mut tools);
                     if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
-                        live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                        best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                     }
                 }
                 match event {
@@ -1802,7 +1802,7 @@ impl Session {
                         request_usage.observe(&snapshot);
                         goal_requests.observe(&snapshot);
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
-                        crate::session_commands::save_live_requests(self, &snapshots)?;
+                        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &snapshots));
                     },
                     EngineEvent::RequestAttempt(event) => {
                         if let Err(error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &event) {
@@ -1864,7 +1864,7 @@ impl Session {
             }
             if background_transcript {
                 live_transcript.dirty = true;
-                live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
             }
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
@@ -1938,7 +1938,7 @@ impl Session {
                 )
             })??;
         }
-        crate::session_commands::save_live_requests(self, &[])?;
+        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
         if let Some(goal) = turn_goal {
             let (tokens, requests, unreported) = goal_requests.usage();
             deepseek_code_core::services::session_goals::record_turn(
@@ -2185,6 +2185,15 @@ pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> R
         reader.queue_prompt(prompt);
     }
     Ok(())
+}
+
+/// A live copy (request accounting or the streaming transcript) is best effort:
+/// the turn's final `write_tx` persists the authoritative rows with retries, so a
+/// busy or failed live write is logged and skipped instead of ending the turn.
+fn best_effort_live_write(what: &str, result: Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!("Skipped live {what} write: {error:#}");
+    }
 }
 
 /// Uses the turn's existing rows and IDs; only workers publish intermediate snapshots.
@@ -2444,6 +2453,30 @@ mod background_transcript_tests {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'REVISED'"}"#));
             assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn flush_keeps_dirty_when_the_database_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(&EngineEvent::Text("streamed".into()), &mut tools);
+        // Hold the writer like another process mid-checkpoint would.
+        let blocker = rusqlite::Connection::open(temp.path().join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(live.flush(&context.db, &session, &assistant, "streamed", "", &tools).is_err());
+        assert!(live.dirty, "a failed flush must retry on the next tick");
+        blocker.execute_batch("COMMIT").unwrap();
+        live.flush(&context.db, &session, &assistant, "streamed", "", &tools).unwrap();
+        assert!(!live.dirty);
+        context.db.with_conn(|conn| {
+            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
+            assert_eq!(message.content, "streamed");
         }).unwrap();
     }
 }

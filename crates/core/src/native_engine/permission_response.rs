@@ -38,7 +38,8 @@ pub(crate) fn set_owner_tool(id: &str, tool: &str) {
 }
 
 pub fn can_allow_bash_session(tool: &str, input: &Value) -> bool {
-    tool == "Bash" && input["command"].as_str().is_some_and(|command| !command.trim().is_empty() && !crate::tools::is_dangerous_command(command))
+    // A Monitor call is a Bash command and can grant the same session approval.
+    matches!(tool, "Bash" | "Monitor") && input["command"].as_str().is_some_and(|command| !command.trim().is_empty() && !crate::tools::is_dangerous_command(command))
 }
 
 pub fn request_owner(id: &str) -> Option<RequestOwner> {

@@ -205,9 +205,11 @@ mod tests {
         let (_root, paths) = fixture();
         let rows = rows(&paths).unwrap();
         let core: Vec<&Row> = rows.iter().filter(|row| row.core).collect();
-        assert_eq!(core.len(), 13);
+        assert_eq!(core.len(), customization::CORE_TOOLS.len());
         assert!(core.iter().all(|row| row.enabled && row.on_demand));
         let list_dir = rows.iter().find(|row| row.name == "ListDir").unwrap();
         assert!(!list_dir.core && !list_dir.enabled && list_dir.on_demand);
+        let task_get = rows.iter().find(|row| row.name == "TaskGet").unwrap();
+        assert!(!task_get.core && task_get.on_demand);
     }
 }

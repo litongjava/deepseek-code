@@ -5,8 +5,16 @@ use crate::terminal::picker::{Entry, Picker};
 use anyhow::Result;
 use deepseek_code_core::mcp::McpServerStatus;
 
+/// The error the `/mcp` menu shows for a failed server, if any.
+pub(crate) fn failure(server: &McpServerStatus) -> Option<&str> {
+    match (server.enabled, server.error.as_deref()) {
+        (true, Some(error)) => Some(error),
+        _ => None,
+    }
+}
+
 fn state(server: &McpServerStatus) -> String {
-    match (server.enabled, server.running, &server.error) {
+    match (server.enabled, server.running, failure(server)) {
         (false, _, _) => "\u{25cb} disabled".into(),
         (true, _, Some(error)) => format!("\u{2718} failed \u{b7} {}", error.lines().next().unwrap_or_default()),
         (true, true, None) => format!(
@@ -18,9 +26,24 @@ fn state(server: &McpServerStatus) -> String {
     }
 }
 
+/// Turn a server off, as this menu's Disable action does.
+pub(crate) async fn disable(session: &Session, server: &McpServerStatus) -> Result<()> {
+    session.mcp.set_server_enabled(&server.id, false).await?;
+    if server.running {
+        session.mcp.stop_server(&server.id).await?;
+    }
+    Ok(())
+}
+
+/// Turn a server on and start it, as this menu's Enable action does.
+pub(crate) async fn enable(session: &Session, server: &McpServerStatus) -> Result<()> {
+    session.mcp.set_server_enabled(&server.id, true).await?;
+    session.mcp.start_server(&server.id).await
+}
+
 /// A bundled preset nobody has turned on or changed; the reference CLI has
 /// no presets, so these stay out of the list.
-fn untouched_preset(server: &McpServerStatus) -> bool {
+pub(crate) fn untouched_preset(server: &McpServerStatus) -> bool {
     !server.enabled
         && deepseek_code_core::mcp::default_servers()
             .iter()
@@ -106,19 +129,13 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
             Err(error) => eprintln!("Failed to reconnect to {}: {error:#}", server.name),
         },
         "Disable" => {
-            session.mcp.set_server_enabled(&server.id, false).await?;
-            if server.running {
-                session.mcp.stop_server(&server.id).await?;
-            }
+            disable(session, server).await?;
             eprintln!("Disabled {}.", server.name);
         }
-        _ => {
-            session.mcp.set_server_enabled(&server.id, true).await?;
-            match session.mcp.start_server(&server.id).await {
-                Ok(()) => eprintln!("Enabled {}.", server.name),
-                Err(error) => eprintln!("Enabled {}, but it failed to start: {error:#}", server.name),
-            }
-        }
+        _ => match enable(session, server).await {
+            Ok(()) => eprintln!("Enabled {}.", server.name),
+            Err(error) => eprintln!("Enabled {}, but it failed to start: {error:#}", server.name),
+        },
     }
     Ok(())
 }

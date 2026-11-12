@@ -1298,6 +1298,42 @@ mod session_rule_tests {
             PermissionResult::Granted
         );
     }
+
+    #[test]
+    fn monitor_uses_bash_rules() {
+        use crate::permissions::patterns::canonical_tool_name;
+        let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
+        // The engine canonicalizes the name before asking the manager, so this
+        // context is what a Monitor call actually presents.
+        let context = |tool: &str, command: &str| PermissionContext {
+            mcp_read_only: false,
+            tool_name: canonical_tool_name(tool).to_owned(),
+            tool_input: serde_json::json!({"command":command}),
+            conversation_id: "one".into(),
+            user_id: None,
+            workspace_path: None,
+        };
+        manager.set_session_rules(
+            "one",
+            HashMap::from([("Bash(rm:*)".into(), PermissionAction::Deny)]),
+        );
+        assert!(matches!(
+            manager.check_permission(&context("Monitor", "rm -rf x")),
+            PermissionResult::Denied(_)
+        ));
+        assert!(matches!(
+            manager.check_permission(&context("Bash", "rm -rf x")),
+            PermissionResult::Denied(_)
+        ));
+        manager.set_session_rules("one", HashMap::new());
+        manager.set_mode(PermissionMode::AskPermissions);
+        let monitor = manager.check_permission(&context("Monitor", "rm -rf x"));
+        assert!(
+            matches!(monitor, PermissionResult::RequiresConfirmation(_)),
+            "{monitor:?}"
+        );
+        assert_eq!(monitor, manager.check_permission(&context("Bash", "rm -rf x")));
+    }
 }
 
 #[cfg(test)]

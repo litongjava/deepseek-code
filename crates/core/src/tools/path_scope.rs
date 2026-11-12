@@ -140,7 +140,7 @@ pub(crate) async fn approved_auto_call<F: Future>(
             Path::new(cwd).join(path)
         })
     });
-    let command = (tool == "Bash" && approved_command)
+    let command = (matches!(tool, "Bash" | "Monitor") && approved_command)
         .then(|| input["command"].as_str().map(str::to_owned))
         .flatten();
     let fetch = (tool == "WebFetch" && approved_command)

@@ -68,13 +68,23 @@ async fn respond(
     assert_eq!(body["stream"], true);
     let tools = tool_names(&body);
     assert!(
-        tools.contains(&"TaskGet".to_owned()),
-        "TaskGet missing: {tools:?}"
-    );
-    assert!(
         !tools.contains(&"TaskOutput".to_owned()),
         "TaskOutput is still advertised: {tools:?}"
     );
+    // TaskGet is deferred: absent from the default request, loaded by the
+    // ToolSearch call at step 1, and carried from step 2 on.
+    if index == 0 {
+        assert!(
+            !tools.contains(&"TaskGet".to_owned()),
+            "TaskGet must start on demand: {tools:?}"
+        );
+    }
+    if index >= 2 {
+        assert!(
+            tools.contains(&"TaskGet".to_owned()),
+            "TaskGet missing after ToolSearch: {tools:?}"
+        );
+    }
     let frames = match index {
         0 => tool_call_frame(
             "call-bash",
@@ -89,16 +99,29 @@ async fn respond(
             let result = last_tool_result(&body)
                 .unwrap_or_else(|| panic!("Bash result missing in request {body}"));
             *fixture.bash_result.lock().unwrap() = Some(result.clone());
-            let task_id = result["task_id"]
-                .as_str()
-                .unwrap_or_else(|| panic!("Bash task_id missing: {result}"));
+            assert!(
+                result["task_id"].as_str().is_some(),
+                "Bash task_id missing: {result}"
+            );
+            tool_call_frame(
+                "call-search",
+                "ToolSearch",
+                &json!({"query":"select:TaskGet"}),
+            )
+        }
+        2 => {
+            let loaded = last_tool_result(&body)
+                .unwrap_or_else(|| panic!("ToolSearch result missing in request {body}"));
+            assert_eq!(loaded["loaded_tools"], json!(["TaskGet"]), "{loaded}");
+            let started = fixture.bash_result.lock().unwrap().clone().expect("Bash result");
+            let task_id = started["task_id"].as_str().expect("Bash task_id");
             tool_call_frame(
                 "call-taskget",
                 "TaskGet",
                 &json!({"task_id":task_id,"block":true,"timeout":5000}),
             )
         }
-        2 => {
+        3 => {
             let result = last_tool_result(&body)
                 .unwrap_or_else(|| panic!("TaskGet result missing in request {body}"));
             *fixture.taskget_result.lock().unwrap() = Some(result.clone());
@@ -185,7 +208,7 @@ async fn cli_background_bash_then_task_get_returns_output_and_exposes_no_task_ou
         .collect();
     assert_eq!(results.len(), 1, "{events:?}");
     assert_eq!(results[0]["is_error"], false, "{}", results[0]);
-    assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 4);
 
     let started = fixture
         .bash_result

@@ -12,7 +12,7 @@ mod notifications;
 pub use notifications::{
     collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START,
 };
-tokio::task_local! { static CONTEXT: Option<(PathBuf, String)>; }
+tokio::task_local! { pub(super) static CONTEXT: Option<(PathBuf, String)>; }
 
 /// A shell task's log directory: its task ID, or the directory of a
 /// foreground call that was moved to the background.
@@ -576,7 +576,9 @@ pub fn task_status(root: &Path, session: &str, task: &Value) -> Result<String> {
     })
 }
 
-pub(crate) async fn scope<F: Future>(context: Option<(PathBuf, String)>, future: F) -> F::Output {
+/// Runs a task with its owning session; used by the Monitor tool and the CLI
+/// tests.
+pub async fn scope<F: Future>(context: Option<(PathBuf, String)>, future: F) -> F::Output {
     CONTEXT.scope(context, future).await
 }
 
@@ -842,12 +844,12 @@ pub(crate) fn start(
         };
         completion.finish(status, output);
     });
-    let mut result = json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. Use TaskGet with task_id to read its output (block:true waits, block defaults to false) and TaskStop to stop it.")});
+    let mut result = json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolSearch; TaskStop stops it.")});
     if interaction == Interaction::StdinPipe {
         result["interaction"] = json!("pipe");
         result["stdin_available"] = json!(true);
         result["stdin_pipe"] = json!(directory.join("stdin.pipe"));
-        result["message"] = json!(format!("Background command \"{description}\" is running with a writable stdin pipe. Use TaskInput with task_id to write UTF-8 data (eof:true closes stdin), TaskGet to read output, and TaskStop to stop it."));
+        result["message"] = json!(format!("Background command \"{description}\" is running with a writable stdin pipe. You will be notified when it finishes. Use TaskInput with task_id to write UTF-8 data (eof:true closes stdin), TaskGet to read output, and TaskStop to stop it."));
     }
     Ok(result)
 }
@@ -1059,7 +1061,7 @@ pub(super) async fn run_foreground(
         completion.finish(status, output);
     });
     Ok(
-        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Use TaskGet with task_id for its output (block:true waits) and TaskStop to stop it."}),
+        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolSearch; TaskStop stops it."}),
     )
 }
 
@@ -1090,7 +1092,10 @@ pub(super) fn control(
     // Read the record directly: calling back through TaskGet would re-enter
     // this control function and recurse for managed shells.
     let task = super::tasks::read_for_session(id, root, session)?;
-    if task["metadata"]["managed_shell"] != true {
+    // A monitor is a managed background task too, but it ends through its
+    // event stream rather than a shell completion record.
+    let monitor = task["metadata"]["monitor"] == true;
+    if task["metadata"]["managed_shell"] != true && !monitor {
         return Ok(None);
     }
     anyhow::ensure!(policy.is_none_or(|(block, _)| !block), "Blocking TaskGet requires the asynchronous task entry point; synchronous callers must set block:false");
@@ -1103,6 +1108,29 @@ pub(super) fn control(
         return Ok(None);
     }
     let status = json!(task_status(root, &session.to_string(), &task)?);
+    if monitor {
+        if name == "TaskStop" {
+            // The monitor loop checks this file every 50 ms.
+            std::fs::create_dir_all(&directory)?;
+            std::fs::write(directory.join("cancel"), b"cancel")?;
+            return Ok(Some(json!({"task_id":id,"status":status,"cancellation_requested":true,"message":"Monitor stop requested; you will get a final 'stopped' notification."})));
+        }
+        let stdout = read_tail(&directory.join("stdout.log"), 64 * 1024)?;
+        let events = std::fs::File::open(directory.join("events.jsonl"))
+            .ok()
+            .map(|file| {
+                std::io::BufRead::lines(std::io::BufReader::new(file))
+                    .filter(|line| line.is_ok())
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut snapshot = task;
+        snapshot["task_id"] = json!(id);
+        snapshot["status"] = status;
+        snapshot["stdout"] = json!(stdout);
+        snapshot["events"] = json!(events);
+        return Ok(Some(snapshot));
+    }
     if name == "TaskStop" {
         let active = task["status"] == "running";
         if active {
@@ -1148,6 +1176,24 @@ pub(super) fn control(
         "not_ready"
     });
     Ok(Some(snapshot))
+}
+
+/// Reads at most `limit` bytes from the end of a log file.
+fn read_tail(path: &Path, limit: u64) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            let length = file.metadata()?.len();
+            if length > limit {
+                file.seek(SeekFrom::Start(length - limit))?;
+            }
+            let mut bytes = Vec::new();
+            file.take(limit).read_to_end(&mut bytes)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn terminal(status: &Value) -> bool {
