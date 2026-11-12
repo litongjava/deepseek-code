@@ -314,6 +314,100 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
         .unwrap()
         .unwrap();
     assert_eq!(conversations, 1);
+    // Exercise the actual CLI entry point, not just the spawn helper's guard.
+    // Snapshot every SQLite table logically (WAL/checkpoint bytes may change).
+    let database_snapshot = || {
+        sessions
+            .db
+            .with_conn(|conn| -> anyhow::Result<Vec<(String, Vec<String>)>> {
+                let mut names = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+                let names = names
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut snapshot = Vec::new();
+                for name in names {
+                    let sql = format!("SELECT * FROM \"{}\"", name.replace('"', "\"\""));
+                    let mut query = conn.prepare(&sql)?;
+                    let columns = query.column_count();
+                    let mut rows = query
+                        .query_map([], |row| {
+                            (0..columns)
+                                .map(|i| row.get_ref(i).map(|value| format!("{value:?}")))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map(|values| format!("{values:?}"))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows.sort();
+                    snapshot.push((name, rows));
+                }
+                Ok(snapshot)
+            })
+            .unwrap()
+            .unwrap()
+    };
+    let other = temp.path().join("other-workspace");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("user.txt"), b"leave this alone").unwrap();
+    let before = database_snapshot();
+    let calls_before = seen.lock().unwrap().len();
+    let jobs_before = jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
+    let first_bytes = std::fs::read(&first_out).unwrap();
+    let second_bytes = std::fs::read(&second_out).unwrap();
+    let output = tokio::process::Command::new(&executable)
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--path",
+            other.to_str().unwrap(),
+            "--resume",
+            &first.session_id,
+            "--print",
+            "must reject this move",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a cross-workspace resume must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--path differs from the resumed session's project"),
+        "{output:?}"
+    );
+    assert_eq!(
+        database_snapshot(),
+        before,
+        "rejection must not mutate any database table"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        calls_before,
+        "no model request on rejection"
+    );
+    assert_eq!(
+        deepseek_code_core::services::background_sessions::list(&data, Some(&parent))
+            .unwrap()
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>(),
+        jobs_before
+    );
+    assert_eq!(
+        std::fs::read(child_workspace.join("marker.txt")).unwrap(),
+        b"prepared"
+    );
+    assert_eq!(
+        std::fs::read(other.join("user.txt")).unwrap(),
+        b"leave this alone"
+    );
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&parent_workspace).unwrap().count(), 0);
+    assert_eq!(std::fs::read(&first_out).unwrap(), first_bytes);
+    assert_eq!(std::fs::read(&second_out).unwrap(), second_bytes);
     assert!(seen.lock().unwrap().len() >= 4);
     server.abort();
 }

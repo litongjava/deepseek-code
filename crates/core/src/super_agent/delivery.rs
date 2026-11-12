@@ -943,17 +943,17 @@ fn validate_target_branch(repo: &RepoTarget) -> std::result::Result<(String, Str
 }
 
 #[derive(Debug, Default, Clone)]
-struct WorktreeEntry {
-    path: PathBuf,
-    branch: Option<String>,
-    locked: Option<String>,
-    prunable: bool,
-    bare: bool,
+pub(crate) struct WorktreeEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) branch: Option<String>,
+    pub(crate) locked: Option<String>,
+    pub(crate) prunable: bool,
+    pub(crate) bare: bool,
 }
 
 /// Every worktree entry Git reports, parsed from NUL-separated porcelain so a
 /// path with spaces (or other special characters) is not split.
-fn worktree_entries(repo_root: &Path) -> Result<Vec<WorktreeEntry>> {
+pub(crate) fn worktree_entries(repo_root: &Path) -> Result<Vec<WorktreeEntry>> {
     let output = command(repo_root, &["worktree", "list", "--porcelain", "-z"])?;
     anyhow::ensure!(
         output.status.success(),
@@ -1981,6 +1981,27 @@ fn verify_current_checkout(
 /// stale preflight classification is an input. A partial multi-repository
 /// result keeps every verified repository and names the ones still pending.
 pub fn verify_delivery(task: &TaskRecord, plan: &DeliveryPlan) -> Result<DeliveryVerification> {
+    verify_delivery_state(task, plan, false)
+}
+
+/// Completed-task cleanup may follow later commits on the target, but never
+/// relax the completion gate itself or the persisted delivery identity.
+pub(crate) fn verify_delivery_for_cleanup(
+    task: &TaskRecord,
+    plan: &DeliveryPlan,
+) -> Result<DeliveryVerification> {
+    anyhow::ensure!(
+        task.status == super::Status::Completed,
+        "Cleanup requires COMPLETED"
+    );
+    verify_delivery_state(task, plan, true)
+}
+
+fn verify_delivery_state(
+    task: &TaskRecord,
+    plan: &DeliveryPlan,
+    allow_target_descendant: bool,
+) -> Result<DeliveryVerification> {
     anyhow::ensure!(
         plan.task_id == task.task_id,
         "The delivery plan belongs to another task"
@@ -2044,7 +2065,10 @@ pub fn verify_delivery(task: &TaskRecord, plan: &DeliveryPlan) -> Result<Deliver
         if reason.is_empty() {
             match resolve_ref(repo, &target.target_ref) {
                 Ok(oid) => {
-                    if oid == target.new_oid {
+                    if oid == target.new_oid
+                        || (allow_target_descendant
+                            && is_ancestor(&repo.repo_root, &target.new_oid, &oid)?)
+                    {
                         actual = Some(oid);
                     } else {
                         reason = format!(
@@ -2058,7 +2082,13 @@ pub fn verify_delivery(task: &TaskRecord, plan: &DeliveryPlan) -> Result<Deliver
             }
         }
         if reason.is_empty() {
-            if let Err(error) = verify_current_checkout(target, repo) {
+            // Verify topology and cleanliness at the observed current target,
+            // keeping the original plan/OID immutable for reports and archives.
+            let mut current_target = target.clone();
+            if allow_target_descendant {
+                current_target.new_oid = actual.clone().expect("resolved target");
+            }
+            if let Err(error) = verify_current_checkout(&current_target, repo) {
                 reason = error;
             }
         }

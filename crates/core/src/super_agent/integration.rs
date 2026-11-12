@@ -85,11 +85,18 @@ fn common_dir(repo: &RepoTarget) -> Result<String> {
 }
 
 /// Porcelain entries with the same encoding `discovery::source_state` records,
-/// so a captured source change can be compared exactly.
+/// so a captured source change can be compared exactly. Observation must not
+/// refresh the user's index (including during completed-task cleanup).
 pub(crate) fn status_entries(path: &Path) -> Result<Vec<String>> {
     let output = command(
         path,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ],
     )?;
     ensure!(
         output.status.success(),

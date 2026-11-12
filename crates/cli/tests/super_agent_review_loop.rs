@@ -1371,7 +1371,7 @@ fn signal_exact(pid: u32, start: &str, signal: &str) {
         "PID {pid} no longer has the recorded start identity; refusing to signal it"
     );
     let status = Command::new("kill")
-        .args([format!("-{signal}"), pid.to_string()])
+        .args([format!("-{signal}"), "--".into(), pid.to_string()])
         .status()
         .expect("running kill");
     assert!(status.success(), "kill -{signal} {pid} failed: {status}");
@@ -3952,6 +3952,9 @@ async fn run_review_loop_with(
                     // The damaged-state scenario ends blocked; its shared
                     // assertions already ran above.
                     if delivery != DeliveryMode::GateMissingState {
+                        let source_head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+                        let source_file = std::fs::read(fixture.repo.join("file.txt")).unwrap();
+                        let source_index = index_bytes(&fixture.repo);
                         let _ = active_orchestrator.tick(&router).await.unwrap();
                         let report = active_orchestrator.tick(&router).await.unwrap();
                         assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
@@ -3966,9 +3969,55 @@ async fn run_review_loop_with(
                             1,
                             "task completion must be recorded exactly once"
                         );
-                        assert!(!events(&active_store, &task_id)
-                            .iter()
-                            .any(|event| event.event_type == EventType::CleanupCompleted));
+                        // Single-Git cleanup is a separate terminal-task tick.
+                        // Completion/delivery identities above remain required.
+                        let cleanup = active_orchestrator.tick(&router).await.unwrap();
+                        assert!(cleanup.warnings.is_empty(), "{cleanup:?}");
+                        let cleanup_events: Vec<_> = events(&active_store, &task_id)
+                            .into_iter()
+                            .filter(|event| event.event_type == EventType::CleanupCompleted)
+                            .collect();
+                        assert_eq!(cleanup_events.len(), 1);
+                        assert_eq!(
+                            active_store
+                                .get_task(&task_id)
+                                .unwrap()
+                                .unwrap()
+                                .cleanup_status,
+                            deepseek_code_core::super_agent::CleanupStatus::Completed
+                        );
+                        assert!(!task.repositories[0].worktree_path.exists());
+                        assert!(git(
+                            &fixture.repo,
+                            &[
+                                "for-each-ref",
+                                "--format=%(refname)",
+                                &format!("refs/heads/{}", task.repositories[0].task_branch)
+                            ]
+                        )
+                        .is_empty());
+                        assert_eq!(git(&fixture.repo, &["rev-parse", "HEAD"]), source_head);
+                        assert_eq!(index_bytes(&fixture.repo), source_index);
+                        assert_eq!(
+                            std::fs::read(fixture.repo.join("file.txt")).unwrap(),
+                            source_file
+                        );
+                        for key in ["reports", "diff"] {
+                            let archive = &cleanup_events[0].payload[key];
+                            let bytes = std::fs::read(archive["path"].as_str().unwrap()).unwrap();
+                            let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+                            let hex: String = digest
+                                .as_ref()
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect();
+                            assert_eq!(archive["sha256"], hex);
+                        }
+                        assert_eq!(
+                            cleanup_events[0].payload["identity"]["repository"]
+                                ["integrated_commit"],
+                            integrated
+                        );
                         assert_eq!(git(&fixture.repo, &["rev-parse", "develop"]), integrated);
                         // The delivered commit keeps its implementation-review
                         // lineage; nothing was rewritten to satisfy the gate.
@@ -4000,6 +4049,14 @@ async fn run_review_loop_with(
                             reopened_store.get_task(&task_id).unwrap().unwrap().status,
                             Status::Completed
                         );
+                        assert_eq!(
+                            events(&reopened_store, &task_id)
+                                .iter()
+                                .filter(|event| event.event_type == EventType::CleanupCompleted)
+                                .count(),
+                            1
+                        );
+
                         assert_eq!(
                             events(&reopened_store, &task_id)
                                 .iter()

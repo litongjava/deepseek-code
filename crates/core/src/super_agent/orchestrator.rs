@@ -156,6 +156,29 @@ impl Orchestrator {
             .list_tasks(router_session, None)
             .map_err(store_error)?;
         for task in tasks {
+            if task.status == Status::Completed {
+                if let Err(error) = crate::super_agent::cleanup::cleanup_completed(
+                    &self.launcher(),
+                    &task.task_id,
+                    &policy,
+                ) {
+                    let reason = format!("{error:#}");
+                    store
+                        .set_cleanup_status(
+                            &task.task_id,
+                            crate::super_agent::CleanupStatus::Pending,
+                        )
+                        .map_err(store_error)?;
+                    let key = format!("super-agent.cleanup-pending.{}", task.task_id);
+                    if self.context.setting::<String>(&key)?.as_deref() != Some(reason.as_str()) {
+                        self.context.save_setting(&key, &reason)?;
+                        report
+                            .warnings
+                            .push(format!("{} cleanup PENDING: {reason}", task.task_id));
+                    }
+                }
+                continue;
+            }
             if task.status.is_terminal() {
                 continue;
             }
@@ -2877,7 +2900,7 @@ fn delivery_job_identity_mismatch(
 /// implementation approval and therefore requires the post-delivery
 /// `final-completion` resume. The persisted decision named by the delivery plan
 /// is authoritative; anything else cannot prove the required stage.
-fn required_completion_reviewer_purpose(
+pub(crate) fn required_completion_reviewer_purpose(
     events: &[crate::super_agent::Event],
     plan: &crate::super_agent::delivery::DeliveryPlan,
 ) -> Option<&'static str> {

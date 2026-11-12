@@ -387,6 +387,27 @@ impl TaskStore {
         })
     }
 
+    /// Recheck the same durable completion gate before archiving/removing assets.
+    /// Git and process liveness are checked by the cleanup executor separately.
+    pub(crate) fn validate_cleanup_evidence(&self, task_id: &str) -> Result<(), StoreError> {
+        self.run_read(|conn| {
+            let record = load_record_conn(conn, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            if record.status != Status::Completed {
+                return Err(StoreError::Invalid("Cleanup requires COMPLETED".into()));
+            }
+            let evidence = gate_evidence_conn(conn, &self.data_dir, &record)?;
+            state::completion_gate(
+                &record,
+                &record.repositories,
+                &load_reports_conn(conn, task_id)?,
+                &load_approvals_conn(conn, task_id)?,
+                &evidence,
+            )
+            .map_err(StoreError::Gate)
+        })
+    }
+
     pub fn set_cleanup_status(
         &self,
         task_id: &str,
@@ -394,7 +415,7 @@ impl TaskStore {
     ) -> Result<(), StoreError> {
         self.run_tx("super-agent cleanup status", |tx| {
             tx.execute(
-                "UPDATE sa_tasks SET cleanup_status=?2, updated_at=?3 WHERE task_id=?1",
+                "UPDATE sa_tasks SET cleanup_status=?2, updated_at=?3 WHERE task_id=?1 AND NOT (cleanup_status='COMPLETED' AND ?2='PENDING')",
                 params![task_id, status.as_str(), chrono::Utc::now().to_rfc3339()],
             )?;
             Ok(())

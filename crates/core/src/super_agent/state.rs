@@ -158,7 +158,11 @@ pub fn apply(
     event: &NewEvent,
     policy: &StatePolicy,
 ) -> Result<Transition, StateError> {
-    if record.status.is_terminal() {
+    // Completed work may only advance its separate cleanup lifecycle. All
+    // other terminal-task events remain rejected.
+    if record.status.is_terminal()
+        && !(record.status == Status::Completed && event.event_type == EventType::CleanupCompleted)
+    {
         return Err(invalid(
             record,
             &event.event_type,
@@ -1402,6 +1406,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn completed_tasks_accept_only_cleanup_without_reopening_work() {
+        let policy = StatePolicy::default();
+        let completed = record(Phase::Finalizing, Status::Completed);
+        let transition = apply(
+            &completed,
+            &event(EventType::CleanupCompleted, json!({})),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(transition.status, Status::Completed);
+        assert_eq!(transition.phase, Phase::Finalizing);
+        assert_eq!(transition.cleanup_status, Some(CleanupStatus::Completed));
+        for event_type in [
+            EventType::TaskCompleted,
+            EventType::TaskPaused,
+            EventType::TaskResumed,
+        ] {
+            assert!(apply(&completed, &event(event_type, json!({})), &policy).is_err());
+        }
+        for status in [Status::Running, Status::Failed, Status::Cancelled] {
+            assert!(apply(
+                &record(Phase::Finalizing, status),
+                &event(EventType::CleanupCompleted, json!({})),
+                &policy
+            )
+            .is_err());
+        }
     }
 
     #[test]

@@ -2074,6 +2074,10 @@ mod two_repository_delivery {
 
     impl TwoRepoDeliveryFixture {
         fn new() -> Self {
+            Self::with_count(2)
+        }
+
+        fn with_count(count: usize) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path().join("data");
             let context = ServiceContext::open(
@@ -2085,11 +2089,12 @@ mod two_repository_delivery {
                 .create(temp.path(), "router-model", "fixture")
                 .unwrap();
             role::set(&context.db, &router, Role::Router).unwrap();
-            let repos = vec![
+            let mut repos = vec![
                 Self::repo(temp.path(), "repo one", "develop", "repo-1", 0),
                 // Paths contain spaces and the two targets use different branches.
                 Self::repo(temp.path(), "repo two", "integration", "repo-2", 1),
             ];
+            repos.truncate(count);
             let spec = TaskSpec {
                 title: "Two repository delivery".into(),
                 workspace: temp.path().to_path_buf(),
@@ -2118,6 +2123,24 @@ mod two_repository_delivery {
             };
             let store = TaskStore::new(context.db.clone(), data.clone());
             let task = store.create_task(&router, spec, "create").unwrap();
+            if count == 1 {
+                let repo = &mut repos[0];
+                git(
+                    &repo.worktree,
+                    &["branch", "-m", &format!("agent/{}", task.task_id)],
+                );
+                let managed = repo.worktree.parent().unwrap().join(&task.task_id);
+                git(
+                    &repo.root,
+                    &[
+                        "worktree",
+                        "move",
+                        repo.worktree.to_str().unwrap(),
+                        managed.to_str().unwrap(),
+                    ],
+                );
+                repo.worktree = managed;
+            }
             for (index, repo) in repos.iter().enumerate() {
                 let common = PathBuf::from(git(
                     &repo.root,
@@ -2133,7 +2156,11 @@ mod two_repository_delivery {
                         git_common_dir: common,
                         target_path: repo.root.clone(),
                         target_branch: repo.branch.clone(),
-                        task_branch: format!("agent/{index}"),
+                        task_branch: if count == 1 {
+                            format!("agent/{}", task.task_id)
+                        } else {
+                            format!("agent/{index}")
+                        },
                         worktree_path: repo.worktree.clone(),
                         working_path: repo.worktree.clone(),
                         base_commit: repo.base.clone(),
@@ -2168,10 +2195,11 @@ mod two_repository_delivery {
                 .unwrap()
                 .unwrap();
             Self::record_evidence(&store, &task, &repos, &policy);
-            let workspace = data
-                .join("super-agent")
-                .join(&task.task_id)
-                .join("workspace");
+            let workspace = if count == 1 {
+                repos[0].worktree.clone()
+            } else {
+                data.join("super-agent").join(&task.task_id).join("workspace")
+            };
             std::fs::create_dir_all(&workspace).unwrap();
             let sessions = SessionStore::new(context.db.clone());
             let coder = sessions
@@ -2548,10 +2576,10 @@ mod two_repository_delivery {
             if dispatched {
                 self.wait_settled().await;
             }
-            self.set_target(0, &self.repos[0].reviewed);
-            self.set_target(1, &self.repos[1].reviewed);
-            self.record_observation(plan, 0);
-            self.record_observation(plan, 1);
+            for (index, repo) in self.repos.iter().enumerate() {
+                self.set_target(index, &repo.reviewed);
+                self.record_observation(plan, index);
+            }
             self.store()
                 .record_delivery_completed(
                     plan,
@@ -4613,4 +4641,5 @@ mod two_repository_delivery {
         assert_eq!(fixture.task().status, Status::Blocked);
         assert_eq!(fixture.task_completed_count(), 0);
     }
+    include!("cleanup_tests.rs");
 }

@@ -3,6 +3,7 @@
 //! The deterministic parts (task state, store, discovery, isolation) live here
 //! and are shared by the CLI and Desktop hosts. Model-facing orchestration is
 //! layered on top and never decides task state itself.
+pub mod cleanup;
 pub mod config;
 pub mod crp;
 pub mod delivery;
