@@ -5,41 +5,6 @@ fn control(id: &str, request: Value) -> Value {
     json!({"type":"control_request","request_id":id,"request":request})
 }
 
-/// Releases the gated first response even when an assertion above fails, so a
-/// failed run tears down instead of leaving the fixture waiting forever.
-struct GateGuard(Arc<tokio::sync::Semaphore>);
-
-impl GateGuard {
-    fn release(&self) {
-        self.0.add_permits(1);
-    }
-}
-
-impl Drop for GateGuard {
-    fn drop(&mut self) {
-        self.0.add_permits(1);
-    }
-}
-
-/// Wait until the endpoint has recorded the streaming request. Its response is
-/// still withheld, so the turn is provably running.
-async fn wait_for_running_request(server: &Server) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !server
-            .fixture
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|body| body["stream"] == true)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the running turn never reached the model endpoint");
-}
-
 async fn answer(client: &mut Client, id: &str, request: Value) -> Value {
     client.send(control(id, request)).await;
     let frame = client.frame("control_response").await;
@@ -98,44 +63,63 @@ async fn idle_status_settings_and_thinking_controls_report_real_state() {
 #[tokio::test]
 async fn running_turn_answers_queries_and_cancels_only_queued_messages() {
     for anthropic in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let server = Server::start(anthropic, Mode::GatedText).await;
-        let mut client = Client::start(root.path(), &server, &[]);
-        let gate = GateGuard(server.fixture.gate.clone());
-        client.send(user("first")).await;
-        wait_for_running_request(&server).await;
-        let mut queued = user("QUEUED_SECOND_SENTINEL");
-        queued["uuid"] = json!("queued-2");
-        client.send(queued).await;
-        let mut kept = user("QUEUED_THIRD_SENTINEL");
-        kept["uuid"] = json!("queued-3");
-        client.send(kept).await;
-        let status = answer(&mut client, "mcp", json!({"subtype":"mcp_status"})).await;
-        assert_eq!(status["subtype"], "success", "{status}");
-        let settings = answer(&mut client, "settings", json!({"subtype":"get_settings"})).await;
-        assert_eq!(settings["subtype"], "success", "{settings}");
-        let mode = answer(&mut client, "mode", json!({"subtype":"set_permission_mode","mode":"acceptEdits"})).await;
-        assert_eq!(mode["subtype"], "success", "{mode}");
-        let model = answer(&mut client, "model", json!({"subtype":"set_model","model":"fixture-model"})).await;
-        assert_eq!(model["subtype"], "error");
-        let cancel = answer(&mut client, "cancel", json!({"subtype":"cancel_async_message","message_uuid":"queued-2"})).await;
-        assert_eq!(cancel["response"]["cancelled"], true, "{cancel}");
-        let again = answer(&mut client, "cancel-again", json!({"subtype":"cancel_async_message","message_uuid":"queued-2"})).await;
-        assert_eq!(again["response"]["cancelled"], false);
-        // Every control above was answered while the first response was still
-        // open; release it and assert the protocol frame the turn now emits.
-        gate.release();
-        assert_eq!(client.frame("message_start").await["type"], "message_start");
-        let (status, results) = client.finish().await;
-        assert!(status.success());
-        assert_eq!(results.len(), 2, "the cancelled message never runs: {results:?}");
-        assert!(results.iter().all(|result| result["is_error"] == false), "{results:?}");
-        let prompts = server.fixture.requests.lock().unwrap().iter().filter(|body| body["stream"] == true).map(|body| body.to_string()).collect::<Vec<_>>();
-        assert!(prompts.iter().all(|body| !body.contains("QUEUED_SECOND_SENTINEL")), "{prompts:?}");
-        assert!(prompts.iter().any(|body| body.contains("QUEUED_THIRD_SENTINEL")));
+        tokio::time::timeout(Duration::from_secs(60), held_control_turn(anthropic))
+            .await
+            .expect("the held control turn did not finish within the watchdog");
     }
 }
 
+/// The model reply is held open while the controls run, so this test no longer
+/// depends on a fixed delay outlasting the control exchange.
+async fn held_control_turn(anthropic: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(anthropic, Mode::HeldText).await;
+    // Releases the held completion frames even if an assertion fails.
+    let _held = ReleaseHeld(server.fixture.release.clone());
+    let mut client = Client::start(root.path(), &server, &[]);
+    client.send(user("first")).await;
+    // The first protocol frame has arrived; completion is behind the gate.
+    client.frame("message_start").await;
+    let mut queued = user("QUEUED_SECOND_SENTINEL");
+    queued["uuid"] = json!("queued-2");
+    client.send(queued).await;
+    let mut kept = user("QUEUED_THIRD_SENTINEL");
+    kept["uuid"] = json!("queued-3");
+    client.send(kept).await;
+    // Deliberately outlast the old fixture's fixed 2 s completion delay while
+    // the gate stays closed, as a slow control exchange would.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let status = answer(&mut client, "mcp", json!({"subtype":"mcp_status"})).await;
+    assert_eq!(status["subtype"], "success", "{status}");
+    let settings = answer(&mut client, "settings", json!({"subtype":"get_settings"})).await;
+    assert_eq!(settings["subtype"], "success", "{settings}");
+    let mode = answer(&mut client, "mode", json!({"subtype":"set_permission_mode","mode":"acceptEdits"})).await;
+    assert_eq!(mode["subtype"], "success", "{mode}");
+    let model = answer(&mut client, "model", json!({"subtype":"set_model","model":"fixture-model"})).await;
+    assert_eq!(model["subtype"], "error");
+    let cancel = answer(&mut client, "cancel", json!({"subtype":"cancel_async_message","message_uuid":"queued-2"})).await;
+    assert_eq!(cancel["response"]["cancelled"], true, "{cancel}");
+    let again = answer(&mut client, "cancel-again", json!({"subtype":"cancel_async_message","message_uuid":"queued-2"})).await;
+    assert_eq!(again["response"]["cancelled"], false);
+    // The turn is still held: no queued prompt has reached the model yet.
+    let streamed = server
+        .fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|body| body["stream"] == true)
+        .count();
+    assert_eq!(streamed, 1, "a queued message ran while the turn was held");
+    drop(_held);
+    let (status, results) = client.finish().await;
+    assert!(status.success());
+    assert_eq!(results.len(), 2, "the cancelled message never runs: {results:?}");
+    assert!(results.iter().all(|result| result["is_error"] == false), "{results:?}");
+    let prompts = server.fixture.requests.lock().unwrap().iter().filter(|body| body["stream"] == true).map(|body| body.to_string()).collect::<Vec<_>>();
+    assert!(prompts.iter().all(|body| !body.contains("QUEUED_SECOND_SENTINEL")), "{prompts:?}");
+    assert!(prompts.iter().any(|body| body.contains("QUEUED_THIRD_SENTINEL")));
+}
 fn git(root: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")
         .args(["-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture"])
