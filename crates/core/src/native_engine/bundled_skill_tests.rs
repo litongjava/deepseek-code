@@ -68,3 +68,76 @@ async fn resource_reads_keep_explicit_permissions_and_model_api_invocation() {
     drop(executor);
     assert!(!path.exists());
 }
+
+fn doctor_executor(temp: &tempfile::TempDir) -> ToolLoopExecutor {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let provider = ResolvedProvider {
+        provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+        model: serde_json::from_value(json!({"id":"fixture-model","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(32);
+    let mut executor = ToolLoopExecutor::new(
+        provider,
+        vec![],
+        None,
+        128,
+        tx,
+        workspace.to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_search_config_path(paths.data_dir.join("config.json"));
+    // /doctor is a user-invocable skill, not a model-invocable one.
+    executor.manual_skill_active = true;
+    executor
+}
+
+const DOCTOR_SNAPSHOT_MARKER: &str = "Read-only local diagnostic snapshot:";
+
+#[tokio::test]
+async fn doctor_prompt_audit_uses_the_neutral_guide() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = doctor_executor(&temp);
+    let model = executor.provider.model.id.clone();
+    let result = executor
+        .execute_skill_tool(&json!({"skill":"doctor","args":"prompt-audit only check AGENTS.md"}))
+        .await
+        .unwrap();
+    let instructions = result["instructions"].as_str().unwrap();
+    assert!(instructions.contains("# Prompt audit"));
+    assert!(instructions.contains("Target model:"));
+    assert!(
+        instructions.contains(&format!("Target model: {model}")),
+        "{instructions}"
+    );
+    assert!(instructions.contains("only check AGENTS.md"));
+    assert!(!instructions.contains(DOCTOR_SNAPSHOT_MARKER));
+}
+
+#[tokio::test]
+async fn doctor_without_subcommand_still_attaches_the_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = doctor_executor(&temp);
+    let result = executor
+        .execute_skill_tool(&json!({"skill":"doctor","args":"my build fails"}))
+        .await
+        .unwrap();
+    let instructions = result["instructions"].as_str().unwrap();
+    assert!(instructions.contains(DOCTOR_SNAPSHOT_MARKER));
+    assert!(!instructions.contains("# Prompt audit"));
+}
+
+#[tokio::test]
+async fn prompt_audit_prefix_requires_a_word_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = doctor_executor(&temp);
+    let result = executor
+        .execute_skill_tool(&json!({"skill":"doctor","args":"prompt-auditing is slow"}))
+        .await
+        .unwrap();
+    let instructions = result["instructions"].as_str().unwrap();
+    assert!(instructions.contains(DOCTOR_SNAPSHOT_MARKER));
+    assert!(!instructions.contains("# Prompt audit"));
+}

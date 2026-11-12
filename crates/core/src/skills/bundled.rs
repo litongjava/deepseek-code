@@ -26,7 +26,7 @@ pub fn commands() -> BTreeMap<String, SkillCommand> {
         ),
         (
             "doctor",
-            "Inspect local CLI configuration and diagnose failures",
+            "Inspect local CLI configuration and diagnose failures; /doctor prompt-audit audits the instruction files loaded into sessions",
             include_str!("bundled/doctor.md"),
         ),
         // The reference CLI's bundled workflow commands.
