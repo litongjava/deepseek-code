@@ -576,14 +576,30 @@ mod windows_tests {
         let mut h = Harness::new().await;
         h.turn(
             "bypass",
-            vec![load(), bash("start", "exit 259"), final_get()],
+            vec![
+                load(),
+                bash(
+                    "start",
+                    "[Console]::WriteLine('EXIT_259_READY'); [void][Console]::ReadLine(); exit 259",
+                ),
+            ],
         )
         .await;
+        // Cold PowerShell startup is not the exit-code regression. Establish
+        // that the real program is running before releasing its exit, then
+        // retain the same bounded TaskGet and exact terminal assertions.
+        h.read_until("EXIT_259_READY").await;
+        let (_, gate) = h.track("start");
+        assert!(!h.cleanup.exited(gate));
+        h.turn("bypass", vec![input("exit", "exit-259\r"), final_get()])
+            .await;
+        assert_eq!(h.result("exit")["bytes_written"], 9);
         let value = h.result("final");
         assert_eq!(value["status"], "failed");
         let result: Value = serde_json::from_str(value["output"].as_str().unwrap()).unwrap();
         assert_eq!(result["exit_code"], 259);
         assert_eq!(result["cleanup_complete"], true);
+        h.wait_exited(gate).await;
         h.shutdown().await;
     }
 
