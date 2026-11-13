@@ -1056,7 +1056,7 @@ Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编�
 - 退出码 259 的真实 CLI 用例先等待 PowerShell 输出 `EXIT_259_READY`，固定 gate 的进程句柄并确认尚未退出，再通过 TaskInput 释放真实 `exit 259`；随后仍用原 20 秒 TaskGet 上限断言 `failed`、精确退出码 259、清理完成及同一句柄已退出。不能把冷启动尚未完成时的 `running` 当成 STILL_ACTIVE 误判的证据，也不能延长退出等待或放宽终态断言。
 - Windows core 另测 Job Object terminate/最后句柄关闭、过期 gate 拒绝、同步写阻塞时超时与取消、DSR 分片、环境/argv/cwd。`job_member_fixture` 是子进程夹具，普通套件调用不启动子进程；子进程重复输出不增加独立用例数量。
 
-未验证项必须单列：Windows/macOS Actions 尚未运行、Desktop 实际 UI、真实 Windows Terminal。Windows owner 强杀后的日志尾部/SQLite 终态 reconcile 尚未移植；TaskGet 保留 unresponsive 与已捕获日志，不虚构 completed 或 cleanup_complete。人工步骤见交付目录 `windows-conpty-validation.md`，使用同候选 SHA 的 `conpty-console.ps1` 和本地 mock。
+平台结果以对应提交的 Actions 日志为准，未运行项必须单列；Desktop 实际 UI、真实 Windows Terminal 仍需人工验证。Windows owner 强杀后的日志尾部/SQLite 终态 reconcile 尚未移植；TaskGet 保留 unresponsive 与已捕获日志，不虚构 completed 或 cleanup_complete。人工步骤见 [Windows ConPTY 人工验证](./windows-conpty-validation.md)，使用同次检出的仓库夹具与本地 mock。
 
 ### 会话持久活动时间
 
