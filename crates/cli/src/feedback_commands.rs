@@ -33,7 +33,7 @@ pub async fn handle(command: &str, argument: &str, session: &Session) -> Result<
             };
             let id = tokio::select! {
                 response = feedback::submit(&session.paths.data_dir, rest.trim(), &session.id, &key) => response?,
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Feedback submission interrupted; delivery status is unknown. Draft retained."),
+                _ = crate::signals::interrupted() => anyhow::bail!("Feedback submission interrupted; delivery status is unknown. Draft retained."),
             };
             command_eprintln!("Feedback submitted: {id}");
         }

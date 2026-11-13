@@ -11,7 +11,6 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 
 mod lsp;
-pub mod macros;
 mod notebook;
 pub mod plan_import;
 mod read;
@@ -140,7 +139,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         // `cron` stays dispatchable for older transcripts; the model sees the reference trio.
         crate::services::goal_proposals::definition(),
         crate::services::compaction_requests::definition(),
-        ToolDefinition { name: "ToolSearch".into(), description: "Load built-in tools that are not in this request yet. A successful search returns their real definitions with schemas and marks them loaded, so they can be called from the next model request on. Select complete tool names separated by commas or whitespace, e.g. `WebSearch WebFetch` or `WebSearch,WebFetch`; `select:Name1,Name2` (also accepting whitespace) explicitly selects exact names. Otherwise every keyword must appear in a tool name or description. Tools that commonly load on demand include listing directories (ListDir), multiple edits (MultiEdit), web access (WebFetch, WebSearch), Git and LSP helpers, subagents (Agent, SendMessage), Workflow, long-term memory, scheduled jobs and desktop control. Searching costs nothing and grants no permission: the tool still goes through the usual approval and scope checks. MCP tools listed as available on demand load the same way.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Complete tool names separated by commas or whitespace, or keywords describing what you need"}},"required":["query"]}) },
+        ToolDefinition { name: "ToolSearch".into(), description: "Load built-in tools that are not in this request yet. A successful search returns their real definitions with schemas and marks them loaded, so they can be called from the next model request on. Select complete tool names separated by commas or whitespace, e.g. `WebSearch WebFetch` or `WebSearch,WebFetch`; `select:Name1,Name2` (also accepting whitespace) explicitly selects exact names. Otherwise keywords are matched against tool names and descriptions; when no tool matches all of them, a tool matching most of them (one naming the tool) is loaded. Tools that commonly load on demand include listing directories (ListDir), multiple edits (MultiEdit), web access (WebFetch, WebSearch), LSP helpers, subagents (Agent, SendMessage), Workflow, long-term memory, scheduled jobs and desktop control. The runtime tool directory in the system prompt lists every built-in this request can load; only those listed there can be loaded. Searching costs nothing and grants no permission: the tool still goes through the usual approval and scope checks. MCP tools listed as available on demand load the same way.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Complete tool names separated by commas or whitespace, or keywords describing what you need"}},"required":["query"]}) },
         ToolDefinition {
             name: "PluginRun".into(),
             description: "Execute an installed, enabled plugin command with OS user permissions. Requires execution approval.".into(),
@@ -180,7 +179,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             name: "Bash".to_string(),
             description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command. A foreground command still running at its timeout is not killed: it moves to the background as a managed task, and you get its output so far and a task_id to wait on with TaskGet or stop with TaskStop.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it. Add `interaction: \"pipe\"` to that background call to give the process a writable stdin pipe: write UTF-8 data or close stdin with TaskInput. On Linux, interaction: \"pty\" instead provides a controlling terminal with merged output and TaskInput resize. PTY EOF sends canonical VEOF, not a permanent stdin close.
 - When a call finishes it cleans up the command's whole process tree, including children the command started. A service that must outlive the call (a local server, a daemon) needs `detach: true`, which starts it outside that tree and returns its pid and log files.
-- With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
+- With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Use the Bash tool for all Git commands; there are no separate Git tools.\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -319,71 +318,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "git_status".to_string(),
-            description: "Runs git status in the workspace directory to see changed, staged, and untracked files.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The workspace directory path to run git status in" }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDefinition {
-            name: "git_diff".to_string(),
-            description: "Runs git diff to show changes in the working directory or staging area.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The workspace directory path" },
-                    "staged": { "type": "boolean", "description": "If true, show staged changes (git diff --staged)" },
-                    "file": { "type": "string", "description": "Optional specific file path to diff" }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDefinition {
-            name: "git_log".to_string(),
-            description: "Runs git log to show commit history.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The workspace directory path" },
-                    "count": { "type": "number", "description": "Number of commits to show (default: 10)" },
-                    "oneline": { "type": "boolean", "description": "Use oneline format (default: true)" }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDefinition {
-            name: "git_commit".to_string(),
-            description: "Stages all changes and commits them with the given message. Runs git add -A then git commit.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The workspace directory path" },
-                    "message": { "type": "string", "description": "The commit message" }
-                },
-                "required": ["path", "message"]
-            }),
-        },
-        ToolDefinition {
-            name: "git_add".to_string(),
-            description: "Stages specific files for the next commit. Runs git add with the specified file paths.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "The workspace directory path" },
-                    "files": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Array of file paths to stage"
-                    }
-                },
-                "required": ["path", "files"]
-            }),
-        },
-        ToolDefinition {
             name: "computer_use".to_string(),
             description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally; results contain screenshot_path (absolute path) and mime_type, not Base64 image data.".to_string(),
             input_schema: serde_json::json!({
@@ -462,13 +396,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(session_worktree::definitions());
     defs.push(wakeup::definition());
     defs.push(findings::definition());
-    for macro_def in macros::get_macro_definitions() {
-        defs.push(ToolDefinition {
-            name: macro_def.name,
-            description: macro_def.description,
-            input_schema: macro_def.input_schema,
-        });
-    }
 
     defs.extend(tasks::definitions());
     defs.push(toolscript::definition());
@@ -478,7 +405,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(crate::services::plans::definitions());
     defs.extend(content_compat::definitions());
     for def in &mut defs {
-        if matches!(def.name.as_str(), "ListDir" | "git_status" | "git_diff") {
+        if def.name == "ListDir" {
             def.input_schema["required"] = serde_json::json!([]);
             def.input_schema["properties"]["path"]["default"] = serde_json::json!(".");
         }
@@ -520,19 +447,13 @@ macro_rules! tool_dispatch {
             "MultiEdit" => tool_multi_edit($input, $cwd),
             "ApplyPatch" => apply_patch_tool::execute($input, $cwd),
             "AskUserQuestion" => tool_ask_user_question($input),
-            "git_status" => tool_git_status($input),
-            "git_diff" => tool_git_diff($input),
-            "git_log" => tool_git_log($input),
-            "git_commit" => tool_git_commit($input),
-            "git_add" => tool_git_add($input),
             "computer_use" => tool_computer_use($input),
             "memory_search" => tool_memory_search($input),
             "memory_ingest" => tool_memory_ingest($input),
-            "smart_project_scan" => macros::execute_smart_project_scan($input, $cwd),
             _ if $name.is_empty() => Ok(serde_json::json!({
                 "error": "Tool call has no name; the model returned an incomplete tool call"
             })),
-            _ => Ok(serde_json::json!({ "error": format!("Unknown tool: {}", $name) })),
+            _ => Err(anyhow!("Unknown tool: {}", $name)),
         }
     };
 }
@@ -542,7 +463,7 @@ fn directory_input(
     mut input: serde_json::Value,
     cwd: &str,
 ) -> Result<serde_json::Value> {
-    if matches!(name, "ListDir" | "git_status" | "git_diff") {
+    if name == "ListDir" {
         let path = input["path"]
             .as_str()
             .filter(|path| !path.trim().is_empty())
@@ -1706,177 +1627,6 @@ fn tool_web_search_blocking(_input: serde_json::Value) -> Result<serde_json::Val
     Err(anyhow!("WebSearch requires a conversation provider and its search settings. Start search from a conversation."))
 }
 
-pub fn run_git_command(args: &[&str], cwd: &str) -> Result<std::process::Output> {
-    let mut cmd = std::process::Command::new("git");
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to execute git: {}", e))
-}
-
-fn tool_git_status(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("path required"))?;
-
-    let output = run_git_command(&["status", "--porcelain"], path)?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() && !stderr.is_empty() {
-        return Ok(serde_json::json!({
-            "error": stderr.trim(),
-            "is_error": true
-        }));
-    }
-
-    let files: Vec<serde_json::Value> = stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            let status = &line[..2];
-            let file_path = &line[3..];
-            serde_json::json!({
-                "status": status.trim(),
-                "file": file_path
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({
-        "files": files,
-        "count": files.len(),
-        "raw": stdout
-    }))
-}
-
-fn tool_git_diff(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("path required"))?;
-    let staged = input["staged"].as_bool().unwrap_or(false);
-    let file = input["file"].as_str();
-
-    let mut args: Vec<&str> = vec!["diff"];
-    if staged {
-        args.push("--staged");
-    }
-    if let Some(f) = file {
-        args.push("--");
-        args.push(f);
-    }
-
-    let output = run_git_command(&args, path)?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() && !stderr.is_empty() {
-        return Ok(serde_json::json!({
-            "error": stderr.trim(),
-            "is_error": true
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "diff": stdout,
-        "staged": staged,
-        "file": file
-    }))
-}
-
-fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("path required"))?;
-    let count = input["count"].as_u64().unwrap_or(10);
-    let oneline = input["oneline"].as_bool().unwrap_or(true);
-
-    let mut args: Vec<String> = vec!["log".to_string()];
-    if oneline {
-        args.push("--oneline".to_string());
-    }
-    args.push(format!("-n{}", count));
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let output = run_git_command(&arg_refs, path)?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() && !stderr.is_empty() {
-        return Ok(serde_json::json!({
-            "error": stderr.trim(),
-            "is_error": true
-        }));
-    }
-
-    let commits: Vec<serde_json::Value> = stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            if oneline {
-                let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                serde_json::json!({
-                    "hash": parts.first().unwrap_or(&""),
-                    "message": parts.get(1).unwrap_or(&"")
-                })
-            } else {
-                serde_json::json!({ "raw": line })
-            }
-        })
-        .collect();
-
-    Ok(serde_json::json!({
-        "commits": commits,
-        "count": commits.len(),
-        "raw": stdout
-    }))
-}
-
-fn tool_git_commit(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("path required"))?;
-    let message = input["message"]
-        .as_str()
-        .ok_or_else(|| anyhow!("message required"))?;
-
-    let add_output = run_git_command(&["add", "-A"], path)?;
-    if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr).to_string();
-        if !stderr.is_empty() {
-            return Ok(serde_json::json!({
-                "error": format!("git add failed: {}", stderr.trim()),
-                "is_error": true
-            }));
-        }
-    }
-
-    let commit_output = run_git_command(&["commit", "-m", message], path)?;
-
-    let stdout = String::from_utf8_lossy(&commit_output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&commit_output.stderr).to_string();
-
-    if !commit_output.status.success() {
-        return Ok(serde_json::json!({
-            "error": format!("git commit failed: {}", if stderr.is_empty() { &stdout } else { &stderr }.trim()),
-            "is_error": true
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "output": stdout,
-        "message": message
-    }))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolExecutionStatus {
     Running,
@@ -1948,55 +1698,6 @@ impl ToolExecutionManager {
     }
 }
 
-fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("path required"))?;
-    let files = input["files"]
-        .as_array()
-        .ok_or_else(|| anyhow!("files array required"))?;
-    anyhow::ensure!(
-        files.iter().all(serde_json::Value::is_string),
-        "Every requested Git path must be a string"
-    );
-
-    let file_strs: Vec<String> = files
-        .iter()
-        .filter_map(|f| f.as_str().map(String::from))
-        .collect();
-
-    if file_strs.is_empty() {
-        return Ok(serde_json::json!({
-            "error": "No files specified",
-            "is_error": true
-        }));
-    }
-
-    let mut args: Vec<String> = vec!["add".to_string(), "--".to_string()];
-    args.extend(file_strs.clone());
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let output = run_git_command(&arg_refs, path)?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        return Ok(serde_json::json!({
-            "error": if !stderr.trim().is_empty() { stderr.trim() } else if !stdout.trim().is_empty() { stdout.trim() } else { "git add failed without output" },
-            "success": false,
-            "exit_code": output.status.code().unwrap_or(-1),
-            "is_error": true
-        }));
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "files": file_strs,
-        "output": stdout
-    }))
-}
-
 async fn tool_web_search_async(input: serde_json::Value) -> Result<serde_json::Value> {
     tool_web_search_blocking(input)
 }
@@ -2013,21 +1714,42 @@ mod directory_edit_regressions {
     use serde_json::json;
 
     #[test]
-    fn git_add_reports_requested_paths_and_real_failures() {
+    fn removed_git_tools_are_unknown_and_never_dispatched() {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().to_str().unwrap();
-        assert!(run_git_command(&["init"], cwd).unwrap().status.success());
-        fs::write(root.path().join("--force"), "requested file").unwrap();
-        fs::write(root.path().join("untouched.txt"), "keep unstaged").unwrap();
-        let result = tool_git_add(json!({"path":cwd,"files":["--force"]})).unwrap();
+        for name in [
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_add",
+            "git_commit",
+            "smart_project_scan",
+        ] {
+            let error = execute_tool(name, json!({"path":cwd}), cwd)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, format!("Unknown tool: {name}"));
+            assert!(
+                get_tool_definitions().iter().all(|tool| tool.name != name),
+                "{name} must not be in the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn git_commands_run_through_bash_after_the_native_tools_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().to_str().unwrap();
+        let result = execute_tool(
+            "Bash",
+            json!({"command":"git init -q && git status --porcelain"}),
+            cwd,
+        )
+        .unwrap();
         assert_eq!(result["success"], true, "{result}");
-        assert_eq!(result["files"], json!(["--force"]));
-        let staged = run_git_command(&["diff", "--cached", "--name-only"], cwd).unwrap();
-        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "--force");
-        let failed = tool_git_add(json!({"path":cwd,"files":["missing.txt"]})).unwrap();
-        assert_eq!(failed["success"], false);
-        assert_ne!(failed["exit_code"], 0);
-        assert!(tool_git_add(json!({"path":cwd,"files":[7]})).is_err());
+        assert_eq!(result["exit_code"], 0, "{result}");
+        // The old native tool is rejected instead of being routed to Git.
+        assert!(execute_tool("git_status", json!({"path":cwd}), cwd).is_err());
     }
 
     #[tokio::test]
@@ -2035,7 +1757,6 @@ mod directory_edit_regressions {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("sentinel.txt"), "hello").unwrap();
         let cwd = root.path().to_str().unwrap();
-        assert!(run_git_command(&["init"], cwd).unwrap().status.success());
         for input in [json!({}), json!({"path":"."}), json!({"path":null})] {
             let list = execute_tool("ListDir", input.clone(), cwd).unwrap();
             assert!(list["entries"]
@@ -2043,15 +1764,6 @@ mod directory_edit_regressions {
                 .unwrap()
                 .iter()
                 .any(|entry| entry["name"] == "sentinel.txt"));
-            let status = execute_tool_async("git_status", input.clone(), cwd)
-                .await
-                .unwrap();
-            assert!(status["files"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|file| file["file"] == "sentinel.txt"));
-            assert_eq!(execute_tool("git_diff", input, cwd).unwrap()["diff"], "");
         }
     }
 

@@ -95,6 +95,14 @@ mod tests {
             try_lock_file(&contender),
             Err(TryLockError::WouldBlock)
         ));
+        // Release through the production path. `flock` ownership belongs to the
+        // open file description, so another thread of this test process can
+        // `fork` while this descriptor is open and its child briefly holds a
+        // copy until exec; close-only release is therefore not immediate in a
+        // process that spawns processes. The deterministic comparison between
+        // close and explicit unlock, with a child that really keeps a copy, is
+        // `an_inherited_descriptor_keeps_a_close_only_lock_but_explicit_unlock_frees_it`.
+        unlock_file(&owner).unwrap();
         drop(owner);
         try_lock_file(&contender).unwrap();
         assert!(matches!(

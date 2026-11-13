@@ -158,7 +158,7 @@ pub async fn handle(
                 }
                 let result = tokio::select! {
                     result = deepseek_code_core::tools::execute_tool_async("LSP", params, &root) => result?,
-                    _ = tokio::signal::ctrl_c() => anyhow::bail!("LSP query cancelled"),
+                    _ = crate::signals::interrupted() => anyhow::bail!("LSP query cancelled"),
                 };
                 command_println!("{}", serde_json::to_string_pretty(&result)?);
             }

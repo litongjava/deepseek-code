@@ -48,7 +48,7 @@ pub async fn handle(
             command_eprintln!("Answering a separate, tool-free side question. Main conversation history is unchanged. You can also ask /btw while a foreground turn is running.");
             let answer = tokio::select! {
                 answer = side_question(session, argument.trim()) => answer?,
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Side question cancelled; main conversation unchanged"),
+                _ = crate::signals::interrupted() => anyhow::bail!("Side question cancelled; main conversation unchanged"),
             };
             command_println!("\n{answer}\n");
         }

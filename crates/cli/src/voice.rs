@@ -284,7 +284,7 @@ pub async fn run(
         }
         Ok::<_, anyhow::Error>(())
     };
-    let result = tokio::select! {result=operation=>result,_=tokio::signal::ctrl_c()=>Ok(())};
+    let result = tokio::select! {result=operation=>result,_=crate::signals::interrupted()=>Ok(())};
     if let Some(session) = session {
         session.close().await?;
     }

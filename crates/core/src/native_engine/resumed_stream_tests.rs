@@ -145,8 +145,23 @@ async fn first_request_after_resume_is_compressed_for_both_protocols() {
         };
         result.unwrap();
         let body = seen.lock().unwrap().clone();
+        // The system prompt (including the tool directory) is not part of the
+        // resumed transcript and varies with the enabled tools.
+        let transcript: String = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] != "system")
+            .map(|message| message.to_string())
+            .collect();
         assert!(
-            body["messages"].to_string().len() < 10000,
+            transcript.len() < 10000,
+            "First resumed request must not send the whole old transcript"
+        );
+        // The whole body must still be smaller than the 8 * 12000 chars of the
+        // uncompressed history the resumed request would otherwise resend.
+        assert!(
+            body["messages"].to_string().len() < 8 * 12000,
             "First resumed request must not send the whole old transcript"
         );
         assert!(body["messages"]
@@ -170,7 +185,7 @@ async fn first_request_after_resume_is_compressed_for_both_protocols() {
             for required in [&system, "workspace rules", "permission rules"] {
                 assert!(
                     instructions.contains(required),
-                    "Missing instruction: {required}"
+                    "Missing instruction: {required}\n{instructions}"
                 );
             }
         }

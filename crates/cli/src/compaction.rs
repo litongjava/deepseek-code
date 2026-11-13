@@ -32,7 +32,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
     );
     tokio::select! {
         result = crate::hook_progress::during(id, true, deepseek_code_core::services::compaction::compact_with_hooks(&engine, &context, &workspace, id, &selected.provider_id, &selected.model, instructions, "manual")) => crate::services::print(&result?),
-        _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
+        _ = crate::signals::interrupted() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
     }
 }
 

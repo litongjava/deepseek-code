@@ -317,7 +317,7 @@ impl Remote {
         let registration = registration(session, &name.join(" "))?;
         let bridge = tokio::select! {
             bridge = Bridge::connect(endpoint, registration, Timing::default()) => bridge?,
-            _ = tokio::signal::ctrl_c() => anyhow::bail!("Remote Control connection cancelled"),
+            _ = crate::signals::interrupted() => anyhow::bail!("Remote Control connection cancelled"),
         };
         command_eprintln!(
             "Remote Control active: {}\nUse /remote-control again to see the link or disconnect.",

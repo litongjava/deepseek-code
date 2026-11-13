@@ -72,7 +72,7 @@ pub async fn install(language: &lsp_servers::Language) -> Result<()> {
     crate::terminal::print_recorded(&format!("Installing {} for {}... (Ctrl+C to cancel)", language.command, language.name))?;
     let launch = tokio::select! {
         result = lsp_servers::install(language, &|line: &str| { let _ = crate::terminal::print_recorded(&format!("  {line}")); }) => result?,
-        _ = tokio::signal::ctrl_c() => bail!("Installation cancelled"),
+        _ = crate::signals::interrupted() => bail!("Installation cancelled"),
     };
     crate::terminal::print_recorded(&format!("Installed {} ({:.1}s).\n  Command: {}\n  Use /lsp list to check availability.\n", language.name, started.elapsed().as_secs_f64(), launch.command.display()))?;
     Ok(())

@@ -2543,7 +2543,12 @@ async fn sdk_cli_rejects_a_tool_with_both_switches_off() {
         assert_eq!(result["is_error"], false, "{result}");
         let requests = server.fixture.requests.lock().unwrap();
         assert!(!request_tool_names(&requests[1], anthropic).contains(&"ListDir".to_owned()));
-        assert!(requests[1].to_string().contains("No tool available on demand"), "{:?}", requests[1]);
+        // The explicitly named tool is reported with its reason, not a generic miss.
+        assert!(
+            requests[1].to_string().contains("disabled by tool settings"),
+            "{:?}",
+            requests[1]
+        );
         assert!(requests[2].to_string().contains("turned off"), "{:?}", requests[2]);
         drop(requests);
         assert!(client.finish().await.0.success());

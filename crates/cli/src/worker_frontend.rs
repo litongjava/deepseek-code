@@ -734,7 +734,7 @@ async fn observe(
                 side=None;
                 match answer { Ok(answer)=>display.notice(&format!("Side answer:\n{answer}")), Err(error)=>display.notice(&format!("Side question failed: {error:#}")) }
             },
-            _ = tokio::signal::ctrl_c() => {
+            _ = crate::signals::interrupted() => {
                 if !cancelled { cancel_job(session, id)?; cancelled = true; display.set_activity("Cancelling worker"); }
             },
         }

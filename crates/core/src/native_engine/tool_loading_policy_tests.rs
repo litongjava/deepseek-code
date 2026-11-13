@@ -1185,17 +1185,13 @@ async fn tool_search_prefers_full_matches_over_partial_ones() {
     let (_, output, failed) = executor
         .execute_tool_call(
             "ToolSearch",
-            &json!({"query":"git diff"}),
+            &json!({"query":"web fetch"}),
             "search-full",
         )
         .await;
     assert!(!failed, "{output}");
     let result: Value = serde_json::from_str(&output).unwrap();
-    // The unchanged every-word path: EnterWorktree's "different branch" also
-    // contains both words, and neither partial pass runs while it has hits.
-    assert_eq!(
-        result["loaded_tools"],
-        json!(["git_diff", "EnterWorktree"]),
-        "{result}"
-    );
+    // The every-word path finds WebFetch because both words are in its name.
+    // No partial pass runs while it has hits, so no other tool is added.
+    assert_eq!(result["loaded_tools"], json!(["WebFetch"]), "{result}");
 }

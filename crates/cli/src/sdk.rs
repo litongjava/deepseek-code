@@ -818,7 +818,7 @@ async fn run_inner(
         if eof {
             break;
         }
-        match tokio::select! {frame=frames.recv()=>frame,_=tokio::signal::ctrl_c()=>bail!("SDK input interrupted")}
+        match tokio::select! {frame=frames.recv()=>frame,_=crate::signals::interrupted()=>bail!("SDK input interrupted")}
         {
             None => {
                 eof = true;
@@ -935,7 +935,7 @@ async fn pump_lifecycle(
     loop {
         tokio::select! {
             result = &mut future => return result,
-            _ = tokio::signal::ctrl_c() => bail!("SDK startup interrupted"),
+            _ = crate::signals::interrupted() => bail!("SDK startup interrupted"),
             frame = frames.recv(), if !*eof => match frame {
                 None => {
                     *eof = true;

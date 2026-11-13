@@ -58,7 +58,7 @@ pub async fn cron(
         CronCommands::Host { provider, model } => {
             return tokio::select! {
                 result=scheduled_prompts::run(context,cwd,provider.clone(),model.clone())=>result,
-                _=tokio::signal::ctrl_c()=>Ok(()),
+                _=crate::signals::interrupted()=>Ok(()),
             }
         }
     };

@@ -78,7 +78,7 @@ pub async fn run(cli: &crate::args::Cli, paths: &RuntimePaths, action: &MemoryCo
             let context = crate::services::context(paths)?;
             tokio::select! {
                 result = deepseek_code_core::services::dream::run(&context, &generator, false) => crate::services::print(&result?),
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Dream cancelled"),
+                _ = crate::signals::interrupted() => anyhow::bail!("Dream cancelled"),
             }
         }
         MemoryCommands::DreamStatus => {

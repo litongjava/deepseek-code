@@ -41,7 +41,7 @@ pub async fn run(paths: &RuntimePaths, action: &PluginCommands) -> Result<()> {
             );
             let input = serde_json::from_str(input)?;
             let root = std::env::current_dir()?;
-            tokio::select! {result=plugins::run(&context,id,command,input,&root)=>services::print(&result?),_=tokio::signal::ctrl_c()=>anyhow::bail!("Plugin cancelled")}
+            tokio::select! {result=plugins::run(&context,id,command,input,&root)=>services::print(&result?),_=crate::signals::interrupted()=>anyhow::bail!("Plugin cancelled")}
         }
     }
 }

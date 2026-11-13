@@ -605,7 +605,7 @@ pub async fn compact(
                 // committed result, stops the remaining post steps, and is
                 // never reported as an unsaved compaction.
                 _ = wait_for_cancel(cancel.as_mut()) => break committed_after_cancel(&tracker, "Compaction interrupted before it was saved; original transcript retained")?,
-                _ = tokio::signal::ctrl_c() => break committed_after_cancel(&tracker, "Compaction interrupted; check /history for a completed summary. Original transcript retained")?,
+                _ = crate::signals::interrupted() => break committed_after_cancel(&tracker, "Compaction interrupted; check /history for a completed summary. Original transcript retained")?,
             }
         }
         // The block ends here, so a cancel after the commit drops the future

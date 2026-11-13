@@ -55,7 +55,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, action: &MagicCommands) -> Res
                 &selection.provider_id,
                 &selection.model,
             )?;
-            tokio::select! { result=docs::update(&context,&root,id,new_context,&generator)=>print(&result?), _=tokio::signal::ctrl_c()=>anyhow::bail!("Update cancelled") }
+            tokio::select! { result=docs::update(&context,&root,id,new_context,&generator)=>print(&result?), _=crate::signals::interrupted()=>anyhow::bail!("Update cancelled") }
         }
         MagicCommands::Start { interval } => {
             let selection = crate::config::select(cli, paths, None, None)?;
@@ -66,7 +66,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, action: &MagicCommands) -> Res
                 &selection.model,
             )?;
             let lease = Lease::acquire(&context, "magic-docs")?;
-            tokio::select! { result=docs::host(context,root,generator,*interval,None,lease)=>result, _=tokio::signal::ctrl_c()=>Ok(()) }
+            tokio::select! { result=docs::host(context,root,generator,*interval,None,lease)=>result, _=crate::signals::interrupted()=>Ok(()) }
         }
     }
 }

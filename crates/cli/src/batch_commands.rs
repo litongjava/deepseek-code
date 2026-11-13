@@ -266,7 +266,7 @@ pub async fn handle(
             #[cfg(windows)]
             process.creation_flags(0x08000000);
             command_eprintln!("Researching a batch plan in a separate read-only session. No workers will start until /batch run ID.");
-            let output = tokio::select! {result=tokio::time::timeout(Duration::from_secs(600),process.output())=>result.context("Batch planning timed out")??,_=tokio::signal::ctrl_c()=>anyhow::bail!("Batch planning cancelled")};
+            let output = tokio::select! {result=tokio::time::timeout(Duration::from_secs(600),process.output())=>result.context("Batch planning timed out")??,_=crate::signals::interrupted()=>anyhow::bail!("Batch planning cancelled")};
             ensure!(
                 output.status.success(),
                 "Batch planner failed: {}\n{}",
