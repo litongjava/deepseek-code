@@ -10,8 +10,10 @@ pub(super) fn validate(input: &Value) -> Result<Option<(u16, u16)>> {
         );
         return Ok(None);
     }
-    ensure!(cfg!(target_os = "linux"),
-        "Bash interaction:\"pty\" is supported only on Linux; Windows/ConPTY and macOS are not implemented");
+    ensure!(
+        cfg!(any(target_os = "linux", windows)),
+        "Bash interaction:\"pty\" is supported only on Linux and Windows; macOS is not implemented"
+    );
     ensure!(
         input["run_in_background"] == true && input["detach"] != true,
         "Bash interaction:\"pty\" requires run_in_background:true and cannot detach"
@@ -39,7 +41,7 @@ pub(super) fn validate(input: &Value) -> Result<Option<(u16, u16)>> {
     )))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) fn start(
     command: tokio::process::Command,
     rows: u16,
@@ -67,7 +69,11 @@ pub(super) fn start(
             }
         }
     }
-    let spec = super::pty_transport::SpawnSpec {
+    #[cfg(windows)]
+    use super::conpty::{self as owner, SpawnSpec};
+    #[cfg(target_os = "linux")]
+    use super::{pty_owner as owner, pty_transport::SpawnSpec};
+    let spec = SpawnSpec {
         executable: command.get_program().to_owned(),
         arguments: command.get_args().map(ToOwned::to_owned).collect(),
         cwd: command
@@ -75,10 +81,17 @@ pub(super) fn start(
             .context("PTY command cwd is missing")?
             .to_owned(),
         environment: environment.into_iter().collect(),
+        // Windows environment names are case-insensitive. Reapply removals
+        // and overrides through portable-pty's Windows environment map.
+        #[cfg(windows)]
+        environment_overrides: command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
+            .collect(),
         rows,
         cols,
     };
-    let (value, guard) = super::pty_owner::start(spec, &root, &session, description, command_text)?;
+    let (value, guard) = owner::start(spec, &root, &session, description, command_text)?;
     // The owner already contributes to background_shell::has_active. Retain
     // its guard across turns until real completion. Runtime shutdown drops the
     // guard, executing the existing bounded session cleanup. No second driver.
@@ -103,7 +116,7 @@ mod tests {
         assert_eq!(validate(&json!({"interaction":"pipe"})).unwrap(), None);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn pty_launch_validates_all_options_before_creating_a_task() {
         let base = json!({"interaction":"pty","run_in_background":true});
@@ -128,7 +141,7 @@ mod tests {
         assert_eq!(validate(&limits).unwrap(), Some((500, 1000)));
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     #[test]
     fn pty_is_explicitly_unsupported() {
         let error = validate(&json!({"interaction":"pty","run_in_background":true})).unwrap_err();

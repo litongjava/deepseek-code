@@ -28,7 +28,7 @@ pub(crate) const MAX_WRITE_MS: u64 = 60_000;
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
         name: "TaskInput".into(),
-        description: "Write UTF-8 data to a managed Bash pipe or Linux PTY in the owning session. data is written before eof. For pipe, eof permanently closes stdin; for PTY, eof sends the terminal's current canonical VEOF character, which is not a permanent close and may only deliver buffered input. Raw mode/disabled VEOF rejects EOF. PTY resize:{rows,cols} must be a separate call, without data/eof. Validate all arguments before effects. timeout bounds one call (default 10000, max 60000 ms); bytes_written counts OS-accepted bytes, not consumption. Partial/unknown writes are never retried automatically. Normal permissions, hooks and cancellation apply; plan mode refuses input. Use TaskGet for merged PTY output and TaskStop to terminate the session.".into(),
+        description: "Write UTF-8 data to a managed Bash pipe, Linux PTY or Windows ConPTY in the owning session. data is written before eof. For pipe, eof permanently closes stdin; for PTY, eof sends the terminal's current canonical VEOF character, which is not a permanent close and may only deliver buffered input. Raw mode/disabled VEOF rejects EOF. Windows eof:true is unsupported and rejects the entire call before data: Ctrl+Z/Ctrl+D are application-specific input, not a universal close; send them explicitly with data if appropriate. Windows input works only in the original owner process (including persistent worker resume). PTY resize:{rows,cols} must be a separate call, without data/eof. Validate all arguments before effects. timeout bounds one call (default 10000, max 60000 ms); bytes_written counts OS-accepted bytes, not consumption. On Windows write errors, bytes_written_lower_bound:true means unreported partial progress is possible. Partial/unknown writes are never retried automatically. Normal permissions, hooks and cancellation apply; plan mode refuses input. Use TaskGet for merged PTY output and TaskStop to terminate the session.".into(),
         input_schema: json!({
             "type":"object",
             "properties":{
@@ -36,7 +36,7 @@ pub(super) fn definition() -> super::ToolDefinition {
                 "taskId":{"type":"string","description":"Alias for task_id."},
                 "id":{"type":"string","description":"Alias for task_id."},
                 "data":{"type":"string","description":format!("UTF-8 text to write. At most {MAX_INPUT_BYTES} bytes per call.")},
-                "eof":{"type":"boolean","default":false,"description":"Pipe: close stdin. PTY: send canonical VEOF after data; not a permanent close."},
+                "eof":{"type":"boolean","default":false,"description":"Pipe: close stdin. Linux PTY: send canonical VEOF after data; not a permanent close. Windows ConPTY: unsupported, including when combined with data."},
                 "resize":{"type":"object","description":"PTY only; separate from data/eof.","properties":{"rows":{"type":"integer","minimum":1,"maximum":500},"cols":{"type":"integer","minimum":1,"maximum":1000}},"required":["rows","cols"],"additionalProperties":false},
                 "timeout":{"type":"integer","minimum":1,"maximum":60000,"default":10000,"description":"Wait limit in milliseconds for the task lock and pipe capacity."},
             },
@@ -151,8 +151,10 @@ pub(crate) fn execute_cancellable(
     if task["metadata"]["interaction"] == "pty" {
         #[cfg(target_os = "linux")]
         return super::pty_owner::execute(input, root, session, cancelled);
-        #[cfg(not(target_os = "linux"))]
-        bail!("PTY TaskInput is supported only on Linux; Windows/ConPTY and macOS are not implemented");
+        #[cfg(windows)]
+        return super::conpty::execute(input, root, session, cancelled);
+        #[cfg(not(any(target_os = "linux", windows)))]
+        bail!("PTY TaskInput is supported only on Linux and Windows; macOS is not implemented");
     }
     ensure!(resize.is_none(), "TaskInput resize requires a PTY task");
     ensure!(

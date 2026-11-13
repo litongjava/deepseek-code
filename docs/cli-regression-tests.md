@@ -955,3 +955,16 @@ ToolScript 保持按需加载。Router 可以加载它来组合允许的工具�
 5. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
 6. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
 7. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。回合实际在会话 Worker 里执行（`input` 为 `None`），有主判定必须同时接受 Worker 控制目录；远端/SDK 宿主不得据此启用。
+
+### Windows ConPTY（Codex 03；Windows 结果以平台 CI 为准）
+
+`.github/workflows/platform-tests.yml` 在 `ci/**` push 或 workflow_dispatch 运行。测试列表集中在 matrix 的 `core-filters` / `cli-tests`；每条命令保存退出码与实际执行数，0 项失败，日志以 `runtime-tests-<os>` artifact 保存。Windows 运行 `tools::pty_bash`、`tools::conpty`、`tools::shell_input` 和 CLI `conpty_worker`。Linux 保留 `tools::pty`（owner/transport/gate/supervisor/adapter）、`owner_loss`、pipe owner/input 和六个 PTY/pipe/TaskGet CLI 目标；macOS 验证明确拒绝 PTY。Linux 结果不能替代 Windows 编译或运行。
+
+- Windows Bash PTY 复用 portable-pty ConPTY，仍使用正常 Bash 的配置 shell/program/argv/env/cwd；环境移除/覆盖保持 Windows 大小写不敏感。初始 rows/cols、sandbox/timeout/Monitor 拒绝与 Linux 相同；Windows WSL、cmd（raw 命令行引号）和 pipe 保持明确不支持。
+- 控制只在原 owner 进程的 canonical root/session/task 注册表中进行；TaskInput 先经过真实任务会话归属检查。持久 worker resume 可继续写，其他进程明确报不支持，不以 PID/心跳或模型 metadata 授权。TaskGet 读取现有合并 stdout 与分页，等待 timeout 不停止任务；TaskStop 使用正常取消标记。
+- ConPTY 的内部 gate 在启动用户 shell 前加入 Job Object，关闭 gate 的 job 句柄后才启动实际命令；不允许 breakaway。owner 最后句柄关闭（含强杀）由 Windows 清理任务树。正常退出/停止后查询 Job Object 的 ActiveProcesses=0，再落真实终态。输出独立持续读取，处理 portable-pty 要求的 DSR 光标查询，避免 ClosePseudoConsole 与输出互相阻塞。
+- Windows `eof:true` 本轮明确不支持，data+eof 整次拒绝且不写；Ctrl+Z/Ctrl+D 可通过 data 显式发送，由应用解释，不能当通用 EOF。同步匿名管道写由精确线程句柄 CancelSynchronousIo 取消并 join；错误时 `bytes_written_lower_bound:true,outcome:"unknown"` 不承诺不存在未报告的部分写入，不能自动重放。
+- `conpty_worker` 使用本地 mock + 真实持久 worker，Windows 检查控制台、回显、resize、跨轮、TaskGet timeout、Job Object 子孙清理、外 session 与同 session 外进程输入拒绝、plan、EOF/非法参数无效果、正常退出、初始化失败、Git Bash 默认 shell、SQLite 独立调用 ID。`CONPTY_ID`/`CONPTY_TREE`/`CONPTY_CLEANUP` 用固定进程句柄记录身份，清理断言先于测试失败兜底清理。
+- Windows core 另测 Job Object terminate/最后句柄关闭、过期 gate 拒绝、同步写阻塞时超时与取消、DSR 分片、环境/argv/cwd。`job_member_fixture` 是子进程夹具，普通套件调用不启动子进程；子进程重复输出不增加独立用例数量。
+
+未验证项必须单列：Windows/macOS Actions 尚未运行、Desktop 实际 UI、真实 Windows Terminal。Windows owner 强杀后的日志尾部/SQLite 终态 reconcile 尚未移植；TaskGet 保留 unresponsive 与已捕获日志，不虚构 completed 或 cleanup_complete。人工步骤见交付目录 `windows-conpty-validation.md`，使用同候选 SHA 的 `conpty-console.ps1` 和本地 mock。
