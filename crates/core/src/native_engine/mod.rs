@@ -6,8 +6,12 @@ pub mod engine_core;
 pub mod provider_manager;
 pub mod session_manager;
 pub mod tool_loop;
+// The durable owner path depends on the embedded QuickJS bridge.
+#[cfg(not(target_os = "android"))]
+pub mod toolscript_job;
 pub mod request_trace;
 mod request_identity;
+pub mod request_options;
 pub mod token_counter;
 pub mod task_context;
 pub mod context_compressor;
@@ -26,4 +30,5 @@ pub mod request_context;
 pub mod permission_response;
 
 pub mod runtime_agents;
+pub mod child_session;
 pub(crate) mod mcp_output;

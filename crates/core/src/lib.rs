@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod tools;
+pub mod toolscript;
 pub mod research;
 pub mod prompt;
 pub mod mcp;
@@ -48,6 +49,8 @@ pub mod app_studio;
 pub mod knowledge;
 pub mod runtime;
 pub mod services;
+
+pub mod super_agent;
 
 pub mod learning;
 pub mod performance;

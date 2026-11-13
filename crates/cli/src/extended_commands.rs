@@ -170,13 +170,30 @@ pub async fn handle(
             command_eprintln!("{}", terminal_setup());
         }
         "/agents" => {
-            ensure!(matches!(argument, "" | "definitions"), "Usage: /agents [definitions]");
-            if argument == "definitions" {
-                for agent in deepseek_code_core::services::agents::list(&crate::services::context(paths)?)? {
-                    command_eprintln!("- {}: {}", agent.id, agent.description);
+            let usage = "Usage: /agents [definitions|model [TYPE [MODEL|default]]]";
+            let (verb, rest) = argument
+                .split_once(char::is_whitespace)
+                .unwrap_or((argument, ""));
+            match verb {
+                "" => command_eprintln!("{}", active_agents_text(paths, &session.id)?),
+                "definitions" if rest.trim().is_empty() => {
+                    for agent in
+                        deepseek_code_core::services::agents::list(&crate::services::context(paths)?)?
+                    {
+                        command_eprintln!("- {}: {}", agent.id, agent.description);
+                    }
                 }
-            } else {
-                command_eprintln!("{}", active_agents_text(paths, &session.id)?);
+                "model" => {
+                    let mut parts = rest.split_whitespace();
+                    let agent = parts.next();
+                    let model = parts.next();
+                    ensure!(parts.next().is_none(), "{usage}");
+                    command_eprintln!(
+                        "{}",
+                        crate::agent_commands::model_command(paths, agent, model)?
+                    );
+                }
+                _ => anyhow::bail!("{usage}"),
             }
         }
         "/list-agents" => {

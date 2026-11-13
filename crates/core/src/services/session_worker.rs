@@ -651,6 +651,7 @@ pub fn begin_job(worker: &Worker, id: &str, prompt: &str) -> Result<Job> {
         finished_ms: None,
         exit_code: None,
         error: None,
+        launched: true,
     };
     jobs::save(&dir.join("state.json"), &job)?;
     fs::File::create(dir.join("output.jsonl"))?;
@@ -1229,6 +1230,7 @@ mod settle_tests {
             id, foreground: false, parent_session_id: session.into(), session_id: session.into(),
             title: "fixture".into(), status: status.into(), supervisor_pid: Some(pid), child_pid: Some(pid),
             started_ms: jobs::now(), heartbeat_ms, finished_ms: None, exit_code: None, error: None,
+            launched: true,
         };
         jobs::save(&dir.join("state.json"), &job).unwrap();
         job

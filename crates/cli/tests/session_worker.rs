@@ -177,7 +177,11 @@ async fn turns_submitted_right_after_completion_are_admitted() {
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let executable = temp.path().join(if cfg!(windows) { "immediate.exe" } else { "immediate" });
+    let executable = temp.path().join(if cfg!(windows) {
+        "immediate.exe"
+    } else {
+        "immediate"
+    });
     std::fs::copy(test_cli_executable(), &executable).unwrap();
     let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
         .await
@@ -981,3 +985,98 @@ async fn explicit_quit_stops_idle_worker_without_waiting_five_minutes() {
 
 #[path = "support/session_worker_recovery.rs"]
 mod recovery;
+
+fn request_tool_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .or_else(|| tool["name"].as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A live terminal does not run the turn itself: `worker_frontend::turn`
+/// submits it to the session worker, and the worker calls
+/// `Session::turn(&cli, &prompt, &mut None)`. Ownership is still proven by the
+/// worker control directory, so CompactContext must be loadable there; the
+/// `input.is_some()` gate alone would hide it from every real terminal.
+#[tokio::test]
+async fn compact_context_is_offered_in_a_worker_terminal_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let requests = requests.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    let step = {
+                        let mut requests = requests.lock().unwrap();
+                        requests.push(body);
+                        requests.len() - 1
+                    };
+                    // The tool the model asked for in the terminal, then the
+                    // request that may use CompactContext.
+                    let (delta, reason) = if step == 0 {
+                        (
+                            json!({"tool_calls":[{"index":0,"id":"search-compact","type":"function","function":{"name":"ToolSearch","arguments":json!({"query":"compact summarize session memory"}).to_string()}}]}),
+                            "tool_calls",
+                        )
+                    } else {
+                        (json!({"content":"finished"}), "stop")
+                    };
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+                            json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]})
+                        ),
+                    )
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) {
+        "compact-context.exe"
+    } else {
+        "compact-context"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    // A model with a known context window is required: no window means no
+    // usage snapshot, and the tool stays unavailable.
+    let id = submit(&host, &endpoint, "finish the task", "deepseek-flash", 256).await;
+    let job = completed(&paths.data_dir, &id).await;
+    assert_eq!(job.status, "completed", "{:?}", job.error);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        !request_tool_names(&requests[0]).iter().any(|name| name == "CompactContext"),
+        "on demand, so not resident before the search"
+    );
+    let after = request_tool_names(&requests[1]);
+    assert!(
+        after.iter().any(|name| name == "CompactContext"),
+        "the worker terminal must expose CompactContext: {after:?}"
+    );
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    server.abort();
+}

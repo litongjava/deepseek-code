@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { planModeFromTool, approvedPermissionModeFromTool } from './planMode';
 describe('plan tool mode updates', () => {
+  it('ignores results from the removed plan_mode tool', () => {
+    for (const result of [{ mode: 'plan' }, ...['ask', 'auto', 'accept_edits', 'bypass'].map(mode => ({ approved: true, mode }))]) {
+      const event = { type: 'done', tool_name: 'plan_mode', is_error: false, content: JSON.stringify(result) };
+      expect(planModeFromTool(event)).toBeNull();
+      expect(approvedPermissionModeFromTool(event)).toBeNull();
+    }
+  });
   it('keeps rejected and failed plans in planning mode', () => {
     expect(planModeFromTool({ type: 'done', tool_name: 'ExitPlanMode', content: '{"approved":false,"mode":"plan"}' })).toBe(true);
     expect(planModeFromTool({ type: 'done', tool_name: 'ExitPlanMode', is_error: true, content: '{"approved":true,"mode":"ask"}' })).toBeNull();
     expect(planModeFromTool({ type: 'done', tool_name: 'ExitPlanMode', content: '{"mode":"ask"}' })).toBeNull();
   });
   it('accepts only successful supported plan transitions', () => {
+    expect(planModeFromTool({ type: 'done', tool_name: 'EnterPlanMode', content: '{"mode":"plan"}' })).toBe(true);
     for (const mode of ['ask', 'auto', 'accept_edits', 'bypass']) expect(planModeFromTool({ type: 'done', tool_name: 'ExitPlanMode', content: JSON.stringify({ approved: true, mode }) })).toBe(false);
     expect(planModeFromTool({ type: 'done', tool_name: 'ExitPlanMode', content: '{"approved":false,"mode":"bypass"}' })).toBeNull();
   });

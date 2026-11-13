@@ -246,6 +246,7 @@ mod tests {
             finished_ms: None,
             exit_code: None,
             error: None,
+            launched: true,
         };
         jobs::save(&directory.join("state.json"), &job).unwrap();
         assert!(validate_idle(&context, &parent, &child)

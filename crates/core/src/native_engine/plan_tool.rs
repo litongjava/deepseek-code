@@ -225,6 +225,67 @@ impl ToolLoopExecutor {
         let plan = plans::read(&root, &session)?
             .filter(|plan| !plan.trim().is_empty())
             .ok_or_else(|| anyhow!("No plan written yet; write the session plan file, then call ExitPlanMode (or supply plan text)"))?;
+        // A Super Agent Coder's plan approval belongs to the host: it is
+        // recorded by the orchestrator after CrpSubmit. Once that current
+        // approval exists, ExitPlanMode resumes the inherited Router policy
+        // instead of returning the plan to a delegation parent that never
+        // approves it.
+        if !entering {
+            if let (Some(runtime), Some(session_id)) =
+                (self.super_agent.as_ref(), self.conv_id.as_deref())
+            {
+                if let Ok(Some((task_id, crate::super_agent::MemberRole::Coder))) =
+                    crate::super_agent::role::membership(&runtime.db, session_id)
+                {
+                    let store = runtime.store();
+                    if let Ok(Some(task)) = store.get_task(&task_id) {
+                        let approved = store.approvals(&task_id).is_ok_and(|approvals| {
+                            approvals.iter().any(|approval| {
+                                approval.request_type
+                                    == crate::super_agent::ApprovalType::Plan
+                                    && approval.status
+                                        == crate::super_agent::ApprovalStatus::Approved
+                                    && approval.task_spec_version == task.spec_version
+                                    && approval.permission_policy_version
+                                        == task.permission_policy_version
+                            })
+                        });
+                        anyhow::ensure!(
+                            approved,
+                            "The host has not approved the current task plan; submit it with CrpSubmit(kind=\"plan\") and wait"
+                        );
+                        let context = crate::services::session_messages::context(&root)?;
+                        let inherited = crate::services::session_permission_mode::load(
+                            &context.db,
+                            &task.router_session_id,
+                        )?
+                        .unwrap_or(PermissionMode::AcceptEdits);
+                        let expected_mode = manager.mode_snapshot();
+                        anyhow::ensure!(
+                            expected_mode.mode == PermissionMode::PlanMode,
+                            "Planning mode changed before approval"
+                        );
+                        crate::services::plan_approval::commit_approved_mode(
+                            &context,
+                            &session,
+                            &manager,
+                            expected_mode,
+                            inherited,
+                            &plan,
+                        )?;
+                        return Ok(json!({
+                            "approved":true,
+                            "mode":crate::services::session_permission_mode::name(inherited),
+                            "approvedBy":"super-agent-orchestrator",
+                            "planFilePath":path,
+                            "plan":plan,
+                            "allowedPrompts":allowed_prompts,
+                            "message":"Plan approved by the Super Agent host. Implement the approved plan."
+                        }));
+                    }
+                }
+            }
+        }
         if self.delegated_parent().is_some()
             && crate::services::teams::team_for_session(&root, &session)?.is_none()
         {
@@ -827,6 +888,7 @@ mod tests {
                 finished_ms: None,
                 exit_code: None,
                 error: None,
+                launched: true,
             };
             background_sessions::save(&directory.join("state.json"), &job).unwrap();
             let log = root.path().join("worker.log");

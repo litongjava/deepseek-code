@@ -145,6 +145,11 @@ async fn evaluate(
         let mut calls = Vec::new();
         if native {
             let response = OpenAIClient::new()
+                .with_request_options(
+                    crate::native_engine::request_options::RequestOptions::for_session(
+                        input["session_id"].as_str(),
+                    ),
+                )
                 .without_retries()
                 .send_message(
                     &provider,
@@ -173,6 +178,11 @@ async fn evaluate(
             messages.push(choice.message);
         } else {
             let response = AnthropicClient::new()
+                .with_request_options(
+                    crate::native_engine::request_options::RequestOptions::for_session(
+                        input["session_id"].as_str(),
+                    ),
+                )
                 .without_retries()
                 .send_message(
                     &provider,

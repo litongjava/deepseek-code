@@ -173,6 +173,8 @@ pub fn recover_malformed_tool_input(tool_name: &str, raw_args: &str) -> Option<V
                 _ => None,
             }
         }
+        "ApplyPatch" => extract_loose_json_string_field(raw_args, "patch", true)
+            .map(|patch| serde_json::json!({ "patch": patch })),
         "MultiEdit" => {
             let file_path = extract_loose_json_string_field(raw_args, "file_path", false);
             if let Some(fp) = file_path {

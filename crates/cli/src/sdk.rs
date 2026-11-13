@@ -145,7 +145,8 @@ impl Permissions {
     }
     pub async fn cancel(&self) {
         for (id, (_, _, tx)) in self.pending.lock().await.drain() {
-            let _ = tx.send(Err(anyhow::anyhow!("SDK turn interrupted")));
+            // Keep the common cancellation prefix when Session adds context.
+            let _ = tx.send(Err(anyhow::anyhow!("Interrupted by SDK host")));
             let _ = crate::session::emit_json(
                 &json!({"type":"control_cancel_request","request_id":id}),
             );
@@ -879,7 +880,7 @@ async fn emit_prompt_suggestion(session: &Session) -> Result<()> {
     }
     let suggestion = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        session.engine.generate_text(
+        session.engine.generate_text_for_session(Some(&session.id),
             &session.provider_id,
             &session.model,
             "Predict the user's likely next message in this conversation. Reply with only that message, at most 120 characters, without quotes.",

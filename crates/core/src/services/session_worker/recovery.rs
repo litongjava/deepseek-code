@@ -9,7 +9,7 @@ use super::*;
 /// release can keep `startup.lock` held after the logical owner has returned.
 /// Only the process that took the lock releases it: a forked copy inherits
 /// `owner` and must not unlock a live parent. Descriptor close stays as the
-/// fallback for abnormal exit.
+/// fallback for abnormal exit, including `SIGKILL`, where no `Drop` runs.
 pub(super) struct OwnedLock {
     file: fs::File,
     owner: u32,
@@ -486,12 +486,22 @@ mod tests {
         while let Ok(duplicate) = receive.try_recv() {
             duplicates.push(duplicate);
         }
-        assert!(duplicates.len() >= 2, "expected startup and supervisor locks");
+        assert!(
+            duplicates.len() >= 2,
+            "expected startup and supervisor locks"
+        );
         crate::fs::unlock_file(&host).unwrap();
         drop(host);
         // Every lock that path took is free immediately, duplicates included.
-        for path in [dir.parent().unwrap().join("startup.lock"), dir.join("supervisor.lock")] {
-            let file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        for path in [
+            dir.parent().unwrap().join("startup.lock"),
+            dir.join("supervisor.lock"),
+        ] {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             crate::fs::try_lock_file(&file)
                 .unwrap_or_else(|error| panic!("{} stayed locked: {error:?}", path.display()));
             crate::fs::unlock_file(&file).unwrap();

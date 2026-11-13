@@ -472,6 +472,7 @@ mod tests {
             finished_ms: Some(0),
             exit_code: Some(2),
             error: None,
+            launched: true,
         };
         std::fs::write(
             directory.join("state.json"),

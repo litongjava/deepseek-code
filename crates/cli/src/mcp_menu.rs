@@ -61,9 +61,22 @@ pub async fn run(session: &Session) -> Result<()> {
             eprintln!("No MCP servers configured. Run /doctor if this is unexpected. Otherwise, run dcl mcp --help to learn how to add one{}.", if hidden > 0 { format!(", or /mcp list to see the {hidden} bundled presets") } else { String::new() });
             return Ok(());
         }
+        let stored = deepseek_code_core::mcp::states::load(&session.paths.data_dir);
         let entries: Vec<Entry> = servers
             .iter()
-            .map(|server| Entry { title: server.name.clone(), detail: state(server) })
+            .map(|server| Entry {
+                title: server.name.clone(),
+                detail: format!(
+                    "{} \u{b7} {}",
+                    state(server),
+                    deepseek_code_core::mcp::states::shown(
+                        &stored,
+                        &server.id,
+                        server.enabled
+                    )
+                    .label()
+                ),
+            })
             .collect();
         let mut count = format!("{} server{}", servers.len(), if servers.len() == 1 { "" } else { "s" });
         if hidden > 0 {
@@ -91,6 +104,7 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
         if server.running {
             actions.push("View tools");
         }
+        actions.push("Set state");
         actions.push("Reconnect");
         actions.push("Disable");
     } else {
@@ -123,6 +137,35 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
             let heading = format!("Tools for {}", server.name);
             let count = format!("{} tool{}", tools.len(), if tools.len() == 1 { "" } else { "s" });
             Picker { heading: &heading, subtitle: Some(&count), entries: &tools, search: true, hint: "Type to search \u{b7} Esc to go back", selected: 0 }.run()?;
+        }
+        "Set state" => {
+            let stored = deepseek_code_core::mcp::states::load(&session.paths.data_dir);
+            let current =
+                deepseek_code_core::mcp::states::shown(&stored, &server.id, server.enabled);
+            match crate::plugins_panel::pick_mcp_state(&server.name, current)? {
+                Some(crate::plugins_panel::McpStateChoice::State(state)) => {
+                    crate::mcp_states::apply(&session.paths, &session.mcp, server, state)
+                        .await?;
+                    if state == deepseek_code_core::mcp::states::McpState::Off {
+                        disable(session, server).await?;
+                    } else if let Err(error) = enable(session, server).await {
+                        eprintln!(
+                            "{} is now {}; it failed to start: {error:#}",
+                            server.name,
+                            state.label()
+                        );
+                    }
+                    eprintln!("{} is now {}.", server.name, state.label());
+                }
+                Some(crate::plugins_panel::McpStateChoice::Details) => eprintln!(
+                    "{} \u{b7} {} \u{b7} {} tool{}",
+                    server.name,
+                    current.label(),
+                    server.tools_count,
+                    if server.tools_count == 1 { "" } else { "s" }
+                ),
+                None => {}
+            }
         }
         "Reconnect" => match session.mcp.restart_server(&server.id).await {
             Ok(()) => eprintln!("Reconnected to {}.", server.name),

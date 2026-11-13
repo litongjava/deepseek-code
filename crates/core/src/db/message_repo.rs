@@ -413,6 +413,46 @@ pub fn insert_tool_call(
     Ok(())
 }
 
+/// Records that `tool_call_id` was made by a nested ToolScript call whose parent
+/// is `parent_tool_call_id`, at the script's internal `sequence`.
+///
+/// Idempotent and first-wins: replaying the same origin keeps one row, and a
+/// conflicting replay must never silently reparent an existing occurrence.
+pub fn save_tool_origin(
+    conn: &Connection,
+    tool_call_id: &str,
+    parent_tool_call_id: &str,
+    sequence: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO tool_call_origins (tool_call_id, parent_tool_call_id, sequence, origin) \
+         VALUES (?1, ?2, ?3, 'toolscript') \
+         ON CONFLICT(tool_call_id) DO NOTHING",
+        params![tool_call_id, parent_tool_call_id, sequence],
+    )?;
+    Ok(())
+}
+
+/// Nested calls recorded for one assistant message, in script order.
+pub fn get_tool_origins_for_message(
+    conn: &Connection,
+    message_id: &str,
+) -> Result<Vec<(String, String, i64)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT o.tool_call_id, o.parent_tool_call_id, o.sequence \
+         FROM tool_call_origins o JOIN tool_calls t ON t.id = o.tool_call_id \
+         WHERE t.message_id = ?1 ORDER BY o.sequence ASC, o.tool_call_id ASC",
+    )?;
+    let rows = stmt.query_map(params![message_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 /// Save each result as it arrives, rather than waiting for the whole assistant turn.
 pub fn save_stream_tool_result(
     conn: &Connection,
@@ -422,10 +462,41 @@ pub fn save_stream_tool_result(
     tool: &ToolCallRow,
 ) -> Result<()> {
     let tx = crate::db::write_transaction(&conn)?;
-    tx.execute("INSERT INTO messages (id, conversation_id, role, content, created_at, sort_order)
-        VALUES (?1, ?2, 'assistant', ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))
-        ON CONFLICT(id) DO UPDATE SET content = excluded.content",
-        params![message_id, conversation_id, content, chrono::Utc::now().to_rfc3339()])?;
+    upsert_stream_tool_result(&tx, conversation_id, message_id, content, tool)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Persists a nested ToolScript row and its origin in one transaction, so a
+/// crash or a failing origin insert cannot leave a row that reopen would replay
+/// as a fabricated provider tool call.
+pub fn save_stream_nested_tool_result(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    tool: &ToolCallRow,
+    parent_tool_call_id: &str,
+    sequence: i64,
+) -> Result<()> {
+    let tx = crate::db::write_transaction(&conn)?;
+    upsert_stream_tool_result(&tx, conversation_id, message_id, content, tool)?;
+    save_tool_origin(&tx, &tool.id, parent_tool_call_id, sequence)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Persists a nested row and its origin without touching the assistant message
+/// content. A background ToolScript owner uses this so it never rewrites text
+/// that the ended parent turn already persisted.
+pub fn save_nested_tool_row(
+    conn: &Connection,
+    message_id: &str,
+    tool: &ToolCallRow,
+    parent_tool_call_id: &str,
+    sequence: i64,
+) -> Result<()> {
+    let tx = crate::db::write_transaction(&conn)?;
     insert_tool_call(
         &tx,
         &tool.id,
@@ -436,7 +507,31 @@ pub fn save_stream_tool_result(
         tool.is_error,
         tool.sort_order,
     )?;
+    save_tool_origin(&tx, &tool.id, parent_tool_call_id, sequence)?;
     tx.commit()?;
+    Ok(())
+}
+
+fn upsert_stream_tool_result(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    tool: &ToolCallRow,
+) -> Result<()> {    conn.execute("INSERT INTO messages (id, conversation_id, role, content, created_at, sort_order)
+        VALUES (?1, ?2, 'assistant', ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))
+        ON CONFLICT(id) DO UPDATE SET content = excluded.content",
+        params![message_id, conversation_id, content, chrono::Utc::now().to_rfc3339()])?;
+    insert_tool_call(
+        conn,
+        &tool.id,
+        message_id,
+        &tool.name,
+        tool.input.as_deref(),
+        tool.output.as_deref(),
+        tool.is_error,
+        tool.sort_order,
+    )?;
     Ok(())
 }
 

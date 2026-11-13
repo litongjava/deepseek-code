@@ -67,10 +67,16 @@ impl From<PermissionMode> for String {
 pub type AlwaysAllowCheckerFn = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModeSnapshot { pub mode: PermissionMode, revision: u64 }
+pub struct ModeSnapshot {
+    pub mode: PermissionMode,
+    revision: u64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PolicySnapshot { pub mode: ModeSnapshot, revision: u64 }
+pub struct PolicySnapshot {
+    pub mode: ModeSnapshot,
+    revision: u64,
+}
 
 pub struct PermissionManager {
     bypass_available: std::sync::atomic::AtomicBool,
@@ -94,9 +100,17 @@ pub struct PermissionManager {
 impl PermissionManager {
     /// In-memory equality guard for resuming an owned executor; never persisted or logged.
     pub(crate) fn delegation_policy_snapshot(&self, session: &str) -> serde_json::Value {
-        let _revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
-        let callback = self.always_allow_checker.lock().unwrap_or_else(|e|e.into_inner()).as_ref().map(|callback| Arc::as_ptr(callback) as *const () as usize);
-        let mode=self.mode_snapshot();
+        let _revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let callback = self
+            .always_allow_checker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|callback| Arc::as_ptr(callback) as *const () as usize);
+        let mode = self.mode_snapshot();
         serde_json::json!({
             "mode":mode.mode.as_str(),
             "mode_revision":mode.revision,
@@ -127,9 +141,14 @@ impl PermissionManager {
         for pattern in rules.keys() {
             super::patterns::validate(pattern)?;
         }
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut current = self.launch_rules.lock().unwrap_or_else(|e| e.into_inner());
-        if current.get(conversation).is_some_and(|value| *value == rules)
+        if current
+            .get(conversation)
+            .is_some_and(|value| *value == rules)
             || (rules.is_empty() && !current.contains_key(conversation))
         {
             return Ok(());
@@ -149,7 +168,10 @@ impl PermissionManager {
         conversation: &str,
         rules: Vec<HashMap<String, PermissionAction>>,
     ) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
         self.runtime_rules
             .lock()
@@ -158,12 +180,20 @@ impl PermissionManager {
     }
     /// Validate or atomically publish a session patch against the latest runtime rules.
     pub(crate) fn update_runtime_rules(
-        &self, conversation: &str, publish: bool,
+        &self,
+        conversation: &str,
+        publish: bool,
         update: impl FnOnce(&mut Vec<HashMap<String, PermissionAction>>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut runtime = self.runtime_rules.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = runtime.get(conversation).cloned().unwrap_or_else(|| vec![HashMap::new(); 3]);
+        let mut next = runtime
+            .get(conversation)
+            .cloned()
+            .unwrap_or_else(|| vec![HashMap::new(); 3]);
         next.resize_with(3, HashMap::new);
         update(&mut next)?;
         if publish {
@@ -173,23 +203,46 @@ impl PermissionManager {
         Ok(())
     }
     pub fn clear_runtime_rules(&self, conversation: &str) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
-        self.runtime_rules.lock().unwrap_or_else(|e| e.into_inner()).remove(conversation);
+        self.runtime_rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conversation);
     }
     pub fn set_session_rules(&self, conversation: &str, rules: HashMap<String, PermissionAction>) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
-        self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).insert(conversation.to_owned(), rules);
+        self.session_rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(conversation.to_owned(), rules);
     }
     /// Adds one allow rule to a session's rules; deny and ask rules still win.
     pub(crate) fn allow_in_session(&self, conversation: &str, rule: &str) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
-        self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).entry(conversation.to_owned()).or_default().insert(rule.to_owned(), PermissionAction::Allow);
+        self.session_rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(conversation.to_owned())
+            .or_default()
+            .insert(rule.to_owned(), PermissionAction::Allow);
     }
     pub fn bash_session_allowed(&self, session: &str) -> bool {
-        self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner()).contains(session)
+        self.bash_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session)
     }
     pub fn edit_session_allowed(&self, session: &str) -> bool {
         self.edit_sessions
@@ -213,10 +266,19 @@ impl PermissionManager {
         }
     }
     pub fn set_bash_session_allowed(&self, session: &str, allowed: bool) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut sessions = self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = if allowed { sessions.insert(session.into()) } else { sessions.remove(session) };
-        if changed { *revision = revision.wrapping_add(1); }
+        let changed = if allowed {
+            sessions.insert(session.into())
+        } else {
+            sessions.remove(session)
+        };
+        if changed {
+            *revision = revision.wrapping_add(1);
+        }
     }
     pub fn session_directories(&self, conversation: &str) -> Vec<PathBuf> {
         self.session_directories
@@ -241,12 +303,19 @@ impl PermissionManager {
 
     #[cfg(test)]
     pub(crate) fn inherit_session_rules(&self, parent: &str, child: &str) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
         let mut sessions = self.session_rules.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(rules) = sessions.get(parent).cloned() { sessions.insert(child.to_owned(), rules); }
+        if let Some(rules) = sessions.get(parent).cloned() {
+            sessions.insert(child.to_owned(), rules);
+        }
         let mut runtime = self.runtime_rules.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(rules) = runtime.get(parent).cloned() { runtime.insert(child.to_owned(), rules); }
+        if let Some(rules) = runtime.get(parent).cloned() {
+            runtime.insert(child.to_owned(), rules);
+        }
         let mut launch = self.launch_rules.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(rules) = launch.get(parent).cloned() {
             launch.insert(child.to_owned(), rules);
@@ -263,7 +332,10 @@ impl PermissionManager {
     /// Independent mutable authority for a delegated session; read-only policy
     /// callback and audit sink may be shared, but mode/approvals/rules may not.
     pub(crate) fn fork_session(&self, parent: &str, child: &str) -> Self {
-        let _revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let _revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rules = self
             .session_rules
             .lock()
@@ -292,7 +364,10 @@ impl PermissionManager {
             ),
             audit_logger: self.audit_logger.clone(),
             confirmations: Mutex::new(HashMap::new()),
-            mode: Mutex::new(ModeSnapshot { mode: self.get_mode(), revision: 0 }),
+            mode: Mutex::new(ModeSnapshot {
+                mode: self.get_mode(),
+                revision: 0,
+            }),
             session_rules: Mutex::new(HashMap::from([(child.to_owned(), rules)])),
             runtime_rules: Mutex::new(HashMap::from([(
                 child.to_owned(),
@@ -342,7 +417,10 @@ impl PermissionManager {
             tool_permissions: Mutex::new(HashMap::new()),
             audit_logger,
             confirmations: Mutex::new(HashMap::new()),
-            mode: Mutex::new(ModeSnapshot { mode: PermissionMode::default(), revision: 0 }),
+            mode: Mutex::new(ModeSnapshot {
+                mode: PermissionMode::default(),
+                revision: 0,
+            }),
             session_rules: Mutex::new(HashMap::new()),
             runtime_rules: Mutex::new(HashMap::new()),
             launch_rules: Mutex::new(HashMap::new()),
@@ -352,9 +430,15 @@ impl PermissionManager {
     }
 
     pub fn set_always_allow_checker(&self, checker: AlwaysAllowCheckerFn) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
-        let mut guard = self.always_allow_checker.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .always_allow_checker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *guard = Some(Arc::from(checker));
         tracing::info!(module = "Permission", "Always allow checker registered");
     }
@@ -367,12 +451,14 @@ impl PermissionManager {
             .unwrap_or_else(|e| e.into_inner());
         self.bypass_available
             .store(available, std::sync::atomic::Ordering::Relaxed);
-        self.full_access_available.store(full_access, std::sync::atomic::Ordering::Relaxed);
+        self.full_access_available
+            .store(full_access, std::sync::atomic::Ordering::Relaxed);
         *revision = revision.wrapping_add(1);
     }
 
     pub fn full_access_available(&self) -> bool {
-        self.full_access_available.load(std::sync::atomic::Ordering::Relaxed)
+        self.full_access_available
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn bypass_available(&self) -> bool {
@@ -381,9 +467,16 @@ impl PermissionManager {
     }
 
     pub fn set_mode(&self, mode: PermissionMode) {
-        let mut policy_revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut policy_revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut m = self.mode.lock().unwrap_or_else(|e| e.into_inner());
-        if m.mode != mode { m.mode = mode; m.revision = m.revision.wrapping_add(1); *policy_revision = policy_revision.wrapping_add(1); }
+        if m.mode != mode {
+            m.mode = mode;
+            m.revision = m.revision.wrapping_add(1);
+            *policy_revision = policy_revision.wrapping_add(1);
+        }
         tracing::info!(module = "Permission", "Mode changed to: {}", mode.as_str());
     }
 
@@ -392,9 +485,18 @@ impl PermissionManager {
     }
 
     pub fn auto_stats(&self, session: &str) -> super::auto_config::AutoStats {
-        self.auto_stats.lock().unwrap_or_else(|e| e.into_inner()).get(session).cloned().unwrap_or_default()
+        self.auto_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .cloned()
+            .unwrap_or_default()
     }
-    pub fn update_auto_stats(&self, session: &str, update: impl FnOnce(&mut super::auto_config::AutoStats)) -> super::auto_config::AutoStats {
+    pub fn update_auto_stats(
+        &self,
+        session: &str,
+        update: impl FnOnce(&mut super::auto_config::AutoStats),
+    ) -> super::auto_config::AutoStats {
         let mut sessions = self.auto_stats.lock().unwrap_or_else(|e| e.into_inner());
         let stats = sessions.entry(session.into()).or_default();
         update(stats);
@@ -407,17 +509,28 @@ impl PermissionManager {
     }
 
     pub fn policy_snapshot(&self) -> PolicySnapshot {
-        let revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
-        PolicySnapshot { mode: self.mode_snapshot(), revision: *revision }
+        let revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        PolicySnapshot {
+            mode: self.mode_snapshot(),
+            revision: *revision,
+        }
     }
 
     /// Do not hold policy locks while calling saved-approval callbacks: they can
     /// read SQLite. Retry a concurrently changing snapshot, then fail closed.
-    pub fn evaluate_stable(&self, context: &PermissionContext) -> Option<(PermissionDecision, PolicySnapshot)> {
+    pub fn evaluate_stable(
+        &self,
+        context: &PermissionContext,
+    ) -> Option<(PermissionDecision, PolicySnapshot)> {
         for _ in 0..3 {
             let before = self.policy_snapshot();
             let decision = self.evaluate_permission(context);
-            if self.policy_snapshot() == before { return Some((decision, before)); }
+            if self.policy_snapshot() == before {
+                return Some((decision, before));
+            }
         }
         None
     }
@@ -429,10 +542,21 @@ impl PermissionManager {
     /// Caller must acquire any DB lock BEFORE entering this method. The closure
     /// may commit an existing transaction but must not acquire DB/permission locks.
     /// Failed commits leave mode unchanged; intervening mode changes reject approval.
-    pub fn commit_mode_transition<T>(&self, expected: ModeSnapshot, next: PermissionMode, commit: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let mut policy_revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn commit_mode_transition<T>(
+        &self,
+        expected: ModeSnapshot,
+        next: PermissionMode,
+        commit: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut policy_revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut current = self.mode.lock().unwrap_or_else(|e| e.into_inner());
-        anyhow::ensure!(*current == expected, "Permission mode changed during review; request approval again");
+        anyhow::ensure!(
+            *current == expected,
+            "Permission mode changed during review; request approval again"
+        );
         let result = commit()?;
         current.mode = next;
         current.revision = current.revision.wrapping_add(1);
@@ -440,23 +564,40 @@ impl PermissionManager {
         Ok(result)
     }
     /// Explicit host selection; same DB-before-mode lock order as plan approval.
-    pub fn commit_mode_update<T>(&self, next: PermissionMode, commit: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let mut policy_revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn commit_mode_update<T>(
+        &self,
+        next: PermissionMode,
+        commit: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut policy_revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut current = self.mode.lock().unwrap_or_else(|e| e.into_inner());
         let result = commit()?;
-        if current.mode != next { current.mode = next; current.revision = current.revision.wrapping_add(1); *policy_revision = policy_revision.wrapping_add(1); }
+        if current.mode != next {
+            current.mode = next;
+            current.revision = current.revision.wrapping_add(1);
+            *policy_revision = policy_revision.wrapping_add(1);
+        }
         Ok(result)
     }
 
     pub fn add_rule(&self, rule: PermissionRule) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
         let mut ruleset = self.ruleset.lock().unwrap_or_else(|e| e.into_inner());
         ruleset.add_rule(rule);
     }
 
     pub fn remove_rule(&self, rule_id: &str) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
         let mut ruleset = self.ruleset.lock().unwrap_or_else(|e| e.into_inner());
         ruleset.rules.retain(|r| r.id != rule_id);
@@ -468,20 +609,30 @@ impl PermissionManager {
     }
 
     pub fn set_tool_permission(&self, tool_name: &str, permission: ToolPermission) {
-        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
-        let mut permissions = self.tool_permissions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut permissions = self
+            .tool_permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         permissions.insert(tool_name.to_string(), permission);
     }
 
     pub fn get_tool_permission(&self, tool_name: &str) -> Option<ToolPermission> {
-        let permissions = self.tool_permissions.lock().unwrap_or_else(|e| e.into_inner());
+        let permissions = self
+            .tool_permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         permissions.get(tool_name).cloned()
     }
 
     fn broad_auto_grant(pattern: &str) -> bool {
         let name = pattern.split('(').next().unwrap_or(pattern);
-        matches!(name, "Bash" | "PowerShell" | "Agent" | "Task" | "team") && (!pattern.contains('(') || pattern.contains('*'))
+        matches!(name, "Bash" | "PowerShell" | "Agent" | "Task" | "team")
+            && (!pattern.contains('(') || pattern.contains('*'))
     }
 
     fn is_read_only_tool(tool_name: &str) -> bool {
@@ -502,6 +653,7 @@ impl PermissionManager {
                 | "TaskOutput"
                 | "ToolSearch"
                 | "ProposeGoal"
+                | "CompactContext"
                 | "EnterPlanMode"
                 | "ExitPlanMode"
                 | "brief"
@@ -517,11 +669,17 @@ impl PermissionManager {
     /// prompt for its todo and task tools or for writes to its memory
     /// directory, they run without asking.
     fn is_own_state_tool(tool_name: &str) -> bool {
-        matches!(tool_name, "memory_ingest" | "TodoWrite" | "TaskCreate" | "TaskUpdate")
+        matches!(
+            tool_name,
+            "memory_ingest" | "TodoWrite" | "TaskCreate" | "TaskUpdate"
+        )
     }
 
     pub fn is_file_edit_tool(tool_name: &str) -> bool {
-        matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+        matches!(
+            tool_name,
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch"
+        )
     }
 
     fn is_edit_tool(tool_name: &str) -> bool {
@@ -530,6 +688,7 @@ impl PermissionManager {
             "Write"
                 | "Edit"
                 | "MultiEdit"
+                | "ApplyPatch"
                 | "SearchReplace"
                 | "GlobReplace"
                 | "Delete"
@@ -619,8 +778,16 @@ impl PermissionManager {
         }
         let auto = mode == PermissionMode::Auto;
         let action = |rules: &HashMap<String, PermissionAction>| {
-            if !auto { return super::patterns::matching_action(rules, context); }
-            let effective = rules.iter().filter(|(pattern, action)| **action != PermissionAction::Allow || !Self::broad_auto_grant(pattern)).map(|(key,value)| (key.clone(),value.clone())).collect();
+            if !auto {
+                return super::patterns::matching_action(rules, context);
+            }
+            let effective = rules
+                .iter()
+                .filter(|(pattern, action)| {
+                    **action != PermissionAction::Allow || !Self::broad_auto_grant(pattern)
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
             super::patterns::matching_action(&effective, context)
         };
         let explicit = self
@@ -655,7 +822,13 @@ impl PermissionManager {
         {
             // Unknown conditions cannot authorize an operation. Deny/ask remain
             // conservative rather than being bypassed by a permissive mode.
-            if auto && rule.action == PermissionAction::Allow && (rule.tool_name.is_none() || Self::broad_auto_grant(rule.tool_name.as_deref().unwrap_or(""))) { continue; }
+            if auto
+                && rule.action == PermissionAction::Allow
+                && (rule.tool_name.is_none()
+                    || Self::broad_auto_grant(rule.tool_name.as_deref().unwrap_or("")))
+            {
+                continue;
+            }
             if rule.action != PermissionAction::Allow
                 || (rule.conditions.is_none()
                     && matches!(
@@ -695,10 +868,25 @@ impl PermissionManager {
                 && matches!(
                     context.tool_input["operation"].as_str(),
                     Some("get" | "list" | "merge" | "sources")
+                ))
+            // One tool, two authorities: listing and viewing GitHub data is a
+            // read, while creating, commenting and merging are mutations. The
+            // tool name alone cannot decide that.
+            || (context.tool_name == "GitHub"
+                && crate::tools::github::is_read_operation(
+                    context.tool_input["operation"].as_str(),
                 ));
         // Plan mode permits shell commands except those rejected by the shared
         // danger filter. Explicit ask/deny settings still take precedence.
         let shell = matches!(context.tool_name.as_str(), "Bash" | "PowerShell");
+        if mode == PermissionMode::PlanMode && shell && context.tool_input["interaction"] == "pty" {
+            return decision(
+                PermissionResult::Denied(
+                    "Plan mode: starting an interactive PTY is not allowed".into(),
+                ),
+                PlanBoundary,
+            );
+        }
         if mode == PermissionMode::PlanMode && shell && !plan_document {
             let command = context.tool_input["command"].as_str().unwrap_or_default();
             if crate::tools::is_dangerous_command(command) {
@@ -744,11 +932,17 @@ impl PermissionManager {
         if setting.as_ref().is_some_and(|p| p.requires_confirmation) {
             return decision(self.request_confirmation(context), ToolSetting);
         }
-        if shell && context.tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
+        if shell
+            && context.tool_input["command"]
+                .as_str()
+                .is_some_and(crate::tools::is_dangerous_command)
+        {
             return decision(self.request_confirmation(context), Mode);
         }
-        if context.tool_name == "Bash" && self.bash_session_allowed(&context.conversation_id)
-            && context.tool_input["command"].as_str().is_some() {
+        if context.tool_name == "Bash"
+            && self.bash_session_allowed(&context.conversation_id)
+            && context.tool_input["command"].as_str().is_some()
+        {
             return decision(PermissionResult::Granted, SavedApproval);
         }
         if auto && shell && context.tool_input["command"].as_str().is_some() {
@@ -765,14 +959,18 @@ impl PermissionManager {
                 PermissionMode::BypassPermissions | PermissionMode::PlanMode
             )
             && !setting.as_ref().is_some_and(|p| p.allowed)
-            && !super::web_fetch::preapproved(context.tool_input["url"].as_str().unwrap_or_default())
+            && !super::web_fetch::preapproved(
+                context.tool_input["url"].as_str().unwrap_or_default(),
+            )
         {
             return decision(self.request_confirmation(context), DefaultPrompt);
         }
         if mode == PermissionMode::PlanMode {
             return decision(PermissionResult::Granted, PlanBoundary);
         }
-        if setting.as_ref().is_some_and(|p| p.allowed) && !(auto && Self::broad_auto_grant(&context.tool_name)) {
+        if setting.as_ref().is_some_and(|p| p.allowed)
+            && !(auto && Self::broad_auto_grant(&context.tool_name))
+        {
             return decision(PermissionResult::Granted, ToolSetting);
         }
         let checker = self
@@ -780,12 +978,14 @@ impl PermissionManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if !(auto && Self::broad_auto_grant(&context.tool_name)) && checker.is_some_and(|checker| {
-            checker(
-                &context.tool_name,
-                &self.extract_action_from_context(context),
-            )
-        }) {
+        if !(auto && Self::broad_auto_grant(&context.tool_name))
+            && checker.is_some_and(|checker| {
+                checker(
+                    &context.tool_name,
+                    &self.extract_action_from_context(context),
+                )
+            })
+        {
             return decision(PermissionResult::Granted, SavedApproval);
         }
         if mode != PermissionMode::BypassPermissions && Self::is_edit_tool(&context.tool_name) {
@@ -825,10 +1025,19 @@ impl PermissionManager {
         }
         // As in the reference CLI's default mode, shell commands that only read
         // inside the workspace run without asking.
-        if shell && !auto && matches!(mode, PermissionMode::AskPermissions | PermissionMode::AcceptEdits) {
+        if shell
+            && !auto
+            && matches!(
+                mode,
+                PermissionMode::AskPermissions | PermissionMode::AcceptEdits
+            )
+        {
             let command = context.tool_input["command"].as_str().unwrap_or_default();
             if let Some(workspace) = context.workspace_path.as_deref() {
-                if super::shell_read_only::reads_only_inside(command, std::path::Path::new(workspace)) {
+                if super::shell_read_only::reads_only_inside(
+                    command,
+                    std::path::Path::new(workspace),
+                ) {
                     return decision(PermissionResult::Granted, DefaultRead);
                 }
             }
@@ -885,9 +1094,13 @@ impl PermissionManager {
     }
 
     pub fn log_tool_execution(&self, context: &PermissionContext, success: bool) {
-        let action = if success { AuditAction::ToolExecuted } else { AuditAction::ToolCancelled };
+        let action = if success {
+            AuditAction::ToolExecuted
+        } else {
+            AuditAction::ToolCancelled
+        };
         let result = if success { "Success" } else { "Cancelled" };
-        
+
         self.audit_logger.log(
             AuditEntry::new(action, &context.tool_name, &context.conversation_id)
                 .with_user_id(context.user_id.as_deref())
@@ -1093,6 +1306,33 @@ mod session_rule_tests {
     }
 
     #[test]
+    fn plan_refuses_pty_launch_even_with_an_explicit_allow() {
+        let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
+        manager.set_mode(PermissionMode::PlanMode);
+        manager.set_session_rules(
+            "one",
+            HashMap::from([("Bash".into(), PermissionAction::Allow)]),
+        );
+        let mut context = PermissionContext {
+            mcp_read_only: false,
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command":"cat", "interaction":"pty", "run_in_background":true}),
+            conversation_id: "one".into(),
+            user_id: None,
+            workspace_path: None,
+        };
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::Denied(_)
+        ));
+        context.tool_input = serde_json::json!({"command":"pwd"});
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
+    }
+
+    #[test]
     fn monitor_uses_bash_rules() {
         use crate::permissions::patterns::canonical_tool_name;
         let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
@@ -1165,6 +1405,89 @@ mod policy_tests {
         }
     }
     #[test]
+    fn task_input_is_a_mutating_operation_and_is_refused_in_plan_mode() {
+        // It feeds an execution, so it must not inherit TaskGet's read-only
+        // authority: plan mode denies it and the default modes ask first.
+        let plan = manager(PermissionMode::PlanMode);
+        assert!(matches!(
+            plan.check_permission(&context("TaskInput")),
+            PermissionResult::Denied(_)
+        ));
+        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+            assert!(
+                matches!(
+                    manager(mode).check_permission(&context("TaskInput")),
+                    PermissionResult::RequiresConfirmation(_)
+                ),
+                "{mode:?}"
+            );
+        }
+        assert_eq!(
+            manager(PermissionMode::BypassPermissions).check_permission(&context("TaskInput")),
+            PermissionResult::Granted
+        );
+    }
+    #[test]
+    fn github_reads_are_read_only_and_writes_need_approval() {
+        // One tool covers both: the operation, not the tool name, decides.
+        let plan = manager(PermissionMode::PlanMode);
+        for operation in [
+            "repo_view",
+            "issue_list",
+            "issue_view",
+            "pr_list",
+            "pr_view",
+        ] {
+            let mut call = context("GitHub");
+            call.tool_input = serde_json::json!({"operation":operation});
+            assert_eq!(
+                plan.check_permission(&call),
+                PermissionResult::Granted,
+                "{operation}"
+            );
+            assert_eq!(
+                manager(PermissionMode::AskPermissions).check_permission(&call),
+                PermissionResult::Granted,
+                "{operation}"
+            );
+        }
+        for operation in [
+            "issue_create",
+            "issue_comment",
+            "pr_create",
+            "pr_comment",
+            "pr_merge",
+        ] {
+            let mut call = context("GitHub");
+            call.tool_input = serde_json::json!({"operation":operation});
+            assert!(
+                matches!(plan.check_permission(&call), PermissionResult::Denied(_)),
+                "plan mode accepted {operation}"
+            );
+            for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+                assert!(
+                    matches!(
+                        manager(mode).check_permission(&call),
+                        PermissionResult::RequiresConfirmation(_)
+                    ),
+                    "{operation} in {mode:?}"
+                );
+            }
+            assert_eq!(
+                manager(PermissionMode::BypassPermissions).check_permission(&call),
+                PermissionResult::Granted,
+                "{operation}"
+            );
+        }
+        // A missing operation is not silently a read.
+        let mut call = context("GitHub");
+        call.tool_input = serde_json::json!({});
+        assert!(matches!(
+            plan.check_permission(&call),
+            PermissionResult::Denied(_)
+        ));
+    }
+    #[test]
     fn plan_allows_messages_without_allowing_team_control() {
         let manager = manager(PermissionMode::PlanMode);
         let mut call = context("SendMessage");
@@ -1231,10 +1554,20 @@ mod policy_tests {
             manager.check_permission(&shell),
             PermissionResult::RequiresConfirmation(_)
         ));
-        shell.tool_input = serde_json::json!({"command":"codegraph init --yes /srv/reference-library"});
-        assert!(matches!(manager.check_permission(&shell), PermissionResult::RequiresConfirmation(_)));
-        manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
-        assert!(matches!(manager.check_permission(&shell), PermissionResult::Denied(_)));
+        shell.tool_input =
+            serde_json::json!({"command":"codegraph init --yes /srv/reference-library"});
+        assert!(matches!(
+            manager.check_permission(&shell),
+            PermissionResult::RequiresConfirmation(_)
+        ));
+        manager.set_session_rules(
+            "session",
+            HashMap::from([("Bash".into(), PermissionAction::Deny)]),
+        );
+        assert!(matches!(
+            manager.check_permission(&shell),
+            PermissionResult::Denied(_)
+        ));
     }
 
     #[test]
@@ -1344,13 +1677,31 @@ mod policy_tests {
         };
         for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
             let manager = manager(mode);
-            assert_eq!(manager.check_permission(&shell("ls -la src")), PermissionResult::Granted);
-            assert!(matches!(manager.check_permission(&shell("cat /etc/passwd")), PermissionResult::RequiresConfirmation(_)));
-            assert!(matches!(manager.check_permission(&shell("npm install")), PermissionResult::RequiresConfirmation(_)));
-            manager.set_session_rules("session", HashMap::from([("Bash(ls *)".into(), PermissionAction::Confirm)]));
-            assert!(matches!(manager.check_permission(&shell("ls -la src")), PermissionResult::RequiresConfirmation(_)));
+            assert_eq!(
+                manager.check_permission(&shell("ls -la src")),
+                PermissionResult::Granted
+            );
+            assert!(matches!(
+                manager.check_permission(&shell("cat /etc/passwd")),
+                PermissionResult::RequiresConfirmation(_)
+            ));
+            assert!(matches!(
+                manager.check_permission(&shell("npm install")),
+                PermissionResult::RequiresConfirmation(_)
+            ));
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("Bash(ls *)".into(), PermissionAction::Confirm)]),
+            );
+            assert!(matches!(
+                manager.check_permission(&shell("ls -la src")),
+                PermissionResult::RequiresConfirmation(_)
+            ));
         }
-        assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&shell("ls")), PermissionResult::Denied(_)));
+        assert!(matches!(
+            manager(PermissionMode::DontAsk).check_permission(&shell("ls")),
+            PermissionResult::Denied(_)
+        ));
     }
     #[test]
     fn local_fetch_requires_explicit_review_in_every_mode() {
@@ -1480,43 +1831,123 @@ mod policy_tests {
 
     #[test]
     fn web_fetch_asks_for_new_hosts_unless_preapproved_or_allowed() {
-        let fetch = |url: &str| PermissionContext { tool_input: serde_json::json!({"url": url, "prompt": "p"}), ..context("WebFetch") };
+        let fetch = |url: &str| PermissionContext {
+            tool_input: serde_json::json!({"url": url, "prompt": "p"}),
+            ..context("WebFetch")
+        };
         for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
             let manager = manager(mode);
-            assert_eq!(manager.check_permission(&fetch("https://docs.python.org/3/")), PermissionResult::Granted, "{mode:?}");
-            assert!(matches!(manager.check_permission(&fetch("https://example.com/")), PermissionResult::RequiresConfirmation(_)), "{mode:?}");
-            manager.set_session_rules("session", HashMap::from([("WebFetch(domain:example.com)".into(), PermissionAction::Allow)]));
-            assert_eq!(manager.check_permission(&fetch("https://example.com/")), PermissionResult::Granted, "{mode:?}");
-            assert!(matches!(manager.check_permission(&fetch("https://example.org/")), PermissionResult::RequiresConfirmation(_)));
+            assert_eq!(
+                manager.check_permission(&fetch("https://docs.python.org/3/")),
+                PermissionResult::Granted,
+                "{mode:?}"
+            );
+            assert!(
+                matches!(
+                    manager.check_permission(&fetch("https://example.com/")),
+                    PermissionResult::RequiresConfirmation(_)
+                ),
+                "{mode:?}"
+            );
+            manager.set_session_rules(
+                "session",
+                HashMap::from([(
+                    "WebFetch(domain:example.com)".into(),
+                    PermissionAction::Allow,
+                )]),
+            );
+            assert_eq!(
+                manager.check_permission(&fetch("https://example.com/")),
+                PermissionResult::Granted,
+                "{mode:?}"
+            );
+            assert!(matches!(
+                manager.check_permission(&fetch("https://example.org/")),
+                PermissionResult::RequiresConfirmation(_)
+            ));
         }
         // A research child may fetch anything; its parent still asks, and deny wins.
         let parent = manager(PermissionMode::AskPermissions);
-        parent.set_session_rules("session", HashMap::from([("WebFetch(domain:evil.test)".into(), PermissionAction::Deny)]));
+        parent.set_session_rules(
+            "session",
+            HashMap::from([("WebFetch(domain:evil.test)".into(), PermissionAction::Deny)]),
+        );
         let child = parent.fork_session("session", "child");
         child.allow_in_session("child", "WebFetch");
-        let in_child = |url: &str| PermissionContext { conversation_id: "child".into(), ..fetch(url) };
-        assert_eq!(child.check_permission(&in_child("https://example.com/")), PermissionResult::Granted);
-        assert!(matches!(child.check_permission(&in_child("https://evil.test/")), PermissionResult::Denied(_)));
-        assert!(matches!(parent.check_permission(&fetch("https://example.com/")), PermissionResult::RequiresConfirmation(_)));
-        assert_eq!(manager(PermissionMode::BypassPermissions).check_permission(&fetch("https://example.com/")), PermissionResult::Granted);
-        assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&fetch("https://example.com/")), PermissionResult::Denied(_)));
+        let in_child = |url: &str| PermissionContext {
+            conversation_id: "child".into(),
+            ..fetch(url)
+        };
+        assert_eq!(
+            child.check_permission(&in_child("https://example.com/")),
+            PermissionResult::Granted
+        );
+        assert!(matches!(
+            child.check_permission(&in_child("https://evil.test/")),
+            PermissionResult::Denied(_)
+        ));
+        assert!(matches!(
+            parent.check_permission(&fetch("https://example.com/")),
+            PermissionResult::RequiresConfirmation(_)
+        ));
+        assert_eq!(
+            manager(PermissionMode::BypassPermissions)
+                .check_permission(&fetch("https://example.com/")),
+            PermissionResult::Granted
+        );
+        assert!(matches!(
+            manager(PermissionMode::DontAsk).check_permission(&fetch("https://example.com/")),
+            PermissionResult::Denied(_)
+        ));
     }
     #[test]
     fn own_state_tools_run_without_asking_unless_a_rule_or_plan_mode_says_otherwise() {
-        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits, PermissionMode::DontAsk] {
+        for mode in [
+            PermissionMode::AskPermissions,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+        ] {
             let manager = manager(mode);
             for tool in ["memory_ingest", "TodoWrite", "TaskCreate", "TaskUpdate"] {
                 let decision = manager.evaluate_permission(&context(tool));
-                assert_eq!(decision.result, PermissionResult::Granted, "{tool} {mode:?}");
+                assert_eq!(
+                    decision.result,
+                    PermissionResult::Granted,
+                    "{tool} {mode:?}"
+                );
                 assert_eq!(decision.origin, DecisionOrigin::DefaultOwnState);
             }
-            manager.set_session_rules("session", HashMap::from([("memory_ingest".into(), PermissionAction::Confirm), ("TodoWrite".into(), PermissionAction::Deny)]));
-            assert!(!matches!(manager.check_permission(&context("memory_ingest")), PermissionResult::Granted), "{mode:?}");
-            assert!(matches!(manager.check_permission(&context("TodoWrite")), PermissionResult::Denied(_)), "{mode:?}");
+            manager.set_session_rules(
+                "session",
+                HashMap::from([
+                    ("memory_ingest".into(), PermissionAction::Confirm),
+                    ("TodoWrite".into(), PermissionAction::Deny),
+                ]),
+            );
+            assert!(
+                !matches!(
+                    manager.check_permission(&context("memory_ingest")),
+                    PermissionResult::Granted
+                ),
+                "{mode:?}"
+            );
+            assert!(
+                matches!(
+                    manager.check_permission(&context("TodoWrite")),
+                    PermissionResult::Denied(_)
+                ),
+                "{mode:?}"
+            );
         }
         // Other writes still ask, and plan mode still blocks these tools.
-        assert!(matches!(manager(PermissionMode::AskPermissions).check_permission(&context("CronCreate")), PermissionResult::RequiresConfirmation(_)));
-        assert!(matches!(manager(PermissionMode::PlanMode).check_permission(&context("memory_ingest")), PermissionResult::Denied(_)));
+        assert!(matches!(
+            manager(PermissionMode::AskPermissions).check_permission(&context("CronCreate")),
+            PermissionResult::RequiresConfirmation(_)
+        ));
+        assert!(matches!(
+            manager(PermissionMode::PlanMode).check_permission(&context("memory_ingest")),
+            PermissionResult::Denied(_)
+        ));
     }
     #[test]
     fn bypass_skips_ask_but_preserves_deny_and_other_modes_keep_ask() {
@@ -1662,25 +2093,50 @@ mod policy_tests {
     #[test]
     fn unsupported_conditional_allow_does_not_authorize_default_prompt() {
         let manager = manager(PermissionMode::DontAsk);
-        manager.add_rule(PermissionRule::new(
-            "conditional", PermissionAction::Allow,
-            super::super::PermissionScope::ToolSpecific,
-            super::super::PermissionLevel::Execute,
-        ).with_tool_name("Bash").with_conditions(serde_json::json!({"unknown":true})));
-        assert!(matches!(manager.check_permission(&context("Bash")), PermissionResult::Denied(_)));
+        manager.add_rule(
+            PermissionRule::new(
+                "conditional",
+                PermissionAction::Allow,
+                super::super::PermissionScope::ToolSpecific,
+                super::super::PermissionLevel::Execute,
+            )
+            .with_tool_name("Bash")
+            .with_conditions(serde_json::json!({"unknown":true})),
+        );
+        assert!(matches!(
+            manager.check_permission(&context("Bash")),
+            PermissionResult::Denied(_)
+        ));
     }
 
     #[test]
     fn delegation_defaults_preserve_inherited_authority_but_auto_classifies() {
-        for mode in [PermissionMode::AskPermissions, PermissionMode::PlanMode, PermissionMode::DontAsk, PermissionMode::Auto] {
+        for mode in [
+            PermissionMode::AskPermissions,
+            PermissionMode::PlanMode,
+            PermissionMode::DontAsk,
+            PermissionMode::Auto,
+        ] {
             let manager = manager(mode);
             for name in ["Agent"] {
                 let decision = manager.evaluate_permission(&context(name));
-                if mode == PermissionMode::Auto { assert!(decision.classifier_eligible); }
-                else { assert_eq!(decision.result, PermissionResult::Granted); }
-                manager.set_session_rules("session", HashMap::from([(name.into(), PermissionAction::Deny)]));
-                assert!(matches!(manager.check_permission(&context(name)), PermissionResult::Denied(_)));
-                manager.set_session_rules("session", HashMap::from([(name.into(), PermissionAction::Confirm)]));
+                if mode == PermissionMode::Auto {
+                    assert!(decision.classifier_eligible);
+                } else {
+                    assert_eq!(decision.result, PermissionResult::Granted);
+                }
+                manager.set_session_rules(
+                    "session",
+                    HashMap::from([(name.into(), PermissionAction::Deny)]),
+                );
+                assert!(matches!(
+                    manager.check_permission(&context(name)),
+                    PermissionResult::Denied(_)
+                ));
+                manager.set_session_rules(
+                    "session",
+                    HashMap::from([(name.into(), PermissionAction::Confirm)]),
+                );
                 let explicit = manager.evaluate_permission(&context(name));
                 assert!(!explicit.classifier_eligible);
                 assert_ne!(explicit.result, PermissionResult::Granted);
@@ -1692,40 +2148,89 @@ mod policy_tests {
     #[test]
     fn auto_filters_broad_grants_without_destroying_saved_rules() {
         let manager = manager(PermissionMode::Auto);
-        manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow), ("Agent".into(), PermissionAction::Allow)]));
-        assert!(manager.evaluate_permission(&context("Agent")).classifier_eligible);
+        manager.set_session_rules(
+            "session",
+            HashMap::from([
+                ("Bash".into(), PermissionAction::Allow),
+                ("Agent".into(), PermissionAction::Allow),
+            ]),
+        );
+        assert!(
+            manager
+                .evaluate_permission(&context("Agent"))
+                .classifier_eligible
+        );
         let mut shell = context("Bash");
         shell.tool_input = serde_json::json!({"command":"npm test"});
         assert_eq!(manager.check_permission(&shell), PermissionResult::Granted);
         manager.set_mode(PermissionMode::AskPermissions);
-        for tool in ["Bash", "Agent"] { assert_eq!(manager.check_permission(&context(tool)), PermissionResult::Granted); }
+        for tool in ["Bash", "Agent"] {
+            assert_eq!(
+                manager.check_permission(&context(tool)),
+                PermissionResult::Granted
+            );
+        }
         manager.set_mode(PermissionMode::Auto);
-        manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
-        assert!(matches!(manager.check_permission(&context("Bash")), PermissionResult::Denied(_)));
+        manager.set_session_rules(
+            "session",
+            HashMap::from([("Bash".into(), PermissionAction::Deny)]),
+        );
+        assert!(matches!(
+            manager.check_permission(&context("Bash")),
+            PermissionResult::Denied(_)
+        ));
     }
 
     #[test]
     fn auto_shell_skips_classifier_but_preserves_explicit_policy_and_danger() {
         let manager = manager(PermissionMode::Auto);
-        for command in ["cd D:/repo && grep -n 'BridgeServer|shutdown' src/main.rs | head", "npm install", "python unknown.py", "custom-script --run", "echo hi > output.txt"] {
+        for command in [
+            "cd D:/repo && grep -n 'BridgeServer|shutdown' src/main.rs | head",
+            "npm install",
+            "python unknown.py",
+            "custom-script --run",
+            "echo hi > output.txt",
+        ] {
             let mut input = context("Bash");
             input.tool_input = serde_json::json!({"command":command});
             let decision = manager.evaluate_permission(&input);
             assert_eq!(decision.result, PermissionResult::Granted, "{command}");
             assert!(!decision.classifier_eligible);
-            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Confirm)]));
-            assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
-            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
-            assert!(matches!(manager.check_permission(&input), PermissionResult::Denied(_)));
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("Bash".into(), PermissionAction::Confirm)]),
+            );
+            assert!(matches!(
+                manager.check_permission(&input),
+                PermissionResult::RequiresConfirmation(_)
+            ));
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("Bash".into(), PermissionAction::Deny)]),
+            );
+            assert!(matches!(
+                manager.check_permission(&input),
+                PermissionResult::Denied(_)
+            ));
             manager.set_session_rules("session", HashMap::new());
         }
         let mut input = context("Bash");
         input.tool_input = serde_json::json!({"command":"shutdown /s"});
-        for mode in [PermissionMode::Auto, PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+        for mode in [
+            PermissionMode::Auto,
+            PermissionMode::AskPermissions,
+            PermissionMode::AcceptEdits,
+        ] {
             manager.set_mode(mode);
-            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow)]));
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("Bash".into(), PermissionAction::Allow)]),
+            );
             let decision = manager.evaluate_permission(&input);
-            assert!(matches!(decision.result, PermissionResult::RequiresConfirmation(_)));
+            assert!(matches!(
+                decision.result,
+                PermissionResult::RequiresConfirmation(_)
+            ));
             assert!(!decision.classifier_eligible);
         }
     }
@@ -1737,7 +2242,10 @@ mod policy_tests {
         input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
         manager.set_bash_session_allowed("session", true);
         assert_eq!(manager.check_permission(&input), PermissionResult::Granted);
-        assert!(matches!(manager.check_permission(&context("Write")), PermissionResult::RequiresConfirmation(_)));
+        assert!(matches!(
+            manager.check_permission(&context("Write")),
+            PermissionResult::RequiresConfirmation(_)
+        ));
         let child = manager.fork_session("session", "child");
         assert!(!child.bash_session_allowed("child"));
         assert!(!manager.bash_session_allowed("other"));
@@ -1745,7 +2253,10 @@ mod policy_tests {
         assert!(!manager.bash_session_allowed("inherited"));
         assert!(!crate::runtime::default_permissions().bash_session_allowed("session"));
         input.tool_input = serde_json::json!({"command":"shutdown"});
-        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+        assert!(matches!(
+            manager.check_permission(&input),
+            PermissionResult::RequiresConfirmation(_)
+        ));
         input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
         for action in [PermissionAction::Deny, PermissionAction::Confirm] {
             manager.set_session_rules("session", HashMap::from([("Bash".into(), action)]));
@@ -1753,7 +2264,10 @@ mod policy_tests {
         }
         manager.set_session_rules("session", HashMap::new());
         manager.set_bash_session_allowed("session", false);
-        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+        assert!(matches!(
+            manager.check_permission(&input),
+            PermissionResult::RequiresConfirmation(_)
+        ));
     }
 
     #[test]

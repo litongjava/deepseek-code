@@ -61,7 +61,15 @@ async fn fixture(
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
     let anthropic = format == "anthropic";
-    let window = if real_data { 256_000 } else { 16_000 };
+    let window = if real_data {
+        256_000
+    } else if mode == 4 || mode == 5 {
+        1_000_000
+    } else if mode == 6 || mode == 7 {
+        2_000
+    } else {
+        16_000
+    };
     let app = Router::new().route(if anthropic { "/v1/messages" } else { "/v1/chat/completions" }, post(move |Json(body): Json<Value>| {
         let captured = captured.clone();
         async move {
@@ -82,7 +90,7 @@ async fn fixture(
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider: Provider = serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":format,"enabled":true,"models":[{"id":"gpt-6-astra","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":window,"max_tokens":if mode == 3 {8192} else {4096}}]})).unwrap();
+    let provider: Provider = serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":format,"enabled":true,"models":[{"id":"gpt-6-astra","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":window,"max_tokens": match mode { 3 => json!(8192), 4 | 6 => Value::Null, 5 | 7 => json!(0), _ => json!(4096) }}]})).unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let engine = runtime::create_engine(
         &paths,
@@ -139,7 +147,7 @@ async fn oversized_compaction_is_bounded_and_persists_only_the_final_summary() {
 }
 
 #[tokio::test]
-async fn compaction_merge_uses_configured_8k_output_without_raising_fragment_budget() {
+async fn compaction_uses_the_configured_output_budget_for_every_stage() {
     for format in ["openai", "anthropic"] {
         let (_dir, store, id, engine, requests, server) = fixture(format, 3, false).await;
         compaction::compact(&engine, &store.db, &id, "fixture", "gpt-6-astra", "")
@@ -147,28 +155,106 @@ async fn compaction_merge_uses_configured_8k_output_without_raising_fragment_bud
             .unwrap();
         let bodies = requests.lock().unwrap();
         assert!(bodies.len() > 2);
-        // Fragments keep their own 4096 output budget; the truncated merge
-        // raises to the configured 8192, and the final summary uses 8192.
-        assert!(bodies.iter().all(|body| {
-            !body
-                .to_string()
-                .contains("Summarize this consecutive fragment")
-                || body["max_tokens"] == 4096
-        }));
+        // The configured 8k cap is used from the first request by fragments,
+        // merges and the final summary alike; no 4096→8192 staircase exists.
+        assert!(
+            bodies.iter().all(|body| body["max_tokens"] == 8192),
+            "{format}"
+        );
         let merges: Vec<_> = bodies
             .iter()
             .filter(|body| body.to_string().contains("Merge these summaries"))
             .collect();
-        assert!(
-            merges.iter().any(|body| body["max_tokens"] == 4096),
-            "{format}: a merge is sent at its initial budget first"
-        );
-        assert!(
-            merges.iter().any(|body| body["max_tokens"] == 8192),
-            "{format}: a truncated merge raises to the configured 8k output"
-        );
+        assert!(!merges.is_empty(), "{format}: compaction merges fragments");
         assert_eq!(bodies.last().unwrap()["max_tokens"], 8192);
         server.abort();
+    }
+}
+
+#[tokio::test]
+async fn missing_or_zero_output_cap_uses_the_32k_fallback_on_the_first_request() {
+    for mode in [4, 5] {
+        for format in ["openai", "anthropic"] {
+            let (_dir, store, id, engine, requests, server) = fixture(format, mode, false).await;
+            let before = store.history(&id).unwrap();
+            compaction::compact(&engine, &store.db, &id, "fixture", "gpt-6-astra", "")
+                .await
+                .unwrap();
+            let bodies = requests.lock().unwrap();
+            assert!(bodies.len() > 2);
+            // An unresolved (null/zero) cap must not block compaction, be zeroed
+            // or borrow a cap from another platform: the named 32K fallback is
+            // used from the very first summary request.
+            assert_eq!(bodies[0]["max_tokens"], 32_768, "mode {mode} {format}");
+            assert!(
+                bodies.iter().all(|body| body["max_tokens"] == 32_768),
+                "mode {mode} {format}"
+            );
+            let merges: Vec<_> = bodies
+                .iter()
+                .filter(|body| body.to_string().contains("Merge these summaries"))
+                .collect();
+            assert!(!merges.is_empty(), "mode {mode} {format}");
+            assert!(merges.iter().all(|body| body["max_tokens"] == 32_768));
+            // The completed summary is installed; the original rows stay as a
+            // prefix that history can still show.
+            let after = store.history(&id).unwrap();
+            assert_eq!(&after[..before.len()], before.as_slice());
+            assert_eq!(after.len(), before.len() + 1);
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_fallback_budget_too_large_for_the_window_sends_no_request_and_keeps_state() {
+    for mode in [6, 7] {
+        for format in ["openai", "anthropic"] {
+            let (_dir, store, id, engine, requests, server) = fixture(format, mode, false).await;
+            let before = store.history(&id).unwrap();
+            let error = compaction::compact(&engine, &store.db, &id, "fixture", "gpt-6-astra", "")
+                .await
+                .unwrap_err();
+            let text = format!("{error:#}");
+            // The 32K fallback cannot fit a 2000-token window: the existing
+            // clear context-space error is reported before any request, rather
+            // than silently exceeding the window or blocking merely because the
+            // cap is unknown (mode 6 null, mode 7 zero).
+            assert!(
+                text.contains("Compaction output budget 32768 leaves less than 1024 input tokens"),
+                "mode {mode} {format}: {text}"
+            );
+            assert!(
+                text.contains("2000-token context window"),
+                "mode {mode} {format}: {text}"
+            );
+            assert!(
+                text.contains("no request was sent"),
+                "mode {mode} {format}: {text}"
+            );
+            assert!(
+                text.contains("original history retained"),
+                "mode {mode} {format}: {text}"
+            );
+            assert!(requests.lock().unwrap().is_empty(), "mode {mode} {format}");
+            assert_eq!(store.history(&id).unwrap(), before, "mode {mode} {format}");
+            // No summary was cached, so a later retry starts from the same state.
+            let cached = store
+                .db
+                .with_conn(|conn| {
+                    Ok::<Option<String>, anyhow::Error>(conn
+                        .query_row(
+                            "SELECT value FROM peripheral_settings WHERE key LIKE 'compaction.checkpoint.%'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(cached, None, "mode {mode} {format}");
+            server.abort();
+        }
     }
 }
 

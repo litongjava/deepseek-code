@@ -3,6 +3,12 @@
 mod interrupt_usage;
 #[path = "sdk/recovery_interrupt.rs"]
 mod recovery_interrupt;
+#[path = "sdk/apply_patch_permissions.rs"]
+mod apply_patch_permissions;
+#[path = "sdk/approval_cancellation.rs"]
+mod approval_cancellation;
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
 #[path = "sdk/steering.rs"]
 mod steering;
 use axum::{
@@ -91,6 +97,7 @@ enum Mode {
     Text,
     RuntimeAgent,
     Approval,
+    ShellApproval,
     ProtectedApproval,
     DelayedApproval,
     Question,
@@ -109,8 +116,59 @@ enum Mode {
     SchemaBad,
     SchemaRejected,
     ToolSearch,
+    /// A mixed patch whose `secret.txt` hunk is under an ask rule.
+    ApplyPatchMixed,
+    /// A patch that only targets an allowed file, so a hook can rewrite it.
+    ApplyPatchAllowed,
+    /// Two different patches that reuse one provider id, so their occurrences
+    /// must stay independent.
+    ApplyPatchReusedId,
     RoleEveryChunk,
 }
+/// The provider id the ApplyPatch fixture reuses; occurrences must not expose it.
+const APPLY_PATCH_PROVIDER_ID: &str = "apply-1";
+/// The patch names one allowed target and one asked-about target.
+const APPLY_PATCH_MIXED: &str = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-one
++ONE
+*** Update File: secret.txt
+@@
+-secret
++LEAK
+*** End Patch";
+const APPLY_PATCH_ALLOWED: &str = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-one
++ONE
+*** End Patch";
+/// What a PreToolUse hook substitutes for [`APPLY_PATCH_ALLOWED`].
+const APPLY_PATCH_REWRITTEN: &str = "\
+*** Begin Patch
+*** Update File: secret.txt
+@@
+-secret
++LEAK
+*** End Patch";
+/// Two patches that must stay independent although the provider reuses one id.
+const APPLY_PATCH_REUSED_FIRST: &str = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-one
++ONE
+*** End Patch";
+const APPLY_PATCH_REUSED_SECOND: &str = "\
+*** Begin Patch
+*** Update File: secret.txt
+@@
+-secret
++LEAK
+*** End Patch";
 #[derive(Clone)]
 struct Fixture {
     anthropic: bool,
@@ -164,7 +222,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
-        || matches!(state.mode, Mode::SlowTool) && count == 1
+        || matches!(state.mode, Mode::SlowTool | Mode::ShellApproval) && count == 1
+        || matches!(
+            state.mode,
+            Mode::ApplyPatchMixed | Mode::ApplyPatchAllowed
+        ) && count == 1
+        || matches!(state.mode, Mode::ApplyPatchReusedId) && count <= 2
         || matches!(
             state.mode,
             Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval | Mode::Question
@@ -208,12 +271,33 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 )
             } else if matches!(
                 state.mode,
+                Mode::ApplyPatchMixed | Mode::ApplyPatchAllowed
+            ) {
+                (
+                    "apply-1",
+                    "ApplyPatch",
+                    json!({"patch":if matches!(state.mode, Mode::ApplyPatchMixed) {APPLY_PATCH_MIXED} else {APPLY_PATCH_ALLOWED}}),
+                )
+            } else if matches!(state.mode, Mode::ApplyPatchReusedId) {
+                (
+                    APPLY_PATCH_PROVIDER_ID,
+                    "ApplyPatch",
+                    json!({"patch":if count == 1 {APPLY_PATCH_REUSED_FIRST} else {APPLY_PATCH_REUSED_SECOND}}),
+                )
+            } else if matches!(
+                state.mode,
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 (
                     "write-1",
                     "Write",
                     json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
+                )
+            } else if matches!(state.mode, Mode::ShellApproval) {
+                (
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"printf should-not-run > approval-shell.txt"}),
                 )
             } else if matches!(state.mode, Mode::SlowTool) {
                 (
@@ -268,9 +352,29 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 json!({"tool_calls":[{"index":0,"id":"plan-1","type":"function","function":{"name":"ExitPlanMode","arguments":json!({"plan":"APPROVED_PLAN_SENTINEL"}).to_string()}}]})
             } else if matches!(
                 state.mode,
+                Mode::ApplyPatchMixed | Mode::ApplyPatchAllowed
+            ) {
+                let patch = if matches!(state.mode, Mode::ApplyPatchMixed) {
+                    APPLY_PATCH_MIXED
+                } else {
+                    APPLY_PATCH_ALLOWED
+                };
+                json!({"tool_calls":[{"index":0,"id":"apply-1","type":"function","function":{"name":"ApplyPatch","arguments":json!({"patch":patch}).to_string()}}]})
+            } else if matches!(state.mode, Mode::ApplyPatchReusedId) {
+                // Same raw provider id for both responses.
+                let patch = if count == 1 {
+                    APPLY_PATCH_REUSED_FIRST
+                } else {
+                    APPLY_PATCH_REUSED_SECOND
+                };
+                json!({"tool_calls":[{"index":0,"id":APPLY_PATCH_PROVIDER_ID,"type":"function","function":{"name":"ApplyPatch","arguments":json!({"patch":patch}).to_string()}}]})
+            } else if matches!(
+                state.mode,
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(state.mode, Mode::ShellApproval) {
+                json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"printf should-not-run > approval-shell.txt"}).to_string()}}]})
             } else if matches!(state.mode, Mode::SlowTool) {
                 json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}).to_string()}}]})
             } else {

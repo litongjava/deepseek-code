@@ -132,7 +132,7 @@ pub fn name_topic(session: &crate::session::Session, prompt: &str) {
     let prompt: String = prompt.chars().take(2000).collect();
     tokio::spawn(async move {
         if let Ok(Some(title)) = engine
-            .generate_text(&provider, &model, PROMPT, &prompt)
+            .generate_text_for_session(Some(&id), &provider, &model, PROMPT, &prompt)
             .await
             .map(|reply| tidy(&reply))
         {

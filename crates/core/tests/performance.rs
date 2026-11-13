@@ -226,6 +226,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
                 max_turns: None,
                 response_schema: None,
                 conversation_id,
+                assistant_message_id: None,
                 context_boundary: None,
                 messages: vec![json!({"role":"user","content":prompt})],
                 model: "primary".into(),

@@ -7,7 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
-pub(super) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
+pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
     let mut command = Command::new("git");
     command
         .current_dir(cwd)
@@ -313,7 +313,9 @@ pub fn resolve(
         path.is_absolute() && path.is_dir(),
         "Conversation worktree is unavailable; restore it before continuing"
     );
-    if super::hooks::resolve(conn, id, &path)? { return Ok(Some(path)); }
+    if super::hooks::resolve(conn, id, &path)? {
+        return Ok(Some(path));
+    }
     let common = |cwd: &Path| -> Result<PathBuf> {
         Ok(PathBuf::from(git(
             cwd,
@@ -326,6 +328,251 @@ pub fn resolve(
         "Conversation worktree no longer belongs to this repository"
     );
     Ok(Some(path))
+}
+
+/// A task worktree created on `agent/<task_id>`. Cleanup is never forced: a
+/// dirty worktree is reported instead of deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskWorktree {
+    pub repo_root: PathBuf,
+    pub common_dir: PathBuf,
+    pub worktree_root: PathBuf,
+    pub working_path: PathBuf,
+    pub task_branch: String,
+    pub target_branch: String,
+    pub base_commit: String,
+}
+
+impl TaskWorktree {
+    pub fn cleanup(&self) {
+        let root = self.worktree_root.to_string_lossy().into_owned();
+        if git(&self.repo_root, &["worktree", "remove", &root]).is_ok() {
+            let _ = git(&self.repo_root, &["branch", "-d", &self.task_branch]);
+        }
+    }
+}
+
+/// Creates the isolated worktree for one Super Agent task. The worktree lives
+/// beside existing managed worktrees (`<common>/desktop-worktrees/<task_id>`),
+/// so it is not an untracked directory inside the source tree.
+pub fn prepare_task_worktree(
+    source: &Path,
+    target_branch: Option<&str>,
+    task_id: &str,
+) -> Result<TaskWorktree> {
+    ensure!(
+        !task_id.is_empty()
+            && task_id.len() <= 128
+            && task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Invalid task ID for a worktree"
+    );
+    let state = branches(source)?;
+    ensure!(state.is_repository, "Task target is not a Git repository");
+    let target_branch = match target_branch {
+        Some(branch) => {
+            ensure!(
+                state.branches.iter().any(|name| name == branch),
+                "Target branch no longer exists: {branch}"
+            );
+            branch.to_owned()
+        }
+        None => state
+            .current_branch
+            .clone()
+            .context("Repository is on a detached HEAD; select a target branch")?,
+    };
+    let base = format!("refs/heads/{target_branch}");
+    let commit = git(
+        source,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )?;
+    let repo = PathBuf::from(git(source, &["rev-parse", "--show-toplevel"])?);
+    let repo_canonical = repo.canonicalize()?;
+    let relative = source
+        .canonicalize()?
+        .strip_prefix(&repo_canonical)?
+        .to_path_buf();
+    let common = PathBuf::from(git(
+        source,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let common = common.canonicalize().unwrap_or(common);
+    let task_branch = format!("agent/{task_id}");
+    let path = common.join("desktop-worktrees").join(task_id);
+    ensure!(
+        !path.exists(),
+        "Task worktree already exists; recover or clean it first"
+    );
+    let branch_exists = command(
+        &repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{task_branch}"),
+        ],
+    )?;
+    ensure!(
+        !branch_exists.status.success(),
+        "Task branch {task_branch} already exists; recover or clean it first"
+    );
+    // Prevent a configured junction or symlink from redirecting the managed
+    // worktree outside this repository's common directory.
+    let common_root = common.canonicalize()?;
+    let mut ancestor = path.parent().context("Invalid task worktree path")?;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .context("Invalid task worktree ancestor")?;
+    }
+    ensure!(
+        ancestor.canonicalize()?.starts_with(&common_root),
+        "Task worktree parent escapes the Git common directory"
+    );
+    std::fs::create_dir_all(path.parent().context("Invalid task worktree path")?)?;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &task_branch,
+            &path.to_string_lossy(),
+            &commit,
+        ],
+    )?;
+    let working_path = path.join(relative);
+    if !working_path.is_dir() {
+        let root = path.to_string_lossy().into_owned();
+        let _ = git(&repo, &["worktree", "remove", &root]);
+        let _ = git(&repo, &["branch", "-d", &task_branch]);
+        anyhow::bail!("The task target does not exist on the selected branch");
+    }
+    Ok(TaskWorktree {
+        repo_root: repo,
+        common_dir: common,
+        worktree_root: path,
+        working_path,
+        task_branch,
+        target_branch,
+        base_commit: commit,
+    })
+}
+
+/// A read-only validation checkout pinned at one commit for the Reviewer.
+/// It never contains the Coder's working-tree changes.
+pub fn prepare_review_worktree(
+    source: &Path,
+    commit: &str,
+    task_id: &str,
+    round: u32,
+) -> Result<TaskWorktree> {
+    prepare_pinned_review_worktree(source, commit, task_id, &round.to_string())
+}
+
+/// A read-only validation checkout pinned at one commit, named by an explicit
+/// label. The final-delivery checkout uses a label distinct from the
+/// implementation review round, so both can exist for the same round.
+pub fn prepare_pinned_review_worktree(
+    source: &Path,
+    commit: &str,
+    task_id: &str,
+    label: &str,
+) -> Result<TaskWorktree> {
+    ensure!(
+        !task_id.is_empty()
+            && task_id.len() <= 110
+            && task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Invalid task ID for a review worktree"
+    );
+    ensure!(
+        !label.is_empty()
+            && label.len() <= 64
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Invalid review worktree label"
+    );
+    let repo = PathBuf::from(git(source, &["rev-parse", "--show-toplevel"])?);
+    let repo_canonical = repo.canonicalize()?;
+    let relative = source
+        .canonicalize()?
+        .strip_prefix(&repo_canonical)?
+        .to_path_buf();
+    let common = PathBuf::from(git(
+        source,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let common = common.canonicalize().unwrap_or(common);
+    let branch = format!("agent/{task_id}-review-{label}");
+    let path = common
+        .join("desktop-worktrees")
+        .join(format!("{task_id}-review-{label}"));
+    let resolved = git(
+        &repo,
+        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+    )?;
+    if path.exists() {
+        // Recovery may reuse an existing review checkout only at the same
+        // commit; a stale checkout is never silently accepted.
+        let head = git(&path, &["rev-parse", "HEAD"])?;
+        ensure!(
+            head == resolved,
+            "Existing review worktree is at {head}, expected {resolved}"
+        );
+    } else {
+        let branch_exists = command(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )?;
+        let branch_at = if branch_exists.status.success() {
+            git(&repo, &["rev-parse", &format!("refs/heads/{branch}")])?
+        } else {
+            String::new()
+        };
+        ensure!(
+            branch_at.is_empty() || branch_at == resolved,
+            "Review branch {branch} already exists at a different commit"
+        );
+        std::fs::create_dir_all(path.parent().context("Invalid review worktree path")?)?;
+        if branch_at.is_empty() {
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch,
+                    &path.to_string_lossy(),
+                    &resolved,
+                ],
+            )?;
+        } else {
+            git(
+                &repo,
+                &["worktree", "add", &path.to_string_lossy(), &resolved],
+            )?;
+        }
+    }
+    let working_path = path.join(relative);
+    Ok(TaskWorktree {
+        repo_root: repo,
+        common_dir: common,
+        worktree_root: path,
+        working_path,
+        task_branch: branch,
+        target_branch: String::new(),
+        base_commit: resolved,
+    })
 }
 
 #[cfg(test)]

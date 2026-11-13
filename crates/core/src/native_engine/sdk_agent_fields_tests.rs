@@ -76,6 +76,7 @@ async fn executor(
             description: "fixture analyst".into(),
             system_prompt: "AGENT_PROMPT_SENTINEL".into(),
             tools: None,
+            read_only_shell: false,
             legacy: None,
         },
         provider: None,

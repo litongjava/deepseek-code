@@ -141,7 +141,7 @@ async fn start_cli_fixture(
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(data.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     std::fs::write(
@@ -160,6 +160,8 @@ async fn start_cli_fixture(
 /// Shared handles for both fixtures.
 #[derive(Clone)]
 struct FixtureState {
+    /// The isolated data directory, so a responder can observe real state.
+    data: std::path::PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
     slots: Arc<Mutex<std::collections::BTreeMap<String, Value>>>,
 }
@@ -170,9 +172,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    fn new(data: std::path::PathBuf) -> Self {
         Self {
             state: FixtureState {
+                data,
                 requests: Arc::new(Mutex::new(vec![])),
                 slots: Arc::new(Mutex::new(Default::default())),
             },
@@ -620,4 +623,433 @@ async fn background_agent_task_get_reports_real_child_progress_report_and_comple
         error.to_string().contains("another session"),
         "a foreign session read the background agent: {error}"
     );
+}
+
+/// Insert a genuine prior assistant turn ahead of the child session's current
+/// turn.
+///
+/// Message history is ordered by `sort_order`; `created_at` is descriptive only
+/// (`job_report` in core selects `ORDER BY sort_order DESC`). "Prior" therefore
+/// means a lower `sort_order`, not an older timestamp. Appending at
+/// `MAX(sort_order)+1` after the child has written its current turn would place
+/// the seed *after* that turn and make it the reported final message.
+///
+/// The row is written at the front in one transaction that shifts the existing
+/// rows up, so the result does not depend on when the seed physically runs
+/// relative to the child's own writes. A child insert after the commit takes
+/// `MAX(sort_order)+1`, which is still later than this row.
+fn seed_prior_assistant_turn(data: &std::path::Path, session: &str, text: &str) {
+    let mut conn =
+        rusqlite::Connection::open(data.join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    let mut attempts = 0;
+    loop {
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "UPDATE messages SET sort_order = sort_order + 1 WHERE conversation_id=?1",
+                [session],
+            )?;
+            tx.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, thinking, created_at, is_compact_boundary, sort_order) VALUES (?1,?2,'assistant',?3,NULL,?4,0,0)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    session,
+                    text,
+                    "2026-01-01T00:00:00Z"
+                ],
+            )?;
+            tx.commit()
+        })();
+        match result {
+            Ok(()) => return,
+            Err(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && attempts < 40 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("could not seed a prior assistant turn: {error}"),
+        }
+    }
+}
+
+/// Release file that lets the paged child's Bash call finish. Dropping it on an
+/// assertion failure also cancels every job in this isolated data directory, so
+/// a failed assertion cannot leave an owned child looping.
+struct GateRelease(std::path::PathBuf);
+
+impl Drop for GateRelease {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"release");
+        let data = self
+            .0
+            .parent()
+            .expect("the gate lives directly in the data directory");
+        if let Ok(entries) = std::fs::read_dir(data.join("background-tasks")) {
+            for entry in entries.flatten() {
+                let _ = std::fs::write(entry.path().join("cancel"), b"1");
+            }
+        }
+    }
+}
+
+fn gate_path(data: &std::path::Path) -> std::path::PathBuf {
+    data.join("paged-agent-gate")
+}
+
+/// The content of the tool message that answers the child's own Bash call.
+///
+/// A real Bash result is a plain-text summary, not JSON, so the parent's
+/// structured `tool_results` helper cannot be used to sequence the child.
+fn child_bash_result(body: &Value) -> Option<String> {
+    let messages = body["messages"].as_array()?;
+    let id = messages.iter().find_map(|message| {
+        message["tool_calls"].as_array()?.iter().find_map(|call| {
+            if call["function"]["name"] == "Bash" {
+                call["id"].as_str().map(str::to_owned)
+            } else {
+                None
+            }
+        })
+    })?;
+    messages.iter().rev().find_map(|message| {
+        if message["role"] == "tool" && message["tool_call_id"] == id.as_str() {
+            message["content"].as_str().map(str::to_owned)
+        } else {
+            None
+        }
+    })
+}
+
+/// Compact request trace for a failing run: roles, tool call ids/names and the
+/// Bash result text, without dumping the whole system prompt.
+fn child_request_summary(requests: &[Value]) -> String {
+    let child: Vec<&Value> = requests
+        .iter()
+        .filter(|request| request["model"] == "fixture-child")
+        .collect();
+    let mut summary = String::new();
+    for (index, request) in child.iter().enumerate() {
+        if index >= 4 && index + 4 < child.len() {
+            continue;
+        }
+        let messages = request["messages"].as_array().cloned().unwrap_or_default();
+        let roles = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>();
+        let mut calls = Vec::new();
+        let mut results = Vec::new();
+        for message in &messages {
+            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                calls.push(format!(
+                    "{}:{}",
+                    call["id"].as_str().unwrap_or("?"),
+                    call["function"]["name"].as_str().unwrap_or("?")
+                ));
+            }
+            if message["role"] == "tool" {
+                results.push(format!(
+                    "{} => {}",
+                    message["tool_call_id"].as_str().unwrap_or("?"),
+                    message["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
+                ));
+            }
+        }
+        summary.push_str(&format!(
+            "#{index} roles={roles:?} calls={calls:?}\n  results={results:?}\n"
+        ));
+    }
+    summary
+}
+
+/// Bounded readiness check: the real job is `running` and has already flushed
+/// the text the pages are expected to observe. This observes actual state; it
+/// is not an elapsed-time guess that can flake under load.
+async fn wait_for_running_progress(data: &std::path::Path, job_id: &str) -> Result<(), String> {
+    let directory = data.join("background-tasks").join(job_id);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = std::fs::read_to_string(directory.join("state.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|value| value["status"].as_str().map(str::to_owned));
+        let progress = std::fs::read_to_string(directory.join("output.jsonl"))
+            .map(|text| text.contains("child-progress"))
+            .unwrap_or(false);
+        if status.as_deref() == Some("running") && progress {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "owned child did not reach running progress: status={status:?} progress={progress}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A real background Agent whose child session already has an assistant turn.
+/// The child emits text and then blocks on a fixture-owned gate, so the job
+/// stays `running` until the parent has captured both pages.
+async fn agent_paging_respond(
+    State(fixture): State<FixtureState>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    let fixture = Fixture { state: fixture };
+    fixture.record_request(&body);
+    assert_eq!(body["stream"], true);
+    if body["model"] == "fixture-child" {
+        if let Some(result) = child_bash_result(&body) {
+            assert!(
+                result.contains("gate-released"),
+                "the held Bash call did not observe the gate release: {result}"
+            );
+            return stream(text_frames("child-final-marker"));
+        }
+        let gate = gate_path(&fixture.state.data);
+        let command = format!(
+            "i=0; while [ ! -e '{}' ] && [ $i -lt 1200 ]; do i=$((i+1)); sleep 0.05; done; echo gate-released",
+            gate.display()
+        );
+        let frames = vec![
+            json!({"choices":[{"index":0,"delta":{"content":"child-progress"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"child-hold","type":"function","function":{"name":"Bash","arguments":json!({"command":command,"description":"Wait for the paging fixture gate"}).to_string()}}]},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+        ];
+        return stream(frames);
+    }
+    let results = tool_results(&body);
+    let step = results.len();
+    let frames = match step {
+        0 => {
+            assert_task_tools(&body);
+            tool_call_frame(
+                "call-agent",
+                "Agent",
+                &json!({
+                    "description": "paged fixture child",
+                    "prompt": "Reply with the exact marker",
+                    "model": "fixture-child",
+                    "run_in_background": true
+                }),
+            )
+        }
+        1 => {
+            let started = results[0].clone();
+            let child = started["session_id"]
+                .as_str()
+                .expect("child session ID")
+                .to_owned();
+            fixture.store("paged_agent", started.clone());
+            let job_id = started["agent_id"]
+                .as_str()
+                .expect("agent job ID")
+                .to_owned();
+            // Wait until the child's current turn really exists, then seed the
+            // prior turn. Doing it in this order exercises the case that the old
+            // `MAX(sort_order)+1` seed got wrong: a prior turn written after the
+            // current one must still sort before it.
+            if let Err(error) = wait_for_running_progress(&fixture.state.data, &job_id).await {
+                panic!("{error}");
+            }
+            let data = fixture.state.data.clone();
+            tokio::task::spawn_blocking(move || {
+                seed_prior_assistant_turn(&data, &child, "PRIOR-ASSISTANT-HISTORY");
+            })
+            .await
+            .unwrap();
+            tool_call_frame(
+                "call-page-1",
+                "TaskGet",
+                &json!({"task_id":job_id,"max_output_bytes":200}),
+            )
+        }
+        2 => {
+            let page = results[1].clone();
+            fixture.store("paged_first", page.clone());
+            tool_call_frame(
+                "call-page-2",
+                "TaskGet",
+                &json!({"task_id":page["task_id"],"cursor":page["next_cursor"],"max_output_bytes":200}),
+            )
+        }
+        3 => {
+            let page = results[2].clone();
+            fixture.store("paged_second", page.clone());
+            // Both pages are captured: release the child and wait for it.
+            std::fs::write(gate_path(&fixture.state.data), b"release").unwrap();
+            tool_call_frame(
+                "call-complete",
+                "TaskGet",
+                &json!({"task_id":page["task_id"],"block":true,"timeout":15000}),
+            )
+        }
+        4 => {
+            fixture.store("paged_completed", results[3].clone());
+            text_frames("paged agent observed")
+        }
+        _ => text_frames("paged agent observed"),
+    };
+    stream(frames)
+}
+
+#[tokio::test]
+async fn background_agent_task_get_pages_while_a_prior_assistant_turn_exists() {
+    let (fixture, state) = start_cli_fixture(post(agent_paging_respond)).await;
+    // Released on every exit path, so an assertion cannot leave the child held.
+    let _gate = GateRelease(gate_path(&fixture.data));
+    let session = uuid::Uuid::new_v4().to_string();
+    let output = run_cli(&fixture, &session).await;
+    assert_single_success(&output);
+
+    let started = state.slot("paged_agent");
+    let job_id = started["agent_id"].as_str().expect("agent job ID");
+    let child_session = started["session_id"].as_str().expect("child session ID");
+    assert_ne!(child_session, session, "{started}");
+
+    // The running job page is the current event stream, not the stored prior
+    // assistant turn, and it carries a valid cursor.
+    let first = state.slot("paged_first");
+    assert_eq!(first["output_mode"], "page", "{first}");
+    assert_eq!(first["status"], "running", "{first}");
+    assert_eq!(first["retrieval_status"], "not_ready", "{first}");
+    assert!(
+        first["next_cursor"].as_str().is_some(),
+        "a running job must return a cursor: {first}"
+    );
+    assert!(
+        !first["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("PRIOR-ASSISTANT-HISTORY"),
+        "the prior assistant turn leaked into the running page: {first}"
+    );
+    let second = state.slot("paged_second");
+    assert_eq!(second["output_mode"], "page", "{second}");
+    assert_eq!(second["status"], "running", "{second}");
+    assert_eq!(second["retrieval_status"], "not_ready", "{second}");
+    let mut paged = first["stdout"].as_str().unwrap_or_default().to_owned();
+    paged.push_str(second["stdout"].as_str().unwrap_or_default());
+    assert!(
+        !paged.contains("PRIOR-ASSISTANT-HISTORY"),
+        "the prior assistant turn leaked into the pages: {paged:?}"
+    );
+    assert!(
+        paged.contains("child-progress"),
+        "the pages did not see the running child's current output: first={first} second={second}"
+    );
+
+    // Completion still returns the child's final report.
+    let completed = state.slot("paged_completed");
+    if completed["status"] != "completed" {
+        let directory = fixture.data.join("background-tasks").join(job_id);
+        let job_state = std::fs::read_to_string(directory.join("state.json")).unwrap_or_default();
+        let stderr = std::fs::read_to_string(directory.join("stderr.log")).unwrap_or_default();
+        let stream = std::fs::read_to_string(directory.join("output.jsonl")).unwrap_or_default();
+        let requests = state.state.requests.lock().unwrap().clone();
+        let trace = child_request_summary(&requests);
+        let gate_visible = gate_path(&fixture.data).exists();
+        panic!(
+            "the owned child did not complete: {completed}\nstate={job_state}\nstderr={stderr}\noutput={stream}\ngate_visible={gate_visible}\nchild_requests:\n{trace}"
+        );
+    }
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["retrieval_status"], "success", "{completed}");
+    assert!(
+        completed["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("child-final-marker"),
+        "the completed read lost the child report: {completed}"
+    );
+
+    // The seeded turn really was in the child session while the job ran, and it
+    // really sorts before the current turn: history order is `sort_order`, not
+    // `created_at`.
+    let conn = rusqlite::Connection::open(
+        fixture
+            .data
+            .join(deepseek_code_core::runtime::DATABASE_FILE),
+    )
+    .unwrap();
+    let seeded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=?1 AND content='PRIOR-ASSISTANT-HISTORY'",
+            [child_session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(seeded, 1);
+    let seeded_order: i64 = conn
+        .query_row(
+            "SELECT sort_order FROM messages WHERE conversation_id=?1 AND content='PRIOR-ASSISTANT-HISTORY'",
+            [child_session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current_order: i64 = conn
+        .query_row(
+            "SELECT sort_order FROM messages WHERE conversation_id=?1 AND role='assistant' AND content LIKE 'child-progress%'",
+            [child_session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (newest_order, newest_content): (i64, String) = conn
+        .query_row(
+            "SELECT sort_order, content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1",
+            [child_session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    eprintln!("ordering: seeded={seeded_order} current={current_order} newest={newest_order}");
+    assert!(
+        seeded_order < current_order,
+        "the seeded prior turn does not sort before the current turn: seeded={seeded_order} current={current_order}"
+    );
+    assert_eq!(
+        newest_order, current_order,
+        "the newest assistant row is not the child's current turn: newest={newest_order} current={current_order}"
+    );
+    assert!(
+        newest_content.contains("child-final-marker"),
+        "the newest assistant row is not the child's final report: {newest_content:?}"
+    );
+
+    // The paged prefix is a prefix of the real append-only event text.
+    let raw = std::fs::read_to_string(
+        fixture
+            .data
+            .join("background-tasks")
+            .join(job_id)
+            .join("output.jsonl"),
+    )
+    .unwrap();
+    let mut snapshot = String::new();
+    let mut first_text = true;
+    for line in raw.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(text) = event["result"].as_str().or_else(|| event["delta"].as_str()) {
+            if !first_text {
+                snapshot.push('\n');
+            }
+            snapshot.push_str(text);
+            first_text = false;
+        }
+    }
+    if !paged.is_empty() {
+        assert!(
+            snapshot.starts_with(&paged),
+            "the pages are not a prefix of the current output: {paged:?} vs {snapshot:?}"
+        );
+    }
 }

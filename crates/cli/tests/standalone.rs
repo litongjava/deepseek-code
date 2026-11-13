@@ -714,6 +714,110 @@ async fn compact_command_generates_summary_and_resume_uses_boundary() {
 
 
 #[tokio::test]
+async fn a_queued_request_compacts_before_the_next_prompt_with_the_keep_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let (url, fixture, task) = server(None, false).await;
+    let mut cli = query(&data, temp.path(), &url);
+    cli.args(["query", "-p", "ORIGINAL_SENTINEL"]);
+    let first = execute(cli).await;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let id = first["session_id"].as_str().unwrap();
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data.clone()).unwrap();
+    let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
+    deepseek_code_core::services::compaction_requests::request(
+        &store.db,
+        id,
+        "KEEP_SENTINEL: preserve the pending tests",
+        50,
+        100,
+    )
+    .unwrap();
+    let mut cli = query(&data, temp.path(), &url);
+    cli.args(["--resume", id, "query", "-p", "follow up"]);
+    let second = execute(cli).await;
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[1].to_string().contains("KEEP_SENTINEL"),
+            "{}",
+            requests[1]
+        );
+        let history = requests[2]["messages"].to_string();
+        assert!(history.contains("SUMMARY_SENTINEL"), "{history}");
+        assert!(!history.contains("ORIGINAL_SENTINEL"), "{history}");
+    }
+    assert!(deepseek_code_core::services::compaction_requests::take(&store.db, id)
+        .unwrap()
+        .is_none());
+    let boundaries: i64 = store
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id=?1 AND is_compact_boundary=1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(boundaries, 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn manual_compact_clears_a_queued_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let (url, fixture, task) = server(None, false).await;
+    let mut cli = query(&data, temp.path(), &url);
+    cli.args(["query", "-p", "ORIGINAL_SENTINEL"]);
+    let first = execute(cli).await;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let id = first["session_id"].as_str().unwrap();
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data.clone()).unwrap();
+    let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
+    deepseek_code_core::services::compaction_requests::request(
+        &store.db,
+        id,
+        "KEEP_SENTINEL: preserve the pending tests",
+        50,
+        100,
+    )
+    .unwrap();
+    let mut cli = query(&data, temp.path(), &url);
+    cli.args(["--resume", id, "query", "-p", "/compact"]);
+    let compacted = execute(cli).await;
+    assert!(
+        compacted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compacted.stderr)
+    );
+    assert!(deepseek_code_core::services::compaction_requests::take(&store.db, id)
+        .unwrap()
+        .is_none());
+    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    task.abort();
+}
+
+
+#[tokio::test]
 async fn session_lifecycle_hooks_run_once_per_frontend_and_resume_context_reaches_model() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");

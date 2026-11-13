@@ -15,30 +15,54 @@ fn cut_short_by_reader(shell: &str, code: Option<i32>) -> bool {
     code == Some(128 + 13) && matches!(shell, "bash" | "zsh" | "sh" | "wsl")
 }
 
-#[derive(Default)]
 struct Captured {
     head: Vec<u8>,
     tail: std::collections::VecDeque<u8>,
     total: usize,
+    /// Bytes kept before the middle is dropped. A caller that must parse a
+    /// complete document can raise this; Bash keeps the historical value.
+    limit: usize,
+}
+impl Default for Captured {
+    fn default() -> Self {
+        Self {
+            head: Vec::new(),
+            tail: std::collections::VecDeque::new(),
+            total: 0,
+            limit: OUTPUT_LIMIT,
+        }
+    }
 }
 impl Captured {
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
     fn push(&mut self, bytes: &[u8]) {
         self.total = self.total.saturating_add(bytes.len());
         let head = bytes
             .len()
-            .min((OUTPUT_LIMIT / 2).saturating_sub(self.head.len()));
+            .min((self.limit / 2).saturating_sub(self.head.len()));
         self.head.extend_from_slice(&bytes[..head]);
         let rest = &bytes[head..];
-        let remove = (self.tail.len() + rest.len()).saturating_sub(OUTPUT_LIMIT / 2);
+        let remove = (self.tail.len() + rest.len()).saturating_sub(self.limit / 2);
         self.tail.drain(..remove.min(self.tail.len()));
         self.tail.extend(rest.iter().copied());
+    }
+
+    /// Whether more bytes arrived than this capture keeps.
+    fn overflowed(&self) -> bool {
+        self.total > self.limit
     }
 
     fn text(&self) -> String {
         let mut bytes = self.head.clone();
         let tail: Vec<_> = self.tail.iter().copied().collect();
         let mut tail_start = 0;
-        if self.total > OUTPUT_LIMIT {
+        if self.overflowed() {
             if let Err(error) = std::str::from_utf8(&bytes) {
                 if error.error_len().is_none() {
                     bytes.truncate(error.valid_up_to());
@@ -53,8 +77,10 @@ impl Captured {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    /// Bash presentation: the capture overflowed, or the head/tail preview is
+    /// still larger than the configured tool output limit.
     fn truncated(&self) -> bool {
-        self.total > OUTPUT_LIMIT || self.text().len() > super::max_output_bytes()
+        self.overflowed() || self.text().len() > super::max_output_bytes()
     }
 }
 
@@ -80,20 +106,88 @@ async fn capture(
 }
 
 pub(super) async fn run(command: &mut Command, timeout: Duration, shell: &str) -> Result<Value> {
-    run_logged(command, Some(timeout), shell, None).await
+    run_logged(command, Some(timeout), shell, None, None).await
 }
 
+/// `stdin` is `Some` only for an explicit interactive pipe; every ordinary call
+/// keeps the historical null stdin.
 pub(super) async fn run_logged(
     command: &mut Command,
     timeout: Option<Duration>,
     shell: &str,
     logs: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    stdin: Option<std::fs::File>,
 ) -> Result<Value> {
+    let run = run_captured(command, timeout, logs, stdin, OUTPUT_LIMIT).await?;
+    if run.timed_out {
+        let timeout = timeout.unwrap_or_default();
+        return Ok(
+            json!({"error":format!("Command timed out after {} ms; descendants were terminated. For long installations or builds, set timeout explicitly (milliseconds, at most 600000), or use run_in_background.",timeout.as_millis()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&run.stdout.text()),"stderr":super::limit_output(&run.stderr.text()),"stdout_truncated":run.stdout.truncated(),"stderr_truncated":run.stderr.truncated()}),
+        );
+    }
+    let status = run.status.expect("a finished capture has a status");
+    let code = status.code();
+    // A pipeline cut short by `head` still produced the output the caller
+    // asked for. The exit code and the flag keep it visible.
+    let cut_short = cut_short_by_reader(shell, code);
+    Ok(json!({
+        "stdout":super::limit_output(&run.stdout.text()),
+        "stderr":super::limit_output(&run.stderr.text()),
+        "stdout_truncated":run.stdout.truncated(),"stderr_truncated":run.stderr.truncated(),
+        "exit_code":code.unwrap_or(-1),
+        "success":status.success() || cut_short,
+        "pipeline_sigpipe":cut_short,
+        "shell":shell
+    }))
+}
+
+/// Runs a command with a bounded **raw** capture: the whole document within
+/// `limit` is kept and returned as it was, with no head/tail presentation
+/// preview, so a caller can parse complete JSON inside that explicit cap.
+/// Anything larger is reported as overflow instead of being handed on as a
+/// silently mangled document.
+pub(super) async fn run_raw(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+    stdin: Option<std::fs::File>,
+) -> Result<Value> {
+    let run = run_captured(command, Some(timeout), None, stdin, limit).await?;
+    let code = run.status.and_then(|status| status.code());
+    Ok(json!({
+        "stdout":run.stdout.text(),
+        "stderr":run.stderr.text(),
+        "stdout_truncated":run.stdout.overflowed(),
+        "stderr_truncated":run.stderr.overflowed(),
+        "exit_code":code.unwrap_or(-1),
+        "success":run.status.is_some_and(|status| status.success()),
+        "timed_out":run.timed_out
+    }))
+}
+
+/// One bounded capture of a child process.
+struct CapturedRun {
+    status: Option<std::process::ExitStatus>,
+    timed_out: bool,
+    stdout: Captured,
+    stderr: Captured,
+}
+
+async fn run_captured(
+    command: &mut Command,
+    timeout: Option<Duration>,
+    logs: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    stdin: Option<std::fs::File>,
+    limit: usize,
+) -> Result<CapturedRun> {
     command
         .kill_on_drop(true)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    match stdin {
+        Some(stdin) => command.stdin(Stdio::from(stdin)),
+        None => command.stdin(Stdio::null()),
+    };
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().context("Starting shell command")?;
@@ -102,7 +196,8 @@ pub(super) async fn run_logged(
     )?;
     let stdout = child.stdout.take().context("Shell stdout missing")?;
     let stderr = child.stderr.take().context("Shell stderr missing")?;
-    let (mut stdout_bytes, mut stderr_bytes) = (Captured::default(), Captured::default());
+    let (mut stdout_bytes, mut stderr_bytes) =
+        (Captured::with_limit(limit), Captured::with_limit(limit));
     let (out_log, err_log) = logs
         .map(|(out, err)| (Some(out), Some(err)))
         .unwrap_or_default();
@@ -127,28 +222,22 @@ pub(super) async fn run_logged(
         None => Ok(execution.await),
     };
     match result {
-        Ok(Ok(status)) => {
-            let code = status.code();
-            // A pipeline cut short by `head` still produced the output the caller
-            // asked for. The exit code and the flag keep it visible.
-            let cut_short = cut_short_by_reader(shell, code);
-            Ok(json!({
-                "stdout":super::limit_output(&stdout_bytes.text()),
-                "stderr":super::limit_output(&stderr_bytes.text()),
-                "stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated(),
-                "exit_code":code.unwrap_or(-1),
-                "success":status.success() || cut_short,
-                "pipeline_sigpipe":cut_short,
-                "shell":shell
-            }))
-        }
+        Ok(Ok(status)) => Ok(CapturedRun {
+            status: Some(status),
+            timed_out: false,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        }),
         Ok(Err(error)) => Err(error).context("Reading shell command output"),
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            Ok(
-                json!({"error":format!("Command timed out after {} ms; descendants were terminated. For long installations or builds, set timeout explicitly (milliseconds, at most 600000), or use run_in_background.",timeout.unwrap().as_millis()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&stdout_bytes.text()),"stderr":super::limit_output(&stderr_bytes.text()),"stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated()}),
-            )
+            Ok(CapturedRun {
+                status: None,
+                timed_out: true,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
         }
     }
 }
@@ -400,7 +489,9 @@ mod tests {
         for dir in ["crates", "src-tauri/src"] {
             let mut stack = vec![root.join(dir)];
             while let Some(path) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&path) else { continue };
+                let Ok(entries) = std::fs::read_dir(&path) else {
+                    continue;
+                };
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
@@ -418,7 +509,10 @@ mod tests {
                 }
             }
         }
-        assert!(offenders.is_empty(), "negative pid without `--`: {offenders:?}");
+        assert!(
+            offenders.is_empty(),
+            "negative pid without `--`: {offenders:?}"
+        );
     }
 
     fn stop_test_service(pid: u32) {

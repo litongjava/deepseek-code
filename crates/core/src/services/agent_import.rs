@@ -67,6 +67,7 @@ pub fn import(context: &ServiceContext, source: &Path, id: &str, preview: bool) 
         description: legacy.description.clone(),
         system_prompt: legacy.system_prompt.clone(),
         tools: Some(tools),
+        read_only_shell: false,
         legacy: Some(legacy),
     };
     agents::validate_custom(&definition)?;

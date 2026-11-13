@@ -176,6 +176,7 @@ pub async fn prepare(session: &Session, value: Option<&Value>) -> Result<Catalog
             description: agent.description,
             system_prompt: agent.prompt,
             tools: agent.tools,
+            read_only_shell: false,
             legacy: None,
         };
         agents::validate_custom(&definition)?;

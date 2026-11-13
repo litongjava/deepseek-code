@@ -15,6 +15,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/add-dir", "Add an additional working directory: PATH"),
     ("/cd", "Change this session's working directory: PATH"),
     ("/effort", "Set thinking effort: default|off|low|medium|high|xhigh|max"),
+    ("/role", "Show or set this session's Super Agent role: agent|router"),
     ("/autocompact", "Set automatic context compaction: default|off|10..95%"),
     ("/recap", "Generate a one-sentence summary of this session"),
     ("/goal", "Set, inspect, or clear a goal checked after each turn"),
@@ -51,7 +52,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/copy", "Copy the latest assistant response: [N]"),
     ("/copy-session-id", "Copy the current session ID to the clipboard"),
     ("/export", "Export transcript: FILE or clipboard"),
-    ("/agents", "Show active agents in this session family; definitions lists available types"),
+    ("/agents", "Show active agents in this session family; definitions lists available types; model shows or sets a type's default model"),
     ("/loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo); omit the interval to let the model self-pace"),
     ("/scroll-speed", "Adjust mouse wheel scroll speed in the transcript pager: 1-10"),
     ("/subagents", "Switch between this session’s subagents"),
@@ -85,8 +86,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/plugins", "Plugins, MCP servers and skills: Installed, Errors and Stats"),
     ("/skill-doctor", "Skill usage and context costs (Stats tab of /plugins)"),
     ("/mcp", "Configured MCP servers"),
-    ("/provider", "Inspect/configure providers: [ID|add|edit ID]"),
-    ("/model", "Inspect/switch models: [ID]"),
+    ("/provider", "Inspect/configure providers: [ID|list|refresh [ID]|add|edit ID]"),
+    ("/model", "Inspect/switch models: [ID|list|refresh]"),
     ("/test", "Test provider with an isolated request"),
     (
         "/compact",
@@ -132,8 +133,26 @@ pub fn help() -> String {
 #[cfg(test)]
 #[test]
 fn aliases_resolve_to_listed_commands() {
-    for (alias, command) in [("/new", "/clear"), ("/reset", "/clear"), ("/settings", "/config"), ("/checkpoint", "/rewind"), ("/help", "/help")] {
+    for (alias, command) in [
+        ("/new", "/clear"),
+        ("/reset", "/clear"),
+        ("/settings", "/config"),
+        ("/checkpoint", "/rewind"),
+        ("/help", "/help"),
+    ] {
         assert_eq!(canonical(alias), command);
         assert!(COMMANDS.iter().any(|(name, _)| *name == command) || command == "/help");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_and_model_help_mention_refresh() {
+    for command in ["/provider", "/model"] {
+        let (_, description) = COMMANDS
+            .iter()
+            .find(|(name, _)| *name == command)
+            .expect("the command is discoverable");
+        assert!(description.contains("refresh"), "{command}: {description}");
     }
 }

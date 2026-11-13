@@ -62,6 +62,7 @@ fn fork_preserves_tool_history_and_leaves_source_unchanged_after_reopen() {
             description: "Read-only investigation".into(),
             system_prompt: "Inspect files without making changes".into(),
             tools: Some(vec!["Read".into()]),
+            read_only_shell: false,
             legacy: None,
         };
         deepseek_code_core::services::agents::bind(&store.db, &source, &restricted).unwrap();

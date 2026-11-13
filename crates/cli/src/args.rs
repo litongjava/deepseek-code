@@ -1,4 +1,4 @@
-﻿//! Terminal commands migrated from the former CLI, now backed by deepseek-code-core.
+//! Terminal commands migrated from the former CLI, now backed by deepseek-code-core.
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -81,6 +81,10 @@ pub struct Cli {
     pub permission_mode: PermissionModeArg,
     #[arg(skip)]
     pub permission_mode_explicit: bool,
+    /// Session role for Super Agent: agent (default) or router. The role is
+    /// independent of the permission mode and is kept on resume.
+    #[arg(long, value_enum, global = true)]
+    pub role: Option<RoleArg>,
     /// Bypass interactive permission prompts; explicit deny rules still apply.
     #[arg(long, global = true, conflicts_with = "permission_mode")]
     pub dangerously_skip_permissions: bool,
@@ -154,12 +158,17 @@ pub struct Cli {
 }
 
 fn parse_session_id(value: &str) -> Result<String, String> {
-    uuid::Uuid::parse_str(value).map(|id|id.to_string()).map_err(|_|"Session ID must be a UUID".into())
+    uuid::Uuid::parse_str(value)
+        .map(|id| id.to_string())
+        .map_err(|_| "Session ID must be a UUID".into())
 }
 
 impl Cli {
     pub fn try_parse_with_mode_source<I, T>(args: I) -> Result<Self, clap::Error>
-    where I: IntoIterator<Item=T>, T: Into<std::ffi::OsString> + Clone {
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
         use clap::{CommandFactory, FromArgMatches};
         let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
         // Accept the launcher spelling while retaining clap's subcommand validation.
@@ -168,15 +177,17 @@ impl Cli {
         }
         let matches = Self::command().try_get_matches_from(args)?;
         let mut cli = Self::from_arg_matches(&matches)?;
-        cli.permission_mode_explicit = matches.value_source("permission_mode") == Some(clap::parser::ValueSource::CommandLine);
+        cli.permission_mode_explicit =
+            matches.value_source("permission_mode") == Some(clap::parser::ValueSource::CommandLine);
         Ok(cli)
     }
     pub fn parse_with_mode_source() -> Self {
-        Self::try_parse_with_mode_source(std::env::args_os()).unwrap_or_else(|error|error.exit())
+        Self::try_parse_with_mode_source(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
     pub fn normalize(&mut self) {
         // Workers get --full-access with the mode in use, which may be another.
-        if self.dangerously_skip_permissions || (self.full_access && !self.permission_mode_explicit) {
+        if self.dangerously_skip_permissions || (self.full_access && !self.permission_mode_explicit)
+        {
             self.permission_mode = PermissionModeArg::Bypass;
         }
         // Starting in bypass keeps it in the Shift+Tab cycle, as in the reference CLI.
@@ -186,11 +197,15 @@ impl Cli {
     }
     pub fn response_schema(&self) -> anyhow::Result<Option<serde_json::Value>> {
         use anyhow::Context;
-        self.json_schema.as_ref().map(|text| {
-            let schema = serde_json::from_str(text).context("--json-schema must be a valid JSON Schema string")?;
-            deepseek_code_core::structured_output::validate_schema(&schema)?;
-            Ok(schema)
-        }).transpose()
+        self.json_schema
+            .as_ref()
+            .map(|text| {
+                let schema = serde_json::from_str(text)
+                    .context("--json-schema must be a valid JSON Schema string")?;
+                deepseek_code_core::structured_output::validate_schema(&schema)?;
+                Ok(schema)
+            })
+            .transpose()
     }
 
     pub fn system_prompt_text(&self) -> anyhow::Result<String> {
@@ -207,9 +222,15 @@ impl Cli {
             prompt.push_str(append);
         }
         if let Some(path) = &self.append_system_prompt_file {
-            let append = std::fs::read_to_string(path)
-                .with_context(|| format!("Cannot read UTF-8 appended system prompt: {}", path.display()))?;
-            if !prompt.is_empty() && !append.is_empty() { prompt.push_str("\n\n"); }
+            let append = std::fs::read_to_string(path).with_context(|| {
+                format!(
+                    "Cannot read UTF-8 appended system prompt: {}",
+                    path.display()
+                )
+            })?;
+            if !prompt.is_empty() && !append.is_empty() {
+                prompt.push_str("\n\n");
+            }
             prompt.push_str(&append);
         }
         Ok(prompt)
@@ -240,7 +261,13 @@ pub enum PermissionModeArg {
     AcceptEdits,
     #[value(alias = "plan_mode")]
     Plan,
-    #[value(alias = "bypassPermissions", alias = "bypass_permissions", alias = "always_allow", alias = "alwaysallow", alias = "zh")]
+    #[value(
+        alias = "bypassPermissions",
+        alias = "bypass_permissions",
+        alias = "always_allow",
+        alias = "alwaysallow",
+        alias = "zh"
+    )]
     Bypass,
     #[value(alias = "dontAsk", alias = "dont_ask")]
     DontAsk,
@@ -248,56 +275,139 @@ pub enum PermissionModeArg {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RoleArg {
+    /// A regular Agent session (default).
+    Agent,
+    /// A Super Agent Router that schedules Coder-Reviewer tasks.
+    Router,
+}
+
+impl From<RoleArg> for deepseek_code_core::super_agent::Role {
+    fn from(value: RoleArg) -> Self {
+        match value {
+            RoleArg::Agent => Self::Agent,
+            RoleArg::Router => Self::Router,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Manage this application's Anthropic account without provider setup.
-    Auth { #[command(subcommand)] action: AuthCommands },
-    Learning { #[command(subcommand)] action: crate::migration::LearningCommands },
-    Performance { #[command(subcommand)] action: crate::migration::PerformanceCommands },
-    Project { #[command(subcommand)] action: crate::migration::ProjectCommands },
-    Cron { #[command(subcommand)] action: crate::migration::CronCommands },
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommands,
+    },
+    Learning {
+        #[command(subcommand)]
+        action: crate::migration::LearningCommands,
+    },
+    Performance {
+        #[command(subcommand)]
+        action: crate::migration::PerformanceCommands,
+    },
+    Project {
+        #[command(subcommand)]
+        action: crate::migration::ProjectCommands,
+    },
+    Cron {
+        #[command(subcommand)]
+        action: crate::migration::CronCommands,
+    },
     /// Explicit maintenance commands for session task storage.
-    Tasks { #[command(subcommand)] action: TasksCommands },
+    Tasks {
+        #[command(subcommand)]
+        action: TasksCommands,
+    },
     /// Internal: run a Workflow script started by the Workflow tool.
     #[command(hide = true)]
     WorkflowRun {
-        #[arg(long)] script: PathBuf,
-        #[arg(long)] run_dir: PathBuf,
-        #[arg(long)] args_json: Option<String>,
-        #[arg(long)] resume_dir: Option<PathBuf>,
+        #[arg(long)]
+        script: PathBuf,
+        #[arg(long)]
+        run_dir: PathBuf,
+        #[arg(long)]
+        args_json: Option<String>,
+        #[arg(long)]
+        resume_dir: Option<PathBuf>,
         /// JSON array of arguments that start each agent's `dcl -p`.
-        #[arg(long)] agent_args: String,
-        #[arg(long, default_value_t = 4)] concurrency: usize,
+        #[arg(long)]
+        agent_args: String,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
     },
-    Ssh { config: PathBuf, operation: PathBuf, #[arg(long)] yes: bool },
-    Remote { request: PathBuf, #[arg(long)] yes: bool },
+    Ssh {
+        config: PathBuf,
+        operation: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+    Remote {
+        request: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Drive a session shared by another dcl with `/remote-control listen`.
     #[command(alias = "rc")]
-    RemoteControl { #[command(subcommand)] action: RemoteControlCommands },
+    RemoteControl {
+        #[command(subcommand)]
+        action: RemoteControlCommands,
+    },
     /// Show language server status or install one: lsp [status] | lsp install LANGUAGE [--yes].
-    Lsp { action: Option<String>, language: Option<String>, #[arg(long)] yes: bool },
+    Lsp {
+        action: Option<String>,
+        language: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Initialize Node.js, Python or CodeGraph for this platform.
-    InitEnv { #[arg(value_parser = ["node", "python", "codegraph", "all"])] target: String, #[arg(long)] dry_run: bool },
-    Help { #[arg(long)] topic:Option<String>, command:Vec<String> },
+    InitEnv {
+        #[arg(value_parser = ["node", "python", "codegraph", "all"])]
+        target: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Help {
+        #[arg(long)]
+        topic: Option<String>,
+        command: Vec<String>,
+    },
     /// Install and run versioned Node.js/Python plugin bundles.
-    Plugin { #[command(subcommand)] action: PluginCommands },
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommands,
+    },
     /// Check a real update manifest; does not install or execute downloads.
-    Update { #[arg(long, env="CLAUDE_UPDATE_MANIFEST")] url:String },
+    Update {
+        #[arg(long, env = "CLAUDE_UPDATE_MANIFEST")]
+        url: String,
+    },
     /// Bounded HTTP diagnostics, using a temporary local server by default.
     StressTest {
-        #[arg(short='c',long,default_value_t=4)] concurrency:usize,
-        #[arg(short='i',long,default_value_t=10)] iterations:usize,
-        #[arg(long)] endpoint:Option<String>,
-        #[arg(long)] allow_remote:bool,
+        #[arg(short = 'c', long, default_value_t = 4)]
+        concurrency: usize,
+        #[arg(short = 'i', long, default_value_t = 10)]
+        iterations: usize,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Run a named agent through the shared session, tools, and permissions.
     Agent {
-        #[arg(long, default_value="general")] agent_type:String,
-        #[arg(short, long)] prompt:String,
+        #[arg(long, default_value = "general")]
+        agent_type: String,
+        #[arg(short, long)]
+        prompt: String,
     },
-    Agents { #[command(subcommand)] action:AgentCommands },
+    Agents {
+        #[command(subcommand)]
+        action: AgentCommands,
+    },
     MagicDocs {
-        #[command(subcommand)] action: MagicCommands,
+        #[command(subcommand)]
+        action: MagicCommands,
     },
     /// Manage personal memory shared with Desktop.
     Memory {
@@ -430,43 +540,95 @@ pub enum MemoryCommands {
     DreamStatus,
     /// Configure automatic consolidation using a saved provider/model.
     DreamConfig {
-        #[arg(long)] enabled: bool,
-        #[arg(long, default_value_t = 24)] min_hours: u64,
-        #[arg(long, default_value_t = 5)] min_memories: usize,
+        #[arg(long)]
+        enabled: bool,
+        #[arg(long, default_value_t = 24)]
+        min_hours: u64,
+        #[arg(long, default_value_t = 5)]
+        min_memories: usize,
     },
     Status,
     /// List memories, newest first, or search them with a query.
-    List { query: Option<String>, #[arg(long, default_value_t = 50)] limit: usize },
+    List {
+        query: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Save a memory.
-    Add { content: String, #[arg(long, default_value_t = 0.7)] importance: f64 },
+    Add {
+        content: String,
+        #[arg(long, default_value_t = 0.7)]
+        importance: f64,
+    },
     /// Replace a memory's text, keeping its importance unless one is given.
-    Update { id: String, content: String, #[arg(long)] importance: Option<f64> },
+    Update {
+        id: String,
+        content: String,
+        #[arg(long)]
+        importance: Option<f64>,
+    },
     /// Delete one memory.
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
     /// Clear personal memory only. Requires explicit confirmation.
-    Clear { #[arg(long)] yes: bool },
+    Clear {
+        #[arg(long)]
+        yes: bool,
+    },
     /// Export all local memories; never overwrite an existing file.
-    Export { output: PathBuf },
+    Export {
+        output: PathBuf,
+    },
     /// Import a versioned archive or an old MemoryEntry JSON array.
-    Import { input: PathBuf, #[arg(long)] preview: bool },
+    Import {
+        input: PathBuf,
+        #[arg(long)]
+        preview: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum MagicCommands {
-    ContextConfig { project_id: String, #[arg(long)] enabled: bool },
-    ImportLegacy {source:PathBuf,#[arg(long)] preview:bool},
+    ContextConfig {
+        project_id: String,
+        #[arg(long)]
+        enabled: bool,
+    },
+    ImportLegacy {
+        source: PathBuf,
+        #[arg(long)]
+        preview: bool,
+    },
     List,
-    Check { file: PathBuf },
+    Check {
+        file: PathBuf,
+    },
     /// Generate a persisted preview; leaves the source file unchanged.
-    Update { id: String, #[arg(long)] context: String },
+    Update {
+        id: String,
+        #[arg(long)]
+        context: String,
+    },
     Previews,
-    Apply { id: String, #[arg(long)] yes: bool },
+    Apply {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Remove tracking and previews only, never document files.
     Clear,
     /// Opt one tracked document into automatic updates from matching personal memory.
-    Auto { id: String, #[arg(long)] enabled: bool },
+    Auto {
+        id: String,
+        #[arg(long)]
+        enabled: bool,
+    },
     /// Foreground host for this project; services stop magic-docs stops it.
-    Start { #[arg(long, default_value_t=3600)] interval: u64 },
+    Start {
+        #[arg(long, default_value_t = 3600)]
+        interval: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -484,12 +646,22 @@ pub enum AgentCommands {
     Import {
         source: PathBuf,
     },
+    /// Show or set an agent type's default model; "default" clears it.
+    ///
+    /// The model is checked when the agent starts, not here: the provider can change.
+    Model {
+        agent: Option<String>,
+        model: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum TeamCommands {
     /// Allow this project to send shared team memories to its selected model.
-    Context { #[arg(long,action=clap::ArgAction::Set)] enabled:bool },
+    Context {
+        #[arg(long,action=clap::ArgAction::Set)]
+        enabled: bool,
+    },
     Status,
     Auth {
         team_id: String,
@@ -582,8 +754,17 @@ pub enum McpCommands {
         preview: bool,
     },
     Hosts,
-    Restart { name:String, #[arg(long)] host:Option<String> },
+    Restart {
+        name: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
     List,
+    /// Show or set an MCP server's state: off, user, on-demand or user-only.
+    State {
+        server: Option<String>,
+        state: Option<String>,
+    },
     /// Add a server: `NAME COMMAND [ARGS...]` for stdio, or
     /// `--transport http|sse|ws NAME URL` for a remote server.
     Add {
@@ -606,7 +787,11 @@ pub enum McpCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum SkillsCommands {
-    ImportLegacy { source: PathBuf, #[arg(long)] preview: bool },
+    ImportLegacy {
+        source: PathBuf,
+        #[arg(long)]
+        preview: bool,
+    },
     List,
     /// Show or set a skill's state: off, user, name-only or user-only.
     State { skill: Option<String>, state: Option<String> },
@@ -626,53 +811,129 @@ pub enum SkillsCommands {
 #[derive(Debug, Subcommand)]
 pub enum SessionCommands {
     /// Stop an idle persistent worker without opening its session.
-    ShutdownWorker { id: String },
+    ShutdownWorker {
+        id: String,
+    },
     /// Request cancellation of one task owned by this saved session.
-    StopTask { id: String, task_id: String },
+    StopTask {
+        id: String,
+        task_id: String,
+    },
     /// Restore trust for one saved session; explicitly list every project root.
     Trust {
         id: String,
         #[arg(long = "folder", required = true)]
         folders: Vec<PathBuf>,
     },
-    ImportLegacy {source:PathBuf,#[arg(long)] preview:bool},
+    ImportLegacy {
+        source: PathBuf,
+        #[arg(long)]
+        preview: bool,
+    },
     List,
-    Show { id: String },
+    Show {
+        id: String,
+    },
     /// Summarize a saved conversation while preserving its original transcript.
-    Compact { id: String, #[arg(long, default_value = "")] instructions: String },
+    Compact {
+        id: String,
+        #[arg(long, default_value = "")]
+        instructions: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum PluginCommands {
-    ImportLegacy { source: String, #[arg(long)] preview: bool },
+    ImportLegacy {
+        source: String,
+        #[arg(long)]
+        preview: bool,
+    },
     List,
-    Install { source: String },
-    Update { id: String, source: String },
-    Enable { id: String },
-    Disable { id: String },
-    Search { query:String, #[arg(long,env="CLAUDE_PLUGIN_REGISTRY")] registry:String },
-    Remove { id: String },
+    Install {
+        source: String,
+    },
+    Update {
+        id: String,
+        source: String,
+    },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
+    Search {
+        query: String,
+        #[arg(long, env = "CLAUDE_PLUGIN_REGISTRY")]
+        registry: String,
+    },
+    Remove {
+        id: String,
+    },
     /// Execute with the current user's permissions in the selected project.
-    Run { id: String, command: String, #[arg(long,default_value="null")] input: String, #[arg(long)] yes: bool },
+    Run {
+        id: String,
+        command: String,
+        #[arg(long, default_value = "null")]
+        input: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn role_is_optional_validated_and_defaults_to_no_override() {
+        use clap::Parser;
+        assert!(super::Cli::try_parse_from(["dcl"]).unwrap().role.is_none());
+        assert!(matches!(
+            super::Cli::try_parse_from(["dcl", "--role", "router"])
+                .unwrap()
+                .role,
+            Some(super::RoleArg::Router)
+        ));
+        assert!(matches!(
+            super::Cli::try_parse_from(["dcl", "--resume", "id", "--role", "agent"])
+                .unwrap()
+                .role,
+            Some(super::RoleArg::Agent)
+        ));
+        assert!(super::Cli::try_parse_from(["dcl", "--role", "supervisor"]).is_err());
+    }
+
+    #[test]
     fn yolo_is_full_access_and_keeps_explicit_worker_modes() {
         let mut cli = super::Cli::try_parse_with_mode_source(["dcl", "--yolo"]).unwrap();
         cli.normalize();
         assert!(cli.full_access && cli.allow_dangerously_skip_permissions);
-        assert!(matches!(cli.permission_mode, super::PermissionModeArg::Bypass));
-        let mut worker = super::Cli::try_parse_with_mode_source(["dcl", "--yolo", "--permission-mode", "plan"]).unwrap();
+        assert!(matches!(
+            cli.permission_mode,
+            super::PermissionModeArg::Bypass
+        ));
+        let mut worker =
+            super::Cli::try_parse_with_mode_source(["dcl", "--yolo", "--permission-mode", "plan"])
+                .unwrap();
         worker.normalize();
         assert!(worker.full_access);
-        assert!(matches!(worker.permission_mode, super::PermissionModeArg::Plan));
+        assert!(matches!(
+            worker.permission_mode,
+            super::PermissionModeArg::Plan
+        ));
     }
     #[test]
     fn permission_mode_tracks_explicit_ask_without_confusing_default() {
-        assert!(!super::Cli::try_parse_with_mode_source(["dcl"]).unwrap().permission_mode_explicit);
-        assert!(super::Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"]).unwrap().permission_mode_explicit);
+        assert!(
+            !super::Cli::try_parse_with_mode_source(["dcl"])
+                .unwrap()
+                .permission_mode_explicit
+        );
+        assert!(
+            super::Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"])
+                .unwrap()
+                .permission_mode_explicit
+        );
     }
     use super::*;
     #[test]
@@ -680,18 +941,50 @@ mod tests {
         let mut cli = Cli::try_parse_from(["dcl", "--dangerously-skip-permissions"]).unwrap();
         cli.normalize();
         assert!(matches!(cli.permission_mode, PermissionModeArg::Bypass));
-        assert!(Cli::try_parse_from(["dcl", "--dangerously-skip-permissions", "--permission-mode", "plan"]).is_err());
-        assert!(matches!(Cli::try_parse_from(["dcl", "--permission-mode", "acceptEdits"]).unwrap().permission_mode, PermissionModeArg::AcceptEdits));
-        assert!(matches!(Cli::try_parse_from(["dcl", "--permission-mode", "bypassPermissions"]).unwrap().permission_mode, PermissionModeArg::Bypass));
+        assert!(Cli::try_parse_from([
+            "dcl",
+            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "plan"
+        ])
+        .is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["dcl", "--permission-mode", "acceptEdits"])
+                .unwrap()
+                .permission_mode,
+            PermissionModeArg::AcceptEdits
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["dcl", "--permission-mode", "bypassPermissions"])
+                .unwrap()
+                .permission_mode,
+            PermissionModeArg::Bypass
+        ));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("append.md");
         std::fs::write(&path, "UTF-8 中文").unwrap();
-        let cli = Cli::try_parse_from(["dcl", "--system-prompt", "Base", "--append-system-prompt-file", path.to_str().unwrap()]).unwrap();
+        let cli = Cli::try_parse_from([
+            "dcl",
+            "--system-prompt",
+            "Base",
+            "--append-system-prompt-file",
+            path.to_str().unwrap(),
+        ])
+        .unwrap();
         assert_eq!(cli.system_prompt_text().unwrap(), "Base\n\nUTF-8 中文");
     }
     #[test]
     fn sdk_input_and_turn_budget_preserve_short_print_prompt() {
-        let cli = Cli::try_parse_from(["dcl", "-p", "initial", "--input-format", "stream-json", "--max-turns", "2"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "dcl",
+            "-p",
+            "initial",
+            "--input-format",
+            "stream-json",
+            "--max-turns",
+            "2",
+        ])
+        .unwrap();
         assert_eq!(cli.prompt.as_deref(), Some("initial"));
         assert!(cli.print_short);
         assert_eq!(cli.input_format, InputFormat::StreamJson);
@@ -742,11 +1035,7 @@ mod tests {
 
     #[test]
     fn continuation_is_exclusive_with_explicit_resume_and_auto_route() {
-        assert!(
-            Cli::try_parse_from(["dcl", "-c"])
-                .unwrap()
-                .continue_session
-        );
+        assert!(Cli::try_parse_from(["dcl", "-c"]).unwrap().continue_session);
         assert!(Cli::try_parse_from(["dcl", "-c", "--resume", "id"]).is_err());
         assert!(Cli::try_parse_from(["dcl", "-c", "--auto-route"]).is_err());
     }
@@ -773,12 +1062,31 @@ mod tests {
     }
     #[test]
     fn remote_launcher_accepts_listen_and_optional_token_prompt() {
-        let mut cli = Cli::try_parse_with_mode_source(["dcl", "--rc", "listen", "--dangerously-skip-permissions"]).unwrap();
+        let mut cli = Cli::try_parse_with_mode_source([
+            "dcl",
+            "--rc",
+            "listen",
+            "--dangerously-skip-permissions",
+        ])
+        .unwrap();
         cli.normalize();
-        assert!(matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Listen { port: 30086, .. } })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::RemoteControl {
+                action: RemoteControlCommands::Listen { port: 30086, .. }
+            })
+        ));
         assert!(matches!(cli.permission_mode, PermissionModeArg::Bypass));
-        let cli = Cli::try_parse_with_mode_source(["dcl", "--rc", "connect", "192.168.1.20:30086", "--token"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Connect { token: Some(token), .. } }) if token.is_empty()));
+        let cli = Cli::try_parse_with_mode_source([
+            "dcl",
+            "--rc",
+            "connect",
+            "192.168.1.20:30086",
+            "--token",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Connect { token: Some(token), .. } }) if token.is_empty())
+        );
     }
-
 }

@@ -1,5 +1,5 @@
 export function planModeFromTool(event: { type?: string; tool_name?: string; content?: string; is_error?: boolean }): boolean | null {
-  if (event.type !== 'done' || event.is_error || !['EnterPlanMode', 'ExitPlanMode', 'plan_mode'].includes(event.tool_name || '')) return null;
+  if (event.type !== 'done' || event.is_error || !['EnterPlanMode', 'ExitPlanMode'].includes(event.tool_name || '')) return null;
   try {
     const result = JSON.parse(event.content || '');
     if (result.mode === 'plan') return true;

@@ -27,7 +27,7 @@ pub struct Message {
     pub blocked_reason: Option<String>,
 }
 fn schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS session_inbox(id TEXT PRIMARY KEY,sender TEXT NOT NULL,recipient TEXT NOT NULL,project_source TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',read INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,blocked_reason TEXT,consumer_generation TEXT,committed_at TEXT); CREATE INDEX IF NOT EXISTS session_inbox_recipient ON session_inbox(recipient,state); CREATE TABLE IF NOT EXISTS session_inbox_consumers(session_id TEXT PRIMARY KEY,generation TEXT NOT NULL,pid INTEGER NOT NULL);")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS session_inbox(id TEXT PRIMARY KEY,sender TEXT NOT NULL,recipient TEXT NOT NULL,project_source TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',read INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,blocked_reason TEXT,consumer_generation TEXT,committed_at TEXT); CREATE INDEX IF NOT EXISTS session_inbox_recipient ON session_inbox(recipient,state); CREATE TABLE IF NOT EXISTS session_inbox_consumers(session_id TEXT PRIMARY KEY,generation TEXT NOT NULL,pid INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS session_inbox_operations(operation_id TEXT PRIMARY KEY,message_id TEXT NOT NULL,sender TEXT NOT NULL,recipient TEXT NOT NULL,content_hash TEXT NOT NULL,created_at TEXT NOT NULL);")?;
     Ok(())
 }
 pub fn context(root: &Path) -> Result<ServiceContext> {
@@ -90,8 +90,57 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 }
 const SELECT: &str =
     "SELECT id,sender,recipient,content,created_at,state,read,blocked_reason FROM session_inbox";
+fn super_agent_pair(conn: &Connection, first: &str, second: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tasks WHERE (router_session_id=?1 AND (coder_session_id=?2 OR reviewer_session_id=?2)) OR (router_session_id=?2 AND (coder_session_id=?1 OR reviewer_session_id=?1)) OR (coder_session_id=?1 AND reviewer_session_id=?2) OR (coder_session_id=?2 AND reviewer_session_id=?1))",
+        params![first, second],
+        |row| row.get(0),
+    )
+}
+
+fn content_digest(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(content.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn message_by_id(conn: &Connection, id: &str) -> Result<Message> {
+    conn.query_row(&format!("{SELECT} WHERE id=?1"), [id], row)
+        .optional()?
+        .context("Delivered message is missing")
+}
+
 pub fn send(
     context: &ServiceContext,
+    sender: &str,
+    recipient: &str,
+    content: &str,
+) -> Result<Message> {
+    deliver(context, None, sender, recipient, content)
+}
+
+/// Delivers a message at most once for a durable operation ID. A retry after a
+/// crash between delivery and the caller's event append returns the original
+/// message instead of queueing a duplicate.
+pub fn send_once(
+    context: &ServiceContext,
+    operation_id: &str,
+    sender: &str,
+    recipient: &str,
+    content: &str,
+) -> Result<Message> {
+    ensure!(
+        !operation_id.trim().is_empty(),
+        "Message operation ID is required"
+    );
+    deliver(context, Some(operation_id), sender, recipient, content)
+}
+
+fn deliver(
+    context: &ServiceContext,
+    operation_id: Option<&str>,
     sender: &str,
     recipient: &str,
     content: &str,
@@ -104,14 +153,45 @@ pub fn send(
         sender != recipient,
         "SendMessage requires a different recipient session"
     );
+    let digest = content_digest(content);
     context.db.with_conn(|conn|->Result<_>{
         schema(conn)?;let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(operation_id) = operation_id {
+            if let Some((message_id, stored_sender, stored_recipient, stored_digest)) = tx
+                .query_row(
+                    "SELECT message_id,sender,recipient,content_hash FROM session_inbox_operations WHERE operation_id=?1",
+                    [operation_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+                )
+                .optional()?
+            {
+                ensure!(
+                    stored_sender == sender
+                        && stored_recipient == recipient
+                        && stored_digest == digest,
+                    "Message operation {operation_id} was already used for different content"
+                );
+                let message = message_by_id(&tx, &message_id)?;
+                tx.commit()?;
+                return Ok(message);
+            }
+        }
         let source=project(&tx,&context.paths.data_dir,sender)?;
-        ensure!(source==project(&tx,&context.paths.data_dir,recipient)?,"Recipient belongs to another project");
+        let recipient_source=project(&tx,&context.paths.data_dir,recipient)?;
+        // A Super Agent task deliberately pairs a Router with sessions in
+        // isolated workspaces. The durable task record is the authorization for
+        // exactly those pairs; arbitrary cross-project messages stay rejected.
+        ensure!(source==recipient_source||super_agent_pair(&tx,sender,recipient)?,"Recipient belongs to another project");
         let (count,bytes):(i64,i64)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(content AS BLOB))),0) FROM session_inbox WHERE recipient=?1 AND state='queued'",[recipient],|r|Ok((r.get(0)?,r.get(1)?)))?;
         ensure!(count<MAX_PENDING && bytes+content.len() as i64<=MAX_PENDING_BYTES,"Recipient inbox is full; inspect pending messages before sending more");
         let message=Message{id:uuid::Uuid::new_v4().to_string(),sender:sender.into(),recipient:recipient.into(),content:content.into(),created_at:chrono::Utc::now().to_rfc3339(),state:"queued".into(),read:false,blocked_reason:None};
         tx.execute("INSERT INTO session_inbox(id,sender,recipient,project_source,content,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,sender,recipient,source,content,message.created_at])?;
+        if let Some(operation_id) = operation_id {
+            tx.execute(
+                "INSERT INTO session_inbox_operations(operation_id,message_id,sender,recipient,content_hash,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![operation_id, message.id, sender, recipient, digest, message.created_at],
+            )?;
+        }
         tx.commit()?;Ok(message)
     })?
 }
@@ -1394,6 +1474,23 @@ mod tests {
         let recipient = store.fork(&sender).unwrap();
         (temp, context, store, sender, recipient)
     }
+    #[test]
+    fn operation_scoped_delivery_is_exactly_once() {
+        let (_temp, context, _store, sender, recipient) = fixture();
+        let first = send_once(&context, "crp-send:tool-1", &sender, &recipient, "hello")
+            .unwrap();
+        let replay = send_once(&context, "crp-send:tool-1", &sender, &recipient, "hello")
+            .unwrap();
+        assert_eq!(first.id, replay.id);
+        assert_eq!(inbox(&context, &recipient, false).unwrap().len(), 1);
+        assert!(send_once(&context, "crp-send:tool-1", &sender, &recipient, "different")
+            .is_err());
+        let other = send_once(&context, "crp-send:tool-2", &sender, &recipient, "hello")
+            .unwrap();
+        assert_ne!(first.id, other.id);
+        assert_eq!(inbox(&context, &recipient, false).unwrap().len(), 2);
+    }
+
     #[test]
     fn transaction_ack_is_atomic_and_replays_once_under_consumer_ownership() {
         let (_temp, context, store, sender, recipient) = fixture();

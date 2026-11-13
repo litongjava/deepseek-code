@@ -447,7 +447,14 @@ impl SessionStore {
                     history.push(json!({"role":message.role,"content":message.content,"provider_content":native}));
                     continue;
                 }
-                let calls = message_repo::get_tool_calls_for_message(conn, &message.id)?;
+                let mut calls = message_repo::get_tool_calls_for_message(conn, &message.id)?;
+                // Nested ToolScript calls are history, not provider protocol:
+                // the provider never emitted their ids, so replaying them would
+                // fabricate an assistant tool_use with no matching requested
+                // call. Their rows stay visible to transcript/display readers.
+                let nested =
+                    crate::services::tool_history::nested_ids_for_message(conn, &message.id)?;
+                calls.retain(|tool| !nested.contains(&tool.id));
                 if message.role == "assistant" && !calls.is_empty() {
                     match format {
                         ApiFormat::OpenAI => {
