@@ -434,7 +434,15 @@ impl McpServerManager {
         }
 
         let mut connector = McpConnector::new(config.clone());
-        connector.start().await?;
+        if let Err(error) = connector.start().await {
+            // The status keeps the start failure so `/mcp` and `/doctor errors` can show it.
+            let mut servers = self.servers.write().await;
+            if let Some(state) = servers.get_mut(id) {
+                state.status.error = Some(format!("{error:#}"));
+                state.status.running = false;
+            }
+            return Err(error);
+        }
 
         let tools = connector.list_tools().await.unwrap_or_default();
         let resources = connector.list_resources().await.unwrap_or_default();

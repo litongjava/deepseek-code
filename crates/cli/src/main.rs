@@ -1300,6 +1300,13 @@ async fn run(cli: &Cli) -> Result<()> {
                 }
                 continue;
             }
+            if let Some(name) = doctor_commands::subcommand(&line) {
+                match doctor_commands::run(name, &paths, &session).await {
+                    Ok(text) => command_eprintln!("{text}"),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
+                }
+                continue;
+            }
             if line.trim() == "/plugins" || line.trim() == "/skill-doctor" {
                 let start = if line.trim() == "/skill-doctor" { "skill-doctor" } else { "installed" };
                 if terminal::picker::available() {

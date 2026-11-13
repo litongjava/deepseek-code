@@ -487,6 +487,14 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
    ```
    覆盖发现恰好一次、模型和用户都可调用、迁移只删除原生占位、物化字节和完整性检查、Python 脚本在 `-S`（无 site-packages）下创建并通过验证。单元测试不能代替第 2、3 条的真实进程调用。
 
+### 不经模型的 /doctor 子命令
+
+在有一个格式错误 `SKILL.md` 的工作区（例如 `.claude/skills/bad/SKILL.md` 的 frontmatter 不是有效 YAML）启动 `dcl`，并用本地模拟接口记录模型请求数：
+
+1. 输入 `/doctor errors`：输出列出该文件的 `skill definition:` 与 `definition skipped`，末尾说明可以用 `/doctor` 让模型协助；期间不产生新的模型请求。
+2. 输入 `/doctor skills`：输出与 `/plugins` 的 Stats 选项卡相同（每个技能的上下文开销、7 天 token、使用次数、最近使用，以及 MCP 服务的状态与开销），同样不产生模型请求。
+3. 输入 `/doctor skills now` 或 `/doctor prompt-audit`：仍交给 `doctor` skill 并调用模型，确认只有精确的 `/doctor skills` 和 `/doctor errors` 走本地路径。
+
 ### 第十一轮：SDK 回合内引导（mid-turn steering）
 
 stream-json 宿主在一轮进行中发送的普通用户消息不再只等这一轮结束，而是通过 `services/input_queue` 的 Steer 模式在下一个工具边界交给正在运行的回合；REPL 与 Desktop 的既有路径不变。全部使用本地模拟模型与临时数据目录。
