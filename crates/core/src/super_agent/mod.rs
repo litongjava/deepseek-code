@@ -18,6 +18,7 @@ pub mod review;
 pub mod role;
 pub mod state;
 pub mod store;
+pub mod watcher;
 
 pub use config::{PlanApprovalPolicy, SuperAgentConfig};
 pub use model::{

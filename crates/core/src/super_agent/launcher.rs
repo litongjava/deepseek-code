@@ -412,6 +412,44 @@ impl Launcher {
         .await
     }
 
+    /// Watcher recovery keeps the exact member/workspace and uses the shared
+    /// child resume path. Its purpose is the durable interruption identity.
+    pub(crate) async fn resume_interrupted(
+        &self,
+        task: &TaskRecord,
+        member: MemberRole,
+        instruction: &str,
+        operation_id: &str,
+    ) -> Result<LaunchOutcome> {
+        let session = member_session(task, member).context("Recovery member missing")?;
+        let workspace = self
+            .context
+            .db
+            .with_conn(|conn| crate::db::conversation_repo::get_conversation(conn, session))??
+            .context("Recovery session missing")?
+            .workspace_path
+            .context("Recovery workspace missing")?;
+        let role = match member {
+            MemberRole::Coder => AgentModelRole::Coder,
+            MemberRole::Reviewer => AgentModelRole::Reviewer,
+        };
+        let (model, warning) = self.resolve_model(role);
+        self.run(LaunchDraft {
+            task,
+            member,
+            kind: LaunchKind::Resume,
+            purpose: operation_id,
+            delivery: None,
+            workspace: canonical(PathBuf::from(workspace))?,
+            resume_session: Some(session.to_owned()),
+            prompt: instruction.to_owned(),
+            model: model.id,
+            warning,
+            allow_workspace_move: false,
+        })
+        .await
+    }
+
     /// Continues the same Coder session for one repository delivery.
     ///
     /// The typed identity is the only way to address a delivery resume: the
