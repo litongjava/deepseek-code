@@ -70,6 +70,7 @@ enigo = "0.2"
 rquickjs = { version = "0.14.0", features = ["futures"] }
 
 [target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
 # `net` is for the managed PTY endpoint: a nonblocking `connect(2)` plus
 # `SO_PEERCRED`, so a saturated backlog cannot block a caller or leak a
 # connector thread.

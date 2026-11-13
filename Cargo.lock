@@ -1703,6 +1703,7 @@ dependencies = [
  "hyper 1.10.1",
  "ignore",
  "jsonschema",
+ "libc",
  "nix 0.28.0",
  "notify",
  "once_cell",
