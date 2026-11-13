@@ -434,8 +434,34 @@ fn result_label(name: &str, input: &Value, output: &str, workspace: Option<&std:
     label(name, input, workspace)
 }
 
+/// A timeout in a transcript line: whole seconds below a minute, else minutes.
+fn timeout_label(ms: u64) -> String {
+    let seconds = ms / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m", seconds / 60)
+    }
+}
+
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
+    // A foreground call that reached its timeout continues as a background
+    // task; its own line says so before the generic running-in-background one.
+    if !failed {
+        if let Ok(value) = serde_json::from_str::<Value>(output) {
+            if value["timed_out_to_background"] == true {
+                let ms = value["timeout_ms"].as_u64().unwrap_or(0);
+                return (
+                    vec![format!(
+                        "Still running after {}; moved to the background (click to show output · /tasks to view)",
+                        timeout_label(ms)
+                    )],
+                    0,
+                );
+            }
+        }
+    }
     if name == "Bash" && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
         value["task_id"].is_string() && value["status"] == "running"
     }) {
@@ -875,6 +901,19 @@ mod tests {
         assert!(background_shell_id("Agent", &output, false).is_none());
         assert!(background_shell_id("Bash", &output, true).is_none());
         assert!(background_shell_id("Bash", r#"{"task_id":"../other","status":"running"}"#, false).is_none());
+    }
+
+    #[test]
+    fn a_timed_out_background_handoff_has_its_own_summary_line() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let output = json!({"task_id":id,"status":"running","backgrounded":true,"timed_out_to_background":true,"timeout_ms":120000}).to_string();
+        let (shown, hidden) = summary("Bash", &output, false);
+        assert_eq!(hidden, 0);
+        assert!(
+            shown[0].starts_with("Still running after 2m"),
+            "{shown:?}"
+        );
+        assert_eq!(background_shell_id("Bash", &output, false), Some(id));
     }
 
     fn text(lines: &[Line]) -> Vec<String> {
