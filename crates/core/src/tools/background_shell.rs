@@ -13,6 +13,12 @@ pub use notifications::{
     collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START,
 };
 tokio::task_local! { pub(super) static CONTEXT: Option<(PathBuf, String)>; }
+tokio::task_local! {
+    /// Whether these tool calls belong to a delegated child session. A child's
+    /// background tasks are never reported after it returns, so its foreground
+    /// timeout keeps terminating the command instead of promoting it.
+    pub(super) static DELEGATED: bool;
+}
 
 /// A shell task's log directory: its task ID, or the directory of a
 /// foreground call that was moved to the background.
@@ -582,6 +588,12 @@ pub async fn scope<F: Future>(context: Option<(PathBuf, String)>, future: F) -> 
     CONTEXT.scope(context, future).await
 }
 
+/// Marks the tool calls of a delegated child so a foreground timeout there keeps
+/// the historical kill instead of promoting a task nobody would report.
+pub async fn delegated_scope<F: Future>(delegated: bool, future: F) -> F::Output {
+    DELEGATED.scope(delegated, future).await
+}
+
 pub(super) fn session_environment() -> Result<Option<String>> {
     match CONTEXT.try_with(Clone::clone).ok().flatten() {
         Some((root, session)) => crate::services::session_environment::script(&root, &session),
@@ -941,18 +953,11 @@ pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
             output.push_str(&format!("{command}\n"));
         }
         for stream in ["stdout", "stderr"] {
-            use std::io::{Read, Seek, SeekFrom};
-            if let Ok(mut file) = std::fs::File::open(directory.join(format!("{stream}.log"))) {
-                let length = file.metadata()?.len();
-                file.seek(SeekFrom::Start(length.saturating_sub(32768)))?;
-                let mut bytes = Vec::new();
-                file.take(32768).read_to_end(&mut bytes)?;
-                if !bytes.is_empty() {
-                    output.push_str(&format!(
-                        "[{stream}]\n{}\n",
-                        String::from_utf8_lossy(&bytes)
-                    ));
-                }
+            // A log that cannot be read is skipped, as before: live inspection
+            // must not fail because one stream is unreadable.
+            let tail = tail_or_empty(&directory.join(format!("{stream}.log")));
+            if !tail.is_empty() {
+                output.push_str(&format!("[{stream}]\n{tail}\n"));
             }
         }
     }
@@ -963,6 +968,24 @@ impl Drop for ForegroundMarker {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// The last bytes of a foreground call's log that a timeout hands to the model.
+const FOREGROUND_TAIL: u64 = 32 * 1024;
+
+/// The same bounded tail, or nothing when the log cannot be read. A timeout
+/// result must keep its task ID even then, and live inspection must keep working
+/// for the other stream.
+fn tail_or_empty(path: &Path) -> String {
+    read_tail(path, FOREGROUND_TAIL).unwrap_or_default()
+}
+
+/// Why a foreground call stopped waiting in the foreground.
+enum Reason {
+    /// The user asked for it, as Ctrl+B does.
+    UserRequest,
+    /// The foreground timeout elapsed; the process keeps running.
+    Timeout,
 }
 
 pub(super) async fn run_foreground(
@@ -988,6 +1011,9 @@ pub(super) async fn run_foreground(
         let _guard = guard;
         return super::bash_process::run(&mut command, timeout, shell).await;
     };
+    // A delegated child's background tasks are never reported to the parent, so
+    // its foreground calls keep the historical kill-at-timeout behavior.
+    let delegated = DELEGATED.try_with(|delegated| *delegated).unwrap_or(false);
     let session_directory = root.join("shell-tasks").join(id.to_string());
     let log_dir = format!("fg-{}", uuid::Uuid::new_v4());
     let directory = session_directory.join(&log_dir);
@@ -998,15 +1024,23 @@ pub(super) async fn run_foreground(
     let _foreground_marker = ForegroundMarker(marker);
     let signal = session_directory.join("background-now");
     let started = std::time::SystemTime::now();
+    // Taken before the spawn: the foreground timeout is measured from here.
+    let started_at = std::time::Instant::now();
     let started_ms = chrono::Utc::now().timestamp_millis();
     let logs = (directory.join("stdout.log"), directory.join("stderr.log"));
     let shell_name = shell.to_owned();
     let mut running = AbortOnDrop(Some(tokio::spawn(async move {
         let _guard = guard;
-        super::bash_process::run_logged(&mut command, Some(timeout), &shell_name, Some(logs), None)
+        // A managed call carries no timeout inside the capture: the poll loop
+        // below hands the process to the model as a background task, so a
+        // foreground timeout never kills what the command has already achieved.
+        // A delegated child keeps the old capture timeout instead, because no
+        // one would be told about a task it left running.
+        let capture_timeout = delegated.then_some(timeout);
+        super::bash_process::run_logged(&mut command, capture_timeout, &shell_name, Some(logs), None)
             .await
     })));
-    loop {
+    let reason = loop {
         let handle = running.0.as_mut().context("Shell task missing")?;
         tokio::select! {
             result = handle => {
@@ -1019,11 +1053,14 @@ pub(super) async fn run_foreground(
                     .and_then(|metadata| metadata.modified())
                     .is_ok_and(|time| time >= started);
                 if requested {
-                    break;
+                    break Reason::UserRequest;
+                }
+                if !delegated && started_at.elapsed() >= timeout {
+                    break Reason::Timeout;
                 }
             }
         }
-    }
+    };
     let task = super::tasks::execute_for_shell_owner(
         "TaskCreate",
         json!({"subject":description,"metadata":{"managed_shell":true,"command":command_text,"started_ms":started_ms,"log_dir":log_dir}}),
@@ -1055,6 +1092,9 @@ pub(super) async fn run_foreground(
         done: false,
     };
     let mut handle = running.0.take().context("Shell task missing")?;
+    // The completion task below owns `directory`; the timeout result still
+    // reads the same logs.
+    let log_directory = directory.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let result = tokio::select! {
@@ -1077,6 +1117,25 @@ pub(super) async fn run_foreground(
         };
         completion.finish(status, output);
     });
+    // The foreground timeout no longer kills the process: it is handed to the
+    // model as a background task that keeps running, together with the output
+    // captured so far, so a long build survives the timeout.
+    if matches!(reason, Reason::Timeout) {
+        let millis = timeout.as_millis() as u64;
+        // The task is already running: an unreadable log must never cost its ID.
+        let stdout = super::limit_output(&tail_or_empty(&log_directory.join("stdout.log")));
+        let stderr = super::limit_output(&tail_or_empty(&log_directory.join("stderr.log")));
+        return Ok(json!({
+            "task_id":id,
+            "status":"running",
+            "backgrounded":true,
+            "timed_out_to_background":true,
+            "timeout_ms":millis,
+            "stdout":stdout,
+            "stderr":stderr,
+            "message":format!("The command was still running after {millis} ms, so it moved to the background and keeps running. Its output so far is in stdout/stderr. To wait for it or read more output, load TaskGet with ToolSearch (block:true waits); TaskStop stops it. You will be notified when it finishes.")
+        }));
+    }
     Ok(
         json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolSearch; TaskStop stops it."}),
     )
@@ -2558,6 +2617,168 @@ setInterval(() => {}, 10000);
         .await
         .unwrap();
         assert!(kept["stdout"].as_str().unwrap().contains("kept"));
+    }
+
+    /// The foreground timeout hands the still-running process to the model as
+    /// a background task instead of killing it.
+    #[tokio::test]
+    async fn a_foreground_call_that_reaches_its_timeout_moves_to_the_background() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        // Warm the interpreter so the 800 ms window measures the command, not a
+        // cold Node start while the whole suite runs in parallel.
+        let mut warmup = Command::new("node");
+        warmup.arg("-e").arg("console.log('warm')");
+        scope(
+            Some((root.path().into(), session.clone())),
+            run_foreground(
+                warmup,
+                Duration::from_secs(30),
+                "node",
+                "warmup",
+                "node warmup",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let mut command = Command::new("node");
+        command
+            .arg("-e")
+            .arg("console.log('early');setTimeout(()=>console.log('late'),2500)");
+        let moved = scope(
+            Some((root.path().into(), session.clone())),
+            run_foreground(
+                command,
+                Duration::from_millis(800),
+                "node",
+                "slow",
+                "node slow",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved["backgrounded"], true, "{moved}");
+        assert_eq!(moved["timed_out_to_background"], true, "{moved}");
+        assert_eq!(moved["timeout_ms"], 800, "{moved}");
+        assert!(
+            mentions(&moved, "stdout", "early"),
+            "the output written before the timeout is missing: {moved}"
+        );
+        let id = moved["task_id"].as_str().unwrap();
+        let finished = wait_until(
+            root.path(),
+            &session,
+            id,
+            "background completion",
+            |value| value["status"] != "running",
+        )
+        .await;
+        assert_eq!(finished["status"], "completed", "{finished}");
+        let stdout = finished["stdout"].as_str().unwrap();
+        assert!(
+            stdout.contains("early") && stdout.contains("late"),
+            "the process was killed at the timeout: {stdout}"
+        );
+    }
+
+    /// A call that finishes inside its timeout keeps returning its own result.
+    #[tokio::test]
+    async fn a_quick_foreground_call_is_unchanged_by_the_timeout() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut command = Command::new("node");
+        command
+            .arg("-e")
+            .arg("console.log('finished in the foreground')");
+        let result = scope(
+            Some((root.path().into(), session.clone())),
+            run_foreground(
+                command,
+                Duration::from_secs(30),
+                "node",
+                "quick",
+                "node quick",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.get("task_id").is_none(), "{result}");
+        assert_eq!(result["success"], true, "{result}");
+        assert!(
+            mentions(&result, "stdout", "finished in the foreground"),
+            "{result}"
+        );
+    }
+
+    /// Without a managed session the call keeps the historical behavior: the
+    /// timeout terminates the process.
+    #[tokio::test]
+    async fn the_timeout_without_a_managed_session_still_terminates() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let mut command = Command::new("node");
+        command
+            .arg("-e")
+            .arg("console.log('waiting');setInterval(()=>{},1000)");
+        let result = run_foreground(
+            command,
+            Duration::from_millis(800),
+            "node",
+            "unmanaged",
+            "node unmanaged",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["timed_out"], true, "{result}");
+        assert!(result.get("task_id").is_none(), "{result}");
+    }
+
+    /// A delegated child keeps the historical timeout: the process is terminated
+    /// instead of becoming a task of a session nobody reports on.
+    #[tokio::test]
+    async fn a_delegated_foreground_call_is_still_terminated_at_its_timeout() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut command = Command::new("node");
+        command
+            .arg("-e")
+            .arg("console.log('waiting');setInterval(()=>{},1000)");
+        let result = scope(
+            Some((root.path().into(), session.clone())),
+            delegated_scope(
+                true,
+                run_foreground(
+                    command,
+                    Duration::from_millis(800),
+                    "node",
+                    "delegated",
+                    "node delegated",
+                    None,
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["timed_out"], true, "{result}");
+        assert!(result.get("task_id").is_none(), "{result}");
+        assert!(result.get("timed_out_to_background").is_none(), "{result}");
+    }
+
+    /// The handoff JSON must keep its task ID even when a log cannot be read:
+    /// the task is already running and nothing else names it.
+    #[test]
+    fn a_timeout_handoff_returns_the_task_even_when_the_logs_are_unreadable() {
+        let root = tempfile::tempdir().unwrap();
+        // A missing log file and a directory (a read error) both yield no
+        // output instead of an error.
+        assert_eq!(tail_or_empty(&root.path().join("missing.log")), "");
+        assert_eq!(tail_or_empty(root.path()), "");
     }
 
     #[tokio::test]
@@ -5126,6 +5347,25 @@ mod foreground_output_tests {
         std::fs::remove_file(path.join("foreground-active")).unwrap();
         assert!(foreground_output(root.path(), &session).unwrap().is_empty());
         assert!(foreground_output(root.path(), "../invalid").is_err());
+    }
+
+    /// Live inspection keeps working when one stream cannot be read: the stream
+    /// is skipped as it was before the shared tail helper.
+    #[test]
+    fn an_unreadable_stream_is_skipped_by_foreground_output() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let path = root.path().join("shell-tasks").join(&session).join("fg-test");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("foreground-active"), b"running").unwrap();
+        std::fs::write(path.join("command.txt"), b"fixture").unwrap();
+        // A directory where the log should be makes the read fail.
+        std::fs::create_dir(path.join("stdout.log")).unwrap();
+        std::fs::write(path.join("stderr.log"), b"diagnostic").unwrap();
+        let output = foreground_output(root.path(), &session).unwrap();
+        assert!(output.contains("fixture"), "{output}");
+        assert!(output.contains("diagnostic"), "{output}");
+        assert!(!output.contains("[stdout]"), "{output}");
     }
 
     fn paged_fixture(

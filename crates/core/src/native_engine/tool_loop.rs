@@ -3655,9 +3655,12 @@ impl ToolLoopExecutor {
                 self.event_tx.clone(),
                 crate::tools::background_shell::scope(
                     context,
-                    crate::tools::path_scope::with_permissions(
-                        self.permission_manager.clone(),
-                        crate::tools::path_scope::scope(directories, self.execute_scoped()),
+                    crate::tools::background_shell::delegated_scope(
+                        self.delegation_depth > 0,
+                        crate::tools::path_scope::with_permissions(
+                            self.permission_manager.clone(),
+                            crate::tools::path_scope::scope(directories, self.execute_scoped()),
+                        ),
                     ),
                 ),
             ))
