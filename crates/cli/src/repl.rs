@@ -312,7 +312,9 @@ fn conversation(
                     if recorded.needs_separator() {
                         recorded.push(String::new(), None);
                     }
-                    let (id, rows) = recorded.block(
+                    let (id, rows) = recorded.tool_block(
+                        &tool.name,
+                        tool.is_error,
                         tool_view::numbered(short, number),
                         tool_view::numbered(full, number),
                     );

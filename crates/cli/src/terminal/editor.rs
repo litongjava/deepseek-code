@@ -1182,6 +1182,7 @@ impl PromptEditor {
         let mut undo: Vec<(Vec<char>, usize)> = Vec::new();
         let mut last_state = (buffer.chars.clone(), buffer.cursor);
         let mut kill_hint = false;
+        let mut copy_feedback: Option<String> = None;
         let mut clear_esc: Option<std::time::Instant> = None;
         // Read once per prompt; ctrl+t toggles whether they show.
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
@@ -1582,6 +1583,7 @@ impl PromptEditor {
             } else {
                 footer
             };
+            let footer = copy_feedback.as_deref().unwrap_or(&footer);
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
                 Some((_, color)) if search.is_none() => TextStyle::Colored(color),
                 _ => TextStyle::Muted,
@@ -2120,6 +2122,7 @@ impl PromptEditor {
                         continue;
                     }
                     restored = false;
+                    copy_feedback = None;
                     let killing = control && matches!(key.code, KeyCode::Char('u' | 'k'));
                     if killing {
                         let cut: String = if key.code == KeyCode::Char('u') {
@@ -2409,6 +2412,20 @@ impl PromptEditor {
                             menu_hidden = true;
                         }
                         KeyCode::Enter => {
+                            if text.trim() == "/copy-session-id" {
+                                if let Some((_, session)) = &self.subagent_context {
+                                    // This local operation does not submit a prompt. Keep
+                                    // the frame and terminal modes; only the input and
+                                    // footer rows change, just like a mouse copy.
+                                    copy_feedback = Some(
+                                        crate::extended_commands::copy_session_id(session)
+                                            .unwrap_or_else(|error| format!("{error:#}")),
+                                    );
+                                    buffer.set("");
+                                    menu_hidden = true;
+                                    continue;
+                                }
+                            }
                             if text.trim() == "/subagents" {
                                 if let Some((context, session)) = &self.subagent_context {
                                     history_view.close()?;
@@ -2794,6 +2811,35 @@ mod tests {
         assert!(output.contains("/help"));
         assert!(output.contains("/model"));
         assert!(!output.contains("> /"));
+    }
+
+    #[test]
+    fn copy_feedback_updates_only_input_and_footer_without_erasing_the_frame() {
+        let mut screen = Screen::pinned();
+        let mut lines = vec![
+            (String::new(), TextStyle::Plain),
+            ("─".repeat(79), TextStyle::Border),
+            ("❯ /copy-session-id".into(), TextStyle::Plain),
+            ("─".repeat(79), TextStyle::Border),
+            ("ask permissions on".into(), TextStyle::Muted),
+        ];
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 2, 18, 32, 4)
+            .unwrap();
+        let anchor = screen.top;
+        lines[2].0 = "❯ ".into();
+        lines[4].0 = "Copied session ID to clipboard: fixture".into();
+        let mut bytes = Vec::new();
+        screen
+            .draw_pinned_to(&mut bytes, &lines, 2, 2, 32, 29)
+            .unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert_eq!(screen.top, anchor);
+        assert!(output.contains("Copied session ID"));
+        assert_eq!(output.matches("\x1b[K").count(), 2);
+        for forbidden in ["\x1b[J", "\x1b[2J", "\x1b[3J", "\x1b[?2004l", "\n", "─"] {
+            assert!(!output.contains(forbidden), "{output:?}");
+        }
     }
 
     #[test]

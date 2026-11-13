@@ -296,10 +296,19 @@ impl TurnTimer {
         // write commits, so a retry never re-applies half of the state.
         self.db.with_conn(|conn| {
             super::write_tx(conn, "finish turn", Duration::from_secs(30), |tx| {
-                tx.execute(
+                let changed = tx.execute(
                     "UPDATE execution_turns SET ended_at=?2,elapsed_ms=?3,status=?4 WHERE id=?1 AND status='running'",
                     params![self.record.turn_id,&ended_at,elapsed_ms,status_name(status)],
                 )?;
+                if changed > 0 {
+                    let now = chrono::Utc::now();
+                    let latest = chrono::DateTime::parse_from_rfc3339(&ended_at)
+                        .map(|end| now.max(end.to_utc()))
+                        .unwrap_or(now);
+                    super::conversation_repo::update_conversation_timestamp(
+                        tx, &self.conversation_id, &latest.to_rfc3339(),
+                    )?;
+                }
                 Ok(())
             })
         })??;
@@ -314,6 +323,66 @@ impl TurnTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_turn_completion_is_not_older_than_its_last_persistent_change() {
+        let (_temp, db, session) = fixture();
+        let mut turn = TurnTimer::start(db.clone(), &session).unwrap();
+        let message = turn.ensure_segment().unwrap();
+        let endpoint = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let last_write = endpoint - chrono::Duration::seconds(1);
+        db.with_conn(|conn| {
+            super::super::message_repo::update_message_content(conn, &message, "final answer")
+                .unwrap();
+            super::super::message_repo::insert_tool_call(
+                conn,
+                "call",
+                &message,
+                "Bash",
+                Some("{}"),
+                Some("done"),
+                false,
+                0,
+            )
+            .unwrap();
+            super::super::conversation_repo::update_conversation_timestamp(
+                conn,
+                &session,
+                &last_write.to_rfc3339(),
+            )
+            .unwrap();
+        })
+        .unwrap();
+        let record = turn
+            .finish_at(
+                TurnStatus::Completed,
+                turn.started + Duration::from_secs(600),
+                endpoint.to_rfc3339(),
+            )
+            .unwrap();
+        assert_eq!(record.elapsed_ms, Some(600_000));
+        let updated = db
+            .with_conn(|conn| {
+                super::super::conversation_repo::get_conversation(conn, &session)
+                    .unwrap()
+                    .unwrap()
+                    .updated_at
+            })
+            .unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(&updated).unwrap() >= endpoint);
+        assert!(chrono::DateTime::parse_from_rfc3339(&updated).unwrap() >= last_write);
+        turn.finish(TurnStatus::Completed).unwrap();
+        assert_eq!(
+            updated,
+            db.with_conn(
+                |conn| super::super::conversation_repo::get_conversation(conn, &session)
+                    .unwrap()
+                    .unwrap()
+                    .updated_at
+            )
+            .unwrap()
+        );
+    }
     use std::time::Duration;
 
     fn fixture() -> (tempfile::TempDir, Arc<DbManager>, String) {

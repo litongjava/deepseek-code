@@ -29,8 +29,12 @@ fn continue_is_scoped_to_directory_and_skips_unavailable_sessions() {
         .with_conn(|conn| {
             conversation_repo::update_conversation_timestamp(conn, &empty, "2999-01-01T00:00:00Z")
                 .unwrap();
-            conversation_repo::update_conversation_timestamp(conn, &older, "2000-01-01T00:00:00Z")
-                .unwrap();
+            // Seed historical ordering directly: activity updates are monotonic.
+            conn.execute(
+                "UPDATE conversations SET updated_at='2000-01-01T00:00:00Z' WHERE id=?1",
+                [&older],
+            )
+            .unwrap();
             conversation_repo::archive_conversation(conn, &archived, true).unwrap();
             conversation_repo::set_workspace_mode(conn, &chat, "chat").unwrap();
         })

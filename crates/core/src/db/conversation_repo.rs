@@ -319,7 +319,7 @@ fn with_session_title(conn: &Connection, mut row: ConversationRow) -> Result<Con
 
 pub fn update_conversation_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3"
+        "UPDATE conversations SET title = ?1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?2) THEN updated_at ELSE ?2 END WHERE id = ?3"
     )?;
     let now = chrono::Utc::now().to_rfc3339();
     stmt.execute(params![title, now, id])?;
@@ -329,7 +329,7 @@ pub fn update_conversation_title(conn: &Connection, id: &str, title: &str) -> Re
 pub fn update_title_if_empty(conn: &Connection, id: &str, title: &str) -> Result<bool> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3 AND (title IS NULL OR title = '' OR lower(title) = 'cli session')"
+        "UPDATE conversations SET title = ?1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?2) THEN updated_at ELSE ?2 END WHERE id = ?3 AND (title IS NULL OR title = '' OR lower(title) = 'cli session')"
     )?;
     let rows = stmt.execute(params![title, now, id])?;
     Ok(rows > 0)
@@ -337,7 +337,7 @@ pub fn update_title_if_empty(conn: &Connection, id: &str, title: &str) -> Result
 
 pub fn update_conversation_model(conn: &Connection, id: &str, model: &str) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET model = ?1, updated_at = ?2 WHERE id = ?3"
+        "UPDATE conversations SET model = ?1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?2) THEN updated_at ELSE ?2 END WHERE id = ?3"
     )?;
     let now = chrono::Utc::now().to_rfc3339();
     stmt.execute(params![model, now, id])?;
@@ -345,16 +345,37 @@ pub fn update_conversation_model(conn: &Connection, id: &str, model: &str) -> Re
 }
 
 pub fn update_conversation_timestamp(conn: &Connection, id: &str, updated_at: &str) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2"
-    )?;
-    stmt.execute(params![updated_at, id])?;
-    Ok(())
+    let candidate = chrono::DateTime::parse_from_rfc3339(updated_at)?;
+    loop {
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM conversations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        if chrono::DateTime::parse_from_rfc3339(&current).is_ok_and(|time| time >= candidate) {
+            return Ok(());
+        }
+        // Compare-and-swap also protects callers outside an IMMEDIATE write
+        // transaction. Parse RFC3339 rather than comparing offsets as text or
+        // losing submillisecond precision in SQLite's date functions.
+        if conn.execute(
+            "UPDATE conversations SET updated_at=?1 WHERE id=?2 AND updated_at=?3",
+            params![updated_at, id, current],
+        )? > 0
+        {
+            return Ok(());
+        }
+    }
 }
 
 pub fn increment_message_count(conn: &Connection, id: &str) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET message_count = message_count + 1, updated_at = ?1 WHERE id = ?2"
+        "UPDATE conversations SET message_count = message_count + 1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?1) THEN updated_at ELSE ?1 END WHERE id = ?2"
     )?;
     let now = chrono::Utc::now().to_rfc3339();
     stmt.execute(params![now, id])?;
@@ -369,7 +390,7 @@ pub fn delete_conversation(conn: &Connection, id: &str) -> Result<()> {
 
 pub fn pin_conversation(conn: &Connection, id: &str, pinned: bool) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET pinned = ?1, updated_at = ?2 WHERE id = ?3"
+        "UPDATE conversations SET pinned = ?1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?2) THEN updated_at ELSE ?2 END WHERE id = ?3"
     )?;
     let now = chrono::Utc::now().to_rfc3339();
     stmt.execute(params![pinned as i64, now, id])?;
@@ -378,7 +399,7 @@ pub fn pin_conversation(conn: &Connection, id: &str, pinned: bool) -> Result<()>
 
 pub fn archive_conversation(conn: &Connection, id: &str, archived: bool) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET archived = ?1, updated_at = ?2 WHERE id = ?3"
+        "UPDATE conversations SET archived = ?1, updated_at = CASE WHEN julianday(updated_at) >= julianday(?2) THEN updated_at ELSE ?2 END WHERE id = ?3"
     )?;
     let now = chrono::Utc::now().to_rfc3339();
     stmt.execute(params![archived as i64, now, id])?;
@@ -522,7 +543,8 @@ pub fn update_conversation(
         params.push(Box::new(a as i64));
     }
     if let Some(ua) = updated_at {
-        sql_parts.push("updated_at = ?");
+        sql_parts.push("updated_at = CASE WHEN julianday(updated_at) >= julianday(?) THEN updated_at ELSE ? END");
+        params.push(Box::new(ua));
         params.push(Box::new(ua));
     }
     if let Some(mc) = message_count {

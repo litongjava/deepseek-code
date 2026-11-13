@@ -174,6 +174,12 @@ cargo test --locked -p deepseek-code-cli --test session_worker
 5. 思考内容 `Thought ... (click to expand)` 和较长的用户消息也能展开、收起。
 6. `Ctrl+O` 的详细记录不受影响，也不出现点击提示。
 
+### C2. 紧凑工具组与复制不跳动
+
+1. 用 `runs/ux/drive.py` 和开发目录 `.venv/bin/python` 在独立数据目录驱动真实 PTY。分别直连和独立 tmux 运行 `/rename control`、`/copy-session-id`，保存 Enter 前后原始字节与快照。复制反馈在原输入框状态行；没有擦除到屏幕末尾、切换输入模式或重画边框。OSC 52 只传剪贴板数据，不能包含来自文本的光标/清屏控制。tmux 的 `show-buffer` 必须为会话 ID。运行中复制仍需保留当前工具和输入区。
+2. 本地模型 fixture 运行 Bash、Glob、失败 Read，Alt+M 摘要应显示 shell/read/patterns 和失败数。点摘要展开，点组顶部 `click to collapse` 收起；组内工具仍可独立切换短结果/完整结果。Alt+M 关闭再打开恢复摘要；普通视图和 Ctrl+O 不受影响。恢复会话后重复同一检查。
+3. `cargo test --locked -p deepseek-code-cli --bin dcl terminal::scrollback` 覆盖真实工具名分类（包括 PowerShell 和全部编辑工具）、同名计数、宽度截断/剩余调用数、失败数、组级状态、模式重开和 reasoning 不算工具。自定义标题包含 Bash/Read 文本不能改变工具分类。
+
 ### D. 中途关闭后恢复
 
 这些场景都要在关闭后立刻恢复一次，因为被杀的前端留下的占用记录要几秒后才过期。
@@ -956,3 +962,7 @@ ToolScript 保持按需加载。Router 可以加载它来组合允许的工具�
 5. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
 6. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
 7. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。回合实际在会话 Worker 里执行（`input` 为 `None`），有主判定必须同时接受 Worker 控制目录；远端/SDK 宿主不得据此启用。
+
+### 会话持久活动时间
+
+`db/schema.rs` 的 activity triggers 与 `conversation_repo` 的时间更新：跑 core 的 `db::schema::activity_tests`、`db::turn_repo`、`session_workflows`，以及完整 core/CLI 回归和三个包 all-targets check。消息内容/思考、多模态内容、工具结果实际变化与回合结束在同一事务刷新 `updated_at`；重复快照、只读查询、worker 心跳、重开 schema 不刷新。SQLite 活动触发器使用毫秒墙钟，回合完成同时保留精确 RFC3339 结束时间。检查事务回滚不留下时间变化、两个连接中较旧候选不覆盖新时间、十分钟注入回合结束后时间不早于最后结果/回合端点。不回填历史会话，不改 Goal proposal contention 提示。
