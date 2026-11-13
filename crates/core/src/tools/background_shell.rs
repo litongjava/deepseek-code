@@ -872,15 +872,22 @@ pub(crate) fn start(
 /// hide EOF from the shell forever.
 #[cfg(unix)]
 fn prepare_stdin_pipe(directory: &Path, id: &str) -> Result<(std::fs::File, std::fs::File)> {
-    use rustix::fs::{mkfifoat, open, statat, AtFlags, Mode, OFlags};
+    use rustix::fs::{open, statat, AtFlags, Mode, OFlags};
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
     let path = directory.join("stdin.pipe");
+    let c_path =
+        CString::new(path.as_os_str().as_bytes()).context("Invalid task stdin pipe path")?;
     match statat(rustix::fs::CWD, &path, AtFlags::empty()) {
         Ok(_) => std::fs::remove_file(&path).context("Replacing a stale stdin pipe")?,
         Err(rustix::io::Errno::NOENT) => {}
         Err(error) => return Err(error).context("Inspecting the task stdin pipe"),
     }
-    mkfifoat(rustix::fs::CWD, &path, Mode::from_raw_mode(0o600))
-        .context("Creating the task stdin pipe")?;
+    // rustix::fs::mkfifoat is unavailable on Apple platforms; mkfifo is POSIX.
+    // SAFETY: c_path is NUL-terminated and remains alive throughout the call.
+    if unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("Creating the task stdin pipe");
+    }
     let owner = open(&path, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
         .map_err(|error| anyhow::anyhow!("Opening the owner side of task {id} stdin: {error}"))?;
     let child = open(&path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
@@ -2912,6 +2919,59 @@ setInterval(() => {}, 10000);
             super::OwnerProbe::open(directory).unwrap().state(),
             super::OwnerState::Unreadable(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_fifo_preserves_non_utf8_paths_and_private_permissions() {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{FileTypeExt, PermissionsExt},
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(std::ffi::OsStr::from_bytes(b"task-\xff"));
+        std::fs::create_dir(&directory).unwrap();
+        let (child, owner) = super::prepare_stdin_pipe(&directory, "fifo-test").unwrap();
+        let metadata = std::fs::metadata(directory.join("stdin.pipe")).unwrap();
+        assert!(metadata.file_type().is_fifo());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        for file in [&child, &owner] {
+            assert!(rustix::io::fcntl_getfd(file)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_fifo_rejects_nul_without_creating_a_truncated_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"task\0suffix"));
+        let error = super::prepare_stdin_pipe(&directory, "fifo-test").unwrap_err();
+        assert_eq!(error.to_string(), "Invalid task stdin pipe path");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_fifo_creation_failure_preserves_errno() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("missing");
+        let error = super::prepare_stdin_pipe(&directory, "fifo-test").unwrap_err();
+        assert_eq!(error.to_string(), "Creating the task stdin pipe");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ENOENT)
+        );
+        assert!(!directory.exists());
     }
 
     /// Start a background shell with the explicit stdin pipe.
