@@ -2,8 +2,10 @@
 //! tool result can show it in full and a second click can fold it again. Only
 //! rows below the clicked block are redrawn; scrollback stays as it was.
 use super::change_view::{self, Line};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 /// One logged line as written, the screen rows it takes and the tool result
 /// it belongs to.
@@ -33,6 +35,7 @@ struct Block {
     body_open: bool,
     whole: bool,
     compact_level: u8,
+    tool: Option<(String, bool)>,
 }
 
 #[derive(Default, Clone)]
@@ -41,6 +44,7 @@ pub(crate) struct Scrollback {
     blocks: Vec<Block>,
     latest_prompt: String,
     welcome: Option<String>,
+    expanded_groups: HashMap<Vec<usize>, usize>,
 }
 
 /// The last turn's lines, handed from the live view to the prompt after it.
@@ -59,9 +63,43 @@ impl Drop for Handoff {
     fn drop(&mut self) { std::mem::take(&mut self.0).save(); }
 }
 
-static COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub(crate) fn compact() -> bool { COMPACT.load(std::sync::atomic::Ordering::Relaxed) }
-pub(crate) fn toggle_compact() { COMPACT.fetch_xor(true, std::sync::atomic::Ordering::Relaxed); }
+// Every off/on cycle gets a fresh generation, including retained prompt and
+// subagent histories. Group disclosure is independent of per-tool detail.
+#[derive(Default)]
+struct CompactMode(AtomicUsize);
+impl CompactMode {
+    fn enabled(&self) -> bool {
+        self.0.load(Ordering::Relaxed) % 2 == 1
+    }
+    fn generation(&self) -> usize {
+        self.0.load(Ordering::Relaxed) / 2
+    }
+    fn toggle(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+static COMPACT: CompactMode = CompactMode(AtomicUsize::new(0));
+pub(crate) fn compact() -> bool {
+    COMPACT.enabled()
+}
+pub(crate) fn toggle_compact() {
+    COMPACT.toggle();
+}
+
+struct CompactRow {
+    text: String,
+    block: Option<usize>,
+    group: Option<Vec<usize>>,
+}
+impl CompactRow {
+    fn block(text: String, block: Option<usize>) -> Self {
+        Self {
+            text,
+            block,
+            group: None,
+        }
+    }
+}
 pub(crate) fn compact_key(key: crossterm::event::KeyEvent) -> bool {
     key.modifiers.contains(crossterm::event::KeyModifiers::ALT) && key.code == crossterm::event::KeyCode::Char('m')
 }
@@ -241,8 +279,25 @@ impl Scrollback {
             body_open: false,
             whole,
             compact_level: 0,
+            tool: None,
         });
         (self.blocks.len() - 1, lines)
+    }
+
+    /// Store semantic identity independently of a shortened or custom title.
+    pub(crate) fn bind_tool(&mut self, id: usize, name: &str, failed: bool) {
+        self.blocks[id].tool = Some((name.to_owned(), failed));
+    }
+    pub(crate) fn tool_block(
+        &mut self,
+        name: &str,
+        failed: bool,
+        short: Vec<Line>,
+        full: Vec<Line>,
+    ) -> (usize, Vec<String>) {
+        let result = self.block(short, full);
+        self.bind_tool(result.0, name, failed);
+        result
     }
 
     pub(super) fn bind_tool_copy(&mut self, number: usize, command: String, body: String) {
@@ -551,74 +606,176 @@ impl Scrollback {
     pub(crate) fn all(&self) -> Vec<String> {
         self.logged.iter().map(|line| line.text.clone()).collect()
     }
-    /// A lossless presentation over logged blocks, with one target per physical row.
-    fn compact_rows(&self) -> Vec<(String, Option<usize>)> {
+    /// A group owns its disclosure state and click target. Plain blocks (for
+    /// example reasoning) are never counted as unnamed tools.
+    fn compact_layout(&self, width: usize, generation: usize) -> Vec<CompactRow> {
         let mut result = Vec::new();
         let mut index = 0;
         while index < self.logged.len() {
-            let Some(first) = self.logged[index].block else {
-                result.push((self.logged[index].text.clone(), None));
+            let line = &self.logged[index];
+            let Some(first) = line.block.filter(|id| self.blocks[*id].tool.is_some()) else {
+                result.push(CompactRow::block(line.text.clone(), line.block));
                 index += 1;
                 continue;
             };
-            if self.blocks[first].review.is_some() || self.blocks[first].prompt.is_some() {
-                if result.last().is_some_and(|(text, id): &(String, Option<usize>)| *id != Some(first) && !text.trim().is_empty()) {
-                    result.push((String::new(), None));
-                }
-                result.push((self.logged[index].text.clone(), Some(first)));
-                index += 1;
-                continue;
-            }
             let mut ids = vec![first];
             index += 1;
             while index < self.logged.len() {
-                if let Some(id) = self.logged[index].block {
-                    if self.blocks[id].review.is_some() || self.blocks[id].prompt.is_some() {
-                        break;
-                    }
+                if let Some(id) = self.logged[index]
+                    .block
+                    .filter(|id| self.blocks[*id].tool.is_some())
+                {
                     if !ids.contains(&id) {
                         ids.push(id);
                     }
                     index += 1;
-                } else if self.logged[index].text.trim().is_empty()
-                    && self.logged.get(index + 1).and_then(|line| line.block)
-                        .is_some_and(|id| self.blocks[id].prompt.is_none() && self.blocks[id].review.is_none()) {
+                } else if self.logged[index].block.is_none()
+                    && self.logged[index].text.trim().is_empty()
+                    && self
+                        .logged
+                        .get(index + 1)
+                        .and_then(|line| line.block)
+                        .is_some_and(|id| self.blocks[id].tool.is_some())
+                {
                     index += 1;
                 } else { break; }
             }
-            if result.last().is_some_and(|(text, _)| !text.trim().is_empty()) {
-                result.push((String::new(), None));
+            if result.last().is_some_and(|row| !row.text.trim().is_empty()) {
+                result.push(CompactRow::block(String::new(), None));
             }
-            if self.blocks[first].compact_level == 0 {
-                let mut counts = [0usize; 6];
-                for id in &ids {
-                    let title = change_view::plain(&self.blocks[*id].short[..1]);
-                    let kind = if title.contains("Bash(") || title.contains("PowerShell(") { 0 }
-                        else if title.contains("Read(") { 1 }
-                        else if title.contains("Grep(") { 2 }
-                        else if title.contains("Glob(") { 3 }
-                        else if title.contains("Updated ") || title.contains("Write(") || title.contains("Edit(") { 4 }
-                        else { 5 };
-                    counts[kind] += 1;
-                }
-                let forms = [("ran", "shell command", "shell commands"), ("read", "file", "files"),
-                    ("searched for", "pattern", "patterns"), ("listed", "directory", "directories"),
-                    ("updated", "file", "files"), ("used", "tool", "tools")];
-                let mut summary = forms.iter().enumerate().filter(|(i, _)| counts[*i] > 0)
-                    .map(|(i, (verb, one, many))| format!("{verb} {} {}", counts[i], if counts[i] == 1 { one } else { many }))
-                    .collect::<Vec<_>>().join(", ");
-                if let Some(first) = summary.get_mut(..1) { first.make_ascii_uppercase(); }
-                result.push((format!("  {summary}  [click to expand]"), Some(first)));
-            } else {
+            let open = self.expanded_groups.get(&ids) == Some(&generation);
+            result.push(CompactRow {
+                text: self.group_summary(&ids, width, open),
+                block: None,
+                group: Some(ids.clone()),
+            });
+            if open {
                 for (position, id) in ids.into_iter().enumerate() {
-                    if position > 0 { result.push((String::new(), None)); }
+                    if position > 0 {
+                        result.push(CompactRow::block(String::new(), None));
+                    }
                     let block = &self.blocks[id];
-                    let rows = if block.compact_level == 2 { rendered(&block.full) } else { collapsed(&block.short) };
-                    result.extend(rows.into_iter().map(|row| (row, Some(id))));
+                    let rows = if block.compact_level == 2 {
+                        rendered(&block.full)
+                    } else {
+                        collapsed(&block.short)
+                    };
+                    result.extend(rows.into_iter().map(|row| CompactRow::block(row, Some(id))));
                 }
             }
         }
         result
+    }
+    fn compact_rows(&self) -> Vec<(String, Option<usize>)> {
+        self.compact_layout(
+            crate::terminal::size().0.saturating_sub(1) as usize,
+            COMPACT.generation(),
+        )
+        .into_iter()
+        .map(|row| (row.text, row.block))
+        .collect()
+    }
+    fn group_summary(&self, ids: &[usize], width: usize, open: bool) -> String {
+        let mut counts = [0usize; 5];
+        let mut others: Vec<(String, usize)> = Vec::new();
+        let mut failed = 0;
+        for id in ids {
+            let Some((name, error)) = &self.blocks[*id].tool else {
+                continue;
+            };
+            failed += usize::from(*error);
+            let kind = match name.as_str() {
+                "Bash" | "PowerShell" => Some(0),
+                "Read" => Some(1),
+                "Grep" => Some(2),
+                "Glob" => Some(3),
+                "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch" => Some(4),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                counts[kind] += 1;
+            } else if let Some((_, count)) = others.iter_mut().find(|(tool, _)| tool == name) {
+                *count += 1;
+            } else {
+                others.push((name.clone(), 1));
+            }
+        }
+        let forms = [
+            ("ran", "shell command", "shell commands"),
+            ("read", "file", "files"),
+            ("searched for", "pattern", "patterns"),
+            ("found files with", "pattern", "patterns"),
+            ("updated", "file", "files"),
+        ];
+        let mut parts: Vec<(String, usize)> = forms
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| counts[*i] > 0)
+            .map(|(i, (verb, one, many))| {
+                (
+                    format!(
+                        "{verb} {} {}",
+                        counts[i],
+                        if counts[i] == 1 { one } else { many }
+                    ),
+                    counts[i],
+                )
+            })
+            .collect();
+        if let Some((first, _)) = parts.first_mut() {
+            if let Some(first) = first.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+        }
+        parts.extend(others.into_iter().map(|(name, count)| {
+            let name: String = name.chars().filter(|ch| !ch.is_control()).collect();
+            (
+                if count == 1 {
+                    name
+                } else {
+                    format!("{name} ×{count}")
+                },
+                count,
+            )
+        }));
+        let failure = if failed > 0 {
+            format!(", {failed} failed")
+        } else {
+            String::new()
+        };
+        let hint = if open {
+            "  [click to collapse]"
+        } else {
+            "  [click to expand]"
+        };
+        let suffix = format!("{failure}{hint}");
+        let available = width.saturating_sub(2 + suffix.width());
+        let mut summary = parts
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if summary.width() > available {
+            for keep in (0..parts.len()).rev() {
+                let omitted: usize = parts[keep..].iter().map(|(_, count)| count).sum();
+                let prefix = parts[..keep]
+                    .iter()
+                    .map(|(label, _)| label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let candidate = format!(
+                    "{prefix}{}+{omitted} calls",
+                    if keep > 0 { ", … " } else { "… " }
+                );
+                if candidate.width() <= available {
+                    summary = candidate;
+                    break;
+                }
+            }
+        }
+        // Preserve failure counts in normal widths; extremely narrow terminals
+        // still get one physical line and the same group click target.
+        super::input::editor::clipped(&format!("  {summary}{suffix}"), width)
     }
     pub(crate) fn presentation(&self) -> Vec<String> {
         if compact() {
@@ -642,40 +799,47 @@ impl Scrollback {
         if !compact() {
             return self.toggle_history(row);
         }
-        let Some(id) = self.compact_rows().get(row).and_then(|(_, id)| *id) else {
+        self.click_compact_row(row, width, COMPACT.generation())
+    }
+    fn click_compact_row(&mut self, row: usize, width: usize, generation: usize) -> bool {
+        let rows = self.compact_layout(width.saturating_sub(1), generation);
+        let Some(target) = rows.get(row) else {
             return false;
         };
-        if self.blocks[id].prompt.is_some() {
+        if let Some(ids) = &target.group {
+            let open = self.expanded_groups.get(ids) == Some(&generation);
+            // Drop stale generations, retaining only explicit group identities.
+            self.expanded_groups.retain(|_, epoch| *epoch == generation);
+            if open {
+                self.expanded_groups.remove(ids);
+            } else {
+                self.expanded_groups.insert(ids.clone(), generation);
+            }
+            for id in ids {
+                self.blocks[*id].compact_level = if open { 0 } else { 1 };
+            }
+            return true;
+        }
+        let Some(id) = target.block else {
+            return false;
+        };
+        if self.blocks[id].review.is_some() {
+            return false;
+        }
+        if self.blocks[id].tool.is_none() {
             let Some(index) = self.logged.iter().position(|line| line.block == Some(id)) else {
                 return false;
             };
             return self.toggle_history(index);
         }
-        if self.blocks[id].review.is_some() {
-            return false;
+        if self.blocks[id].compact_level != 2 {
+            self.refresh_background(id);
         }
-        if self.blocks[id].compact_level == 0 {
-            let mut index = self
-                .logged
-                .iter()
-                .position(|line| line.block == Some(id))
-                .unwrap();
-            while index < self.logged.len() {
-                if let Some(member) = self.logged[index].block {
-                    if self.blocks[member].review.is_some() || self.blocks[member].prompt.is_some()
-                    {
-                        break;
-                    }
-                    self.blocks[member].compact_level = 1;
-                    index += 1;
-                } else if self.logged[index].text.trim().is_empty()
-                    && self.logged.get(index + 1).is_some_and(|line| line.block.is_some()) { index += 1; }
-                else { break; }
-            }
+        self.blocks[id].compact_level = if self.blocks[id].compact_level == 2 {
+            1
         } else {
-            if self.blocks[id].compact_level == 1 { self.refresh_background(id); }
-            self.blocks[id].compact_level = if self.blocks[id].compact_level == 1 { 2 } else { 1 };
-        }
+            2
+        };
         true
     }
     pub(super) fn toggle_history(&mut self, row: usize) -> bool {
@@ -1056,18 +1220,34 @@ mod tests {
     #[test]
     fn compact_keeps_blank_lines_between_tool_and_prompt_blocks() {
         let mut history = super::Scrollback::default();
-        for label in ["Read(a)", "Grep(b)"] {
+        for (name, label) in [("Read", "Read(a)"), ("Grep", "Grep(b)")] {
             let short = vec![super::change_view::body(label)];
-            let (id, rows) = history.block(short.clone(), short);
-            for row in rows { history.push(row, Some(id)); }
+            let (id, rows) = history.tool_block(name, false, short.clone(), short);
+            for row in rows {
+                history.push(row, Some(id));
+            }
             history.push(String::new(), None);
         }
         history.record_prompt("NEXT INPUT");
         let short = vec![super::change_view::body("Bash(c)")];
-        let (id, rows) = history.block(short.clone(), short);
-        for row in rows { history.push(row, Some(id)); }
+        let (id, rows) = history.tool_block("Bash", false, short.clone(), short);
+        for row in rows {
+            history.push(row, Some(id));
+        }
         for level in [0, 1, 2] {
-            for block in &mut history.blocks { block.compact_level = level; }
+            history.expanded_groups.clear();
+            if level > 0 {
+                for group in history
+                    .compact_layout(120, COMPACT.generation())
+                    .into_iter()
+                    .filter_map(|row| row.group)
+                {
+                    history.expanded_groups.insert(group, COMPACT.generation());
+                }
+            }
+            for block in &mut history.blocks {
+                block.compact_level = level;
+            }
             let rows = history.compact_rows();
             let input = rows
                 .iter()
@@ -1328,27 +1508,164 @@ mod tests {
         for n in 0..2 {
             let short = vec![change_view::body(&format!("● Bash(command {n})"))];
             let full = vec![short[0].clone(), change_view::body("secret output")];
-            let (id, rows) = history.block(short, full);
-            for row in rows { history.push(row, Some(id)); }
+            let (id, rows) = history.tool_block("Bash", false, short, full);
+            for row in rows {
+                history.push(row, Some(id));
+            }
             history.push(String::new(), None);
         }
         history.push("Assistant explanation".into(), None);
-        let (id, rows) = history.block(vec![change_view::body("● Read(file)")], vec![change_view::body("file contents")]);
-        for row in rows { history.push(row, Some(id)); }
+        let (id, rows) = history.tool_block(
+            "Read",
+            false,
+            vec![change_view::body("● Read(file)")],
+            vec![change_view::body("file contents")],
+        );
+        for row in rows {
+            history.push(row, Some(id));
+        }
         let rows = history.compact_rows();
         assert!(rows[0].0.contains("Ran 2 shell commands"));
         assert!(rows.iter().any(|(row, _)| row == "Assistant explanation"));
         assert!(rows.last().unwrap().0.contains("Read 1 file"));
-        history.blocks[0].compact_level = 1;
+        assert!(history.click_compact_row(0, 120, COMPACT.generation()));
         let rows = history.compact_rows();
-        assert!(rows[0].0.contains("command 0"));
-        assert!(rows[2].0.contains("command 1"));
+        assert!(rows[1].0.contains("command 0"));
+        assert!(rows[3].0.contains("command 1"));
         assert!(!rows.iter().any(|(row, _)| row.contains("secret output")));
         history.blocks[0].compact_level = 2;
-        assert!(history.compact_rows().iter().any(|(row, _)| row.contains("secret output")));
-        history.blocks[0].compact_level = 0;
+        assert!(history
+            .compact_rows()
+            .iter()
+            .any(|(row, _)| row.contains("secret output")));
+        assert!(history.click_compact_row(0, 120, COMPACT.generation()));
         assert!(history.compact_rows()[0].0.contains("Ran 2 shell commands"));
         assert_eq!(history.all().len(), 6);
+    }
+
+    fn add_compact_tool(history: &mut Scrollback, name: &str, failed: bool) -> usize {
+        let short = vec![change_view::body(
+            "custom title containing Read(fake), Bash(fake), failed",
+        )];
+        let full = vec![short[0].clone(), change_view::body("FULL RESULT")];
+        let (id, rows) = history.tool_block(name, failed, short, full);
+        for row in rows {
+            history.push(row, Some(id));
+        }
+        id
+    }
+
+    #[test]
+    fn compact_classifies_actual_names_including_all_edit_tools_and_glob() {
+        let mut history = Scrollback::default();
+        for name in [
+            "Bash",
+            "PowerShell",
+            "Read",
+            "Grep",
+            "Glob",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "ApplyPatch",
+        ] {
+            add_compact_tool(&mut history, name, false);
+        }
+        let rows = history.compact_layout(300, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "  Ran 2 shell commands, read 1 file, searched for 1 pattern, found files with 1 pattern, updated 5 files  [click to expand]");
+        assert!(!rows[0].text.contains("director"));
+    }
+
+    #[test]
+    fn compact_named_tools_merge_counts_and_preserve_recorded_failures() {
+        let mut history = Scrollback::default();
+        for (name, failed) in [
+            ("ToolSearch", false),
+            ("TaskGet", true),
+            ("TaskGet", false),
+            ("Agent", true),
+        ] {
+            add_compact_tool(&mut history, name, failed);
+        }
+        assert_eq!(
+            history.compact_layout(120, 0)[0].text,
+            "  ToolSearch, TaskGet ×2, Agent, 2 failed  [click to expand]"
+        );
+        assert!(!history.compact_layout(120, 0)[0].text.contains("shell"));
+        let narrow = history.compact_layout(55, 0)[0].text.clone();
+        assert!(narrow.width() <= 55, "{narrow}");
+        assert!(narrow.contains("+3 calls"), "{narrow}");
+        assert!(narrow.contains("2 failed"), "{narrow}");
+        for width in [1, 8, 20, 40, 80] {
+            assert!(history.compact_layout(width, 0)[0].text.width() <= width);
+        }
+    }
+
+    #[test]
+    fn compact_preserves_custom_tool_name_case_and_unicode_when_clipping() {
+        let mut history = Scrollback::default();
+        add_compact_tool(&mut history, "mcp__服务__read", false);
+        add_compact_tool(&mut history, "bash", false);
+        assert_eq!(
+            history.compact_layout(120, 0)[0].text,
+            "  mcp__服务__read, bash  [click to expand]"
+        );
+        for width in [1, 8, 30, 50] {
+            assert!(history.compact_layout(width, 0)[0].text.width() <= width);
+        }
+    }
+
+    #[test]
+    fn compact_group_collapse_and_mode_reset_do_not_depend_on_first_block() {
+        let mode = CompactMode::default();
+        let mut history = Scrollback::default();
+        let first = add_compact_tool(&mut history, "Bash", false);
+        let second = add_compact_tool(&mut history, "Read", true);
+        mode.toggle();
+        assert!(mode.enabled());
+        assert!(history.click_compact_row(0, 120, mode.generation()));
+        assert!(history.compact_layout(120, mode.generation())[0]
+            .text
+            .contains("click to collapse"));
+        // Deliberately disagree: the first member cannot collapse the group.
+        history.blocks[first].compact_level = 0;
+        history.blocks[second].compact_level = 2;
+        assert!(history
+            .compact_layout(120, mode.generation())
+            .iter()
+            .any(|row| row.text.contains("FULL RESULT")));
+        assert!(history.click_compact_row(0, 120, mode.generation()));
+        assert_eq!(history.compact_layout(120, mode.generation()).len(), 1);
+        assert!(history.click_compact_row(0, 120, mode.generation()));
+        mode.toggle();
+        assert!(!mode.enabled());
+        mode.toggle();
+        assert!(mode.enabled());
+        assert_eq!(history.compact_layout(120, mode.generation()).len(), 1);
+        assert!(history.click_compact_row(0, 120, mode.generation()));
+        assert!(history.blocks.iter().all(|block| block.compact_level == 1));
+        assert!(history.click_compact_row(1, 120, mode.generation()));
+        assert_eq!(history.blocks[first].compact_level, 2);
+        assert!(history.click_compact_row(1, 120, mode.generation()));
+        assert_eq!(history.blocks[first].compact_level, 1);
+    }
+
+    #[test]
+    fn compact_does_not_count_reasoning_or_merge_across_commentary() {
+        let mut history = Scrollback::default();
+        let (id, rows) = history.block(vec![change_view::body("Thought Read(fake)")], vec![]);
+        for row in rows {
+            history.push(row, Some(id));
+        }
+        add_compact_tool(&mut history, "Read", false);
+        history.push("explanation".into(), None);
+        add_compact_tool(&mut history, "Glob", false);
+        let rows = history.compact_layout(120, 0);
+        assert_eq!(rows.iter().filter(|row| row.group.is_some()).count(), 2);
+        assert!(rows[0].text.contains("Thought Read(fake)"));
+        assert!(rows.iter().any(|row| row.text == "explanation"));
     }
 
     #[test]

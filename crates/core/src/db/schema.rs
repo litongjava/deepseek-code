@@ -590,4 +590,94 @@ CREATE TABLE IF NOT EXISTS sa_repository_delivery_observations (
     source TEXT NOT NULL DEFAULT 'unknown',
     PRIMARY KEY(task_id, plan_operation_id, repository_id)
 );
+
+-- Durable activity, shared by CLI, child transcripts and Desktop. Keep the
+-- timestamp in the same statement/transaction as the content. Replaying the
+-- same snapshot is not activity; reads and worker heartbeats have no trigger.
+CREATE TRIGGER IF NOT EXISTS activity_messages_insert AFTER INSERT ON messages
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=NEW.conversation_id
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_messages_update AFTER UPDATE OF content,thinking,role,is_compact_boundary ON messages
+WHEN NEW.content IS NOT OLD.content OR NEW.thinking IS NOT OLD.thinking OR NEW.role IS NOT OLD.role OR NEW.is_compact_boundary IS NOT OLD.is_compact_boundary
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=NEW.conversation_id
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_tool_calls_insert AFTER INSERT ON tool_calls
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages
+    WHERE id=NEW.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_tool_calls_update AFTER UPDATE OF name,input,output,is_error ON tool_calls
+WHEN NEW.name IS NOT OLD.name OR NEW.input IS NOT OLD.input OR NEW.output IS NOT OLD.output OR NEW.is_error IS NOT OLD.is_error
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages
+    WHERE id=NEW.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_message_user_content_insert AFTER INSERT ON message_user_content
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages
+    WHERE id=NEW.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_message_user_content_update AFTER UPDATE OF content_json ON message_user_content
+WHEN NEW.content_json IS NOT OLD.content_json
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages
+    WHERE id=NEW.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_messages_delete AFTER DELETE ON messages
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=OLD.conversation_id
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_tool_calls_delete AFTER DELETE ON tool_calls
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages WHERE id=OLD.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_message_user_content_delete AFTER DELETE ON message_user_content
+BEGIN
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=(SELECT conversation_id FROM messages WHERE id=OLD.message_id)
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
+CREATE TRIGGER IF NOT EXISTS activity_turn_finished AFTER UPDATE OF status,ended_at ON execution_turns
+WHEN NEW.status <> 'running' AND (NEW.status IS NOT OLD.status OR NEW.ended_at IS NOT OLD.ended_at)
+BEGIN
+    UPDATE conversations
+    SET updated_at=NEW.ended_at
+    WHERE id=NEW.conversation_id
+      AND julianday(updated_at) < julianday(NEW.ended_at);
+    UPDATE conversations
+    SET updated_at=strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')
+    WHERE id=NEW.conversation_id
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) < julianday(strftime('%Y-%m-%dT%H:%M:%f000000+00:00','now')));
+END;
 "#;
+
+#[cfg(test)]
+#[path = "activity_tests.rs"]
+mod activity_tests;

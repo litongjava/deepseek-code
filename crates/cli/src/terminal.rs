@@ -409,7 +409,21 @@ pub(crate) fn print_recorded(text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn writeln_recorded(out: &mut impl std::io::Write, history: &mut scrollback::Scrollback, row: &str, newline: &str) -> std::io::Result<()> {
+/// Serialize clipboard controls with the renderer's complete frames. In
+/// particular, never let formatting an OSC interleave with the live renderer.
+pub(crate) fn write_clipboard(sequence: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stderr().lock();
+    out.write_all(sequence.as_bytes())?;
+    out.flush()
+}
+
+fn writeln_recorded(
+    out: &mut impl std::io::Write,
+    history: &mut scrollback::Scrollback,
+    row: &str,
+    newline: &str,
+) -> std::io::Result<()> {
     write!(out, "{row}{newline}")?;
     history.push(row.to_owned(), None);
     Ok(())

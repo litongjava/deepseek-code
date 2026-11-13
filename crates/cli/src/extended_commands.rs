@@ -457,12 +457,17 @@ fn base64(bytes: &[u8]) -> String {
 /// Sends the text to the terminal's clipboard with OSC 52.
 fn copy_osc52(text: &str) -> bool {
     use std::io::IsTerminal;
-    if !std::io::stderr().is_terminal() || text.len() > 74_994 {
+    if !std::io::stderr().is_terminal() {
         return false;
     }
-    let encoded = base64(text.as_bytes());
-    let mut out = std::io::stderr();
-    write!(out, "\x1b]52;c;{encoded}\x07").and_then(|()| out.flush()).is_ok()
+    let Some(sequence) = clipboard_sequence(text) else {
+        return false;
+    };
+    crate::terminal::write_clipboard(&sequence).is_ok()
+}
+
+fn clipboard_sequence(text: &str) -> Option<String> {
+    (text.len() <= 74_994).then(|| format!("\x1b]52;c;{}\x07", base64(text.as_bytes())))
 }
 
 /// Copies through the OS clipboard program, then tmux's buffer, then OSC 52,
@@ -547,6 +552,21 @@ fn copy_system(text: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn clipboard_sequence_never_contains_display_controls_from_the_payload() {
+        let text = "session\x1b[2J\x1b[H\n\x07中文";
+        let sequence = clipboard_sequence(text).unwrap();
+        assert_eq!(
+            sequence,
+            format!("\x1b]52;c;{}\x07", base64(text.as_bytes()))
+        );
+        assert_eq!(sequence.matches('\x1b').count(), 1);
+        assert_eq!(sequence.matches('\x07').count(), 1);
+        assert!(!sequence.contains('\n'));
+        assert!(clipboard_sequence(&"x".repeat(74_994)).is_some());
+        assert!(clipboard_sequence(&"x".repeat(74_995)).is_none());
+    }
 
     #[test]
     fn active_agents_require_live_execution_and_exclude_unrelated_sessions() {

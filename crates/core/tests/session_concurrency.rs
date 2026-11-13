@@ -462,20 +462,30 @@ fn a_failed_append_leaves_the_transcript_unchanged() {
     );
 }
 
-/// A failure at the *final* conversation update happens after the message row,
-/// the counter and the structured content were written. The whole unit must
-/// roll back, leaving no message, counter, content or hook-origin row.
+/// A failure after the last content write happens after the message row and
+/// counter were written. A stale trailing timestamp may now be a no-op, so
+/// inject at the durable write itself. The whole unit must roll back, leaving
+/// no message, counter, content or hook-origin row.
 #[test]
 fn a_failed_append_rolls_back_after_message_and_counter_writes() {
     let (temp, db, store, _path) = session_fixture();
     let id = store.create(temp.path(), "fixture", "fixture").unwrap();
     db.with_conn(|conn| {
         conn.execute_batch(
-            // Fires only on the trailing timestamp update: the counter update
-            // also touches updated_at but changes message_count.
-            "CREATE TRIGGER reject_conversation_timestamp \
-             BEFORE UPDATE OF updated_at ON conversations \
-             WHEN NEW.message_count = OLD.message_count \
+            // The structured row is written after the counter. For hooks the
+            // order is message, origin, counter. Conditions prove each fault
+            // fires only after all of that append's rows have been written;
+            // activity timestamp triggers cannot cause an earlier failure.
+            "CREATE TRIGGER reject_structured_append \
+             AFTER INSERT ON message_user_content \
+             WHEN EXISTS (SELECT 1 FROM messages m JOIN conversations c \
+               ON c.id=m.conversation_id WHERE m.id=NEW.message_id AND c.message_count=1) \
+             BEGIN SELECT RAISE(ABORT,'fixture late append failure'); END; \
+             CREATE TRIGGER reject_hook_append \
+             AFTER UPDATE OF message_count ON conversations \
+             WHEN NEW.message_count > OLD.message_count AND EXISTS \
+               (SELECT 1 FROM messages m JOIN peripheral_settings p \
+                ON p.key='message-origin:' || m.id WHERE m.conversation_id=NEW.id) \
              BEGIN SELECT RAISE(ABORT,'fixture late append failure'); END;",
         )
     })
@@ -513,7 +523,7 @@ fn a_failed_append_rolls_back_after_message_and_counter_writes() {
         0,
         "the structured content row must not survive the rolled-back unit"
     );
-    // The hook append writes its origin row before the same trailing update, so
+    // The hook append writes its origin row before the counter update, so
     // this proves that side row is rolled back too rather than never written.
     let error = store
         .append_hook_user(&id, "hook must not persist")
@@ -548,9 +558,13 @@ fn a_failed_append_rolls_back_after_message_and_counter_writes() {
         ),
         0
     );
-    db.with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_conversation_timestamp"))
-        .unwrap()
-        .unwrap();
+    db.with_conn(|conn| {
+        conn.execute_batch(
+            "DROP TRIGGER reject_structured_append; DROP TRIGGER reject_hook_append;",
+        )
+    })
+    .unwrap()
+    .unwrap();
     // The hook-origin side row is written in the same unit; it exists only for a
     // committed append.
     store.append_hook_user(&id, "hook body").unwrap();

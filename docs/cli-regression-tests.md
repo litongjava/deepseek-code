@@ -176,6 +176,12 @@ cargo test --locked -p deepseek-code-cli --test session_worker
 5. 思考内容 `Thought ... (click to expand)` 和较长的用户消息也能展开、收起。
 6. `Ctrl+O` 的详细记录不受影响，也不出现点击提示。
 
+### C2. 紧凑工具组与复制不跳动
+
+1. 用 `runs/ux/drive.py` 和开发目录 `.venv/bin/python` 在独立数据目录驱动真实 PTY。分别直连和独立 tmux 运行 `/rename control`、`/copy-session-id`，保存 Enter 前后原始字节与快照。复制反馈在原输入框状态行；没有擦除到屏幕末尾、切换输入模式或重画边框。OSC 52 只传剪贴板数据，不能包含来自文本的光标/清屏控制。tmux 的 `show-buffer` 必须为会话 ID。运行中复制仍需保留当前工具和输入区。
+2. 本地模型 fixture 运行 Bash、Glob、失败 Read，Alt+M 摘要应显示 shell/read/patterns 和失败数。点摘要展开，点组顶部 `click to collapse` 收起；组内工具仍可独立切换短结果/完整结果。Alt+M 关闭再打开恢复摘要；普通视图和 Ctrl+O 不受影响。恢复会话后重复同一检查。
+3. `cargo test --locked -p deepseek-code-cli --bin dcl terminal::scrollback` 覆盖真实工具名分类（包括 PowerShell 和全部编辑工具）、同名计数、宽度截断/剩余调用数、失败数、组级状态、模式重开和 reasoning 不算工具。自定义标题包含 Bash/Read 文本不能改变工具分类。
+
 ### D. 中途关闭后恢复
 
 这些场景都要在关闭后立刻恢复一次，因为被杀的前端留下的占用记录要几秒后才过期。
@@ -1042,3 +1048,7 @@ Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编�
 - Windows core 另测 Job Object terminate/最后句柄关闭、过期 gate 拒绝、同步写阻塞时超时与取消、DSR 分片、环境/argv/cwd。`job_member_fixture` 是子进程夹具，普通套件调用不启动子进程；子进程重复输出不增加独立用例数量。
 
 未验证项必须单列：Windows/macOS Actions 尚未运行、Desktop 实际 UI、真实 Windows Terminal。Windows owner 强杀后的日志尾部/SQLite 终态 reconcile 尚未移植；TaskGet 保留 unresponsive 与已捕获日志，不虚构 completed 或 cleanup_complete。人工步骤见交付目录 `windows-conpty-validation.md`，使用同候选 SHA 的 `conpty-console.ps1` 和本地 mock。
+
+### 会话持久活动时间
+
+`db/schema.rs` 的 activity triggers 与 `conversation_repo` 的时间更新：跑 core 的 `db::schema::activity_tests`、`db::turn_repo`、`session_workflows`，以及完整 core/CLI 回归和三个包 all-targets check。消息内容/思考、多模态内容、工具结果实际变化与回合结束在同一事务刷新 `updated_at`；重复快照、只读查询、worker 心跳、重开 schema 不刷新。SQLite 活动触发器使用毫秒墙钟，回合完成同时保留精确 RFC3339 结束时间。检查事务回滚不留下时间变化、两个连接中较旧候选不覆盖新时间、十分钟注入回合结束后时间不早于最后结果/回合端点。不回填历史会话，不改 Goal proposal contention 提示。

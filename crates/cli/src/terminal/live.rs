@@ -54,8 +54,21 @@ enum Update {
     ToolStarted(String, change_view::Line, bool),
     /// A call finished: its result replaces the running form in one frame,
     /// with the full form a click shows when there is one.
-    Finished(String, Vec<change_view::Line>, Option<Vec<change_view::Line>>),
-    BackgroundFinished(String, Vec<change_view::Line>, Vec<change_view::Line>, String),
+    Finished(
+        String,
+        String,
+        bool,
+        Vec<change_view::Line>,
+        Option<Vec<change_view::Line>>,
+    ),
+    BackgroundFinished(
+        String,
+        String,
+        bool,
+        Vec<change_view::Line>,
+        Vec<change_view::Line>,
+        String,
+    ),
     /// The session's working directory, shown in the footer.
     Workspace(String),
     ShellContext(std::path::PathBuf, String),
@@ -204,8 +217,21 @@ impl LiveTurn {
     fn tool_started(&self, id: &str, header: change_view::Line, shell: bool) {
         let _ = self.updates.send(Update::ToolStarted(id.into(), header, shell));
     }
-    fn finished(&self, id: &str, short: Vec<change_view::Line>, full: Option<Vec<change_view::Line>>) {
-        let _ = self.updates.send(Update::Finished(id.into(), short, full));
+    fn finished(
+        &self,
+        id: &str,
+        name: &str,
+        failed: bool,
+        short: Vec<change_view::Line>,
+        full: Option<Vec<change_view::Line>>,
+    ) {
+        let _ = self.updates.send(Update::Finished(
+            id.into(),
+            name.into(),
+            failed,
+            short,
+            full,
+        ));
     }
     pub fn permission_mode(&self, mode: &str) {
         let _ = self.updates.send(Update::PermissionMode(mode.into()));
@@ -487,6 +513,7 @@ struct State {
     /// Messages typed during the turn, shown until the model reads them.
     queued: Vec<String>,
     notices: Vec<String>,
+    copy_feedback: Option<String>,
     status_page: Option<String>,
     inspection_title: String,
     inspection_scroll: usize,
@@ -638,6 +665,7 @@ impl State {
             running: Vec::new(),
             queued: Vec::new(),
             notices: Vec::new(),
+            copy_feedback: None,
             status_page: None,
             inspection_title: "Status".into(),
             inspection_scroll: 0,
@@ -1690,7 +1718,7 @@ impl Frame {
         id: &str,
         short: Vec<change_view::Line>,
         full: Vec<change_view::Line>,
-    ) {
+    ) -> usize {
         if let Some(block) = self.tool_blocks.remove(id) {
             let queued: usize = self.logs.iter().map(|(_, height)| height).sum();
             let bottom = self
@@ -1707,10 +1735,10 @@ impl Frame {
                 self.top = Some(start);
                 self.logs.extend(lines);
                 self.logged = self.scrollback.all();
-                return;
+                return block;
             }
         }
-        self.log_block(short, full);
+        self.log_block(short, full)
     }
     /// Switches a clicked tool result between its short and full form and
     /// redraws everything below it, the frame included.
@@ -1843,8 +1871,17 @@ impl Frame {
         let cursor_from_end = 3 + draft_height - 1 - draft_cursor_row;
         let status = clip(&state.status_line(), width);
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
-        let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
-        let mode = if super::scrollback::compact() { format!("{mode} · Compact · Alt+M") } else { mode };
+        let mode = format!(
+            "{} {}",
+            crate::terminal::style::status_mode(&state.mode),
+            state.model_label
+        );
+        let mode = if super::scrollback::compact() {
+            format!("{mode} · Compact · Alt+M")
+        } else {
+            mode
+        };
+        let mode = state.copy_feedback.as_deref().unwrap_or(&mode);
         let rule = "─".repeat(width);
         let budget = if state.shell_expanded { (size.1 as usize).saturating_sub(10).max(2) } else { content_budget(size.1) };
         let panel = state.details.render(width, budget);
@@ -2201,7 +2238,11 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Inspection(command, text)) => {
-                    if command.trim() == "/status" || command.trim().starts_with("/tasks") {
+                    if command.trim() == "/copy-session-id" {
+                        // Feedback occupies the existing footer, so copying
+                        // never moves the running tool or allocates notice rows.
+                        state.copy_feedback = Some(text);
+                    } else if command.trim() == "/status" || command.trim().starts_with("/tasks") {
                         if state.status_page.is_none() {
                             execute!(io::stderr(), terminal::EnterAlternateScreen)?;
                         }
@@ -2257,31 +2298,25 @@ fn run(
                     }
                     dirty = true;
                 }
-                Ok(Update::BackgroundFinished(id, short, full, task)) => {
+                Ok(Update::BackgroundFinished(id, name, failed, short, full, task)) => {
                     state.running.retain(|call| call.id != id);
                     flush_notices(state, screen)?;
                     finish_text(state, screen);
-                    screen.log_block(short, full);
+                    let block = screen.log_block(short, full);
+                    screen.scrollback.bind_tool(block, &name, failed);
                     if let Some((root, session)) = &state.shell_context {
                         screen.scrollback.bind_background(root.clone(), session.clone(), task);
                     }
                     dirty = true;
                 }
-                Ok(Update::Finished(id, short, full)) => {
+                Ok(Update::Finished(id, name, failed, short, full)) => {
                     state.running.retain(|call| call.id != id);
                     flush_notices(state, screen)?;
                     finish_text(state, screen);
-                    match full {
-                        Some(full) => screen.finish_tool_block(&id, short, full),
-                        None if short.is_empty() => {}
-                        None => {
-                            screen.separate_block();
-                            let width = crate::terminal::size().0.saturating_sub(1) as usize;
-                            let color = std::env::var_os("NO_COLOR").is_none();
-                            for line in short {
-                                screen.log_rendered(&change_view::render(&line, width, color));
-                            }
-                        }
+                    if !short.is_empty() {
+                        let full = full.unwrap_or_else(|| short.clone());
+                        let block = screen.finish_tool_block(&id, short, full);
+                        screen.scrollback.bind_tool(block, &name, failed);
                     }
                     dirty = true;
                 }
@@ -2592,7 +2627,12 @@ fn run(
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
-                    if state.draft.cursor < state.draft.paste_end || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home) { state.draft.pasted = false; }
+                    state.copy_feedback = None;
+                    if state.draft.cursor < state.draft.paste_end
+                        || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home)
+                    {
+                        state.draft.pasted = false;
+                    }
                     let key = match state.bindings.resolve(key, &mut state.key_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -4647,9 +4687,9 @@ impl TurnDisplay {
                     let short = change_view::collapsed_change(&display_lines);
                     let mut full = display_lines;
                     full.push(change_view::muted(super::tool_view::COLLAPSE_HINT));
-                    live.finished(id, short, Some(full));
+                    live.finished(id, name, failed, short, Some(full));
                 } else {
-                    live.finished(id, display_lines, None);
+                    live.finished(id, name, failed, display_lines, None);
                 }
             } else {
                 let label_input = &effective_input;
@@ -4664,14 +4704,37 @@ impl TurnDisplay {
                     self.workspace.as_deref(),
                 ), name, title, failed), number);
                 if name != "TodoWrite" {
-                    let full = super::tool_view::numbered(super::tool_view::titled(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), name, title, failed), number);
-                    if let Some(task) = super::tool_view::background_shell_id(name, output, failed) {
-                        let _ = live.updates.send(Update::BackgroundFinished(id.into(), short, full, task));
+                    let full = super::tool_view::numbered(
+                        super::tool_view::titled(
+                            super::tool_view::expanded_block(
+                                name,
+                                label_input,
+                                output,
+                                failed,
+                                elapsed,
+                                self.workspace.as_deref(),
+                            ),
+                            name,
+                            title,
+                            failed,
+                        ),
+                        number,
+                    );
+                    if let Some(task) = super::tool_view::background_shell_id(name, output, failed)
+                    {
+                        let _ = live.updates.send(Update::BackgroundFinished(
+                            id.into(),
+                            name.into(),
+                            failed,
+                            short,
+                            full,
+                            task,
+                        ));
                     } else {
-                        live.finished(id, short, Some(full));
+                        live.finished(id, name, failed, short, Some(full));
                     }
                 } else {
-                    live.finished(id, short, None);
+                    live.finished(id, name, failed, short, None);
                 }
             }
             let _ = live.updates.send(Update::Copy(
