@@ -27,7 +27,7 @@ async fn builtin_errors_are_failures_in_serial_and_parallel_paths() {
             &events,
             None,
             false,
-            None,
+            Default::default(),
         )
         .await;
         assert_eq!(result.is_err(), failure, "{name}: {result:?}");

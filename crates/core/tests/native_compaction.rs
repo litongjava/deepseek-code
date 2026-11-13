@@ -159,7 +159,20 @@ async fn fixture(mode: u8) -> Fixture {
 
 #[tokio::test]
 async fn running_responses_turn_uses_native_compaction_before_local_truncation() {
-    let Fixture { dir, store, id, engine, seen, server, .. } = fixture(3).await;
+    let Fixture {
+        dir,
+        store,
+        id,
+        engine,
+        seen,
+        server,
+        ..
+    } = fixture(3).await;
+    std::fs::write(
+        dir.path().join("data/settings.json"),
+        r#"{"requestRecording":{"enabled":true}}"#,
+    )
+    .unwrap();
     let original = "Detailed evidence ".repeat(2200);
     store.append(&id, "assistant", &original).unwrap();
     store.append(&id, "user", "Continue").unwrap();
@@ -179,6 +192,43 @@ async fn running_responses_turn_uses_native_compaction_before_local_truncation()
         &requests[1]["input"].as_array().unwrap()[..3],
         window().as_array().unwrap()
     );
+    let records = dir.path().join("data/request-records").join(&id);
+    let compact: Value =
+        serde_json::from_slice(&std::fs::read(records.join("compaction-0001.json")).unwrap())
+            .unwrap();
+    assert_eq!(compact["trigger"], "auto");
+    assert_eq!(compact["completed"], true);
+    assert_eq!(compact["request_sequences"], json!([1]));
+    assert_eq!(compact["after_native_content"]["items"], window());
+    let meta_path = std::fs::read_dir(&records)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("0001-")
+                && p.to_string_lossy().ends_with(".meta.json")
+        })
+        .unwrap();
+    let meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    assert_eq!(meta["purpose"], "compaction");
+    assert_eq!(meta["compaction_stage"], "native");
+    let body_path = meta_path
+        .to_string_lossy()
+        .replace(".meta.json", ".request.json");
+    let body: Value = serde_json::from_slice(&std::fs::read(body_path).unwrap()).unwrap();
+    assert_eq!(body, requests[0]);
+    let response: Value = serde_json::from_slice(
+        &std::fs::read(
+            meta_path
+                .to_string_lossy()
+                .replace(".meta.json", ".response.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response["output"], window());
     server.abort();
 }
 

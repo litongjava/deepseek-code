@@ -262,7 +262,21 @@ impl AnthropicClient {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body);
-            let response = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?.send().await?;
+            let request = crate::services::anthropic_auth::authorize(
+                request,
+                &provider.provider.api_key,
+                base_url,
+                provider.model.fast,
+            )
+            .await?;
+            let response = super::request_recording::send(
+                request,
+                &self.request_options,
+                provider,
+                "anthropic-messages",
+                false,
+            )
+            .await?;
 
             if !self.retry_requests {
                 return super::auto_permissions::bounded_response(response).await;
@@ -328,8 +342,22 @@ impl AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body);
-        let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
-        Ok(super::stream_retry::response(request, identity).await?.0)
+        let request = crate::services::anthropic_auth::authorize(
+            request,
+            &provider.provider.api_key,
+            base_url,
+            provider.model.fast,
+        )
+        .await?;
+        Ok(super::stream_retry::response(
+            request,
+            identity,
+            self.request_options.clone(),
+            provider.clone(),
+            "anthropic-messages",
+        )
+        .await?
+        .0)
     }
 
     pub async fn send_message_stream_with_thinking(
@@ -428,9 +456,31 @@ impl AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body);
-        let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
-        if let Some(capture) = context_capture { capture.record("anthropic-messages", &body, provider.model.context_window, max_tokens).await; }
-        super::stream_retry::response(request, identity).await
+        let request = crate::services::anthropic_auth::authorize(
+            request,
+            &provider.provider.api_key,
+            base_url,
+            provider.model.fast,
+        )
+        .await?;
+        if let Some(capture) = context_capture {
+            capture
+                .record(
+                    "anthropic-messages",
+                    &body,
+                    provider.model.context_window,
+                    max_tokens,
+                )
+                .await;
+        }
+        super::stream_retry::response(
+            request,
+            identity,
+            self.request_options.clone().observed(context_capture),
+            provider.clone(),
+            "anthropic-messages",
+        )
+        .await
     }
 }
 

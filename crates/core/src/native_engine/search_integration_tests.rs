@@ -46,7 +46,7 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
         &tx,
         None,
         false,
-        None,
+        Default::default(),
     );
     let b = execute_builtin_tool(
         "WebSearch",
@@ -56,7 +56,7 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
         &tx,
         None,
         false,
-        None,
+        Default::default(),
     );
     let (a, b) = tokio::join!(a, b);
     let (a, b) = (a.unwrap().to_string(), b.unwrap().to_string());
@@ -106,7 +106,7 @@ async fn search_failure_still_records_provider_usage() {
         &tx,
         None,
         false,
-        None,
+        Default::default(),
     )
     .await
     .is_err());
@@ -148,7 +148,7 @@ async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
         &tx,
         None,
         false,
-        None,
+        Default::default(),
     )
     .await
     .unwrap();
@@ -166,7 +166,7 @@ async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
         &tx,
         Some(&path),
         false,
-        None,
+        Default::default(),
     )
     .await
     .unwrap_err()
@@ -214,7 +214,7 @@ async fn deepseek_search_reads_independent_endpoint_model_and_new_key_on_each_ca
             &tx,
             Some(&config_path),
             false,
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -238,5 +238,69 @@ async fn deepseek_search_reads_independent_endpoint_model_and_new_key_on_each_ca
             }
         }
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn web_search_recording_matches_wire_and_existing_trace_id() {
+    use axum::{body::Bytes, routing::post, Json, Router};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("settings.json"),
+        r#"{"requestRecording":{"enabled":true}}"#,
+    )
+    .unwrap();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = captured.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = search_provider(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "search-model",
+    );
+    let app = Router::new().fallback(post(move |body: Bytes| {
+        *capture.lock().unwrap() = body.to_vec();
+        async { Json(json!({"id":"search-response","status":"completed","output":[{"type":"web_search_call","status":"completed","action":{"sources":[{"url":"https://fixture.example","title":"Fixture"}]}}]})) }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, mut rx) = mpsc::channel(8);
+    let result = execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"fixture"}),
+        ".",
+        &provider,
+        &tx,
+        None,
+        false,
+        crate::native_engine::request_options::RequestOptions::from_root(root.path(), Some("search-session"), "main"),
+    )
+    .await
+    .unwrap();
+    assert!(result.to_string().contains("fixture.example"));
+    let mut trace = None;
+    while let Ok(event) = rx.try_recv() {
+        if let EngineEvent::RequestSnapshot(snapshot) = event {
+            trace = Some(snapshot);
+        }
+    }
+    let trace = trace.unwrap();
+    let dir = root.path().join("request-records/search-session");
+    let meta = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".meta.json"))
+        .unwrap();
+    let value: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    assert_eq!(value["purpose"], "web_search");
+    assert_eq!(value["model_request_id"], trace["id"]);
+    assert_eq!(value["request_id"], trace["id"]);
+    assert_eq!(
+        std::fs::read(
+            meta.to_string_lossy()
+                .replace(".meta.json", ".request.json")
+        )
+        .unwrap(),
+        *captured.lock().unwrap()
+    );
+    assert!(value["stream_completed"] == true);
     server.abort();
 }

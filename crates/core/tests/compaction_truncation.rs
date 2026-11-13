@@ -882,6 +882,11 @@ async fn a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_s
             History::Unique(30_000),
         ))
         .await;
+        std::fs::write(
+            fixture.dir.path().join("data/settings.json"),
+            r#"{"requestRecording":{"enabled":true}}"#,
+        )
+        .unwrap();
         let before = fixture.store.history(&fixture.id).unwrap();
         compaction::compact(
             &fixture.engine(),
@@ -928,6 +933,35 @@ async fn a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_s
             fixture.store.history(&fixture.id).unwrap().len(),
             before.len() + 1
         );
+        let dir = fixture
+            .dir
+            .path()
+            .join("data/request-records")
+            .join(&fixture.id);
+        let mut records: Vec<Value> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().ends_with(".meta.json"))
+            .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
+            .collect();
+        records.sort_by_key(|r| r["sequence"].as_u64().unwrap());
+        assert_eq!(records.len(), 7);
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r["compaction_stage"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["segment", "segment", "merge", "recovery", "recovery", "recovery", "final"]
+        );
+        assert!(records
+            .iter()
+            .all(|r| r["purpose"] == "compaction" && r["stream_completed"] == true));
+        let compact: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("compaction-0001.json")).unwrap())
+                .unwrap();
+        assert_eq!(compact["request_sequences"], json!([1, 2, 3, 4, 5, 6, 7]));
+        assert_eq!(compact["completed"], true);
+        assert_eq!(compact["trigger"], "manual");
     }
 }
 

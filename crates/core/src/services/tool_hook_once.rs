@@ -13,6 +13,23 @@ impl HookRunner {
         let prepared = transcript.map(|cache| self.transcript_input(session, input.clone(), cache));
         let input = prepared.as_ref().unwrap_or(input);
         if let Some(config) = &hook.prompt {
+            let options = self
+                .recording_db
+                .as_ref()
+                .map(|db| {
+                    crate::native_engine::request_options::RequestOptions::from_db(
+                        db,
+                        Some(session),
+                        "hook",
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::native_engine::request_options::RequestOptions::from_root(
+                        self.once_directory.parent().unwrap_or(&self.workspace),
+                        Some(session),
+                        "hook",
+                    )
+                });
             if config.is_agent() {
                 return agent::execute_agent(
                     hook,
@@ -20,11 +37,18 @@ impl HookRunner {
                     self.prompt_provider.as_ref(),
                     input,
                     &self.workspace,
+                    options,
                 )
                 .await;
             }
-            return prompt::execute_prompt(hook, config, self.prompt_provider.as_ref(), input)
-                .await;
+            return prompt::execute_prompt(
+                hook,
+                config,
+                self.prompt_provider.as_ref(),
+                input,
+                options,
+            )
+            .await;
         }
         let env_file = if hook.http.is_none()
             && !matches!(hook.shell.as_deref(), Some("powershell" | "pwsh"))

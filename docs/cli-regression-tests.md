@@ -1052,3 +1052,16 @@ Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编�
 ### 会话持久活动时间
 
 `db/schema.rs` 的 activity triggers 与 `conversation_repo` 的时间更新：跑 core 的 `db::schema::activity_tests`、`db::turn_repo`、`session_workflows`，以及完整 core/CLI 回归和三个包 all-targets check。消息内容/思考、多模态内容、工具结果实际变化与回合结束在同一事务刷新 `updated_at`；重复快照、只读查询、worker 心跳、重开 schema 不刷新。SQLite 活动触发器使用毫秒墙钟，回合完成同时保留精确 RFC3339 结束时间。检查事务回滚不留下时间变化、两个连接中较旧候选不覆盖新时间、十分钟注入回合结束后时间不早于最后结果/回合端点。不回填历史会话，不改 Goal proposal contention 提示。
+
+### 完整模型请求记录（默认关闭）
+
+开关顺序：`--record-requests` 强制开启；否则 `DEEPSEEK_CODE_RECORD_REQUESTS=1/true/0/false` 覆盖数据目录 `settings.json` 的 `requestRecording.enabled`；两者均未指定时才使用 `--full-access` / `--yolo` 的自动开启。显式环境变量或配置 `false` 关闭自动开启；无效环境值视为未指定。运行时按会话保存 CLI 策略，子代理通过显式父会话继承，后台 Worker 参数继续携带 CLI 开关；不会改写 settings。
+
+- `cargo test --locked -j 2 -p deepseek-code-core --lib native_engine::request_recording::tests`：三通道本地 HTTP 请求体与原始 SSE 字节相等；非流式原始 JSON；认证头过滤；并发编号；重试 a1/a2；中途取消保留部分字节；记录关闭/路径不可写不影响响应；Unix 目录 0700/文件 0600；14 天最新修改时间与活跃锁排除；会话策略隔离。
+- `cargo test --locked -j 2 -p deepseek-code-cli --test request_recording --test deepseek_harness_headers`：真实 CLI 开关组合、普通请求与自动超限压缩、`model_requests` ID 关联、compaction 文件的摘要/边界/请求序号，以及 `dcl requests SESSION` 的纯文本列表、帮助、不存在提示和路径穿越拒绝。缺少记录时查看命令不得创建数据目录。
+- `cargo test --locked -j 2 -p deepseek-code-core --test compaction_truncation --test native_compaction --test compaction_overflow --test compaction_status_regressions`：段摘要、合并、截断恢复的记录阶段与顺序；原生 Responses 压缩和运行中的不透明窗口。`a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_stage` 必须观察到 7 份记录，阶段依次 segment/segment/merge/recovery/recovery/recovery/final，不能只看 compaction 文件存在。
+- 同时跑 `native_engine::request_options::tests`、`native_engine::stream_retry::tests`、`native_engine::utf8_stream::tests`、`native_engine::provider_runtime::tests`、`request_failure` / `reconnect_policy`、CLI `sdk`，最后执行本文必跑的 core/CLI 全套和 `cargo check --locked -j 2 -p deepseek-code-core -p deepseek-code-cli -p deepseek-code-desktop --all-targets`。
+
+记录保存在 `<数据目录>/request-records/<会话ID>/NNNN-<请求ID>-aK.*`，请求体及响应不脱敏；元数据 URL 去掉查询、fragment 和 userinfo。头名称包含 auth/cookie/api-key/apikey/api_key/token/secret/credential/password 或以 -key 结尾时移除；任意头值匹配 Bearer/Basic、sk-/sk_、ghp_/github_pat_、AIza、AKIA、eyJ 前缀也移除；所有头值中，长度至少 32、混合字母数字、仅含 token 字符且不是 UUID 的值视为不透明密钥移除。合法 UUID 保留，但敏感头名称和已知密钥前缀仍优先移除。逐块写并 sync_data；开始时元数据即为未完成，收到完整结束标记或正常非流式 EOF 后标记完成；进程突然退出至少保留初始未完成元数据。
+
+需另行验证 Windows 路径、ACL/文件锁/替换行为、ConPTY、Desktop 实际运行、真实供应商与 Bedrock 二进制事件。Linux 本地 mock 和 all-targets 编译不能代替这些证据。

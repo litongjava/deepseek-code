@@ -367,6 +367,11 @@ async fn execute(
         // Each job carries its own launch permissions.
         session.bypass_available = cli.allow_dangerously_skip_permissions;
         session.full_access = cli.full_access;
+        session.store.db.set_request_recording_policy(
+            &session.id,
+            cli.record_requests,
+            cli.full_access,
+        );
         session
             .permissions
             .set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);

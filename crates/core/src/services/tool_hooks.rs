@@ -263,6 +263,7 @@ fn default_timeout() -> u64 {
 
 #[derive(Default, Clone)]
 pub struct HookRunner {
+    recording_db: Option<std::sync::Arc<crate::db::DbManager>>,
     workspace: PathBuf,
     once_directory: PathBuf,
     hooks: Vec<ActiveHook>,
@@ -283,6 +284,10 @@ impl HookRunner {
             workspace,
             super::plugins::command_hooks(context)?,
         )
+        .map(|mut runner| {
+            runner.recording_db = Some(context.db.clone());
+            runner
+        })
     }
 
     fn load_with_configs(
@@ -472,6 +477,7 @@ impl HookRunner {
             force_sync: false,
             callbacks: None,
             prompt_provider: None,
+            recording_db: None,
         })
     }
 

@@ -95,6 +95,9 @@ pub struct Cli {
     /// outside the sandbox. Only for disposable machines.
     #[arg(long, visible_alias = "yolo", global = true)]
     pub full_access: bool,
+    /// Record exact model HTTP requests and responses in the data directory.
+    #[arg(long, global = true)]
+    pub record_requests: bool,
     /// Allow matching tools without confirmation for this launch; deny and Plan still apply.
     #[arg(long, visible_alias = "allowedTools", num_args = 1.., global = true)]
     pub allowed_tools: Vec<String>,
@@ -294,6 +297,8 @@ impl From<RoleArg> for deepseek_code_core::super_agent::Role {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// List recorded HTTP requests for a session (plain text).
+    Requests { session_id: String },
     /// Manage this application's Anthropic account without provider setup.
     Auth {
         #[command(subcommand)]
