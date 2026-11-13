@@ -958,6 +958,8 @@ ToolScript 保持按需加载。Router 可以加载它来组合允许的工具�
 
 ### Windows ConPTY（Codex 03；Windows 结果以平台 CI 为准）
 
+Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编译整个 lib 测试单元，不能只检查过滤器命中的函数。Unix shell supervisor 夹具的实际执行测试应为 `cfg(unix)`；纯持久状态 adoption 测试仍跨平台运行。依赖 `/proc/self/fd`、inode 和 `dup/fcntl` 的 owner 辅助函数及其类型应与调用测试一样限制为 Linux。ConPTY 测试中 `std::process::Child` 同时实现 portable-pty `Child` 和标准库 `AsRawHandle`，获取原始句柄必须用 `AsRawHandle::as_raw_handle(&child)` 消歧。改动这些测试后，Linux 跑 `tools::background_shell`、`services::background_sessions` 和 core/CLI/Desktop `--all-targets` 检查；Windows CI 跑下面全部过滤器与 CLI 目标，非零测试结果才算通过，Linux 不执行 Windows-only `tools::conpty` 的空过滤器。
+
 `.github/workflows/platform-tests.yml` 在 `ci/**` push 或 workflow_dispatch 运行。测试列表集中在 matrix 的 `core-filters` / `cli-tests`；每条命令保存退出码与实际执行数，0 项失败，日志以 `runtime-tests-<os>` artifact 保存。Windows 运行 `tools::pty_bash`、`tools::conpty`、`tools::shell_input` 和 CLI `conpty_worker`。Linux 保留 `tools::pty`（owner/transport/gate/supervisor/adapter）、`owner_loss`、pipe owner/input 和六个 PTY/pipe/TaskGet CLI 目标；macOS 验证明确拒绝 PTY。Linux 结果不能替代 Windows 编译或运行。
 
 - Windows Bash PTY 复用 portable-pty ConPTY，仍使用正常 Bash 的配置 shell/program/argv/env/cwd；环境移除/覆盖保持 Windows 大小写不敏感。初始 rows/cols、sandbox/timeout/Monitor 拒绝与 Linux 相同；Windows WSL、cmd（raw 命令行引号）和 pipe 保持明确不支持。

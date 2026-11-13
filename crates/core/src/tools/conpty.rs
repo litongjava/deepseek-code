@@ -848,7 +848,7 @@ mod tests {
         job.stop().unwrap();
         unsafe {
             assert_eq!(
-                WaitForSingleObject(HANDLE(gate.as_raw_handle()), 10_000),
+                WaitForSingleObject(HANDLE(AsRawHandle::as_raw_handle(&gate)), 10_000),
                 windows::Win32::Foundation::WAIT_OBJECT_0
             );
             assert_eq!(
@@ -866,7 +866,7 @@ mod tests {
         drop(job);
         unsafe {
             assert_eq!(
-                WaitForSingleObject(HANDLE(gate.as_raw_handle()), 10_000),
+                WaitForSingleObject(HANDLE(AsRawHandle::as_raw_handle(&gate)), 10_000),
                 windows::Win32::Foundation::WAIT_OBJECT_0
             );
             assert_eq!(
