@@ -263,7 +263,10 @@ fn script_outcome(
 
 fn failure_code(output: &str) -> &'static str {
     let lower = output.to_ascii_lowercase();
-    if lower.contains("permission denied") {
+    if lower.contains("permission denied")
+        || lower.starts_with("tool approval failed:")
+        || lower.starts_with("hook requested permission:")
+    {
         "permission_denied"
     } else if lower.contains("not allowed for this agent")
         || lower.contains("not loaded")

@@ -12,6 +12,8 @@ pub struct State {
 
 #[derive(Default)]
 pub struct Overrides {
+    /// Explicit opt-out; older SDK hosts implicitly support can_use_tool.
+    pub disable_tool_approval: bool,
     pub system_prompt: Option<String>,
     pub response_schema: Option<Value>,
     /// Prepended once to the first user turn when a main-thread agent is selected.
@@ -134,6 +136,10 @@ fn validate(cli: &Cli, request: &Value) -> Result<Overrides> {
                     .context("Invalid initialize.jsonSchema")?;
                 schema = Some(value.clone());
             }
+            "canUseTool" => ensure!(
+                value.is_boolean(),
+                "initialize.canUseTool must be a boolean"
+            ),
             "agents" => ensure!(value.is_object(), "initialize.agents must be an object"),
             "hooks" => {
                 deepseek_code_core::services::hook_callbacks::validate(value)?;
@@ -183,6 +189,7 @@ fn validate(cli: &Cli, request: &Value) -> Result<Overrides> {
         None
     };
     Ok(Overrides {
+        disable_tool_approval: request.get("canUseTool") == Some(&Value::Bool(false)),
         system_prompt,
         response_schema: schema,
         initial_prompt: None,

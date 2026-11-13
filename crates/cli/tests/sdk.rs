@@ -1,4 +1,6 @@
 //! End-to-end SDK tests run the actual CLI process against local model servers.
+#[path = "sdk/toolscript_approval.rs"]
+mod toolscript_approval;
 #[path = "sdk/interrupt_usage.rs"]
 mod interrupt_usage;
 #[path = "sdk/recovery_interrupt.rs"]

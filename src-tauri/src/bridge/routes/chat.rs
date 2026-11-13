@@ -512,6 +512,7 @@ pub(super) async fn start_chat(
                     }
                     Some(serde_json::json!({
                         "type": "tool_permission",
+                        "toolscript": deepseek_code_core::native_engine::permission_response::toolscript_origin(&request_id),
                         "session_id": deepseek_code_core::native_engine::permission_response::request_owner(&request_id).map(|owner| owner.session_id).unwrap_or_else(|| conv_id.clone()),
                         "request_id": request_id,
                         "tool_use_id": tool_use_id,

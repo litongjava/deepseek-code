@@ -6,8 +6,29 @@ use tokio::sync::{oneshot, watch, Mutex};
 
 pub type Commit = Box<dyn FnOnce() -> Result<()> + Send>;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolScriptOrigin {
+    pub parent_tool_use_id: String,
+    pub task_id: String,
+}
+
+pub fn toolscript_origin(id: &str) -> Option<ToolScriptOrigin> {
+    request_owner(id).and_then(|owner| owner.toolscript)
+}
+
+pub(crate) fn set_toolscript_origin(id: &str, origin: Option<ToolScriptOrigin>) {
+    if let Some(owner) = owners()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(id)
+    {
+        owner.toolscript = origin;
+    }
+}
+
 #[derive(Clone)]
 pub struct RequestOwner {
+    pub toolscript: Option<ToolScriptOrigin>,
     pub session_id: String,
     pub tool_use_id: String,
     pub kind: String,
@@ -26,11 +47,24 @@ fn owners() -> &'static std::sync::Mutex<HashMap<String, RequestOwner>> {
 
 pub fn register_owner(id: &str, session: &str, tool: &str, kind: &str, input: Value,
     plan: Option<crate::services::plan_approval::ApprovalRequest>,
-    manager: Option<Arc<crate::permissions::PermissionManager>>, root: Option<std::path::PathBuf>) {
-    owners().lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), RequestOwner {
-        session_id: session.into(), tool_use_id: tool.into(), kind: kind.into(), tool_name: None, input, plan, manager, root,
-        outcome: watch::channel(None).0,
-    });
+    manager: Option<Arc<crate::permissions::PermissionManager>>,
+    root: Option<std::path::PathBuf>,
+) {
+    owners().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id.into(),
+        RequestOwner {
+            toolscript: None,
+            session_id: session.into(),
+            tool_use_id: tool.into(),
+            kind: kind.into(),
+            tool_name: None,
+            input,
+            plan,
+            manager,
+            root,
+            outcome: watch::channel(None).0,
+        },
+    );
 }
 
 pub(crate) fn set_owner_tool(id: &str, tool: &str) {

@@ -121,6 +121,15 @@ impl Permissions {
             .await
             .insert(id.into(), (input.clone(), question, tx));
         let mut frame = json!({"type":"control_request","request_id":id,"request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":tool_use_id}});
+        if let Some(origin) =
+            deepseek_code_core::native_engine::permission_response::toolscript_origin(id)
+        {
+            frame["request"]["toolscript"] = serde_json::to_value(&origin)?;
+            frame["request"]["description"] = json!(format!(
+                "From ToolScript (parent {})",
+                origin.parent_tool_use_id
+            ));
+        }
         if let Some(description) = description {
             frame["request"]["description"] = json!(description);
         }

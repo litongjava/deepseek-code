@@ -40,10 +40,6 @@ pub const FOREGROUND_WAIT: Duration = Duration::from_secs(60);
 /// Bounded read for a non-paged snapshot.
 const SNAPSHOT_LIMIT: u64 = 1024 * 1024;
 const RESULT_LIMIT: u64 = 2 * 1024 * 1024;
-/// How long an approval request may wait for an answer before it is denied.
-/// A parent that exited (for example `--print`) leaves no responder, so the
-/// call fails closed instead of hanging.
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long cancellation waits for the owned process groups to be gone.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often the owner re-reads the durable permission policy.
@@ -79,7 +75,7 @@ pub fn directory(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(jobs_dir(root).join(id))
 }
 
-fn save_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(super) fn save_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().context("Missing job directory")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(&mut temporary, value)?;
@@ -111,9 +107,8 @@ pub struct JobSpec {
     pub allowed_tools: Option<Vec<String>>,
     pub exposed_tools: Option<Vec<String>>,
     pub source_sha256: String,
-    /// Whether a live parent can answer permission prompts. A background job
-    /// and a `--print` parent are non-interactive: a call that needs approval
-    /// is denied explicitly rather than auto-allowed or left hanging.
+    /// Whether the owning frontend can answer permission prompts. The host
+    /// lease bounds this capability; detached jobs cannot invent a responder.
     #[serde(default)]
     pub interactive: bool,
 }
@@ -311,6 +306,7 @@ pub fn recover_session(root: &Path, session: &str) -> Result<()> {
 pub struct StartOutcome {
     pub id: String,
     pub directory: PathBuf,
+    pub(crate) approval_host: Option<super::tool_loop::toolscript_approval::HostLease>,
 }
 
 /// Admits a job and starts its owner. Returns only after the owner has taken
@@ -349,6 +345,25 @@ pub async fn start_job(root: &Path, mut spec: JobSpec) -> Result<StartOutcome> {
             record_start_failure(root, &spec.session, &id, &directory, &message, false).await,
         );
     }
+
+    let approval_host = if spec.interactive {
+        match super::tool_loop::toolscript_approval::HostLease::acquire(&directory) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                return Err(record_start_failure(
+                    root,
+                    &spec.session,
+                    &id,
+                    &directory,
+                    &format!("Opening the ToolScript approval host: {error:#}"),
+                    true,
+                )
+                .await)
+            }
+        }
+    } else {
+        None
+    };
 
     let executable = match std::env::var_os(WORKER_EXE_ENV)
         .map(PathBuf::from)
@@ -398,7 +413,11 @@ pub async fn start_job(root: &Path, mut spec: JobSpec) -> Result<StartOutcome> {
                 // observed. Its real outcome is not a start failure.
                 Admission::Terminal => {
                     reap(child);
-                    return Ok(StartOutcome { id, directory });
+                    return Ok(StartOutcome {
+                        id,
+                        directory,
+                        approval_host,
+                    });
                 }
                 Admission::Failed => {
                     let error = current
@@ -427,7 +446,11 @@ pub async fn start_job(root: &Path, mut spec: JobSpec) -> Result<StartOutcome> {
                 // exiting; a recorded outcome wins over the exit status.
                 if let Ok(current) = load_state(&directory) {
                     if classify_admission(&current) == Admission::Terminal {
-                        return Ok(StartOutcome { id, directory });
+                        return Ok(StartOutcome {
+                            id,
+                            directory,
+                            approval_host,
+                        });
                     }
                 }
                 let error = format!("The ToolScript owner exited during admission ({status})");
@@ -472,7 +495,11 @@ pub async fn start_job(root: &Path, mut spec: JobSpec) -> Result<StartOutcome> {
     // The state update belongs to the lease-holding owner, which writes it
     // before it starts the script. The parent only observes, so it can never
     // move a record that already finished back to `running`.
-    Ok(StartOutcome { id, directory })
+    Ok(StartOutcome {
+        id,
+        directory,
+        approval_host,
+    })
 }
 
 /// What the admission handshake observed.
@@ -956,11 +983,13 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
     // is reported as the terminal cause instead of a user cancellation.
     let policy_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
-    let mailbox = executor.permission_mailbox_handle();
+    executor = executor.with_toolscript_approval(
+        directory,
+        spec.interactive,
+        cancellation.clone(),
+        policy_error.clone(),
+    );
     let log_path = directory.join("output.log");
-    let approvals = directory.join("approvals");
-    let interactive = spec.interactive;
-    let approvals_session = spec.session.clone();
     let persist = spec
         .assistant_id
         .as_ref()
@@ -1009,36 +1038,6 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
             }
             if let Err(error) = append_line(&log_path, &render(&event)) {
                 fail(format!("Could not write the job log: {error}"));
-            }
-            if let EngineEvent::ToolPermission {
-                request_id,
-                tool_name,
-                input,
-                ..
-            } = &event
-            {
-                // A worker cannot show a prompt. It either hands the request to
-                // a live host through the durable approval directory, or denies
-                // it explicitly. It never auto-allows and never waits forever.
-                let mailbox = mailbox.clone();
-                let approvals = approvals.clone();
-                let session = approvals_session.clone();
-                let (request_id, tool, input) =
-                    (request_id.clone(), tool_name.clone(), input.clone());
-                tokio::spawn(async move {
-                    let response =
-                        resolve_permission(&approvals, interactive, &session, &tool, &input).await;
-                    let _ = append_line(
-                        &approvals.join("log.txt"),
-                        &format!("{request_id} {tool} -> {:?}\n", response_kind(&response)),
-                    );
-                    let _ = crate::native_engine::permission_response::respond(
-                        &mailbox,
-                        &request_id,
-                        response,
-                    )
-                    .await;
-                });
             }
             tool_history::apply_event(&mut rows, &mut origins, &mut arguments, &event);
             if let Some((data_dir, session, assistant)) = &persist {
@@ -1239,6 +1238,9 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
             finish(directory, state, "completed").await?;
         }
         Err(error) => {
+            let (started, succeeded) = *script_counts.lock().unwrap_or_else(|e| e.into_inner());
+            state.calls_started = started;
+            state.calls_succeeded = succeeded;
             let cancelled = cancellation.is_cancelled();
             let message = format!("{error:#}");
             append_line(
@@ -1297,86 +1299,6 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
         }
     }
     Ok(())
-}
-
-/// Resolves one nested permission prompt.
-///
-/// With a live host, the request is written to the durable approval directory
-/// and the answer is awaited up to `APPROVAL_TIMEOUT`. Without one (background
-/// job, `--print`, or a host that exited), the call fails closed: it is denied
-/// with an explicit message, never auto-allowed and never left hanging.
-async fn resolve_permission(
-    approvals: &Path,
-    interactive: bool,
-    _session: &str,
-    tool: &str,
-    input: &Value,
-) -> crate::native_engine::permission_response::PermissionResponse {
-    use crate::native_engine::permission_response::PermissionResponse;
-    let deny = |message: String| PermissionResponse::Deny {
-        message,
-        interrupt: false,
-    };
-    if !interactive {
-        return deny(format!(
-            "{tool} requires user approval, but this ToolScript job has no interactive host. The call was not auto-allowed."
-        ));
-    }
-    if fs::create_dir_all(approvals).is_err() {
-        return deny(format!(
-            "{tool} requires user approval, but the approval channel is unavailable. The call was not auto-allowed."
-        ));
-    }
-    let request = approvals.join(format!("{}.request.json", uuid::Uuid::new_v4()));
-    let response_path = request.with_extension("response.json");
-    if save_atomic(&request, &json!({"tool": tool, "input": input})).is_err() {
-        return deny(format!(
-            "{tool} requires user approval, but the request could not be recorded. The call was not auto-allowed."
-        ));
-    }
-    let deadline = Instant::now() + APPROVAL_TIMEOUT;
-    loop {
-        if let Ok(bytes) = fs::read(&response_path) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                return match value["decision"].as_str() {
-                    Some("allow") => PermissionResponse::Allow {
-                        updated_input: value.get("updated_input").cloned(),
-                        commit: None,
-                        note: value["note"].as_str().map(str::to_owned),
-                    },
-                    Some("deny") => deny(
-                        value["message"]
-                            .as_str()
-                            .unwrap_or("The user denied this tool call")
-                            .to_owned(),
-                    ),
-                    _ => deny(format!(
-                        "{tool} approval response was invalid. The call was not auto-allowed."
-                    )),
-                };
-            }
-        }
-        if Instant::now() >= deadline {
-            return deny(format!(
-                "{tool} needs user approval, but no host answered within {}s. The call was not auto-allowed.",
-                APPROVAL_TIMEOUT.as_secs()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn response_kind(
-    response: &crate::native_engine::permission_response::PermissionResponse,
-) -> &'static str {
-    use crate::native_engine::permission_response::PermissionResponse;
-    match response {
-        PermissionResponse::Allow { .. } => "allow",
-        PermissionResponse::AllowBashForSession { .. } => "allow_bash_session",
-        PermissionResponse::AllowEditsForSession { .. } => "allow_edits_session",
-        PermissionResponse::Deny { .. } => "deny",
-        PermissionResponse::Text(_) => "text",
-    }
 }
 
 async fn finish(directory: &Path, state: &mut JobState, status: &str) -> Result<()> {
@@ -1534,7 +1456,21 @@ fn apply_permission_snapshot(
 /// Records the first refresh failure, stops the script and writes the cause to
 /// the job log. Cancellation is requested before the log line, so a reader that
 /// sees the line knows no further internal call will be admitted.
-fn record_policy_failure(
+pub(super) fn refresh_approval_policy(
+    directory: &Path,
+    permissions: &crate::permissions::PermissionManager,
+) -> Result<()> {
+    let spec = load_spec(directory)?;
+    let root = Path::new(&spec.data_dir);
+    let db = crate::runtime::RuntimePaths::new(root.to_path_buf())?.open_database()?;
+    apply_permission_snapshot(
+        permissions,
+        &spec.session,
+        read_permission_snapshot(root, Path::new(&spec.workspace), &db, &spec.session)?,
+    )
+}
+
+pub(super) fn record_policy_failure(
     slot: &std::sync::Mutex<Option<String>>,
     cancellation: &Cancellation,
     log_path: &Path,

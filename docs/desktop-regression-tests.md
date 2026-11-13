@@ -177,3 +177,7 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 - `features/trajectory/`（工具调用分组）：D6
 - `crates/core` 的技能发现、模型技能列表和 `Skill` 工具：D4，以及 `cli-regression-tests.md` 的 N 节
 - 其他范围：至少跑 D1
+
+### ToolScript 内层审批来源
+
+复用 `ToolPermissionPrompt` 和已有权限响应路由。模型经 ToolSearch 加载 ToolScript 后，ask 模式中的内层 Write 应展示实际输入以及 ToolScript 父调用 ID，允许/拒绝与普通工具一致；取消或 TaskStop 后提示消失，旧回复不能执行工具。`ToolPermissionPrompt.test.tsx` 覆盖来源文字与既有按钮行为；真实 Desktop/WebView 和私有 worker 的全链路需另行运行，不以 SDK 测试代替。

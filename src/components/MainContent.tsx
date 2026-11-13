@@ -763,7 +763,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   setPermissionApproval(current => current?.id === data.request_id ? null : current);
                 }
                 if (event === 'tool_permission' && data) {
-                  setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || convId, allow_session: data.allow_session });
+                  setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || convId, allow_session: data.allow_session, toolscript: data.toolscript });
                 }
                 if (event === 'message_start' && data?.usage) {
                   setTokenUsage((prev: any) => {
