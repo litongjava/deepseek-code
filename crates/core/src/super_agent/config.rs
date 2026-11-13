@@ -112,6 +112,30 @@ pub struct DeliveryConfig {
     pub enabled: bool,
 }
 
+/// A bounded recovery policy. The host schedules watch_once; no loop lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WatcherConfig {
+    pub default_progress_timeout_seconds: u64,
+    pub max_recovery_attempts: u32,
+    pub retry_backoff_seconds: u64,
+    pub max_backoff_seconds: u64,
+    /// Wall-clock budget from the first interruption, across host restarts.
+    pub recovery_budget_seconds: u64,
+}
+
+impl Default for WatcherConfig {
+    fn default() -> Self {
+        Self {
+            default_progress_timeout_seconds: 300,
+            max_recovery_attempts: 3,
+            retry_backoff_seconds: 10,
+            max_backoff_seconds: 300,
+            recovery_budget_seconds: 3600,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SuperAgentConfig {
@@ -121,6 +145,7 @@ pub struct SuperAgentConfig {
     pub review: ReviewConfig,
     pub scheduler: SchedulerConfig,
     pub delivery: DeliveryConfig,
+    pub watcher: WatcherConfig,
 }
 
 impl SuperAgentConfig {
@@ -168,6 +193,14 @@ impl SuperAgentConfig {
         anyhow::ensure!(
             self.scheduler.max_spawned_tasks_per_task <= 20,
             "superAgent scheduler.maxSpawnedTasksPerTask must be at most 20"
+        );
+        anyhow::ensure!(
+            (1..=86_400).contains(&self.watcher.default_progress_timeout_seconds)
+                && self.watcher.max_recovery_attempts <= 20
+                && self.watcher.retry_backoff_seconds <= self.watcher.max_backoff_seconds
+                && self.watcher.max_backoff_seconds <= 86_400
+                && (1..=604_800).contains(&self.watcher.recovery_budget_seconds),
+            "Invalid superAgent watcher timeout, attempts, backoff or recovery budget"
         );
         Ok(())
     }

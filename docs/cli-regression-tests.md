@@ -998,3 +998,13 @@ ToolScript 保持按需加载。Router 可以加载它来组合允许的工具�
 5. `cargo test --locked -p deepseek-code-cli --test standalone a_queued_request_compacts_before_the_next_prompt_with_the_keep_text`：真实 CLI + 本地 mock，排队的请求在下一提示前发送摘要请求并带上 `keep` 文本，之后的历史从新边界开始且请求行已被删除。
 6. `cargo test --locked -p deepseek-code-cli --test standalone manual_compact_clears_a_queued_request`：手动 `/compact` 成功后清除排队请求。
 7. 真实终端：在历史超过窗口 30% 的会话里，让模型完成任务并请求压缩；下一条提示时确认显示 `Compacting the conversation as the model requested…`，且摘要保留 `keep` 中列出的待办、决定和路径。工具默认按需加载，先经 ToolSearch 加载 `CompactContext`；SDK、`--print` 和子代理中不应出现该工具。回合实际在会话 Worker 里执行（`input` 为 `None`），有主判定必须同时接受 Worker 控制目录；远端/SDK 宿主不得据此启用。
+
+## Super Agent Watcher 核心与安全续接（阶段 6 第一部分）
+
+改动 `super_agent/watcher.rs`、恢复配置、Launcher 续接或 CLI `super_agent_tick` 时：
+
+- `cargo test --locked -j 2 -p deepseek-code-core --lib super_agent::`：包括工具超时保护、指数退避上限和恢复配置边界；继续运行现有状态机、交付身份和清理门禁断言。
+- `cargo test --locked -j 2 -p deepseek-code-cli --test super_agent_watcher`：Linux 上真实 detached `dcl` 子进程、本地 SSE mock、临时 Git。覆盖已提交后 kill 只续接一次且 HEAD/提交数不变、审批等待及暂停不恢复、双宿主在 reservation 屏障实际竞争、重试上限与一次 Router 通知、存活旧实例先 TaskStop 后续接、持久退避/时间预算、spawn 后宿主中断重开接管、Reviewer 同会话同工作目录续接、外部 SessionClaim 占用时拒绝新实例。测试仅按自身 Job 的 PID 与进程启动标识发信号。
+- 回归 `cargo test --locked -j 2 -p deepseek-code-cli --test super_agent_child --test super_agent_router --test super_agent_review_loop --test agent_fork`；`cargo check --locked -j 2 -p deepseek-code-core -p deepseek-code-cli --all-targets`。
+
+Watcher 只执行一次判定，调度由宿主负责；CLI 现有 tick 调用它，无新增常驻循环或界面。缺失/无法确认 Job 身份或副作用结果时保守 BLOCKED；审批/用户/依赖等待不自动续接。未知工具起始时间使用持久首次观察时间计算超时，没有 timeout 的活动工具持续受保护。恢复预算为自首次中断起的墙钟时间，跨宿主重启保留；不声称实现 token/费用预算。非 Git 缺少事后 hash 基线、未完成副作用工具、Git 合并/变基中间态，以及未由现有 typed delivery 路径证实完成的交付，均要求人工核对，不盲目重放。Windows/macOS 的真实 kill/双宿主场景需对应平台另验；上述 Linux 集成不替代 Desktop/Watcher 常驻调度验证。

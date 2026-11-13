@@ -97,7 +97,7 @@ impl Orchestrator {
         }
     }
 
-    fn launcher(&self) -> Launcher {
+    pub(crate) fn launcher(&self) -> Launcher {
         Launcher {
             context: self.context.clone(),
             config: self.config.clone(),
@@ -143,7 +143,43 @@ impl Orchestrator {
 
     /// One deterministic pass. Safe to call repeatedly; it only advances work
     /// that a durable event or a missing step allows.
+    /// CLI/other Router hosts opt into one supervision pass before advancement.
+    /// The host owns scheduling; this method never starts a resident loop.
+    pub async fn tick_watched(&self, router_session: &str) -> Result<TickReport> {
+        let Some(_lock) = crate::super_agent::watcher::lock_router(self, router_session)? else {
+            return Ok(TickReport::default());
+        };
+        // Adopt a previously spawned recovery before applying its pending report:
+        // ImplementationSubmitted legitimately requires RUNNING, not RECOVERING.
+        let reconciled =
+            crate::super_agent::watcher::watch_locked(self, router_session, true).await?;
+        let processed = TaskStore::from_context(&self.context)
+            .process_pending(router_session, &self.policy())
+            .map_err(store_error)?
+            .len();
+        let watched =
+            crate::super_agent::watcher::watch_locked(self, router_session, false).await?;
+        let mut deferred = watched.deferred_tasks;
+        deferred.extend(reconciled.deferred_tasks);
+        let mut report = self.tick_excluding(router_session, &deferred).await?;
+        report.processed += processed;
+        report.launched.extend(reconciled.resumed);
+        report.launched.extend(watched.resumed);
+        report.blocked.extend(reconciled.blocked);
+        report.blocked.extend(watched.blocked);
+        Ok(report)
+    }
+
     pub async fn tick(&self, router_session: &str) -> Result<TickReport> {
+        self.tick_excluding(router_session, &Default::default())
+            .await
+    }
+
+    async fn tick_excluding(
+        &self,
+        router_session: &str,
+        deferred: &std::collections::BTreeSet<String>,
+    ) -> Result<TickReport> {
         let store = TaskStore::from_context(&self.context);
         let policy = self.policy();
         let mut report = TickReport::default();
@@ -156,6 +192,9 @@ impl Orchestrator {
             .list_tasks(router_session, None)
             .map_err(store_error)?;
         for task in tasks {
+            if deferred.contains(&task.task_id) {
+                continue;
+            }
             if task.status == Status::Completed {
                 if let Err(error) = crate::super_agent::cleanup::cleanup_completed(
                     &self.launcher(),

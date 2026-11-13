@@ -28,7 +28,7 @@ pub async fn tick(session: &Session) -> Result<()> {
         session.permission_mode().to_owned(),
         None,
     );
-    let report = orchestrator.tick(&session.id).await?;
+    let report = orchestrator.tick_watched(&session.id).await?;
     if report.is_empty() {
         return Ok(());
     }
