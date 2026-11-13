@@ -492,6 +492,9 @@ impl Session {
         } else {
             id
         };
+        store
+            .db
+            .set_request_recording_policy(&id, cli.record_requests, cli.full_access);
         let internal_worker = deepseek_code_core::services::background_sessions::worker_directory(
             &paths.data_dir,
             &id,
@@ -811,6 +814,11 @@ impl Session {
         crate::session_commands::copy_settings(&self.store.db, &self.id, &id)?;
         let lifecycle_owned = self.lifecycle_owned;
         self.end_hooks("clear").await;
+        if let Some(policy) = self.store.db.request_recording_policy(&self.id) {
+            self.store
+                .db
+                .set_request_recording_policy(&id, policy.cli, policy.full_access);
+        }
         self.id = id.clone();
         self.waiting_for_continue
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -847,6 +855,11 @@ impl Session {
         self.model = model;
         self.provider_id = provider_id;
         self.auto_route = false;
+        if let Some(policy) = self.store.db.request_recording_policy(&self.id) {
+            self.store
+                .db
+                .set_request_recording_policy(id, policy.cli, policy.full_access);
+        }
         self.id = id.to_owned();
         self.waiting_for_continue
             .store(true, std::sync::atomic::Ordering::Relaxed);

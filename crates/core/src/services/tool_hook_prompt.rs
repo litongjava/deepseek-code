@@ -164,6 +164,7 @@ async fn evaluate(
     config: &PromptHook,
     current: Option<&ResolvedProvider>,
     input: &Value,
+    options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<Value> {
     let provider = select_provider(
         config,
@@ -190,11 +191,7 @@ async fn evaluate(
     ) {
         (true, _) | (_, ApiFormat::OpenAI) => {
             let response = OpenAIClient::new()
-                .with_request_options(
-                    crate::native_engine::request_options::RequestOptions::for_session(
-                        input["session_id"].as_str(),
-                    ),
-                )
+                .with_request_options(options.clone())
                 .without_retries()
                 .with_response_schema(Some(schema))
                 .send_message(
@@ -229,11 +226,7 @@ async fn evaluate(
         }
         (false, ApiFormat::Anthropic) => {
             let response = AnthropicClient::new()
-                .with_request_options(
-                    crate::native_engine::request_options::RequestOptions::for_session(
-                        input["session_id"].as_str(),
-                    ),
-                )
+                .with_request_options(options.clone())
                 .without_retries()
                 .with_response_schema(Some(schema))
                 .send_message(
@@ -282,6 +275,7 @@ pub(super) async fn execute_prompt(
     config: &PromptHook,
     provider: Option<&ResolvedProvider>,
     input: &Value,
+    options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<(i32, String, String)> {
     let _progress = super::super::hook_progress::Running::start(
         input["session_id"].as_str().unwrap_or(""),
@@ -289,7 +283,7 @@ pub(super) async fn execute_prompt(
     );
     match tokio::time::timeout(
         Duration::from_secs(hook.timeout),
-        evaluate(config, provider, input),
+        evaluate(config, provider, input, options),
     )
     .await
     {

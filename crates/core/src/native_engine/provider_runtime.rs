@@ -429,8 +429,22 @@ pub async fn stream_with_options(
         if entry["id"] == "cloudflare-ai-gateway" {
             request = request.header("cf-aig-authorization", format!("Bearer {key}"));
         }
-        if let Some(capture) = context_capture { capture.record(api, &body, provider.model.context_window, max_tokens).await; }
-        checked_response(request.send().await?).await
+        if let Some(capture) = context_capture {
+            capture
+                .record(api, &body, provider.model.context_window, max_tokens)
+                .await;
+        }
+        checked_response(
+            super::request_recording::send(
+                request,
+                &options.clone().observed(context_capture),
+                provider,
+                api,
+                true,
+            )
+            .await?,
+        )
+        .await
     })
     .await?;
     let api = api.to_string();
@@ -460,6 +474,23 @@ pub async fn stream_with_options(
         if let Some(chunk)=state.complete(&api) {yield format!("data: {}\n\n",chunk);}
         yield "data: [DONE]\n\n".to_string();
     }))
+}
+
+/// Observe binary completion without exposing the decoded/normalized stream to
+/// the recorder. Parsing errors remain the original consumer's responsibility.
+pub(crate) fn recorded_binary_completion(pending: &mut Vec<u8>) -> bool {
+    let mut completed = false;
+    loop {
+        match bedrock::next(pending) {
+            Ok(Some(event)) => completed |= event["type"] == "messageStop",
+            Ok(None) => break,
+            Err(_) => {
+                pending.clear();
+                break;
+            }
+        }
+    }
+    completed
 }
 
 fn endpoint(base: &str, suffix: &str) -> String {

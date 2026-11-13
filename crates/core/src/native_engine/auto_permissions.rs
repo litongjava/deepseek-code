@@ -84,7 +84,7 @@ pub struct Classification {
 pub struct AutoClassifier {
     config: AutoConfig,
     provider: ResolvedProvider,
-    session_id: Option<String>,
+    request_options: super::request_options::RequestOptions,
 }
 
 /// User-authored text and assistant tool uses only. Never include assistant
@@ -263,8 +263,13 @@ pub async fn authorize(
             .cloned(),
     );
     let expected_provider = serde_json::to_value((&provider.provider, &provider.model)).ok();
-    let classifier =
+    let mut classifier =
         AutoClassifier::new(config.clone(), provider).with_session(&tool.conversation_id);
+    classifier.request_options = super::request_options::RequestOptions::from_db(
+        &context.db,
+        Some(&tool.conversation_id),
+        "classifier",
+    );
     let outcome = classifier
         .classify_started(
             &authorized_messages,
@@ -362,11 +367,12 @@ impl AutoClassifier {
         Self {
             config,
             provider,
-            session_id: None,
+            request_options: Default::default(),
         }
     }
     pub fn with_session(mut self, session: &str) -> Self {
-        self.session_id = Some(session.to_owned());
+        self.request_options = super::request_options::RequestOptions::for_session(Some(session))
+            .with_purpose("classifier");
         self
     }
     pub fn provider_id(&self) -> &str {
@@ -438,9 +444,7 @@ impl AutoClassifier {
         match self.provider.provider.api_format {
             ApiFormat::OpenAI => {
                 let response = OpenAIClient::new()
-                    .with_request_options(super::request_options::RequestOptions::for_session(
-                        self.session_id.as_deref(),
-                    ))
+                    .with_request_options(self.request_options.clone())
                     .without_retries()
                     .with_response_schema(Some(schema()))
                     .send_message(
@@ -484,9 +488,7 @@ impl AutoClassifier {
             }
             ApiFormat::Anthropic => {
                 let response = AnthropicClient::new()
-                    .with_request_options(super::request_options::RequestOptions::for_session(
-                        self.session_id.as_deref(),
-                    ))
+                    .with_request_options(self.request_options.clone())
                     .without_retries()
                     .with_response_schema(Some(schema()))
                     .send_message(

@@ -496,10 +496,28 @@ pub async fn compact(
         "Summary focus requested by the user:\n{}\n\nConversation JSON:\n{}",
         instructions, prepared.transcript
     );
+    let mut options =
+        crate::native_engine::request_options::RequestOptions::from_db(db, Some(id), "compaction");
+    let mut record = crate::native_engine::request_recording::CompactionRecord::start(
+        &mut options,
+        "manual",
+        &prepared.transcript,
+    );
     let summary = engine
-        .generate_compaction(id, provider_id, model, PROMPT, &input, instructions)
+        .generate_compaction_recorded(
+            id,
+            provider_id,
+            model,
+            PROMPT,
+            &input,
+            instructions,
+            options,
+        )
         .await?;
     let mut result = commit_with_context(db, prepared, &summary, None)?;
+    if let Some(record) = &mut record {
+        record.finish(&summary, &result.message_id);
+    }
     result.duration_ms = started.elapsed().as_millis() as u64;
     Ok(result)
 }
@@ -606,10 +624,29 @@ pub async fn summarize_part(
 ) -> Result<(String, usize)> {
     let prepared = prepare_part(db, id, message_id, part)?;
     let input = format!("Conversation JSON:\n{}", prepared.transcript);
+    let mut options =
+        crate::native_engine::request_options::RequestOptions::from_db(db, Some(id), "compaction");
+    let mut record = crate::native_engine::request_recording::CompactionRecord::start(
+        &mut options,
+        "manual",
+        &prepared.transcript,
+    );
     let summary = engine
-        .generate_summary(None, provider_id, model, PROMPT, &input)
+        .generate_summary_recorded(Some(id), provider_id, model, PROMPT, &input, options)
         .await?;
-    commit_part(db, id, message_id, part, prepared, &summary)
+    let result = commit_part(db, id, message_id, part, prepared, &summary)?;
+    if let Some(record) = &mut record {
+        record.finish_partial(
+            &summary,
+            &result.0,
+            message_id,
+            match part {
+                Part::UpTo => "up_to",
+                Part::From => "from",
+            },
+        );
+    }
+    Ok(result)
 }
 
 /// Run compact lifecycle hooks in the trusted workspace. The boundary and fresh
@@ -662,9 +699,17 @@ pub async fn compact_with_hooks_tracked(
         instructions,
         trigger,
         tracker,
-        |input, focus| async move {
+        |input, focus, options| async move {
             engine
-                .generate_compaction(id, provider_id, model, PROMPT, &input, &focus)
+                .generate_compaction_recorded(
+                    id,
+                    provider_id,
+                    model,
+                    PROMPT,
+                    &input,
+                    &focus,
+                    options,
+                )
                 .await
         },
     )
@@ -682,7 +727,7 @@ async fn compact_hooks<F, Fut>(
     summarize: F,
 ) -> Result<CompactionResult>
 where
-    F: FnOnce(String, String) -> Fut,
+    F: FnOnce(String, String, crate::native_engine::request_options::RequestOptions) -> Fut,
     Fut: std::future::Future<Output = Result<GeneratedSummary>>,
 {
     use super::tool_hooks::{HookEvent, HookRunner};
@@ -720,7 +765,17 @@ where
         "Summary focus requested by the user:\n{}\n\nConversation JSON:\n{}",
         focus, prepared.transcript
     );
-    let summary = summarize(input, focus).await?;
+    let mut options = crate::native_engine::request_options::RequestOptions::from_db(
+        &context.db,
+        Some(id),
+        "compaction",
+    );
+    let mut record = crate::native_engine::request_recording::CompactionRecord::start(
+        &mut options,
+        trigger,
+        &prepared.transcript,
+    );
+    let summary = summarize(input, focus, options).await?;
     let (fresh_context, start_warnings) =
         match super::session_hooks::collect(context, workspace, id, "compact", model).await {
             Ok(result) => result,
@@ -731,6 +786,9 @@ where
         };
     warnings.extend(start_warnings);
     let mut result = commit_with_context(&context.db, prepared, &summary, Some(&fresh_context))?;
+    if let Some(record) = &mut record {
+        record.finish(&summary, &result.message_id);
+    }
     // Export only after the boundary is saved. A failed export never rolls the
     // compaction back or triggers another generation.
     match export_summary(
@@ -855,7 +913,7 @@ mod hook_tests {
             "",
             "manual",
             None,
-            |_, _| async { Ok("summary".into()) },
+            |_, _, _| async { Ok("summary".into()) },
         )
         .await
         .unwrap();
@@ -879,7 +937,7 @@ mod hook_tests {
             "",
             "manual",
             Some(&tracker),
-            |_, _| async { Ok("summary".into()) },
+            |_, _, _| async { Ok("summary".into()) },
         );
         tokio::pin!(future);
         let outcome = tokio::select! {
@@ -929,7 +987,7 @@ mod hook_tests {
                 "focus",
                 trigger,
                 None,
-                |input, focus| async move {
+                |input, focus, _| async move {
                     assert!(input.contains("focus\n\nkeep exact paths"));
                     assert_eq!(focus, "focus\n\nkeep exact paths");
                     Ok("summary".into())
@@ -978,7 +1036,7 @@ mod hook_tests {
                 "",
                 "auto",
                 None,
-                |_, _| async {
+                |_, _, _| async {
                     if failure == "generation" {
                         anyhow::bail!("generation failed");
                     }
@@ -1026,7 +1084,7 @@ mod hook_tests {
                 "",
                 "manual",
                 None,
-                |_, _| async {
+                |_, _, _| async {
                     if stage == "summary" {
                         std::fs::write(dir.path().join("started"), "yes").unwrap();
                         std::future::pending::<()>().await;
@@ -1077,7 +1135,7 @@ mod hook_tests {
             "",
             "manual",
             Some(&tracker),
-            |_, _| async { Ok("summary".into()) },
+            |_, _, _| async { Ok("summary".into()) },
         )
         .await
         .unwrap();
@@ -1103,7 +1161,7 @@ mod hook_tests {
             "",
             "manual",
             Some(&tracker),
-            |_, _| async { anyhow::bail!("generation failed") },
+            |_, _, _| async { anyhow::bail!("generation failed") },
         )
         .await;
         assert!(result.is_err());

@@ -318,6 +318,16 @@ async fn run(cli: &Cli) -> Result<()> {
     if let Some(Commands::Tasks { action }) = &cli.command {
         return task_commands::run(&paths, action);
     }
+    if let Some(Commands::Requests { session_id }) = &cli.command {
+        print!(
+            "{}",
+            deepseek_code_core::native_engine::request_recording::list(
+                &paths.data_dir,
+                session_id
+            )?
+        );
+        return Ok(());
+    }
     let _resource_sampler = resource_sampling::start(&paths.data_dir);
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
@@ -351,6 +361,7 @@ async fn run(cli: &Cli) -> Result<()> {
     }
     let mut skill_prompt = None;
     match &cli.command {
+        Some(Commands::Requests { .. }) => unreachable!("handled before startup"),
         Some(Commands::Auth { action }) => return account_commands::run(&paths, action).await,
         Some(Commands::Plugin { action }) => return plugins::run(&paths, action).await,
         Some(Commands::Update { url }) => {

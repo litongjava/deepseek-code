@@ -51,6 +51,7 @@ pub(crate) async fn generate(
     id: &str,
     provider: &ResolvedProvider,
     instructions: &str,
+    options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<GeneratedSummary> {
     let history =
         crate::runtime::SessionStore::new(db.clone()).model_history(id, &ApiFormat::OpenAI)?;
@@ -59,12 +60,35 @@ pub(crate) async fn generate(
         .into_iter()
         .map(serde_json::from_value::<OpenAIMessage>)
         .collect::<serde_json::Result<Vec<_>>>()?;
-    generate_messages(provider, Some(id), messages, instructions).await
+    generate_messages_with_options(
+        provider,
+        options.compaction("native"),
+        messages,
+        instructions,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn generate_messages(
     provider: &ResolvedProvider,
     session: Option<&str>,
+    messages: Vec<OpenAIMessage>,
+    instructions: &str,
+) -> Result<GeneratedSummary> {
+    generate_messages_with_options(
+        provider,
+        crate::native_engine::request_options::RequestOptions::for_session(session)
+            .compaction("native"),
+        messages,
+        instructions,
+    )
+    .await
+}
+
+pub(crate) async fn generate_messages_with_options(
+    provider: &ResolvedProvider,
+    options: crate::native_engine::request_options::RequestOptions,
     messages: Vec<OpenAIMessage>,
     instructions: &str,
 ) -> Result<GeneratedSummary> {
@@ -89,22 +113,21 @@ pub(crate) async fn generate_messages(
         .build()?;
     let mut request = client
         .post(url)
-        .headers(
-            crate::native_engine::request_options::RequestOptions {
-                session_id: session.map(str::to_owned),
-                compact: true,
-            }
-            .headers(provider)?,
-        )
+        .headers(options.headers(provider)?)
         .header("x-request-id", uuid::Uuid::new_v4().to_string())
         .json(&body);
     if !provider.provider.api_key.is_empty() {
         request = request.bearer_auth(&provider.provider.api_key);
     }
-    let mut response = request
-        .send()
-        .await
-        .context("Native compaction gateway request failed")?;
+    let mut response = crate::native_engine::request_recording::send(
+        request,
+        &options,
+        provider,
+        "openai-responses-compact",
+        false,
+    )
+    .await
+    .context("Native compaction gateway request failed")?;
     ensure!(response.status().is_success(), "Native compaction gateway returned HTTP {}; verify /responses/compact support and input context size", response.status().as_u16());
     const LIMIT: usize = 32 * 1024 * 1024;
     let mut bytes = Vec::new();

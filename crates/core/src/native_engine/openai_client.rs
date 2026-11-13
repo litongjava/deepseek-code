@@ -283,19 +283,38 @@ impl OpenAIClient {
                 crate::structured_output::append_openai_instruction(&mut body, schema);
             }
         }
-        if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
+        if let Some(messages) = body["messages"].as_array_mut() {
+            for message in messages {
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("provider_content");
+                }
+            }
+        }
         let harness_headers = self.request_options.headers(provider)?;
-        let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
+        let identity = super::request_identity::RequestIdentity::new(
+            None,
+            super::request_identity::is_opencode(provider),
+        );
         let request = || async {
-            let response = self.client
+            let request = self
+                .client
                 .post(&url)
                 .headers(identity.headers())
                 .headers(harness_headers.clone())
-                .header("Authorization", format!("Bearer {}", provider.provider.api_key))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", provider.provider.api_key),
+                )
                 .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+                .json(&body);
+            let response = super::request_recording::send(
+                request,
+                &self.request_options,
+                provider,
+                "openai-completions",
+                false,
+            )
+            .await?;
 
             if !self.retry_requests {
                 return super::auto_permissions::bounded_response(response).await;
@@ -435,7 +454,14 @@ impl OpenAIClient {
             .header("Authorization", format!("Bearer {}", provider.provider.api_key))
             .header("content-type", "application/json")
             .json(&body);
-        super::stream_retry::response(request, identity).await
+        super::stream_retry::response(
+            request,
+            identity,
+            self.request_options.clone().observed(context_capture),
+            provider.clone(),
+            "openai-completions",
+        )
+        .await
     }
 }
 

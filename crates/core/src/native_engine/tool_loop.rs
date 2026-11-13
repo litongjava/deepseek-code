@@ -690,7 +690,7 @@ async fn web_fetch_with_prompt(
     input: Value,
     cwd: &str,
     provider: &ResolvedProvider,
-    session: Option<&str>,
+    options: super::request_options::RequestOptions,
 ) -> Result<Value> {
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
     let page = crate::tools::execute_tool_async(
@@ -707,11 +707,11 @@ async fn web_fetch_with_prompt(
         page["content"].as_str().unwrap_or_default(),
         prompt
     );
-    let answer = crate::native_engine::generation::generate_for_session(
+    let answer = crate::native_engine::generation::generate_with_options(
         provider.clone(),
         system,
         &request,
-        session,
+        options.with_purpose("web_fetch"),
     )
     .await?;
     Ok(
@@ -1235,7 +1235,7 @@ async fn execute_builtin_tool(
     event_tx: &mpsc::Sender<EngineEvent>,
     search_config_path: Option<&std::path::Path>,
     skill_shell_active: bool,
-    session: Option<&str>,
+    options: super::request_options::RequestOptions,
 ) -> Result<Value> {
     if name == "Bash" && skill_shell_active {
         let input = crate::skills::invocation::shell_input(
@@ -1284,7 +1284,7 @@ async fn execute_builtin_tool(
             .as_str()
             .is_some_and(|prompt| !prompt.trim().is_empty())
     {
-        return Box::pin(web_fetch_with_prompt(input, cwd, provider, session)).await;
+        return Box::pin(web_fetch_with_prompt(input, cwd, provider, options.clone())).await;
     }
     if name == "ImageGenerate" {
         return crate::tools::image_generation::generate(input, cwd, provider).await;
@@ -1353,7 +1353,9 @@ async fn execute_builtin_tool(
     let _ = event_tx
         .send(EngineEvent::RequestSnapshot(trace.started()))
         .await;
-    let result = crate::tools::provider_search::search_for_session(input, provider, session).await;
+    let mut options = options.clone().with_purpose("web_search");
+    options.model_request_id = trace.started()["id"].as_str().map(str::to_owned);
+    let result = crate::tools::provider_search::search_with_options(input, provider, options).await;
     let snapshot = match &result {
         Ok(value) => {
             trace.observe_openai(&json!({"usage": value["usage"], "model": value["model"], "id": value["response_id"]}));
@@ -3066,7 +3068,7 @@ impl ToolLoopExecutor {
                         &self.event_tx,
                         self.search_config_path.as_deref(),
                         self.skill_shell_active,
-                        self.conv_id.as_deref(),
+                        self.openai_client.request_options.clone(),
                     ),
                 ),
             ),
@@ -3910,7 +3912,26 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(|p| p.parent())
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
-        let options = super::request_options::RequestOptions::for_session(self.conv_id.as_deref());
+        let mut options = self
+            .goal_db
+            .as_ref()
+            .map(|db| {
+                super::request_options::RequestOptions::from_db(
+                    db,
+                    self.conv_id.as_deref(),
+                    if self.delegation_depth > 0 {
+                        "subagent"
+                    } else {
+                        "main"
+                    },
+                )
+            })
+            .unwrap_or_else(|| {
+                super::request_options::RequestOptions::for_session(self.conv_id.as_deref())
+            });
+        if let Some(recording) = &mut options.recording {
+            recording.parent_session_id = self.request_parent_session();
+        }
         self.openai_client.request_options = options.clone();
         self.anthropic_client.request_options = options;
         let parent_session = self.request_parent_session();
@@ -6193,13 +6214,27 @@ impl ToolLoopExecutor {
                         model_context_limit
                     );
                     if crate::services::compaction::native::supports(&self.provider) {
-                        let compacted = crate::services::compaction::native::generate_messages(
-                            &self.provider,
-                            self.conv_id.as_deref(),
-                            conversation_messages.clone(),
-                            self.system_prompt.as_deref().unwrap_or(""),
-                        )
-                        .await?;
+                        let mut options = self
+                            .openai_client
+                            .request_options
+                            .clone()
+                            .compaction("native");
+                        let mut record = super::request_recording::CompactionRecord::start(
+                            &mut options,
+                            "auto",
+                            &serde_json::to_string(&conv_values)?,
+                        );
+                        let compacted =
+                            crate::services::compaction::native::generate_messages_with_options(
+                                &self.provider,
+                                options,
+                                conversation_messages.clone(),
+                                self.system_prompt.as_deref().unwrap_or(""),
+                            )
+                            .await?;
+                        if let Some(record) = &mut record {
+                            record.finish(&compacted, "in-flight-native-window");
+                        }
                         // Only the in-flight context changes here; all original messages and tool rows remain durable.
                         conversation_messages = vec![OpenAIMessage {
                             role: "user".into(),

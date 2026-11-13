@@ -3,6 +3,7 @@ use clap::CommandFactory;
 pub fn show(topic: Option<&str>, commands: &[String]) -> Result<()> {
     if let Some(topic) = topic {
         let content=match topic {
+            "requests"=>"dcl requests SESSION lists exact model HTTP records under DATA_DIR/request-records/SESSION. Recording is off by default. --record-requests overrides DEEPSEEK_CODE_RECORD_REQUESTS (1/true or 0/false), then settings.json requestRecording.enabled; otherwise --full-access/--yolo enables recording. Explicit env/config false disables that automatic enablement. Bodies and responses are unredacted; authentication headers are omitted. Session records expire after 14 days of inactivity.",
             "memory"=>"memory import FILE --preview previews an archive; import FILE backs up before writing. memory dream preserves source memories. Configure memory dream-config and run services start auto-dream for scheduled consolidation.",
             "plugins"|"plugin"=>"plugin install SOURCE validates a JSON bundle without running code. plugin search QUERY --registry URL reads an operator catalog. plugin run ID COMMAND --input '{}' --yes executes Node.js/Python with your OS permissions. plugin disable ID also revokes running commands. PluginRun model calls use normal tool permissions.",
             "mcp"=>"mcp import-legacy SETTINGS_JSON --preview checks old MCP definitions; omit --preview to back up and atomically import without launching servers. Conflicting names fail the whole import. Relative working directories must be made absolute first. mcp hosts lists existing live owners. mcp restart NAME --host ID sends a request to that owner and waits for acknowledgement. No Desktop or Bridge is required. Without a running owner restart fails; multiple owners require --host.",
@@ -17,7 +18,7 @@ pub fn show(topic: Option<&str>, commands: &[String]) -> Result<()> {
             "remote"|"ssh"=>"remote REQUEST_JSON performs one HTTP request; non-GET/HEAD methods require --yes. ssh CONFIG_JSON OPERATION_JSON uses OpenSSH keys/agent and strict known-host verification; execution/transfers require --yes. Ctrl+C cancels the request.",
             "cron"=>"cron create SCHEDULE PROMPT stores a UTC recurring text-generation task. cron host --provider ID --model ID runs the foreground host; cron stop stops the actual owner across processes. Creating a schedule alone does not run it. Scheduled generations cannot execute tools. Use cron list/get to read durable results.",
             "update"=>"update --url URL checks a publisher-provided JSON manifest using semantic versions. HTTP errors are reported as errors. stress-test -c 4 -i 10 measures real local HTTP response-header latency; it is not a model benchmark.",
-            _=>anyhow::bail!("Unknown topic. Available: memory, plugins, mcp, voice, team-sync, magic-docs, agents, services, learning, performance, project, remote, ssh, cron, update"),
+            _=>anyhow::bail!("Unknown topic. Available: requests, memory, plugins, mcp, voice, team-sync, magic-docs, agents, services, learning, performance, project, remote, ssh, cron, update"),
         };
         println!("{content}");
         return Ok(());

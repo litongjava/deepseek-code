@@ -107,6 +107,11 @@ async fn scenario(api: &'static str) {
     let root = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
+    std::fs::write(
+        paths.data_dir.join("settings.json"),
+        r#"{"requestRecording":{"enabled":true}}"#,
+    )
+    .unwrap();
     let id = store
         .create(root.path(), "fixture-model", "fixture")
         .unwrap();
@@ -173,6 +178,58 @@ async fn scenario(api: &'static str) {
         .unwrap()
         .iter()
         .any(|message| message["content"].as_str() == Some("HEADER_NORMAL_REPLY")));
+    let dir = paths.data_dir.join("request-records").join(&id);
+    let mut records: Vec<Value> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".meta.json"))
+        .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
+        .collect();
+    records.sort_by_key(|r| r["sequence"].as_u64().unwrap());
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[2]["purpose"], "compaction");
+    assert!(records[2]["compaction_stage"].is_string());
+    for record in records.iter().filter(|r| r["purpose"] == "main") {
+        let trace = record["model_request_id"]
+            .as_str()
+            .expect("main request trace ID");
+        let found: i64 = store
+            .db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM model_requests WHERE id=?1",
+                    [trace],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(found, 1);
+    }
+    let compact: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("compaction-0001.json")).unwrap()).unwrap();
+    assert_eq!(compact["trigger"], "auto");
+    assert_eq!(compact["completed"], true);
+    assert_eq!(compact["summary"], "HEADER_COMPACT_SUMMARY");
+    assert_eq!(
+        compact["request_sequences"],
+        json!([records[2]["sequence"]])
+    );
+    assert!(compact["before_estimated_tokens"].as_u64().unwrap() > 0);
+    assert!(compact["before_messages"].is_array());
+    let boundary = compact["after_boundary"].as_str().unwrap();
+    let found: i64 = store
+        .db
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM messages WHERE id=?1 AND is_compact_boundary=1",
+                [boundary],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found, 1);
     let boundaries: i64 = store
         .db
         .with_conn(|conn| {

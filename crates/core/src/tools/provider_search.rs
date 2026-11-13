@@ -358,6 +358,20 @@ pub async fn search_for_session(
     provider: &ResolvedProvider,
     session: Option<&str>,
 ) -> Result<Value> {
+    search_with_options(
+        input,
+        provider,
+        crate::native_engine::request_options::RequestOptions::for_session(session)
+            .with_purpose("web_search"),
+    )
+    .await
+}
+
+pub(crate) async fn search_with_options(
+    input: Value,
+    provider: &ResolvedProvider,
+    options: crate::native_engine::request_options::RequestOptions,
+) -> Result<Value> {
     let query = input["query"]
         .as_str()
         .map(str::trim)
@@ -376,9 +390,13 @@ pub async fn search_for_session(
         .map_err(|_| anyhow!("Could not initialize the provider search HTTP client."))?;
     let mut request = client
         .post(url)
-        .headers(
-            crate::native_engine::request_options::RequestOptions::for_session(session)
-                .headers(provider)?,
+        .headers(options.headers(provider)?)
+        .header(
+            "x-request-id",
+            options
+                .model_request_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         )
         .header("accept", "application/json")
         .bearer_auth(&api_key)
@@ -389,7 +407,7 @@ pub async fn search_for_session(
             request = request.header("x-api-key", &api_key);
         }
     }
-    let mut response = request.send().await.map_err(|e| if e.is_timeout() {
+    let mut response = crate::native_engine::request_recording::send(request, &options, provider, selected.api_format(), false).await.map_err(|e| if e.is_timeout() {
         anyhow!("Provider WebSearch timed out after 45 seconds.")
     } else { anyhow!("Could not reach the configured provider's native search API. Check its endpoint and connection.") })?;
     if !response.status().is_success() {

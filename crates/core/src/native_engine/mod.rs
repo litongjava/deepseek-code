@@ -32,3 +32,5 @@ pub mod permission_response;
 pub mod runtime_agents;
 pub mod child_session;
 pub(crate) mod mcp_output;
+
+pub mod request_recording;

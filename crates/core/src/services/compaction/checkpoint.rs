@@ -27,6 +27,7 @@ struct Saved {
 pub(crate) struct Checkpoint<'a> {
     db: &'a DbManager,
     pub session: &'a str,
+    pub options: crate::native_engine::request_options::RequestOptions,
     saved: Saved,
 }
 
@@ -61,7 +62,16 @@ impl<'a> Checkpoint<'a> {
                 fingerprint,
                 completed: BTreeMap::new(),
             });
-        Ok(Self { db, session, saved })
+        Ok(Self {
+            db,
+            session,
+            saved,
+            options: crate::native_engine::request_options::RequestOptions::from_db(
+                db,
+                Some(session),
+                "compaction",
+            ),
+        })
     }
 
     pub fn request_key(system: &str, input: &str, output: u32) -> String {

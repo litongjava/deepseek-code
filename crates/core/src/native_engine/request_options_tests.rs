@@ -135,6 +135,7 @@ async fn transport_matrix(channel: &str) {
                     let options = RequestOptions {
                         session_id: has_session.then(|| session.clone()),
                         compact,
+                        ..Default::default()
                     };
                     let modes: &[&str] = match channel {
                         "anthropic" => &["single", "stream", "thinking"],

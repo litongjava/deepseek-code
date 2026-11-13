@@ -675,10 +675,13 @@ impl<'a, 'b> Summarizer<'a, 'b> {
             false,
             Some(label),
             self.budget_source,
-            super::request_options::RequestOptions {
-                session_id: session,
-                compact: true,
-            },
+            self.checkpoint
+                .as_ref()
+                .map(|c| c.options.clone())
+                .unwrap_or_else(|| {
+                    super::request_options::RequestOptions::for_session(session.as_deref())
+                })
+                .compaction(label),
         )
         .await?;
         // Only a complete, validated summary reaches the cache.
@@ -1413,6 +1416,21 @@ pub async fn generate_for_session(
     input: &str,
     session: Option<&str>,
 ) -> Result<String> {
+    generate_with_options(
+        provider,
+        system,
+        input,
+        super::request_options::RequestOptions::for_session(session),
+    )
+    .await
+}
+
+pub(crate) async fn generate_with_options(
+    provider: ResolvedProvider,
+    system: &str,
+    input: &str,
+    options: super::request_options::RequestOptions,
+) -> Result<String> {
     generate_request(
         provider,
         system,
@@ -1421,7 +1439,7 @@ pub async fn generate_for_session(
         true,
         None,
         BudgetSource::Fixed,
-        super::request_options::RequestOptions::for_session(session),
+        options,
     )
     .await
 }

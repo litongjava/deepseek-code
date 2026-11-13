@@ -148,10 +148,36 @@ pub fn write_tx<T>(
 }
 
 pub struct DbManager {
+    data_dir: PathBuf,
+    request_recording: std::sync::RwLock<
+        std::collections::HashMap<String, crate::native_engine::request_recording::Policy>,
+    >,
     pool: Pool<SqliteConnectionManager>,
 }
 
 impl DbManager {
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    pub fn set_request_recording_policy(&self, session: &str, cli: bool, full_access: bool) {
+        self.request_recording
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                session.into(),
+                crate::native_engine::request_recording::Policy { cli, full_access },
+            );
+    }
+    pub fn request_recording_policy(
+        &self,
+        session: &str,
+    ) -> Option<crate::native_engine::request_recording::Policy> {
+        self.request_recording
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .cloned()
+    }
     pub fn new(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -185,7 +211,14 @@ impl DbManager {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            data_dir: path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf(),
+            request_recording: Default::default(),
+        })
     }
 
     pub fn init(&self) -> Result<()> {

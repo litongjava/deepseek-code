@@ -13,6 +13,9 @@ async fn send(
     identity: &RequestIdentity,
     budget: &AttemptBudget,
     attempts: &AttemptCounter,
+    options: &super::request_options::RequestOptions,
+    provider: &super::provider_manager::ResolvedProvider,
+    api: &str,
 ) -> Result<reqwest::Response> {
     let result = crate::performance::retry_with_backoff_budget(
         || async {
@@ -20,7 +23,14 @@ async fn send(
                 .try_clone()
                 .ok_or_else(|| anyhow::anyhow!("Model request cannot be replayed"))?;
             let response = crate::performance::checked_response(
-                request.headers(identity.headers()).send().await?,
+                super::request_recording::send(
+                    request.headers(identity.headers()),
+                    options,
+                    provider,
+                    api,
+                    true,
+                )
+                .await?,
             )
             .await?;
             // The status of the attempt that produced this response stays known,
@@ -43,6 +53,9 @@ async fn send(
 pub(super) async fn response(
     request: reqwest::RequestBuilder,
     identity: RequestIdentity,
+    options: super::request_options::RequestOptions,
+    provider: super::provider_manager::ResolvedProvider,
+    api: &'static str,
 ) -> Result<(
     Pin<Box<dyn Stream<Item = Result<String>> + Send>>,
     AttemptCounter,
@@ -50,7 +63,10 @@ pub(super) async fn response(
     let mut budget = AttemptBudget::configured();
     budget.id = identity.id().to_owned();
     let attempts = AttemptCounter::default();
-    let first = send(&request, &identity, &budget, &attempts).await?;
+    let first = send(
+        &request, &identity, &budget, &attempts, &options, &provider, api,
+    )
+    .await?;
     let counter = attempts.clone();
     let retries = crate::config::OrchestrationConfig::max_retries();
     let stream = Box::pin(async_stream::try_stream! {
@@ -112,7 +128,7 @@ pub(super) async fn response(
             crate::performance::retry_events::emit(&budget, "retry_wait", Some(detail.as_json()), Some(delay), false, None).await;
             // Dropping the consumer cancels this delay and the next attempt.
             tokio::time::sleep(delay).await;
-            next = Some(send(&request, &identity, &budget, &attempts).await?);
+            next = Some(send(&request, &identity, &budget, &attempts, &options, &provider, api).await?);
         }
     });
     Ok((stream, counter))

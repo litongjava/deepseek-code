@@ -108,6 +108,7 @@ async fn evaluate(
     current: Option<&ResolvedProvider>,
     input: &Value,
     workspace: &Path,
+    options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<Option<Value>> {
     let provider = prompt::select_provider(
         config,
@@ -145,11 +146,7 @@ async fn evaluate(
         let mut calls = Vec::new();
         if native {
             let response = OpenAIClient::new()
-                .with_request_options(
-                    crate::native_engine::request_options::RequestOptions::for_session(
-                        input["session_id"].as_str(),
-                    ),
-                )
+                .with_request_options(options.clone())
                 .without_retries()
                 .send_message(
                     &provider,
@@ -178,11 +175,7 @@ async fn evaluate(
             messages.push(choice.message);
         } else {
             let response = AnthropicClient::new()
-                .with_request_options(
-                    crate::native_engine::request_options::RequestOptions::for_session(
-                        input["session_id"].as_str(),
-                    ),
-                )
+                .with_request_options(options.clone())
                 .without_retries()
                 .send_message(
                     &provider,
@@ -257,6 +250,7 @@ pub(super) async fn execute_agent(
     provider: Option<&ResolvedProvider>,
     input: &Value,
     workspace: &Path,
+    options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<(i32, String, String)> {
     let session = input["session_id"].as_str().unwrap_or("");
     let _progress =
@@ -270,7 +264,7 @@ pub(super) async fn execute_agent(
     let result = tokio::select! {
         biased;
         _ = receiver.changed() => return Ok((3, String::new(), String::new())),
-        result = tokio::time::timeout(Duration::from_secs(hook.timeout), evaluate(config, provider, input, workspace)) => result,
+        result = tokio::time::timeout(Duration::from_secs(hook.timeout), evaluate(config, provider, input, workspace, options)) => result,
     };
     match result {
         Ok(Ok(Some(value))) if value["ok"] == true => Ok((0, String::new(), String::new())),

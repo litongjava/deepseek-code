@@ -405,13 +405,32 @@ impl QueryEngine {
         system: &str,
         input: &str,
     ) -> Result<String> {
+        self.generate_text_for_purpose(session, "generation", provider_id, model, system, input)
+            .await
+    }
+
+    pub async fn generate_text_for_purpose(
+        &self,
+        session: Option<&str>,
+        purpose: &str,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+    ) -> Result<String> {
         let provider = self
             .provider_manager
             .lock()
             .await
             .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        super::generation::generate_for_session(provider, system, input, session).await
+        super::generation::generate_with_options(
+            provider,
+            system,
+            input,
+            super::request_options::RequestOptions::from_db(&self.db_manager, session, purpose),
+        )
+        .await
     }
 
     /// The resolved provider/model pair this session would use, for hosts that
@@ -436,6 +455,30 @@ impl QueryEngine {
         system: &str,
         input: &str,
     ) -> Result<String> {
+        self.generate_summary_recorded(
+            session,
+            provider_id,
+            model,
+            system,
+            input,
+            super::request_options::RequestOptions::from_db(
+                &self.db_manager,
+                session,
+                "compaction",
+            ),
+        )
+        .await
+    }
+
+    pub(crate) async fn generate_summary_recorded(
+        &self,
+        session: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+        options: super::request_options::RequestOptions,
+    ) -> Result<String> {
         let provider = self
             .provider_manager
             .lock()
@@ -452,6 +495,9 @@ impl QueryEngine {
                 )
             })
             .transpose()?;
+        if let Some(checkpoint) = &mut checkpoint {
+            checkpoint.options = options;
+        }
         super::generation::summarize(provider, system, input, checkpoint.as_mut()).await
     }
     pub async fn generate_compaction(
@@ -462,6 +508,32 @@ impl QueryEngine {
         system: &str,
         input: &str,
         instructions: &str,
+    ) -> Result<crate::services::compaction::GeneratedSummary> {
+        self.generate_compaction_recorded(
+            session,
+            provider_id,
+            model,
+            system,
+            input,
+            instructions,
+            super::request_options::RequestOptions::from_db(
+                &self.db_manager,
+                Some(session),
+                "compaction",
+            ),
+        )
+        .await
+    }
+
+    pub(crate) async fn generate_compaction_recorded(
+        &self,
+        session: &str,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+        instructions: &str,
+        options: super::request_options::RequestOptions,
     ) -> Result<crate::services::compaction::GeneratedSummary> {
         let provider = self
             .provider_manager
@@ -478,10 +550,18 @@ impl QueryEngine {
                 session,
                 &provider,
                 instructions,
+                options,
             )
             .await;
         }
-        self.generate_summary(Some(session), provider_id, model, system, input)
+        let mut checkpoint = crate::services::compaction::checkpoint::Checkpoint::open(
+            &self.db_manager,
+            session,
+            &provider,
+            system,
+        )?;
+        checkpoint.options = options;
+        super::generation::summarize(provider, system, input, Some(&mut checkpoint))
             .await
             .map(Into::into)
     }
@@ -1725,7 +1805,7 @@ impl QueryEngine {
                                     let title_result: Result<String, anyhow::Error> = match resolved.provider.api_format {
                                         crate::native_engine::provider_manager::ApiFormat::OpenAI => {
                                             let client = crate::native_engine::openai_client::OpenAIClient::new()
-                                                .with_request_options(super::request_options::RequestOptions::for_session(Some(&title_conv_id)));
+                                                .with_request_options(super::request_options::RequestOptions::from_db(&db_title, Some(&title_conv_id), "title"));
                                             let msgs = vec![
                                                 crate::native_engine::openai_client::OpenAIMessage {
                                                     role: "user".to_string(),
@@ -1753,7 +1833,7 @@ impl QueryEngine {
                                         }
                                         crate::native_engine::provider_manager::ApiFormat::Anthropic => {
                                             let client = crate::native_engine::anthropic_client::AnthropicClient::new()
-                                                .with_request_options(super::request_options::RequestOptions::for_session(Some(&title_conv_id)));
+                                                .with_request_options(super::request_options::RequestOptions::from_db(&db_title, Some(&title_conv_id), "title"));
                                             let msgs = vec![
                                                 crate::native_engine::anthropic_client::AnthropicMessage {
                                                     role: "user".to_string(),
