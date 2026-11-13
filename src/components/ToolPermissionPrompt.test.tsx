@@ -15,6 +15,14 @@ describe('tool permission prompt', () => {
     render(<ToolPermissionPrompt request={current} onRespond={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Allow for Session' })).toBeNull();
   });
+  it('shows ToolScript provenance without changing the reviewed tool input or choices', async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    render(<ToolPermissionPrompt request={{ ...request, toolscript: { parent_tool_use_id: 'inv-parent', task_id: 'job' } }} onRespond={respond} />);
+    expect(screen.getByText('From ToolScript (parent inv-parent)')).toBeInTheDocument();
+    expect(screen.getByText(request.input.command)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    await waitFor(() => expect(respond).toHaveBeenCalledWith('allow'));
+  });
   it('keeps the prompt with an error after a rejected response', async () => {
     render(<ToolPermissionPrompt request={request} onRespond={vi.fn().mockRejectedValue(new Error('Request expired'))} />);
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));

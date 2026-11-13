@@ -7,6 +7,7 @@ export interface ToolPermissionRequest {
   session_id?: string;
   input?: any;
   allow_session?: boolean;
+  toolscript?: { parent_tool_use_id: string; task_id: string };
 }
 export type ToolPermissionChoice = 'allow' | 'deny' | 'allow_session';
 
@@ -31,6 +32,7 @@ export default function ToolPermissionPrompt({ request, onRespond, onCancel }: {
   return <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
     <div role="dialog" aria-modal="true" aria-label="Tool Permission Request" className="w-[640px] max-w-[90vw] max-h-[80vh] overflow-auto rounded-2xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl">
       <h3 className="mb-2 text-[15px] font-semibold text-deepseek-text">{shell ? 'Bash command' : request.tool_name}</h3>
+      {request.toolscript && <p className="mb-2 text-sm text-deepseek-textSecondary">From ToolScript (parent {request.toolscript.parent_tool_use_id})</p>}
       {shell && request.input?.description && <p className="mb-2 text-sm text-deepseek-textSecondary">{request.input.description}</p>}
       <pre className="mb-3 max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-deepseek-border bg-deepseek-input p-3 text-xs text-deepseek-text">{shell ? request.input?.command : JSON.stringify(request.input, null, 2)}</pre>
       {error && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}

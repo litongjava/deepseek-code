@@ -52,6 +52,7 @@ interface AskUserDialogData {
 interface ToolPermissionDialogData {
   session_id?: string;
   allow_session?: boolean;
+  toolscript?: { parent_tool_use_id: string; task_id: string };
   request_id: string;
   tool_use_id: string;
   tool_name: string;

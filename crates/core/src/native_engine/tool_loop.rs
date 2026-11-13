@@ -240,6 +240,9 @@ pub struct ToolLoopExecutor {
     provider: ResolvedProvider,
     auto_manual_interactive: bool,
     permission_host_available: bool,
+    toolscript_approval: Option<toolscript_approval::WorkerApproval>,
+    approval_origin: Option<crate::native_engine::permission_response::ToolScriptOrigin>,
+    toolscript_hosts: Vec<toolscript_approval::HostTask>,
     local_goal_frontend: bool,
     /// The active history's estimated tokens and the model window, snapshotted
     /// by an interactive host before the turn. `None` keeps CompactContext
@@ -278,9 +281,9 @@ pub struct ToolLoopExecutor {
     parent_message_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     permission_mailbox: crate::native_engine::permission_response::Mailbox,
-    permission_interrupted: std::sync::Mutex<Option<String>>,
+    permission_interrupted: Arc<std::sync::Mutex<Option<String>>>,
     /// Notes the user attached to approvals, delivered after the tool results.
-    approval_notes: std::sync::Mutex<Vec<String>>,
+    approval_notes: Arc<std::sync::Mutex<Vec<String>>>,
     approved_call: Option<tool_approval::ExactApproval>,
     runtime_agents: super::runtime_agents::Catalog,
     permission_manager: Option<Arc<PermissionManager>>,
@@ -1404,6 +1407,9 @@ impl ToolLoopExecutor {
         Self {
             auto_manual_interactive: false,
             permission_host_available: true,
+            toolscript_approval: None,
+            approval_origin: None,
+            toolscript_hosts: Vec::new(),
             local_goal_frontend: false,
             context_usage: None,
             auto_history: messages.clone(),
@@ -1430,8 +1436,8 @@ impl ToolLoopExecutor {
             parent_message_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
             permission_mailbox: Default::default(),
-            permission_interrupted: std::sync::Mutex::new(None),
-            approval_notes: std::sync::Mutex::new(Vec::new()),
+            permission_interrupted: Arc::new(std::sync::Mutex::new(None)),
+            approval_notes: Arc::new(std::sync::Mutex::new(Vec::new())),
             approved_call: None,
             runtime_agents: Default::default(),
             permission_manager: None,
@@ -1780,13 +1786,16 @@ impl ToolLoopExecutor {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect(),
-            // Only a foreground call on a live host can answer prompts.
-            interactive: !background && self.permission_host_available,
+            // Foreground and background jobs share this owning frontend.
+            interactive: self.permission_host_available,
         };
-        let start = match crate::native_engine::toolscript_job::start_job(&root, spec).await {
+        let mut start = match crate::native_engine::toolscript_job::start_job(&root, spec).await {
             Ok(start) => start,
             Err(error) => return failed(format!("ToolScript could not start: {error:#}")),
         };
+        if let Some(lease) = start.approval_host.take() {
+            self.start_toolscript_approval_host(&start.directory, id, lease);
+        }
         if background {
             return (
                 input.clone(),
@@ -1802,9 +1811,6 @@ impl ToolLoopExecutor {
         let deadline =
             tokio::time::Instant::now() + crate::native_engine::toolscript_job::FOREGROUND_WAIT;
         loop {
-            // A live host answers the owner's permission requests while this
-            // call waits; without one the owner denies them itself.
-            self.service_toolscript_approvals(&start.directory).await;
             let state = match crate::native_engine::toolscript_job::state(&start.directory) {
                 Ok(state) => state,
                 Err(error) => return failed(format!("ToolScript state is unreadable: {error:#}")),
@@ -1820,7 +1826,11 @@ impl ToolLoopExecutor {
                     state.status != "completed",
                 );
             }
-            if tokio::time::Instant::now() >= deadline {
+            // A foreground response wait is not an approval timeout. Keep
+            // its owning turn alive while the ordinary approval is pending.
+            if tokio::time::Instant::now() >= deadline
+                && !toolscript_approval::has_pending_request(&start.directory)
+            {
                 return (
                     input.clone(),
                     json!({
@@ -1833,43 +1843,6 @@ impl ToolLoopExecutor {
                 );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    /// Forwards pending owner approval requests to the live host and records
-    /// the answer. A failure is written as an explicit denial.
-    async fn service_toolscript_approvals(&self, directory: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(directory.join("approvals")) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(stem) = name.strip_suffix(".request.json") else {
-                continue;
-            };
-            let response = path.with_file_name(format!("{stem}.response.json"));
-            if response.exists() {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-                continue;
-            };
-            let tool = value["tool"].as_str().unwrap_or_default().to_owned();
-            let tool_input = value.get("input").cloned().unwrap_or(Value::Null);
-            let body = match self
-                .request_tool_approval_with(&tool, &tool_input, stem)
-                .await
-            {
-                Ok(updated) => json!({"decision": "allow", "updated_input": updated}),
-                Err(error) => json!({"decision": "deny", "message": format!("{error:#}")}),
-            };
-            let _ = std::fs::write(&response, body.to_string());
         }
     }
 
@@ -2361,6 +2334,11 @@ impl ToolLoopExecutor {
             return finished(input.clone(), format!("Invalid {name} arguments: expected a complete JSON object; resend the call with all required fields. Tool was not executed."));
         }
         if let Some(violation) = self.loading_violation(name) {
+            // Hidden Super schemas must still report the common hard gate.
+            // Loaded tools keep their ordinary input-rewriting hook order.
+            if let Some(reason) = self.super_agent_hard_denial(name, input) {
+                return finished(input.clone(), format!("Permission denied: {reason}"));
+            }
             return finished(input.clone(), violation);
         }
         self.sync_parent_permission_mode();
@@ -2433,7 +2411,7 @@ impl ToolLoopExecutor {
             if let PermissionResult::Denied(reason) = hook_decision {
                 return finished(input, format!("Permission denied: {reason}"));
             }
-            input = match self.request_tool_approval_with(name, &input, id).await {
+            input = match self.request_hook_approval_with(name, &input, id).await {
                 Ok(actual) => actual,
                 Err(error) => {
                     return finished(input, format!("Hook requested permission: {error:#}"))
@@ -7181,3 +7159,6 @@ mod shell_cwd_tests {
         assert_eq!(read(&directory, "session-b"), "/other/workspace");
     }
 }
+
+#[path = "toolscript_approval.rs"]
+pub(crate) mod toolscript_approval;

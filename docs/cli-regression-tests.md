@@ -605,6 +605,25 @@ cargo test --locked -j 2 -p deepseek-code-cli --test toolscript_history -- --noc
 - `taskget_background::cli_task_get_pages_a_background_shell_to_its_exit_status` 专测分页执行，在独立数据目录通过 `support/tool_loading.rs` 显式开启 TaskGet，保留完整分页、字节上限和终态断言；同文件另一用例仍验证模型自行搜索 TaskGet。
 - `sdk` 全文件中的 `apply_patch_permissions::sdk_input_closed_while_the_patch_waits_for_approval_never_writes` 是监督者确认的公共 ApplyPatch 取消问题，交由运行时分支处理，不因本轮默认工具修复放宽断言。
 
+## ToolScript 内层审批桥接（J4）
+
+内层调用的 `RequiresConfirmation` 经 job 内 UUID request/response 文件转交拥有该调用的前端，继续使用普通 `ToolPermission` mailbox、SDK `can_use_tool`、终端审批菜单和 Desktop 审批通道。请求保留实际输入与内层 occurrence ID；`toolscript` 来源包含 `parent_tool_use_id` 和 `task_id`。来源不是工具参数，不改变执行输入。父上下文处理普通审批超时、用户选择、改写输入与规则提交；worker 接收结果后再严格读取持久权限并校验输入，显式 deny 与 Super 门禁不能被批准覆盖。
+
+每个审批文件只属于一个内层调用。一次允许不改变脚本权限；用户明确选择现有持久规则或会话授权时，后续调用按该规则判定。审批宿主持有独立 OS 文件锁，worker 在等候回复时检测宿主消失；TaskStop、脚本取消/结束和宿主关闭都使待定请求失效，取消 mailbox watcher，拒绝迟到回复。worker 的 500 ms 严格刷新在等待期间继续运行，刷新失败仍记为 `policy_refresh_failed`。普通无宿主 `--print` 明确拒绝；SDK 可用 `initialize.canUseTool=false` 明确关闭审批能力，省略时保持原 SDK 默认行为。
+
+```bash
+cargo test --locked -j 2 -p deepseek-code-cli --test sdk toolscript_approval -- --nocapture
+cargo test --locked -j 2 -p deepseek-code-core --lib -- toolscript services::permission_updates native_engine::tool_loop::tool_approval tool_loading_tests executor_lifetime_tests child_transcript::tests
+cargo test --locked -j 2 -p deepseek-code-cli --test toolscript_history --test toolscript_super_agent --test sdk
+cargo check --locked -j 2 -p deepseek-code-core -p deepseek-code-cli -p deepseek-code-desktop --all-targets
+```
+
+SDK 用例通过真实 CLI、本地 OpenAI mock、ToolSearch 与私有 worker 验证允许/拒绝、两次独立审批、持久规则、批准改写输入、等待时 EOF、真实模型 TaskStop 与迟到 allow、持久 deny 和损坏策略刷新、无审批能力、Router/Coder 门禁优先，以及 PreToolUse 强制 ask 不被普通 allow 规则绕过。测试输出 `J4_APPROVAL`、`J4_STATE`、`J4_LOG`、`J4_DB`，逐项核对调用 ID、父 ID、输入、输出、错误终态和文件副作用，不预造 assistant 或工具行。Super 场景仅预设真实会话角色及任务关系。夹具在 ask 模式只预先允许外层 ToolScript；内层 Write 必须独立审批。TaskStop 场景另允许 TaskStop，以便模型能够取消待审脚本，这不授权 Write。
+
+另外重跑相邻 dev-support 中 `toolscript-20261111/j2a/run_j2a.py` 和 `j2b/run_j2b.py`：先读脚本用法，以本 worktree 构建的 `target/debug/dcl` 和全新临时 fixture 目录执行，不能复用旧证据。J2 脚本只验私有 worker，J4 SDK 用例才验证真实模型入口。
+
+人工终端/ Desktop 验收：ask 模式让 ToolScript 执行 Write，现有审批框应显示原工具预览和 `From ToolScript (parent …)`，分别选择一次允许、拒绝、会话/规则授权；取消脚本后旧提示消失，迟到允许不得写文件。编译、组件测试、SDK 协议测试不能替代真实 TUI / Desktop 运行验收。Windows/macOS、远程提供商、跨回合后台提示接管和磁盘故障须单独报告，不推断为通过。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3

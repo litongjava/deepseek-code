@@ -258,6 +258,7 @@ async fn h5_chat_handler(
                     }
                     Some(serde_json::json!({
                         "type": "tool_permission",
+                        "toolscript": deepseek_code_core::native_engine::permission_response::toolscript_origin(&request_id),
                         "request_id": request_id,
                         "tool_use_id": tool_use_id,
                         "tool_name": tool_name,

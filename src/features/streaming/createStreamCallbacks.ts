@@ -394,7 +394,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
       setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, session_id: data.session_id || conversationId, planApprovalRequest: data.planApprovalRequest || data.tool_input?.planApprovalRequest, questions: data.questions || [], answers: {} });
     }
     if (event === 'tool_permission' && data) {
-      setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || conversationId, allow_session: data.allow_session });
+      setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || conversationId, allow_session: data.allow_session, toolscript: data.toolscript });
     }
     if (event === 'message_start' && data?.usage) {
       const u = data.usage;

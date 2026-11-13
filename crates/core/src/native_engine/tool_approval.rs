@@ -66,12 +66,7 @@ impl ToolLoopExecutor {
         }
     }
 
-    pub(super) fn permission_hard_denial_for(
-        &self,
-        tool: &str,
-        input: &Value,
-        pre_tool_hook: bool,
-    ) -> Option<String> {
+    pub(super) fn super_agent_hard_denial(&self, tool: &str, input: &Value) -> Option<String> {
         // Router sessions never change business code. The plan document keeps
         // its separate checked scope, which is the documented exception.
         if tool != "SandboxNetwork"
@@ -88,7 +83,16 @@ impl ToolLoopExecutor {
         // but business writes and shell commands stay blocked until the host
         // has approved the plan for the current specification and permission
         // policy. A parent permission-mode change cannot bypass this gate.
-        if let Some(reason) = self.super_agent_plan_gate(tool, input) {
+        self.super_agent_plan_gate(tool, input)
+    }
+
+    pub(super) fn permission_hard_denial_for(
+        &self,
+        tool: &str,
+        input: &Value,
+        pre_tool_hook: bool,
+    ) -> Option<String> {
+        if let Some(reason) = self.super_agent_hard_denial(tool, input) {
             return Some(reason);
         }
         // A sandboxed command's host question belongs to its Bash call, which
@@ -256,7 +260,16 @@ impl ToolLoopExecutor {
     ) -> Result<Value> {
         // Hook execution holds a substantial async state machine. Keep it out
         // of every enclosing tool/model-loop future on Windows debug stacks.
-        Box::pin(self.request_tool_approval_inner(tool, input, id)).await
+        Box::pin(self.request_tool_approval_inner(tool, input, id, false)).await
+    }
+
+    pub(super) async fn request_hook_approval_with(
+        &self,
+        tool: &str,
+        input: &Value,
+        id: &str,
+    ) -> Result<Value> {
+        Box::pin(self.request_tool_approval_inner(tool, input, id, true)).await
     }
 
     async fn request_tool_approval_inner(
@@ -264,7 +277,13 @@ impl ToolLoopExecutor {
         tool: &str,
         input: &Value,
         id: &str,
+        hook_asks: bool,
     ) -> Result<Value> {
+        if let Some(bridge) = &self.toolscript_approval {
+            return self
+                .request_toolscript_approval(bridge, tool, input, id, hook_asks)
+                .await;
+        }
         let reviewed_policy = self
             .permission_manager
             .as_ref()
@@ -300,6 +319,10 @@ impl ToolLoopExecutor {
             None,
         );
         crate::native_engine::permission_response::set_owner_tool(&request_id, tool);
+        crate::native_engine::permission_response::set_toolscript_origin(
+            &request_id,
+            self.approval_origin.clone(),
+        );
         if let Some(hooks) = &self.hooks {
             if let Err(error) = hooks.run(crate::services::tool_hooks::HookEvent::Notification,
                 self.conv_id.as_deref().unwrap_or_default(),
