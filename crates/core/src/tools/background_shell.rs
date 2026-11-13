@@ -4634,6 +4634,7 @@ setInterval(() => {}, 1000);
     /// Node shell: records its PID, reports readiness through the production
     /// stdout capture, and never reads stdin, so its FIFO read end stays open
     /// with no consumer.
+    #[cfg(target_os = "linux")]
     const LINUX_OWNER_SHELL: &str = r#"
 const fs = require('fs');
 fs.writeFileSync(process.argv[2], String(process.pid));
@@ -4643,6 +4644,7 @@ setInterval(() => {}, 1000);
 
     /// Node helper: proves it inherited a usable descriptor, records itself, and
     /// keeps that descriptor open for as long as it lives.
+    #[cfg(target_os = "linux")]
     const LINUX_OWNER_HELPER: &str = r#"
 const fs = require('fs');
 const fd = Number(process.env.DCL30_FD);
@@ -4657,6 +4659,7 @@ setInterval(() => {}, 1000);
     /// `interaction:"pipe"`, duplicates the descriptor it holds for the task's
     /// lease, hands the duplicate (made inheritable) to a helper, and stays alive
     /// until the parent kills it.
+    #[cfg(target_os = "linux")]
     async fn linux_owner_role() {
         crate::config::OrchestrationConfig::init_global().unwrap();
         let root = PathBuf::from(std::env::var("DCL30_ROOT").unwrap());
@@ -4758,6 +4761,7 @@ setInterval(() => {}, 1000);
     /// One owned fixture. Constructed (and cleaned up on every exit path) before
     /// any readiness wait, so a failing setup cannot leak the processes it
     /// already started.
+    #[cfg(target_os = "linux")]
     struct LinuxOwnerDeath {
         data: tempfile::TempDir,
         fixture: PathBuf,
@@ -4767,6 +4771,7 @@ setInterval(() => {}, 1000);
         directory: PathBuf,
     }
 
+    #[cfg(target_os = "linux")]
     impl LinuxOwnerDeath {
         fn spawn(test_name: &str) -> Self {
             crate::config::OrchestrationConfig::init_global().unwrap();
@@ -4862,6 +4867,7 @@ setInterval(() => {}, 1000);
         }
     }
 
+    #[cfg(target_os = "linux")]
     impl Drop for LinuxOwnerDeath {
         fn drop(&mut self) {
             if let Some(mut owner) = self.owner.take() {

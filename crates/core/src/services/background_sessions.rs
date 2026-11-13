@@ -1515,6 +1515,7 @@ mod tests {
     /// execs the test binary with `--exact` on this ignored test, so the tests
     /// exercise the real `run_worker_from_env`/`run_worker`/`supervise` path
     /// rather than a re-implementation of the protocol.
+    #[cfg(unix)]
     #[test]
     #[ignore = "entry point for the reserved-job supervisor fixture"]
     fn run_worker_entry() {
@@ -1533,7 +1534,6 @@ mod tests {
     }
 
     fn real_worker_fixture() -> RealWorker {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let counter = temp.path().join("child-runs.log");
         let test_binary = std::env::current_exe().unwrap();
@@ -1552,7 +1552,11 @@ mod tests {
             format!("#!/bin/sh\necho run >> '{}'\nexit 0\n", counter.display()),
         )
         .unwrap();
+        // State-only adoption tests also use these paths on Windows, without
+        // executing either script. Only the Unix process tests need chmod.
+        #[cfg(unix)]
         for script in [&supervisor, &child] {
+            use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
         }
         RealWorker {
@@ -1570,6 +1574,7 @@ mod tests {
             .unwrap_or(0)
     }
 
+    #[cfg(unix)]
     fn wait_for_terminal(dir: &Path) -> Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
@@ -1588,6 +1593,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_for_child_runs(counter: &Path, expected: usize) {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while child_runs(counter) < expected {
@@ -1607,6 +1613,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fast_worker_terminal_state_survives_parent_publication() {
         let worker = real_worker_fixture();
@@ -1645,6 +1652,7 @@ mod tests {
         assert!(stored.launched);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_host_interruption_after_spawn_is_adopted_without_a_second_child() {
         let worker = real_worker_fixture();
@@ -1818,6 +1826,7 @@ mod tests {
         assert_eq!(child_runs(&worker.counter), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_duplicate_supervisor_without_the_claim_token_does_not_execute_the_job() {
         let worker = real_worker_fixture();

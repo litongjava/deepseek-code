@@ -1008,3 +1008,18 @@ ToolScript 保持按需加载。Router 可以加载它来组合允许的工具�
 - 回归 `cargo test --locked -j 2 -p deepseek-code-cli --test super_agent_child --test super_agent_router --test super_agent_review_loop --test agent_fork`；`cargo check --locked -j 2 -p deepseek-code-core -p deepseek-code-cli --all-targets`。
 
 Watcher 只执行一次判定，调度由宿主负责；CLI 现有 tick 调用它，无新增常驻循环或界面。缺失/无法确认 Job 身份或副作用结果时保守 BLOCKED；审批/用户/依赖等待不自动续接。未知工具起始时间使用持久首次观察时间计算超时，没有 timeout 的活动工具持续受保护。恢复预算为自首次中断起的墙钟时间，跨宿主重启保留；不声称实现 token/费用预算。非 Git 缺少事后 hash 基线、未完成副作用工具、Git 合并/变基中间态，以及未由现有 typed delivery 路径证实完成的交付，均要求人工核对，不盲目重放。Windows/macOS 的真实 kill/双宿主场景需对应平台另验；上述 Linux 集成不替代 Desktop/Watcher 常驻调度验证。
+
+### Windows ConPTY（Codex 03；Windows 结果以平台 CI 为准）
+
+Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编译整个 lib 测试单元，不能只检查过滤器命中的函数。Unix shell supervisor 夹具的实际执行测试应为 `cfg(unix)`；纯持久状态 adoption 测试仍跨平台运行。依赖 `/proc/self/fd`、inode 和 `dup/fcntl` 的 owner 辅助函数及其类型应与调用测试一样限制为 Linux。ConPTY 测试中 `std::process::Child` 同时实现 portable-pty `Child` 和标准库 `AsRawHandle`，获取原始句柄必须用 `AsRawHandle::as_raw_handle(&child)` 消歧。改动这些测试后，Linux 跑 `tools::background_shell`、`services::background_sessions` 和 core/CLI/Desktop `--all-targets` 检查；Windows CI 跑下面全部过滤器与 CLI 目标，非零测试结果才算通过，Linux 不执行 Windows-only `tools::conpty` 的空过滤器。
+
+`.github/workflows/platform-tests.yml` 在 `ci/**` push 或 workflow_dispatch 运行。测试列表集中在 matrix 的 `core-filters` / `cli-tests`；每条命令保存退出码与实际执行数，0 项失败，日志以 `runtime-tests-<os>` artifact 保存。Windows 运行 `tools::pty_bash`、`tools::conpty`、`tools::shell_input` 和 CLI `conpty_worker`。Linux 保留 `tools::pty`（owner/transport/gate/supervisor/adapter）、`owner_loss`、pipe owner/input 和六个 PTY/pipe/TaskGet CLI 目标；macOS 验证明确拒绝 PTY。Linux 结果不能替代 Windows 编译或运行。
+
+- Windows Bash PTY 复用 portable-pty ConPTY，仍使用正常 Bash 的配置 shell/program/argv/env/cwd；环境移除/覆盖保持 Windows 大小写不敏感。初始 rows/cols、sandbox/timeout/Monitor 拒绝与 Linux 相同；Windows WSL、cmd（raw 命令行引号）和 pipe 保持明确不支持。
+- 控制只在原 owner 进程的 canonical root/session/task 注册表中进行；TaskInput 先经过真实任务会话归属检查。持久 worker resume 可继续写，其他进程明确报不支持，不以 PID/心跳或模型 metadata 授权。TaskGet 读取现有合并 stdout 与分页，等待 timeout 不停止任务；TaskStop 使用正常取消标记。
+- ConPTY 的内部 gate 在启动用户 shell 前加入 Job Object，关闭 gate 的 job 句柄后才启动实际命令；不允许 breakaway。owner 最后句柄关闭（含强杀）由 Windows 清理任务树。正常退出/停止后查询 Job Object 的 ActiveProcesses=0，再落真实终态。输出独立持续读取，处理 portable-pty 要求的 DSR 光标查询，避免 ClosePseudoConsole 与输出互相阻塞。
+- Windows `eof:true` 本轮明确不支持，data+eof 整次拒绝且不写；Ctrl+Z/Ctrl+D 可通过 data 显式发送，由应用解释，不能当通用 EOF。同步匿名管道写由精确线程句柄 CancelSynchronousIo 取消并 join；错误时 `bytes_written_lower_bound:true,outcome:"unknown"` 不承诺不存在未报告的部分写入，不能自动重放。
+- `conpty_worker` 使用本地 mock + 真实持久 worker，Windows 检查控制台、回显、resize、跨轮、TaskGet timeout、Job Object 子孙清理、外 session 与同 session 外进程输入拒绝、plan、EOF/非法参数无效果、正常退出、初始化失败、Git Bash 默认 shell、SQLite 独立调用 ID。`CONPTY_ID`/`CONPTY_TREE`/`CONPTY_CLEANUP` 用固定进程句柄记录身份，清理断言先于测试失败兜底清理。
+- Windows core 另测 Job Object terminate/最后句柄关闭、过期 gate 拒绝、同步写阻塞时超时与取消、DSR 分片、环境/argv/cwd。`job_member_fixture` 是子进程夹具，普通套件调用不启动子进程；子进程重复输出不增加独立用例数量。
+
+未验证项必须单列：Windows/macOS Actions 尚未运行、Desktop 实际 UI、真实 Windows Terminal。Windows owner 强杀后的日志尾部/SQLite 终态 reconcile 尚未移植；TaskGet 保留 unresponsive 与已捕获日志，不虚构 completed 或 cleanup_complete。人工步骤见交付目录 `windows-conpty-validation.md`，使用同候选 SHA 的 `conpty-console.ps1` 和本地 mock。

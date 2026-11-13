@@ -1,0 +1,104 @@
+name: Platform runtime tests
+
+on:
+  push:
+    branches: ['ci/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+  RUST_TEST_THREADS: 4
+  RUST_MIN_STACK: 16777216
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  runtime:
+    name: Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            core-filters: '["tools::pty_bash", "tools::conpty", "tools::shell_input"]'
+            cli-tests: '["conpty_worker"]'
+          - os: ubuntu-22.04
+            core-filters: '["tools::pty", "tools::background_shell", "tools::shell_input", "tools::tasks", "permissions::manager::session_rule_tests"]'
+            cli-tests: '["pty_worker", "task_input", "task_input_worker", "task_input_owner_death", "taskget_backends", "taskget_background"]'
+          - os: macos-15
+            core-filters: '["tools::pty_bash", "tools::shell_input"]'
+            cli-tests: '["conpty_worker"]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libasound2-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            pkg-config \
+            curl \
+            wget \
+            file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: platform-tests-${{ matrix.os }}
+
+      - name: Run runtime suites
+        shell: python
+        env:
+          CORE_FILTERS: ${{ matrix.core-filters }}
+          CLI_TESTS: ${{ matrix.cli-tests }}
+        run: |
+          import json, os, pathlib, re, subprocess, sys
+          logs = pathlib.Path('platform-test-logs')
+          logs.mkdir()
+          commands = [(['cargo', 'test', '--locked', '-j', '2', '-p', 'deepseek-code-core', '--lib', name, '--', '--nocapture'], 'core-' + name.replace(':', '_')) for name in json.loads(os.environ['CORE_FILTERS'])]
+          commands += [(['cargo', 'test', '--locked', '-j', '2', '-p', 'deepseek-code-cli', '--test', name, '--', '--nocapture'], 'cli-' + name) for name in json.loads(os.environ['CLI_TESTS'])]
+          failed = False
+          for command, name in commands:
+              with (logs / (name + '.log')).open('w', encoding='utf-8') as log:
+                  log.write('COMMAND: ' + json.dumps(command) + '\n')
+                  process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+                  output = []
+                  for line in process.stdout:
+                      print(line, end='', flush=True)
+                      log.write(line)
+                      output.append(line)
+                  code = process.wait()
+                  counts = re.findall(r'test result: .*? (\d+) passed; (\d+) failed;', ''.join(output))
+                  # Each command runs one test binary; child fixtures can print
+                  # their own summaries, so count the final (parent) summary.
+                  executed = sum(map(int, counts[-1])) if counts else 0
+                  log.write(f'EXIT_CODE: {code}\nEXECUTED_TESTS: {executed}\n')
+                  failed |= code != 0 or executed == 0
+          sys.exit(1 if failed else 0)
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-tests-${{ matrix.os }}
+          path: platform-test-logs/
+          if-no-files-found: warn
+          retention-days: 14

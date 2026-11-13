@@ -49,6 +49,8 @@ pub(crate) mod apply_patch_fs;
 pub(crate) mod apply_patch_tool;
 pub mod background_shell;
 mod bash_process;
+#[cfg(windows)]
+mod conpty;
 pub mod file_change;
 pub(crate) mod github;
 pub(crate) mod image_generation;
@@ -89,7 +91,13 @@ pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
     Ok(None)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
+    conpty::run_gate()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 #[doc(hidden)]
 pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
     Ok(None)
@@ -177,7 +185,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command. A foreground command still running at its timeout is not killed: it moves to the background as a managed task, and you get its output so far and a task_id to wait on with TaskGet or stop with TaskStop.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it. Add `interaction: \"pipe\"` to that background call to give the process a writable stdin pipe: write UTF-8 data or close stdin with TaskInput. On Linux, interaction: \"pty\" instead provides a controlling terminal with merged output and TaskInput resize. PTY EOF sends canonical VEOF, not a permanent stdin close.
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command. A foreground command still running at its timeout is not killed: it moves to the background as a managed task, and you get its output so far and a task_id to wait on with TaskGet or stop with TaskStop.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it. Add `interaction: \"pipe\"` to that background call to give the process a writable stdin pipe: write UTF-8 data or close stdin with TaskInput. On Linux and Windows, interaction: \"pty\" instead provides a controlling terminal with merged output and TaskInput resize. Linux PTY EOF sends canonical VEOF, not a permanent stdin close. Windows ConPTY has no universal EOF: eof:true is rejected before writing; send application-specific control characters with data or use TaskStop. Windows input requires the original owning process (persistent worker across turns).
 - When a call finishes it cleans up the command's whole process tree, including children the command started. A service that must outlive the call (a local server, a daemon) needs `detach: true`, which starts it outside that tree and returns its pid and log files.
 - With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Use the Bash tool for all Git commands; there are no separate Git tools.\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
@@ -187,7 +195,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout": { "description": "Positive timeout in milliseconds: 1..600000 foreground, 1..86400000 background. Omit for no background runtime limit; zero is invalid.", "type": "number", "minimum": 1, "maximum": 86400000 },
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
-                    "interaction": { "description": "Use with run_in_background:true. pipe provides writable stdin; pty provides a Linux controlling terminal with merged stdout/stderr. PTY is unsupported on Windows/macOS and with sandbox policies or Bash timeout; use TaskGet timeout to bound a read and TaskStop to stop it.", "type": "string", "enum": ["pipe", "pty"] },
+                    "interaction": { "description": "Use with run_in_background:true. pipe provides writable stdin; pty provides a Linux PTY or Windows ConPTY console with merged stdout/stderr. PTY is unsupported on macOS and with sandbox policies or Bash timeout; Windows WSL, cmd and pipe interaction are unsupported; use TaskGet timeout to bound a read and TaskStop to stop it.", "type": "string", "enum": ["pipe", "pty"] },
                     "rows": { "description": "Initial PTY rows (pty only).", "type": "integer", "minimum": 1, "maximum": 500, "default": 24 },
                     "cols": { "description": "Initial PTY columns (pty only).", "type": "integer", "minimum": 1, "maximum": 1000, "default": 80 },
                     "detach": { "description": "Start an unmanaged service that must outlive this call, such as a local server or daemon. The command is not waited for and is not added to the process tree that a normal call cleans up, so it keeps running after this call, using `detach` with `run_in_background` or `timeout` is an error. Use it only when the process must survive; otherwise run the command normally or use `run_in_background`.", "type": "boolean" },
@@ -1128,6 +1136,17 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let settings = background_shell::shell_settings()?;
     let resolved = settings.resolve(input["shell"].as_str(), false)?;
     let shell_type = resolved.name.as_str();
+    #[cfg(windows)]
+    if pty_size.is_some() {
+        // Reject before WSL path translation/launch or cmd raw_arg building.
+        // Command::get_args cannot describe which Windows arguments were raw.
+        anyhow::ensure!(
+            resolved.wsl.is_none(),
+            "ConPTY managed tasks do not support WSL process-tree cleanup; no process was started"
+        );
+        anyhow::ensure!(resolved.command_flag != "/C",
+            "ConPTY managed tasks do not support cmd raw command-line quoting yet; select PowerShell/pwsh or Git Bash. No process was started");
+    }
 
     if !path_scope::bypass_permissions()
         && !path_scope::approved_auto_command(command)
@@ -1329,13 +1348,13 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         .filter(|text| !text.trim().is_empty())
         .unwrap_or(&command)
         .to_owned();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some((rows, cols)) = pty_size {
         let mut result = pty_bash::start(cmd, rows, cols, &description, &command)?;
         result["shell_path"] = serde_json::json!(shell);
         return Ok(result);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let _ = pty_size;
     if detach {
         let directory = crate::runtime::resolve_default_data_dir()?
