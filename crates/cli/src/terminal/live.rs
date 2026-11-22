@@ -1853,7 +1853,10 @@ impl Frame {
         Some(format!("\x1b[?25l{out}"))
     }
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
-        let size = crate::terminal::size();
+        self.draw_at(state, crate::terminal::size())
+    }
+
+    fn draw_at(&mut self, state: &mut State, size: (u16, u16)) -> io::Result<()> {
         let width = (size.0 as usize).saturating_sub(1).max(4);
         let color = std::env::var_os("NO_COLOR").is_none();
         let prompt = if state.answer.is_some() { "Answer \u{203a} ".to_owned() } else { format!("{} ", crate::terminal::prompt_glyph()) };
@@ -5277,3 +5280,6 @@ mod mcp_started_tests {
         assert!(screen.scrollback.all().join("\n").contains("body"));
     }
 }
+
+#[cfg(test)]
+mod running_status_tests;
