@@ -1331,6 +1331,18 @@ mod tests {
         skills_for_session(root, session, &["- deploy: Ship it".to_owned()]);
         set_changes(root, session, "loadable-tools", &["ListDir".to_owned()]);
         set_changes(root, session, "skills", &["deploy".to_owned()]);
+        set_changes(
+            root,
+            session,
+            crate::session_files::SET_CHANGE_SKILL_REVISIONS,
+            &["deploy@1".to_owned()],
+        );
+        set_changes(
+            root,
+            session,
+            crate::session_files::SET_CHANGE_MCP_REVISIONS,
+            &["local@1".to_owned()],
+        );
         std::fs::write(
             crate::session_files::environment_file(
                 root,
