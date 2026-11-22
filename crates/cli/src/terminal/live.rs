@@ -1221,23 +1221,41 @@ fn content_budget(height: u16) -> usize {
 /// Calls in progress in their transcript form: `● #2 Bash(ls)` over
 /// `⎿  Running…`. A shell command adds the Ctrl+B hint and, once clicked,
 /// its latest output. Returns the rows and those of the running shell call.
-fn running_lines(state: &State, width: usize, budget: usize, color: bool) -> (Vec<String>, Option<std::ops::Range<usize>>) {
+fn running_lines(
+    state: &State,
+    width: usize,
+    budget: usize,
+    color: bool,
+    room: usize,
+    first_header_logged: bool,
+) -> (Vec<String>, Option<std::ops::Range<usize>>) {
     let mut rows = Vec::new();
     let mut shell = None;
     let foreground = state.activity.starts_with("Running Bash");
-    for (index, call) in state.running.iter().enumerate() {
-        if index > 0 {
+    let calls = &state.running[..];
+    // Reserve one header/status pair per call before spending rows on gaps,
+    // output or the background hint. If the screen is too short, omit whole calls.
+    let required = (2 * calls.len()).saturating_sub(usize::from(first_header_logged));
+    let (calls, first_header_logged) = if required <= room {
+        (calls, first_header_logged)
+    } else {
+        (&calls[calls.len() - room / 2..], false)
+    };
+    let needed = (2 * calls.len()).saturating_sub(usize::from(first_header_logged));
+    let hint = foreground && calls.last().is_some_and(|call| call.shell && call.started.elapsed() >= Duration::from_secs(3));
+    let gaps = needed + calls.len().saturating_sub(1) + usize::from(hint) <= room;
+    for (index, call) in calls.iter().enumerate() {
+        if index > 0 && gaps {
             rows.push(String::new());
         }
         let first = rows.len();
-        // MCP inputs are already in scrollback, outside the live frame budget.
-        if !super::tool_view::is_mcp_header(&call.header) {
+        if index != 0 || !first_header_logged {
             rows.push(change_view::render(&call.header, width, color));
         }
         let elapsed = call.started.elapsed().as_secs();
         let detail = if elapsed >= 2 { format!(" ({})", short_duration(elapsed)) } else { String::new() };
         rows.push(change_view::render(&change_view::running(&detail), width, color));
-        if !(call.shell && foreground && index + 1 == state.running.len()) {
+        if !(call.shell && foreground && index + 1 == calls.len()) {
             continue;
         }
         if state.shell_expanded {
@@ -1247,15 +1265,18 @@ fn running_lines(state: &State, width: usize, budget: usize, color: bool) -> (Ve
             }).unwrap_or_default();
             let output = terminal_text(&output);
             let lines: Vec<_> = output.trim_end().lines().map(|row| clip(row, width.saturating_sub(5))).collect();
-            let room = budget.saturating_sub(rows.len() + 2);
+            let output_room = room.saturating_sub(rows.len() + usize::from(hint));
             if lines.is_empty() {
-                rows.push("     Waiting for command output\u{2026}".into());
+                if output_room > 0 {
+                    rows.push("     Waiting for command output\u{2026}".into());
+                }
             } else {
+                let room = budget.saturating_sub(rows.len() + 2).min(output_room);
                 rows.extend(lines.iter().skip(lines.len().saturating_sub(room)).map(|row| format!("     {row}")));
             }
         }
         // A long command can continue in the background, as in the reference CLI.
-        if call.started.elapsed() >= Duration::from_secs(3) {
+        if hint && rows.len() < room {
             let hint = if state.shell_expanded { "     Ctrl+B to run in background \u{b7} click to hide output" } else { "     Ctrl+B to run in background \u{b7} click to show output" };
             rows.push(if color { change_view::render(&change_view::muted(hint), width, true) } else { clip(hint, width) });
         }
@@ -1551,6 +1572,14 @@ impl Frame {
         )
     }
 
+    // MCP starts write the input to scrollback. Reuse it as a live header
+    // only if no other transcript block has since taken its place.
+    fn first_running_header_logged(&self, state: &State) -> bool {
+        state.running.first()
+            .and_then(|call| self.tool_blocks.get(&call.id))
+            .is_some_and(|&block| Some(block) == self.scrollback.last_block())
+    }
+
     fn refresh_history(&mut self, state: &State, width: usize) {
         self.history_view.set_pinned(&self.pinned.text, width);
         self.history_view.refresh(&[], &self.scrollback.presentation(), width);
@@ -1573,10 +1602,15 @@ impl Frame {
                 self.history_view.append(&line, width);
             }
         }
-        let (running, _) = running_lines(state, width, content_budget(self.size.1), false);
+        let adjacent = self.first_running_header_logged(state)
+            && state.queued.is_empty()
+            && preview.is_empty()
+            && state.group.is_none()
+            && !state.activity.starts_with("Running Bash");
+        let (running, _) = running_lines(state, width, content_budget(self.size.1), false, usize::MAX, adjacent);
         if !running.is_empty() {
-            self.history_view
-                .append(&format!("\n{}", running.join("\n")), width);
+            let gap = if adjacent { "" } else { "\n" };
+            self.history_view.append(&format!("{gap}{}", running.join("\n")), width);
         }
         for notice in &state.notices {
             self.history_view.append(&format!("\n{notice}\n"), width);
@@ -1710,6 +1744,39 @@ impl Frame {
             self.log_line(line, Some(block));
         }
         block
+    }
+
+    fn start_call(&mut self, state: &mut State, id: String, header: change_view::Line, shell: bool) {
+        // Commit earlier text and reasoning before showing the call below them.
+        finish_text(state, self);
+        if state.running.iter().any(|call| call.id == id) {
+            return;
+        }
+        if super::tool_view::is_mcp_header(&header) {
+            let block = self.log_block(vec![header.clone()], vec![header.clone()]);
+            self.tool_blocks.insert(id.clone(), block);
+        }
+        state.running.push(Running { id, header, started: Instant::now(), shell });
+    }
+
+    fn finish_call(
+        &mut self,
+        state: &mut State,
+        id: &str,
+        name: &str,
+        failed: bool,
+        short: Vec<change_view::Line>,
+        full: Option<Vec<change_view::Line>>,
+    ) -> io::Result<()> {
+        state.running.retain(|call| call.id != id);
+        flush_notices(state, self)?;
+        finish_text(state, self);
+        if !short.is_empty() {
+            let full = full.unwrap_or_else(|| short.clone());
+            let block = self.finish_tool_block(id, short, full);
+            self.scrollback.bind_tool(block, name, failed);
+        }
+        Ok(())
     }
 
     fn finish_tool_block(
@@ -1894,6 +1961,7 @@ impl Frame {
         // The live content flows right below the transcript: the reasoning
         // preview, the streaming answer and running calls in the form they
         // keep once finished, so nothing jumps when they join the transcript.
+        let mut running_start = None;
         let mut content: Vec<String> = if state.details.expanded {
             panel.lines.iter().map(|(text, _)| text.clone()).collect()
         } else {
@@ -1908,15 +1976,13 @@ impl Frame {
                 _ if thinking => thinking_lines(state, width, THINKING_PREVIEW_ROWS + 1),
                 _ => streamed_rows(state, width, budget),
             };
-            let (running, shell) = running_lines(state, width, budget, color);
-            if !running.is_empty() {
+            if !state.running.is_empty() {
                 if !content.is_empty() { content.push(String::new()); }
-                self.shell_rows = shell.map(|rows| rows.start + content.len()..rows.end + content.len());
-                content.extend(running);
+                running_start = Some(content.len());
             }
             if crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) && !state.todos.is_empty() {
                 // ctrl+t: the todo list below the work in progress.
-                if !content.is_empty() { content.push(String::new()); }
+                if !content.is_empty() || running_start.is_some() { content.push(String::new()); }
                 content.extend(crate::terminal::todo_rows(&state.todos, width).into_iter().map(|(row, done, current)| {
                     if done { format!("\x1b[2m{row}\x1b[0m") } else if current { format!("\x1b[1m{row}\x1b[0m") } else { row }
                 }));
@@ -1927,21 +1993,6 @@ impl Frame {
             }
             content
         };
-        if content.len() > budget {
-            let skip = content.len() - budget;
-            content.drain(..skip);
-            self.shell_rows = self.shell_rows.take().filter(|rows| rows.end > skip).map(|rows| rows.start.saturating_sub(skip)..rows.end - skip);
-        }
-        // One blank row separates the content from the transcript, as it will
-        // once the content is written there.
-        if !content.is_empty() && self.scrollback.needs_separator() {
-            content.insert(0, String::new());
-            self.shell_rows = self.shell_rows.take().map(|rows| rows.start + 1..rows.end + 1);
-            self.panel_toggle = self.panel_toggle.map(|mut hit| {
-                hit.row += 1;
-                hit
-            });
-        }
         let mut lines = vec![
             String::new(),
             format!(
@@ -2021,13 +2072,48 @@ impl Frame {
             agent_rows.push(clip(&format!("  … {hidden} more agents"), width));
         } else { agent_rows.truncate(limit); }
         lines.splice(2..2, agent_rows);
+        let mut notices = Vec::new();
         if !state.notices.is_empty() {
-            content.push(String::new());
+            notices.push(String::new());
             for notice in &state.notices {
-                content.extend(terminal_text(notice).lines().map(|line| clip(line, width)));
-                content.push(String::new());
+                notices.extend(terminal_text(notice).lines().map(|line| clip(line, width)));
+                notices.push(String::new());
             }
         }
+        let mut content_limit = budget;
+        let mut separate = self.scrollback.needs_separator();
+        if let Some(start) = running_start {
+            let adjacent = start == 0 && self.first_running_header_logged(state);
+            let minimum = state.running.len() * 2 - usize::from(adjacent);
+            let available = (size.1 as usize).saturating_sub(1 + lines.len() + notices.len());
+            separate &= !adjacent || minimum > available;
+            let suffix = content.split_off(start);
+            let skip = suffix.len().saturating_sub(available.saturating_sub(minimum));
+            let suffix = &suffix[skip..];
+            let room = available.saturating_sub(suffix.len()).min(budget.max(minimum + 1));
+            let (running, shell) = running_lines(state, width, budget, color, room, adjacent);
+            // Only the preview above these complete call groups may be trimmed.
+            content_limit = budget.max(running.len() + suffix.len()).min(available);
+            self.shell_rows = shell.map(|rows| rows.start + start..rows.end + start);
+            content.extend(running);
+            content.extend_from_slice(suffix);
+        }
+        if content.len() > content_limit {
+            let skip = content.len() - content_limit;
+            content.drain(..skip);
+            self.shell_rows = self.shell_rows.take().map(|rows| rows.start - skip..rows.end - skip);
+        }
+        // One blank row separates the content from the transcript, as it will
+        // once the content is written there.
+        if !content.is_empty() && separate {
+            content.insert(0, String::new());
+            self.shell_rows = self.shell_rows.take().map(|rows| rows.start + 1..rows.end + 1);
+            self.panel_toggle = self.panel_toggle.map(|mut hit| {
+                hit.row += 1;
+                hit
+            });
+        }
+        content.extend(notices);
         let choice_rows = state
             .choice
             .as_ref()
@@ -2287,17 +2373,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::ToolStarted(id, header, shell)) => {
-                    // Earlier text and reasoning join the transcript first, so
-                    // the call shows right below them, where it will stay.
-                    finish_text(state, screen);
-                    if !state.running.iter().any(|call| call.id == id) {
-                        if super::tool_view::is_mcp_header(&header) {
-                            let block =
-                                screen.log_block(vec![header.clone()], vec![header.clone()]);
-                            screen.tool_blocks.insert(id.clone(), block);
-                        }
-                        state.running.push(Running { id, header, started: Instant::now(), shell });
-                    }
+                    screen.start_call(state, id, header, shell);
                     dirty = true;
                 }
                 Ok(Update::BackgroundFinished(id, name, failed, short, full, task)) => {
@@ -2312,14 +2388,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Finished(id, name, failed, short, full)) => {
-                    state.running.retain(|call| call.id != id);
-                    flush_notices(state, screen)?;
-                    finish_text(state, screen);
-                    if !short.is_empty() {
-                        let full = full.unwrap_or_else(|| short.clone());
-                        let block = screen.finish_tool_block(&id, short, full);
-                        screen.scrollback.bind_tool(block, &name, failed);
-                    }
+                    screen.finish_call(state, &id, &name, failed, short, full)?;
                     dirty = true;
                 }
                 Ok(Update::ShellContext(root, session, owner)) => {
@@ -5232,7 +5301,7 @@ mod mcp_started_tests {
             started: Instant::now(),
             shell: false,
         });
-        let (rows, _) = running_lines(&state, 30, 2, false);
+        let (rows, _) = running_lines(&state, 30, 2, false, 2, screen.first_running_header_logged(&state));
         assert_eq!(rows.len(), 1);
         assert!(rows[0].contains("Running"));
         let output =

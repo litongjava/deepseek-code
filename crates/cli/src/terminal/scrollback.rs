@@ -136,6 +136,10 @@ pub(crate) fn compact_key(key: crossterm::event::KeyEvent) -> bool {
 }
 
 impl Scrollback {
+    pub(super) fn last_block(&self) -> Option<usize> {
+        self.logged.back()?.block
+    }
+
     pub(super) fn latest_prompt(&self) -> &str {
         &self.latest_prompt
     }
