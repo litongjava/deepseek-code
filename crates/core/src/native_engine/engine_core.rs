@@ -1253,6 +1253,10 @@ impl QueryEngine {
             .iter()
             .map(|skill| skill.name.clone())
             .collect::<Vec<_>>();
+        let skill_revisions = model_skills
+            .iter()
+            .map(|skill| crate::prompt::catalog_revision(&skill.name, skill))
+            .collect::<Result<Vec<_>>>()?;
         // The set of tools ToolLoad can offer and the model-invocable skills
         // are frozen into the first user message. A later discovery only adds a
         // change reminder to the latest message, never an edit to that prefix.
@@ -1261,16 +1265,22 @@ impl QueryEngine {
             && allowed_tool_names
                 .as_ref()
                 .is_none_or(|names| names.iter().any(|name| name == "ToolLoad"));
+        let mcp_tools = match &self.mcp_registry {
+            Some(registry) => crate::native_engine::tool_loop::discover_mcp_tools(registry).await?.0,
+            None => Vec::new(),
+        };
+        let mcp_states = crate::mcp::states::load(&plugin_context.paths.data_dir);
+        let mcp_revisions = mcp_tools.iter().filter(|tool| {
+            use crate::mcp::states::{effective, server_of, McpState};
+            !customization.is_disabled(&tool.name)
+                && allowed_tool_names.as_ref().is_none_or(|names| names.contains(&tool.name))
+                && server_of(&tool.name).is_some_and(|server| match effective(&mcp_states, server) {
+                    McpState::User => true,
+                    McpState::OnDemand => tool_load_available,
+                    McpState::Off | McpState::UserOnly => false,
+                })
+        }).map(|tool| crate::prompt::catalog_revision(&tool.name, tool)).collect::<Result<Vec<_>>>()?;
         let (loadable_builtin, loadable_mcp) = if tool_load_available {
-            let mcp_tools = match &self.mcp_registry {
-                Some(registry) => {
-                    crate::native_engine::tool_loop::discover_mcp_tools(registry)
-                        .await?
-                        .0
-                }
-                None => Vec::new(),
-            };
-            let mcp_states = crate::mcp::states::load(&plugin_context.paths.data_dir);
             let goal_proposals = self
                 .local_goal_frontend
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1316,7 +1326,7 @@ impl QueryEngine {
             .messages
             .iter()
             .any(|message| message.get("role").and_then(Value::as_str) == Some("user"));
-        let (loadable_tools, available_skills_listing, set_changes) =
+        let (loadable_tools, available_skills_listing, set_changes, mcp_changes) =
             tokio::task::spawn_blocking(move || {
                 let loadable_tools = crate::prompt::loadable_tools_for_session(
                     &first_message_root,
@@ -1347,13 +1357,22 @@ impl QueryEngine {
                             crate::session_files::SET_CHANGE_SKILLS,
                             &available_skill_names,
                         );
-                        crate::prompt::changes_reminder(now, gone, new_skills, removed_skills)
+                        let (revisions, _) = crate::prompt::set_changes(
+                            &first_message_root, &first_message_session,
+                            crate::session_files::SET_CHANGE_SKILL_REVISIONS, &skill_revisions,
+                        );
+                        let updated = revisions.iter().filter_map(|r| r.split_once(' '))
+                            .map(|(_, name)| name.to_owned()).filter(|name| !new_skills.contains(name)).collect();
+                        crate::prompt::changes_reminder(now, gone, new_skills, removed_skills, updated)
                     })
                     .flatten();
-                (loadable_tools, available_skills, changes)
+                let mcp_changes = (has_user_message && !replay).then(|| {
+                    crate::prompt::mcp_changes_reminder(&first_message_root, &first_message_session, &mcp_revisions)
+                }).flatten();
+                (loadable_tools, available_skills, changes, mcp_changes)
             })
             .await?;
-        if let Some(reminder) = set_changes {
+        for reminder in set_changes.into_iter().chain(mcp_changes) {
             turn_blocks.push((reminder, None));
         }
         crate::tools::configure_lsp_servers(

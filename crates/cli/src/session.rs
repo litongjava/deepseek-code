@@ -77,6 +77,7 @@ pub struct Session {
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
+    extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
     pub(crate) startup_provider: Option<crate::config::StartupProvider>,
     has_saved_providers: bool,
@@ -606,6 +607,19 @@ impl Session {
         Ok(())
     }
 
+    async fn reconcile_mcp(&self) -> Result<()> {
+        match self.mcp.reconcile_config().await {
+            Ok(changes) => {
+                deepseek_code_core::mcp::invalidate_snapshots(&self.paths.data_dir, &self.id, &changes)?;
+                for (id, action) in changes {
+                    crate::compaction::notice(&format!("MCP: {id} {action}"));
+                }
+            }
+            Err(err) => crate::compaction::notice(&format!("MCP reload: {err:#}")),
+        }
+        Ok(())
+    }
+
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
         self.mcp_ready
             .get_or_try_init(|| async {
@@ -943,6 +957,7 @@ impl Session {
             engine,
             mcp,
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
+            extension_watch: Mutex::new(None),
             startup_provider,
             has_saved_providers: paths.data_dir.join("config.json").is_file() || paths.data_dir.join("providers.json").is_file(),
             providers,
@@ -2048,7 +2063,20 @@ impl Session {
             self.ide.disconnect().await;
         }
         self.sdk_cancellable(self.ensure_mcp()).await?;
+        {
+            use deepseek_code_core::mcp::extension_watch::ExtensionWatch;
+            let mut guard = self.extension_watch.lock().await;
+            if guard.as_ref().is_some_and(|w| w.workspace != self.workspace) {
+                *guard = None;
+            }
+            let watch = guard.get_or_insert_with(|| ExtensionWatch::new(&self.paths.data_dir, &self.workspace));
+            if watch.settle().await {
+                crate::compaction::notice("Skills reloaded");
+            }
+        }
+        self.reconcile_mcp().await?;
         self.sdk_cancellable(self.reload_plugins()).await?;
+        self.reconcile_mcp().await?;
         if cli.output_format == OutputFormat::StreamJson {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;

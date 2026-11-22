@@ -198,6 +198,32 @@ pub fn set_changes(
     )
 }
 
+pub(crate) fn catalog_revision(name: &str, item: &impl serde::Serialize) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(serde_json::to_vec(item)?);
+    Ok(format!("{digest:x} {name}"))
+}
+
+pub(crate) fn mcp_changes_reminder(root: &Path, session: &str, revisions: &[String]) -> Option<String> {
+    let (added, removed) = set_changes(root, session, crate::session_files::SET_CHANGE_MCP_REVISIONS, revisions);
+    let names = |entries: Vec<String>| -> std::collections::BTreeSet<String> {
+        entries.into_iter().filter_map(|s| s.split_once(' ').map(|(_, n)| n.to_owned())).collect()
+    };
+    let (new, old) = (names(added), names(removed));
+    let mut lines = Vec::new();
+    for (label, names) in [
+        ("New", new.difference(&old).collect::<Vec<_>>()),
+        ("Updated", new.intersection(&old).collect()),
+        ("Removed", old.difference(&new).collect()),
+    ] {
+        if !names.is_empty() {
+            let names = names.into_iter().map(String::as_str).collect::<Vec<_>>();
+            lines.push(format!("{label} MCP tools: {}", names.join(", ")));
+        }
+    }
+    (!lines.is_empty()).then(|| format!("<system-reminder>\n{}\n</system-reminder>", lines.join("\n")))
+}
+
 /// One reminder on the latest user message describing only what changed since
 /// the first message froze its lists. None when nothing changed.
 pub fn changes_reminder(
@@ -205,6 +231,7 @@ pub fn changes_reminder(
     no_longer_available: Vec<String>,
     new_skills: Vec<String>,
     removed_skills: Vec<String>,
+    updated_skills: Vec<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
     if !now_loadable.is_empty() {
@@ -221,6 +248,9 @@ pub fn changes_reminder(
     }
     if !removed_skills.is_empty() {
         lines.push(format!("Removed skills: {}", removed_skills.join(", ")));
+    }
+    if !updated_skills.is_empty() {
+        lines.push(format!("Updated skills: {}", updated_skills.join(", ")));
     }
     (!lines.is_empty()).then(|| format!("<system-reminder>\n{}\n</system-reminder>", lines.join("\n")))
 }
@@ -1228,11 +1258,11 @@ mod tests {
             "each kind tracks its own set"
         );
         assert_eq!(
-            changes_reminder(now, gone, vec!["new-skill".to_owned()], vec!["old-skill".to_owned()])
+            changes_reminder(now, gone, vec!["new-skill".to_owned()], vec!["old-skill".to_owned()], Vec::new())
                 .unwrap(),
             "<system-reminder>\nNow loadable: Glob\nNo longer available: WebSearch\nNew skills: new-skill\nRemoved skills: old-skill\n</system-reminder>"
         );
-        assert!(changes_reminder(Vec::new(), Vec::new(), Vec::new(), Vec::new()).is_none());
+        assert!(changes_reminder(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()).is_none());
     }
 
     #[test]

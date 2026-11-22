@@ -10,6 +10,9 @@ use tokio::sync::{Mutex, RwLock};
 pub mod composio;
 pub mod control;
 pub mod elicitation;
+pub mod extension_watch;
+mod reload;
+pub use reload::invalidate_snapshots;
 pub mod presentation;
 pub mod states;
 pub mod tool_executor;
@@ -146,6 +149,8 @@ pub struct McpServerManager {
     servers: Arc<RwLock<HashMap<String, McpServerState>>>,
     config_path: PathBuf,
     revision: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    // Last configuration consumed by a turn (distinct from the persistence CAS).
+    applied: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     control: std::sync::Mutex<Option<control::Host>>,
     lifecycle_lock: Arc<Mutex<()>>,
 }
@@ -156,6 +161,7 @@ impl McpServerManager {
             servers: Arc::new(RwLock::new(HashMap::new())),
             config_path,
             revision: Arc::new(std::sync::Mutex::new(None)),
+            applied: Arc::default(),
             control: std::sync::Mutex::new(None),
             lifecycle_lock: Arc::new(Mutex::new(())),
         }
@@ -173,6 +179,7 @@ impl McpServerManager {
                 servers: self.servers.clone(),
                 config_path: self.config_path.clone(),
                 revision: self.revision.clone(),
+                applied: self.applied.clone(),
                 control: std::sync::Mutex::new(None),
                 lifecycle_lock: self.lifecycle_lock.clone(),
             };
@@ -182,11 +189,19 @@ impl McpServerManager {
     }
 
     async fn load_config(&self) -> Result<()> {
-        let content = tokio::fs::read_to_string(&self.config_path).await?;
-        let config: serde_json::Value = serde_json::from_str(&content)?;
-        *self.revision.lock().unwrap() = Some(content.as_bytes().to_vec());
+        let content = tokio::fs::read(&self.config_path).await?;
+        *self.servers.write().await = Self::parse_config(&content)?;
+        *self.revision.lock().unwrap() = Some(content.clone());
+        *self.applied.lock().unwrap() = Some(content);
+        Ok(())
+    }
 
-        if let Some(servers) = config.get("mcpServers").and_then(|s| s.as_object()) {
+    fn parse_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {
+        let config: serde_json::Value = serde_json::from_slice(content)?;
+        let mut parsed = HashMap::new();
+        {
+            let servers = config.get("mcpServers").and_then(|s| s.as_object())
+                .ok_or_else(|| anyhow!("expected an mcpServers object"))?;
             for (id, value) in servers {
                 let server_config = McpServerConfig {
                     id: id.clone(),
@@ -258,11 +273,11 @@ impl McpServerManager {
                     status,
                 };
 
-                self.servers.write().await.insert(id.clone(), state);
+                parsed.insert(id.clone(), state);
             }
         }
 
-        Ok(())
+        Ok(parsed)
     }
 
     async fn create_default_config(&self) -> Result<()> {
@@ -586,25 +601,10 @@ impl McpServerManager {
     }
 
     pub async fn call_tool(&self, server_id: &str, tool_name: &str, arguments: serde_json::Value) -> Result<serde_json::Value> {
-        let connector = {
-            let servers = self.servers.read().await;
-            if let Some(state) = servers.get(server_id) {
-                if let Some(connector) = &state.connector {
-                    Some(connector.clone())
-                } else {
-                    return Err(anyhow!("Server connector not available: {}", server_id));
-                }
-            } else {
-                return Err(anyhow!("Server not found: {}", server_id));
-            }
-        };
-
-        if let Some(connector) = connector {
-            let conn = connector.lock().await;
-            conn.call_tool(tool_name, arguments).await
-        } else {
-            Err(anyhow!("Server not running: {}", server_id))
-        }
+        let servers = self.servers.read().await;
+        let conn = Self::running_connector(&servers, server_id)?.lock_owned().await;
+        drop(servers);
+        conn.call_tool(tool_name, arguments).await
     }
 
     fn running_connector(servers: &HashMap<String, McpServerState>, server_id: &str) -> Result<Arc<Mutex<McpConnector>>> {
