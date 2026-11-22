@@ -551,6 +551,19 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 7. 内置工作流不得被意外覆盖：在 `<数据目录>/skills/bundled` 放与内置同名的技能，确认仍执行内置定义；直接放在 `<数据目录>/skills/<同名>` 的用户技能按既有规则覆盖内置。插件命名空间技能的行为不变。
 8. 名称兼容：把 frontmatter `name` 写成 `My Skill` 或含 `(`、`&`、`'` 的名称，确认斜杠命令分别为 `/my-skill`、保留标点的旧名称，模型列表和 `Skill` 工具使用同一个名称，不存在大小写不同的第二个别名。再放两个同名的数据目录技能，确认两者都按 `skill_<hash>` 列出，重复运行结果相同。
 
+### N1. 运行中会话的 MCP 与技能重载（I54）
+
+按顺序运行（本地 stdio fixture 需要 Node；Worker 使用 loopback 模型端点）：
+
+```sh
+cargo test --locked -p deepseek-code-core --lib live_reconcile_preserves_processes_and_drains_calls
+cargo test --locked -p deepseek-code-cli --test session_worker running_session_reloads_extensions_on_the_next_request
+```
+
+- 管理器用例：保留未修改服务的 PID，增删、修改、禁用和重新启用另一服务。待移除服务已有调用时，先让调用正常返回再移除。无效配置不能停止现有进程。
+- 同一 Worker 连续提交五轮：增加服务和项目技能，修改同名工具定义及技能正文，切换为按需加载，再禁用两者。核对实际请求中的 `tools`、最新用户消息的差异提醒以及保持不变的第一条用户消息，并检查 Worker 的终端通知事件。
+- 手工补充：保持交互终端打开，在同一数据目录的第二个终端用 `dcl mcp add/remove/enable/disable` 改动本地测试服务；也可从会话安装。每次只在下一轮检查变更及简短通知，不需重启会话。用编辑器的原子保存方式修改数据目录技能、项目 `.claude/commands`，切换内置技能状态；核对斜杠列表、实际调用内容及模型可见性。项目 `.mcp.json` 不是独立 CLI 自动执行的服务清单，需先按原流程导入。
+
 ### O. 内置 skill-creator
 
 1. `dcl skills list` 在全新数据目录和已有旧占位的数据目录中只列出一个 skill-creator。旧占位必须是 `SKILL.md` 加 `agents/analyzer.md`、`agents/grader.md` 且内容未被改动才会被删除；改动过的副本、额外文件和不相关兄弟技能保持原样。
