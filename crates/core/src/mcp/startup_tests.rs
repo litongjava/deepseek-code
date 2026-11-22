@@ -1,6 +1,75 @@
 use super::*;
 
 #[tokio::test]
+async fn live_reconcile_preserves_processes_and_drains_calls() {
+    use serde_json::{json, Value};
+    use tokio::time::{sleep, timeout, Duration};
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mcp-servers.json");
+    let gate = root.path().join("gate");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live-mcp.cjs");
+    let config = |rev, enabled| {
+        json!({"command":"node", "args":[fixture], "enabled":enabled,
+        "env":{"REVISION":rev, "GATE":gate}})
+    };
+    let save =
+        |servers: Value| std::fs::write(&path, json!({"mcpServers":servers}).to_string()).unwrap();
+    save(json!({}));
+    let manager = Arc::new(McpServerManager::new(path.clone()));
+    manager.load_config().await.unwrap();
+    let pid = |server| manager.call_tool(server, "probe", json!({}));
+    let stable = config("stable", true);
+    save(json!({"stable":stable, "live":config("first",true)}));
+    assert_eq!(manager.reconcile_config().await.unwrap().len(), 2);
+    let stable_pid = pid("stable").await.unwrap();
+    let live_pid = pid("live").await.unwrap();
+    std::fs::write(&path, "{").unwrap();
+    assert!(manager.reconcile_config().await.is_err());
+    assert_eq!(pid("live").await.unwrap(), live_pid);
+    save(json!({"stable":stable, "live":config("second",true)}));
+    assert_eq!(
+        manager.reconcile_config().await.unwrap(),
+        [("live".into(), "restarted".into())]
+    );
+    assert_ne!(pid("live").await.unwrap(), live_pid);
+    save(json!({"stable":stable, "live":config("second",false)}));
+    manager.reconcile_config().await.unwrap();
+    assert!(pid("live").await.is_err());
+    save(json!({"stable":stable, "live":config("second",true)}));
+    manager.reconcile_config().await.unwrap();
+    let enabled_pid = pid("live").await.unwrap();
+    let active = manager.clone();
+    let call = tokio::spawn(async move {
+        active
+            .call_tool("live", "probe", json!({"wait":true}))
+            .await
+    });
+    timeout(Duration::from_secs(5), async {
+        while !gate.with_extension("waiting").exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    save(json!({"stable":stable}));
+    let reload = manager.reconcile_config();
+    tokio::pin!(reload);
+    assert!(timeout(Duration::from_millis(100), &mut reload)
+        .await
+        .is_err());
+    std::fs::write(gate, "release").unwrap();
+    assert_eq!(call.await.unwrap().unwrap(), enabled_pid);
+    timeout(Duration::from_secs(5), reload)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(manager.get_server("live").await.is_none());
+    assert_eq!(pid("stable").await.unwrap(), stable_pid);
+    manager.shutdown_all().await.unwrap();
+}
+
+#[tokio::test]
 async fn fresh_hosts_reconcile_default_creation() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("mcp-servers.json");

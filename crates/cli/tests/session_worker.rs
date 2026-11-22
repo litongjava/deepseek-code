@@ -24,6 +24,8 @@ fn test_cli_executable() -> std::path::PathBuf {
 
 #[path = "support/session_worker_idle.rs"]
 mod idle;
+#[path = "support/session_worker_reload.rs"]
+mod reload;
 
 #[tokio::test]
 async fn live_mode_change_applies_to_tool_after_inflight_model_request() {
