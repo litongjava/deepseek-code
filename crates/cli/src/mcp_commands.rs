@@ -139,10 +139,11 @@ pub(crate) async fn execute(
             &crate::services::context(paths)?,
         )?)?,
         McpOp::Restart { server, host } => {
-            let owner = deepseek_code_core::mcp::control::restart(
+            let owner = deepseek_code_core::mcp::control::restart_from_manager(
                 &crate::services::context(paths)?,
                 &server,
                 host.as_deref(),
+                interactive.then_some(manager),
             )
             .await?;
             serde_json::json!({"restarted": server, "host": owner})
@@ -198,7 +199,7 @@ pub(crate) async fn execute(
                 text: manager.get_prompt(&server, &name, arguments).await?,
             })
         }
-        McpOp::ProbeOwner
+        McpOp::ListPlugins | McpOp::ProbeOwner
         | McpOp::ReloadPlugins
         | McpOp::SetPluginEnabled { .. }
         | McpOp::StopAll => {

@@ -2015,6 +2015,7 @@ impl Session {
         self.engine.cancel_turn(&self.id).await;
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
+        let _guard = self.mcp_gate.lock().await;
         self.mcp.shutdown_all().await
     }
 
@@ -2180,7 +2181,6 @@ impl Session {
         mut origin: TurnOrigin<'_>,
     ) -> Result<()> {
         self.ensure_writable_workspace("the prompt")?;
-        use std::io::IsTerminal;
         self.apply_settings_permissions(cli)?;
         // Idle callers must check the resume gate before submitting a turn.
         self.allow_automatic_wake();

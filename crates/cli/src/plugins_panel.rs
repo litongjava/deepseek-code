@@ -239,7 +239,16 @@ pub(crate) async fn load(
     let mut plugins: Vec<PluginRow> = if scope == Scope::Skills {
         Vec::new()
     } else {
-        deepseek_code_core::services::plugins::list(&context)?
+        let packages = if session.worker_frontend && scope == Scope::Plugins {
+            use deepseek_code_core::services::session_worker::{McpOp, McpResult};
+            let McpResult::Json { value } = session.mcp_call(McpOp::ListPlugins).await? else {
+                anyhow::bail!("Unexpected worker plugin catalog reply");
+            };
+            serde_json::from_value(value)?
+        } else {
+            deepseek_code_core::services::plugins::list(&context)?
+        };
+        packages
             .into_iter()
             .map(|plugin| {
                 let owned: Vec<&SkillRow> = skills

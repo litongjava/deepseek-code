@@ -153,6 +153,7 @@ impl std::fmt::Debug for McpServerState {
 pub struct McpServerManager {
     servers: Arc<RwLock<HashMap<String, McpServerState>>>,
     config_path: PathBuf,
+    worker_endpoint: Option<String>,
     revision: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     // Last configuration consumed by a turn (distinct from the persistence CAS).
     applied: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
@@ -165,11 +166,17 @@ impl McpServerManager {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),
             config_path,
+            worker_endpoint: None,
             revision: Arc::new(std::sync::Mutex::new(None)),
             applied: Arc::default(),
             control: std::sync::Mutex::new(None),
             lifecycle_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub fn with_worker_endpoint(mut self, endpoint: String) -> Self {
+        self.worker_endpoint = Some(endpoint);
+        self
     }
 
     pub async fn initialize(&self) -> Result<()> {
@@ -187,6 +194,7 @@ impl McpServerManager {
             let worker = Self {
                 servers: self.servers.clone(),
                 config_path: self.config_path.clone(),
+                worker_endpoint: self.worker_endpoint.clone(),
                 revision: self.revision.clone(),
                 applied: self.applied.clone(),
                 control: std::sync::Mutex::new(None),

@@ -34,6 +34,16 @@ pub(super) fn persist(
     configs: &HashMap<String, McpServerConfig>,
     backup: bool,
 ) -> Result<Option<PathBuf>> {
+    persist_then(path, revision, configs, backup, || Ok(()))
+}
+
+fn persist_then(
+    path: &Path,
+    revision: &Mutex<Option<Vec<u8>>>,
+    configs: &HashMap<String, McpServerConfig>,
+    backup: bool,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<Option<PathBuf>> {
     let parent = path
         .parent()
         .context("MCP config needs a parent directory")?;
@@ -78,11 +88,46 @@ pub(super) fn persist(
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
+    // Keep the file lock through the catalog commit. A rejected CAS/rename
+    // never reaches the catalog. Restore the exact preimage on a DB failure.
+    if let Err(error) = commit() {
+        if let Some(previous) = &current {
+            let mut restore = tempfile::NamedTempFile::new_in(parent)?;
+            restore.write_all(previous)?;
+            restore.as_file().sync_all()?;
+            restore.persist(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+        return Err(error);
+    }
     *revision = Some(bytes);
     Ok(backup)
 }
 
 impl McpServerManager {
+    pub(crate) async fn commit_plugin_config(
+        &self,
+        plugin: &str,
+        mut desired: std::collections::BTreeMap<String, McpServerConfig>,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let prefix = format!("plugin:{plugin}:");
+        let servers = self.servers.read().await;
+        let mut configs = HashMap::new();
+        for (id, server) in servers.iter() {
+            if !id.starts_with(&prefix) {
+                configs.insert(id.clone(), server.config.clone());
+            } else if let Some(updated) = desired.get_mut(id) {
+                updated.enabled = server.config.enabled;
+            }
+        }
+        configs.extend(desired);
+        persist_then(&self.config_path, &self.revision, &configs, false, commit)?;
+        Ok(())
+    }
+
     pub async fn import_legacy(&self, source: &Path, preview: bool) -> Result<Report> {
         let unloaded = self.revision.lock().unwrap().is_none();
         if unloaded && self.config_path.exists() {

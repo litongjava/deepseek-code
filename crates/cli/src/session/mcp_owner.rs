@@ -92,10 +92,12 @@ pub(crate) async fn local_operation(
     reconcile(manager, paths, session).await?;
     if matches!(op, McpOp::ReloadPlugins | McpOp::SetPluginEnabled { .. }) {
         let context = crate::services::context(paths)?;
-        if let McpOp::SetPluginEnabled { id, enabled } = op {
-            deepseek_code_core::services::plugins::enable(&context, &id, enabled)?;
-        }
-        let notices = deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?;
+        let notices = if let McpOp::SetPluginEnabled { id, enabled } = op {
+            deepseek_code_core::services::plugins::set_mcp_enabled(&context, manager, &id, enabled)
+                .await?
+        } else {
+            deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?
+        };
         reconcile(manager, paths, session).await?;
         reload_plugin_metadata(paths, workspace)?;
         return Ok(McpResult::Reloaded { notices });
@@ -123,16 +125,31 @@ pub(crate) struct WorkerMcp {
 }
 
 impl WorkerMcp {
-    pub(crate) fn new(paths: RuntimePaths, workspace: PathBuf, session: String) -> Self {
+    pub(crate) fn new(
+        paths: RuntimePaths,
+        workspace: PathBuf,
+        session: String,
+        endpoint: String,
+    ) -> Self {
         Self {
-            manager: Arc::new(McpServerManager::new(
-                paths.data_dir.join("mcp-servers.json"),
-            )),
+            manager: Arc::new(
+                McpServerManager::new(paths.data_dir.join("mcp-servers.json"))
+                    .with_worker_endpoint(endpoint),
+            ),
             ready: Arc::default(),
             gate: Arc::default(),
             paths,
             workspace,
             session,
+        }
+    }
+
+    pub(crate) fn runtime_status(&self) -> deepseek_code_core::services::runtime_status::RuntimeSource {
+        deepseek_code_core::services::runtime_status::RuntimeSource {
+            mcp: self.manager.clone(),
+            mcp_ready: self.ready.clone(),
+            data_dir: self.paths.data_dir.clone(),
+            workspace: self.workspace.clone(),
         }
     }
 
@@ -166,13 +183,23 @@ impl WorkerMcp {
         let send =
             move |response| tokio::spawn(async move { worker::reply(stream, &response).await });
         let (id, op) = match request {
-            Request::Mcp(op) => (None, op),
+            Request::Mcp(McpOp::ListPlugins) => {
+                let result = crate::services::context(&self.paths).and_then(|ctx| {
+                    Ok(McpResult::Json {
+                        value: serde_json::to_value(deepseek_code_core::services::plugins::list(
+                            &ctx,
+                        )?)?,
+                    })
+                });
+                send(worker::mcp_reply(result));
+                return;
+            }
             Request::McpTracked { id, operation } if operation.needs_receipt() => {
                 if let Some(reply) = receipts.admit(id) {
                     send(reply);
                     return;
                 }
-                (Some(id), operation)
+                (id, operation)
             }
             Request::McpOutcome { id } => {
                 send(receipts.query(id));
@@ -195,17 +222,7 @@ impl WorkerMcp {
                     None => Ok(McpResult::Busy),
                 }
             };
-            let response = match id {
-                Some(id) => receipts.finish(id, result),
-                None => match result {
-                    Ok(mcp) => {
-                        let mut reply = Reply::ok(None);
-                        reply.mcp = Some(mcp);
-                        reply
-                    }
-                    Err(error) => Reply::error(error),
-                },
-            };
+            let response = receipts.finish(id, result);
             send(response);
         });
     }

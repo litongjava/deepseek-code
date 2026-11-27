@@ -1,6 +1,6 @@
 //! Persistent session ownership, independent of individual model-turn jobs.
 //! Provider credentials cross a local IPC stream in memory, never a job file.
-mod mcp_operations;
+pub(crate) mod mcp_operations;
 pub use mcp_operations::{McpClient, McpReceipts};
 mod recovery;
 use super::background_sessions::{self as jobs, Job, SessionClaim};
@@ -69,6 +69,7 @@ pub struct Worker {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
     ProbeOwner,
+    ListPlugins,
     ReloadPlugins,
     SetPluginEnabled {
         id: String,
@@ -202,6 +203,16 @@ pub struct Reply {
     pub runtime_status: Option<super::runtime_status::RuntimeStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpResult>,
+}
+pub fn mcp_reply(result: Result<McpResult>) -> Reply {
+    match result {
+        Ok(mcp) => {
+            let mut reply = Reply::ok(None);
+            reply.mcp = Some(mcp);
+            reply
+        }
+        Err(error) => Reply::error(error),
+    }
 }
 impl Reply {
     pub fn ok(id: Option<String>) -> Self {

@@ -132,11 +132,25 @@ async fn tick_once(
     }
     if let Some((request, server)) = context.db.claim_mcp_restart(id, now())? {
         let result = if servers.contains(&server) {
-            match tokio::time::timeout(Duration::from_secs(20), manager.restart_server(&server))
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!("MCP restart timed out")),
+            if let Some(endpoint) = &manager.worker_endpoint {
+                use crate::services::session_worker::{mcp_operations, McpOp, McpResult};
+                let operation = McpOp::Reconnect { server };
+                let reply =
+                    mcp_operations::tracked(endpoint, uuid::Uuid::parse_str(&request)?, &operation)
+                        .await;
+                match reply {
+                    Ok(reply) if !reply.ok => {
+                        Err(anyhow::anyhow!("{}", reply.error.unwrap_or_default()))
+                    }
+                    Ok(reply) if matches!(reply.mcp, Some(McpResult::Busy)) => {
+                        Err(anyhow::anyhow!("MCP is busy, try after this turn"))
+                    }
+                    Ok(reply) if matches!(reply.mcp, Some(McpResult::Message { .. })) => Ok(()),
+                    Ok(_) => Err(anyhow::anyhow!("Unexpected worker restart reply")),
+                    Err(error) => Err(error),
+                }
+            } else {
+                manager.restart_server(&server).await
             }
         } else {
             Err(anyhow::anyhow!("Server is no longer running in this host"))
@@ -168,6 +182,15 @@ pub async fn restart(
     server: &str,
     host: Option<&str>,
 ) -> Result<String> {
+    restart_from_manager(context, server, host, None).await
+}
+
+pub async fn restart_from_manager(
+    context: &ServiceContext<impl McpControl>,
+    server: &str,
+    host: Option<&str>,
+    admitted: Option<&McpServerManager>,
+) -> Result<String> {
     let matches: Vec<_> = hosts(context)?
         .into_iter()
         .filter(|h| host.is_none_or(|id| id == h.id) && h.servers.iter().any(|s| s == server))
@@ -179,6 +202,18 @@ pub async fn restart(
     );
     let id = uuid::Uuid::new_v4().to_string();
     let host = &matches[0].id;
+    if let Some(manager) = admitted {
+        let local = manager
+            .control
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|h| h.id == *host);
+        if local {
+            manager.restart_server(server).await?;
+            return Ok(host.clone());
+        }
+    }
     context
         .db
         .request_mcp_restart(&id, host, server, now() + 25)?;
@@ -192,8 +227,10 @@ pub async fn restart(
             anyhow::bail!("MCP restart failed: {}", error.unwrap_or_default());
         }
         ensure!(
-            tokio::time::Instant::now() < deadline,
-            "MCP host did not acknowledge restart; check host status"
+            tokio::time::Instant::now() < deadline
+                || (state == "running"
+                    && !crate::services::session_worker::process_exited(matches[0].pid)),
+            "MCP host did not acknowledge restart request {id} (last state: {state})"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

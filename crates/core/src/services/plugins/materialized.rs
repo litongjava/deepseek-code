@@ -39,7 +39,10 @@ fn directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn materialize(context: &ServiceContext<impl PluginCatalog>, bundle: &Bundle) -> Result<PathBuf> {
+pub(super) fn materialize(
+    context: &ServiceContext<impl PluginCatalog>,
+    bundle: &Bundle,
+) -> Result<PathBuf> {
     bundle.validate()?;
     let files = decoded_files(bundle)?;
     let payload = serde_json::to_vec(bundle)?;
@@ -126,7 +129,9 @@ pub fn skill_commands(
     Ok(skills)
 }
 
-pub fn command_hooks(context: &ServiceContext<impl PluginCatalog>) -> Result<Vec<(PathBuf, Value)>> {
+pub fn command_hooks(
+    context: &ServiceContext<impl PluginCatalog>,
+) -> Result<Vec<(PathBuf, Value)>> {
     let mut hooks = Vec::new();
     for installed in list(context)?.into_iter().filter(|p| p.enabled) {
         let bundle = enabled_bundle(context, &installed.id)?;
@@ -153,42 +158,7 @@ pub async fn sync_mcp(
     let mut desired = BTreeMap::new();
     for installed in list(context)?.into_iter().filter(|p| p.enabled) {
         let bundle = enabled_bundle(context, &installed.id)?;
-        if bundle.mcp_servers.is_empty() {
-            continue;
-        }
-        let root = materialize(context, &bundle)?;
-        for (name, mut server) in bundle.mcp_servers {
-            official::replace_plugin_root(&mut server, &root.to_string_lossy().replace('\\', "/"));
-            let id = format!("plugin:{}:{name}", bundle.id);
-            let mut config = crate::mcp::McpServerConfig {
-                id: id.clone(),
-                name: id.clone(),
-                command: server["command"]
-                    .as_str()
-                    .context("MCP command missing")?
-                    .into(),
-                args: serde_json::from_value(
-                    server
-                        .get("args")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!([])),
-                )?,
-                env: serde_json::from_value(
-                    server
-                        .get("env")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({})),
-                )?,
-                cwd: Some(root.clone()),
-                enabled: true,
-                ..Default::default()
-            };
-            config
-                .env
-                .entry("CLAUDE_PLUGIN_ROOT".into())
-                .or_insert_with(|| root.to_string_lossy().into_owned());
-            desired.insert(id, config);
-        }
+        desired.extend(bundle_servers(context, bundle)?);
     }
     let current = manager.list_servers_full().await;
     for server in current
@@ -223,4 +193,71 @@ pub async fn sync_mcp(
         notices.push((id, status));
     }
     Ok(notices)
+}
+
+fn bundle_servers(
+    context: &ServiceContext<impl PluginCatalog>,
+    bundle: Bundle,
+) -> Result<BTreeMap<String, crate::mcp::McpServerConfig>> {
+    let mut desired = BTreeMap::new();
+    if bundle.mcp_servers.is_empty() {
+        return Ok(desired);
+    }
+    let root = materialize(context, &bundle)?;
+    for (name, mut server) in bundle.mcp_servers {
+        official::replace_plugin_root(&mut server, &root.to_string_lossy().replace('\\', "/"));
+        let id = format!("plugin:{}:{name}", bundle.id);
+        let mut config = crate::mcp::McpServerConfig {
+            id: id.clone(),
+            name: id.clone(),
+            command: server["command"]
+                .as_str()
+                .context("MCP command missing")?
+                .into(),
+            args: serde_json::from_value(
+                server
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )?,
+            env: serde_json::from_value(
+                server
+                    .get("env")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            )?,
+            cwd: Some(root.clone()),
+            enabled: true,
+            ..Default::default()
+        };
+        config
+            .env
+            .entry("CLAUDE_PLUGIN_ROOT".into())
+            .or_insert_with(|| root.to_string_lossy().into_owned());
+        desired.insert(id, config);
+    }
+    Ok(desired)
+}
+
+pub async fn set_mcp_enabled(
+    context: &ServiceContext<impl PluginCatalog>,
+    manager: &crate::mcp::McpServerManager,
+    id: &str,
+    enabled: bool,
+) -> Result<Vec<(String, String)>> {
+    let (bundle, _, _) = context
+        .db
+        .plugins()?
+        .into_iter()
+        .find(|(b, _, _)| b.id == id)
+        .context("Plugin not installed")?;
+    let desired = if enabled {
+        bundle_servers(context, bundle)?
+    } else {
+        BTreeMap::new()
+    };
+    manager
+        .commit_plugin_config(id, desired, || context.db.enable_plugin(id, enabled))
+        .await?;
+    manager.reconcile_config().await
 }

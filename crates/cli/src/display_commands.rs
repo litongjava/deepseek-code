@@ -348,7 +348,14 @@ pub async fn handle(
             let Some(Commands::Plugin { action }) = parsed.command else {
                 unreachable!()
             };
-            crate::plugins::run(paths, &action).await?;
+            use crate::args::PluginCommands;
+            if let PluginCommands::Enable { id } | PluginCommands::Disable { id } = &action {
+                let enabled = matches!(action, PluginCommands::Enable { .. });
+                session.apply_plugin_operation(deepseek_code_core::services::session_worker::McpOp::SetPluginEnabled { id: id.clone(), enabled }).await?;
+                crate::services::print(&serde_json::json!({"enabled":enabled}))?;
+            } else {
+                crate::plugins::run(paths, &action).await?;
+            }
         }
         "/reload-plugins" => {
             ensure!(argument.is_empty(), "Usage: /reload-plugins");

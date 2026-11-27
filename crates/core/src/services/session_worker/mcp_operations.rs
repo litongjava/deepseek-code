@@ -1,7 +1,7 @@
 //! Mutation receipts are local to one worker generation. Finishing an admitted
 //! action never depends on the original client keeping its stream open.
 use super::*;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -19,12 +19,23 @@ fn response(outcome: Outcome) -> Reply {
 }
 
 #[derive(Default, Clone)]
-pub struct McpReceipts(Arc<Mutex<VecDeque<(Uuid, Option<Outcome>)>>>);
+pub struct McpReceipts(Arc<Mutex<ReceiptCache>>);
+
+#[derive(Default)]
+struct ReceiptCache {
+    entries: VecDeque<(Uuid, Option<Outcome>)>,
+    // Discard large result payloads without ever admitting an old ID again.
+    expired: HashSet<Uuid>,
+}
 
 impl McpReceipts {
     /// Reserve before spawning the task, so a status request can never pass it.
     pub fn admit(&self, id: Uuid) -> Option<Reply> {
-        let mut entries = self.0.lock().unwrap();
+        let mut cache = self.0.lock().unwrap();
+        let ReceiptCache { entries, expired } = &mut *cache;
+        if expired.contains(&id) {
+            return Some(response(Ok(McpResult::MissingReceipt)));
+        }
         if let Some((_, entry)) = entries.iter().find(|(key, _)| *key == id) {
             return Some(response(entry.clone().unwrap_or(Ok(McpResult::Pending))));
         }
@@ -32,7 +43,7 @@ impl McpReceipts {
             let Some(index) = entries.iter().position(|(_, value)| value.is_some()) else {
                 return Some(response(Ok(McpResult::Busy)));
             };
-            entries.remove(index);
+            expired.insert(entries.remove(index).unwrap().0);
         }
         entries.push_back((id, None));
         None
@@ -44,6 +55,7 @@ impl McpReceipts {
             .0
             .lock()
             .unwrap()
+            .entries
             .iter_mut()
             .find(|(key, _)| *key == id)
         {
@@ -54,7 +66,7 @@ impl McpReceipts {
 
     pub fn query(&self, id: Uuid) -> Reply {
         let entries = self.0.lock().unwrap();
-        response(match entries.iter().find(|(key, _)| *key == id) {
+        response(match entries.entries.iter().find(|(key, _)| *key == id) {
             Some((_, Some(outcome))) => outcome.clone(),
             Some(_) => Ok(McpResult::Pending),
             None => Ok(McpResult::MissingReceipt),
@@ -64,13 +76,9 @@ impl McpReceipts {
 
 impl McpOp {
     pub fn needs_receipt(&self) -> bool {
-        matches!(
-            self,
-            Self::StopAll
-                | Self::State { .. }
-                | Self::ReloadPlugins
-                | Self::SetPluginEnabled { .. }
-        )
+        // Every manager operation, including listing tools, can initialize or
+        // reconcile servers. Only the catalog-only panel read has no side effects.
+        !matches!(self, Self::ListPlugins)
     }
 }
 
@@ -87,23 +95,18 @@ impl McpClient {
     pub async fn call_endpoint(&mut self, endpoint: &str, op: &McpOp) -> Result<Reply> {
         let key = serde_json::to_vec(op)?;
         if let Some((generation, id, prior)) = &self.pending {
+            if generation != endpoint && *prior == key {
+                anyhow::bail!(
+                    "MCP operation outcome unknown for previous worker {generation} ({id})"
+                );
+            }
             if generation == endpoint {
                 let reply = resolve(endpoint, *id).await?;
-                if matches!(reply.mcp, Some(McpResult::MissingReceipt)) {
-                    // A lost frame or an expired receipt. Fence a retry on an
-                    // idle manager before applying the desired state again.
-                    let probe = exchange(
-                        endpoint,
-                        &Request::Mcp(McpOp::ProbeOwner),
-                        Duration::from_secs(5),
-                    )
-                    .await?
-                    .checked()?;
+                if *prior == key {
                     ensure!(
-                        !matches!(probe.mcp, Some(McpResult::Busy)),
-                        "MCP operation outcome unknown; owner is busy"
+                        !matches!(reply.mcp, Some(McpResult::MissingReceipt)),
+                        "MCP operation outcome unknown for {endpoint} ({id})"
                     );
-                } else if *prior == key {
                     self.pending = None;
                     return reply.checked();
                 }
@@ -117,52 +120,46 @@ impl McpClient {
         }
         let id = Uuid::new_v4();
         self.pending = Some((endpoint.to_owned(), id, key));
-        let request = Request::McpTracked {
-            id,
-            operation: op.clone(),
-        };
-        let reply = match exchange(endpoint, &request, Duration::from_secs(30)).await {
-            Ok(reply) => reply,
-            Err(_) => resolve(endpoint, id).await?,
-        };
-        ensure!(
-            !matches!(
-                reply.mcp,
-                Some(McpResult::MissingReceipt | McpResult::Pending)
-            ),
-            "MCP operation outcome unknown for worker {} ({id})",
-            endpoint
-        );
+        let reply = tracked(endpoint, id, op).await?;
         self.pending = None;
         reply.checked()
     }
 }
 
-async fn resolve(endpoint: &str, id: Uuid) -> Result<Reply> {
-    let poll = async {
-        loop {
-            let reply = exchange(
-                endpoint,
-                &Request::McpOutcome { id },
-                Duration::from_secs(5),
-            )
-            .await?;
-            if !matches!(reply.mcp, Some(McpResult::Pending)) {
-                return Ok::<_, anyhow::Error>(reply);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+pub(crate) async fn tracked(endpoint: &str, id: Uuid, op: &McpOp) -> Result<Reply> {
+    let request = Request::McpTracked {
+        id,
+        operation: op.clone(),
     };
-    tokio::time::timeout(Duration::from_secs(5), poll)
+    let reply = match exchange(endpoint, &request, Duration::from_secs(30)).await {
+        Ok(reply) if !matches!(reply.mcp, Some(McpResult::Pending)) => reply,
+        _ => resolve(endpoint, id).await?,
+    };
+    ensure!(
+        !matches!(
+            reply.mcp,
+            Some(McpResult::MissingReceipt | McpResult::Pending)
+        ),
+        "MCP operation outcome unknown for worker {} ({id})",
+        endpoint
+    );
+    Ok(reply)
+}
+
+async fn resolve(endpoint: &str, id: Uuid) -> Result<Reply> {
+    loop {
+        let reply = exchange(
+            endpoint,
+            &Request::McpOutcome { id },
+            Duration::from_secs(5),
+        )
         .await
-        .map_err(anyhow::Error::from)
-        .and_then(|reply| reply)
-        .with_context(|| {
-            format!(
-                "MCP operation outcome unknown for worker {} ({id})",
-                endpoint
-            )
-        })
+        .with_context(|| format!("MCP operation outcome unknown for worker {endpoint} ({id})"))?;
+        if !matches!(reply.mcp, Some(McpResult::Pending)) {
+            return Ok::<_, anyhow::Error>(reply);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(test)]

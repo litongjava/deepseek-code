@@ -20,8 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use crate::session::WorkerMcp;
-type StatusTarget =
-    Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
+
 struct ModeControl {
     job_id: String,
     session_id: String,
@@ -193,9 +192,8 @@ pub async fn run_from_env() -> Result<bool> {
     let mut coordination_active = false;
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
     let receipts = service::McpReceipts::default();
-    let mcp_target = WorkerMcp::new(RuntimePaths::new(worker.root.clone())?, worker.workspace.clone(), worker.session_id.clone());
+    let mcp_target = WorkerMcp::new(RuntimePaths::new(worker.root.clone())?, worker.workspace.clone(), worker.session_id.clone(), worker.endpoint.clone());
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
-    let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
     let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
     let active = Arc::new(AtomicBool::new(false));
     let current_turn: CurrentTurn = Arc::new(std::sync::Mutex::new(None));
@@ -293,10 +291,7 @@ pub async fn run_from_env() -> Result<bool> {
                             mcp_target.dispatch(request, stream, &receipts, busy);
                         }
                         Request::RuntimeStatus => {
-                            let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
-                                mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),
-                                mcp_ready: Arc::new(tokio::sync::OnceCell::new()), workspace: worker.workspace.clone(), data_dir:worker.root.clone(),
-                            });
+                            let source = mcp_target.runtime_status();
                             let response = match tokio::time::timeout(Duration::from_secs(1), source.snapshot()).await {
                                 Ok(snapshot) => { let mut response=Reply::ok(None); response.runtime_status=Some(snapshot); response },
                                 Err(_) => Reply::error("Runtime status inspection timed out"),
@@ -377,10 +372,10 @@ pub async fn run_from_env() -> Result<bool> {
                             }
                             coordination_active = true;
                             let mcp_target = mcp_target.clone();
-                            let binding=binding.clone();let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();let bash_target=bash_target.clone();let current_turn=current_turn.clone();let admission_released=admission_released.clone();
+                            let binding=binding.clone();let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let bash_target=bash_target.clone();let current_turn=current_turn.clone();let admission_released=admission_released.clone();
                             tokio::spawn(async move {
                                 let task_worker=worker.clone();let task_id=turn_id.clone();let task_mode_target=mode_target.clone();
-                                let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,binding,sessions,task_mode_target,status_target,bash_target,mcp_target).await}).await;
+                                let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,binding,sessions,task_mode_target,bash_target,mcp_target).await}).await;
                                 let error=match result {Ok(result)=>result.err().map(|error|format!("{error:#}")),Err(error)=>{fatal.store(true,Ordering::Release);Some(format!("Session turn panicked: {error}"))}};
                                 if let Some(error)=&error {let _=service::emit_event(&serde_json::json!({"type":"error","error":error}));}
                                 if service::finish_job(&worker,&turn_id,error).await.is_err() {fatal.store(true,Ordering::Release);}
@@ -434,7 +429,6 @@ async fn execute(
     binding: deepseek_code_core::native_engine::session_binding::SessionBinding,
     sessions: Arc<tokio::sync::Mutex<Option<Session>>>,
     mode_target: ModeTarget,
-    status_target: StatusTarget,
     bash_target: BashTarget,
     mcp_target: WorkerMcp,
 ) -> Result<()> {
@@ -549,9 +543,6 @@ async fn execute(
     session
         .engine
         .set_owned_child_idle_ready(&session.id, false);
-    *status_target
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(session.runtime_status_source());
     let current_provider = session.selected_provider().await?;
     let identity = if stamped || snapshot.generation != 0 {
         format!("generation:{}", snapshot.generation)

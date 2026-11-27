@@ -15,7 +15,7 @@ mod legacy;
 mod official;
 mod materialized;
 mod claude_code;
-pub use materialized::{skill_commands, command_hooks, sync_mcp};
+pub use materialized::{skill_commands, command_hooks, set_mcp_enabled, sync_mcp};
 pub use legacy::import_legacy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct Bundle {
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, Value>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Installed {
     pub id: String,
     pub version: String,
