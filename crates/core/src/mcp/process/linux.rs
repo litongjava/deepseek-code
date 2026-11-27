@@ -391,6 +391,8 @@ pub(super) struct Tracker {
     launcher: i32,
     members: Arc<Mutex<Members>>,
     monitor: tokio::task::JoinHandle<()>,
+    #[cfg(test)]
+    signals: Box<dyn Signals + Send + Sync>,
 }
 
 impl Tracker {
@@ -415,6 +417,8 @@ impl Tracker {
             launcher: pid,
             members,
             monitor,
+            #[cfg(test)]
+            signals: Box::new(Kernel),
         }
     }
 
@@ -426,6 +430,9 @@ impl Tracker {
                 entry: &self.token,
                 launcher: self.launcher,
             },
+            #[cfg(test)]
+            self.signals.as_ref(),
+            #[cfg(not(test))]
             &Kernel,
             |_| Ok(child.try_wait()?.is_some()),
         )
@@ -466,11 +473,13 @@ mod tests {
     use super::*;
     use crate::mcp::process::ServerProcess;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     struct Denied {
         deny_open: bool,
         deny_kill: bool,
         errno: i32,
-        kills: std::cell::Cell<usize>,
+        kills: AtomicUsize,
     }
 
     impl Signals for Denied {
@@ -488,7 +497,7 @@ mod tests {
         }
 
         fn kill(&self, pid: i32, signal: i32) -> io::Result<()> {
-            self.kills.set(self.kills.get() + 1);
+            self.kills.fetch_add(1, Ordering::Relaxed);
             if self.deny_kill {
                 Err(io::Error::from_raw_os_error(libc::EPERM))
             } else {
@@ -528,12 +537,12 @@ mod tests {
                 assert!(members
                     .signal_member(&scope, pid, birth + 1, libc::SIGTERM, &mut termed, &denied)
                     .unwrap());
-                assert_eq!(denied.kills.get(), 0);
+                assert_eq!(denied.kills.load(Ordering::Relaxed), 0);
                 drain(&mut Members::default(), scope, &denied, |_| {
                     Ok(server.child.try_wait()?.is_some())
                 })
                 .unwrap();
-                assert_eq!(denied.kills.get(), 1);
+                assert_eq!(denied.kills.load(Ordering::Relaxed), 1);
                 assert_eq!(
                     server.child.try_wait().unwrap().unwrap().signal(),
                     Some(libc::SIGTERM)
@@ -569,9 +578,9 @@ mod tests {
                 && before.elapsed() < STOP_BOUND + Duration::from_secs(1)
         );
         assert!(
-            (2..30).contains(&denied.kills.get()),
+            (2..30).contains(&denied.kills.load(Ordering::Relaxed)),
             "{}",
-            denied.kills.get()
+            denied.kills.load(Ordering::Relaxed)
         );
         assert!(
             error.to_string().contains(&pid.to_string())
@@ -580,6 +589,102 @@ mod tests {
         );
         assert!(server.child.try_wait().unwrap().is_none());
         server.stop().unwrap();
+    }
+
+    #[tokio::test]
+    async fn refused_stop_fences_the_connector_until_a_successful_retry() {
+        use crate::mcp::McpServerManager;
+        use serde_json::json;
+        use std::path::Path;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mcp.json");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live-mcp.cjs");
+        let config = json!({"mcpServers": {"w": {
+            "command":"node", "args":["-e", "setInterval(() => {}, 60000); require(process.argv[1])", fixture],
+            "enabled":true
+        }}});
+        fs::write(&path, config.to_string()).unwrap();
+        let manager = McpServerManager::new(path.clone());
+        manager.load_config().await.unwrap();
+        manager.start_server("w").await.unwrap();
+        let connector = manager.servers.read().await["w"].connector.clone().unwrap();
+        let pid = {
+            let mut guard = connector.lock().await;
+            let tree = &mut guard.process.as_mut().unwrap().tree;
+            tree.signals = Box::new(Denied {
+                deny_open: true,
+                deny_kill: true,
+                errno: libc::EPERM,
+                kills: 0.into(),
+            });
+            tree.launcher
+        };
+        let error = manager
+            .set_server_enabled("w", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("MCP server w could not be stopped")
+                && error.contains(&pid.to_string())
+                && error.contains("os error 1"),
+            "{error}"
+        );
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["mcpServers"]["w"]["enabled"], false);
+        let status = manager.get_server("w").await.unwrap();
+        assert!(status.enabled && status.running);
+        assert_eq!(status.error.as_deref(), Some(error.as_str()));
+        assert_eq!(
+            manager.reconcile_config().await.unwrap_err().to_string(),
+            error
+        );
+        assert_eq!(
+            manager
+                .set_server_enabled("w", true)
+                .await
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+        assert_eq!(
+            manager.start_server("w").await.unwrap_err().to_string(),
+            error
+        );
+        assert_eq!(
+            manager.restart_server("w").await.unwrap_err().to_string(),
+            error
+        );
+        assert_eq!(
+            manager.remove_server("w").await.unwrap_err().to_string(),
+            error
+        );
+        assert!(Arc::ptr_eq(
+            manager.servers.read().await["w"]
+                .connector
+                .as_ref()
+                .unwrap(),
+            &connector
+        ));
+        assert!(stat(pid).is_ok_and(|s| s.state != b'Z'));
+        connector
+            .lock()
+            .await
+            .process
+            .as_mut()
+            .unwrap()
+            .tree
+            .signals = Box::new(Kernel);
+        manager.stop_server("w").await.unwrap();
+        assert_eq!(stat(pid).unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert!(manager.servers.read().await["w"].connector.is_none());
+        let status = manager.get_server("w").await.unwrap();
+        assert!(!status.enabled && !status.running && status.error.is_none());
+        manager.set_server_enabled("w", true).await.unwrap();
+        manager.start_server("w").await.unwrap();
+        manager.remove_server("w").await.unwrap();
+        assert!(manager.get_server("w").await.is_none());
     }
 
     #[tokio::test]

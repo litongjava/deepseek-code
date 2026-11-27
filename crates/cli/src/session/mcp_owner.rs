@@ -223,3 +223,92 @@ impl WorkerMcp {
         });
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use deepseek_code_core::mcp::McpServerConfig;
+    use std::{fs, time::Duration};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    #[ignore = "requires a seccomp runner denying pidfd_open and numeric TERM/KILL"]
+    async fn refused_signals_reach_disable_enable_and_remove_replies() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let target = WorkerMcp::new(paths, root.path().into(), "test-worker".into());
+        let starts = root.path().join("starts");
+        let keep = root.path().join("keep");
+        fs::write(&keep, "").unwrap();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/live-mcp.cjs");
+        let script = r#"const fs = require('fs');
+            fs.appendFileSync(process.argv[2], process.pid + '\n');
+            setInterval(() => { if (!fs.existsSync(process.argv[3])) process.exit(0) }, 20);
+            require(process.argv[1]);"#;
+        target
+            .manager
+            .add_server(McpServerConfig {
+                id: "w".into(),
+                name: "w".into(),
+                command: "node".into(),
+                enabled: true,
+                args: vec![
+                    "-e".into(),
+                    script.into(),
+                    fixture.display().to_string(),
+                    starts.display().to_string(),
+                    keep.display().to_string(),
+                ],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        target.manager.start_server("w").await.unwrap();
+        // Ownership is already initialized. Exercise the ordinary worker
+        // dispatcher and serialized receipts without binding a listener.
+        target.ready.set(()).unwrap();
+        let original = fs::read_to_string(&starts).unwrap();
+        let receipts = worker::McpReceipts::default();
+        for operation in [
+            McpOp::State {
+                server: Some("w".into()),
+                state: Some("off".into()),
+            },
+            McpOp::State {
+                server: Some("w".into()),
+                state: Some("user".into()),
+            },
+            McpOp::Remove { server: "w".into() },
+        ] {
+            let request = worker::Request::McpTracked {
+                id: uuid::Uuid::new_v4(),
+                operation,
+            };
+            let (client, server) = tokio::io::duplex(4096);
+            let before = std::time::Instant::now();
+            target.dispatch(request, Box::new(server), &receipts, false);
+            let mut line = String::new();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                BufReader::new(client).read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            eprintln!("{:.2?} {}", before.elapsed(), line.trim_end());
+            let reply: worker::Reply = serde_json::from_str(&line).unwrap();
+            assert!(!reply.ok && reply.mcp.is_none());
+            let error = reply.error.unwrap();
+            assert!(
+                error.contains("MCP server w could not be stopped")
+                    && error.contains(original.trim())
+                    && error.contains("os error 1"),
+                "{error}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&starts).unwrap(), original);
+        fs::remove_file(keep).unwrap();
+        target.manager.stop_server("w").await.unwrap();
+    }
+}

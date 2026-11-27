@@ -140,6 +140,45 @@ pub struct McpServerState {
     plugin_start_failed: bool,
 }
 
+impl McpServerState {
+    // A failed start has no connector. A cleanup error retains its connector
+    // and blocks starts until an explicit stop successfully drains that tree.
+    fn stop_error(&self) -> Option<&str> {
+        self.connector.as_ref().and(self.status.error.as_deref())
+    }
+
+    fn ensure_unfenced(&self) -> Result<()> {
+        if let Some(error) = self.stop_error() {
+            return Err(anyhow!("{error}"));
+        }
+        Ok(())
+    }
+
+    async fn retry_failed_stop(&mut self) -> Result<()> {
+        if self.stop_error().is_some() {
+            self.stop().await?;
+        }
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if let Some(connector) = &self.connector {
+            if let Err(error) = connector.lock().await.stop().await {
+                self.status.error = Some(error.to_string());
+                return Err(error);
+            }
+            self.connector = None;
+            self.status.error = None;
+        }
+        self.status.running = false;
+        self.status.pid = None;
+        self.status.tools_count = 0;
+        self.status.resources_count = 0;
+        self.status.enabled = self.config.enabled;
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for McpServerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpServerState")
@@ -207,18 +246,20 @@ impl McpServerManager {
     async fn load_config(&self) -> Result<()> {
         let content = tokio::fs::read(&self.config_path).await?;
         let servers = Self::parse_config(&content)?;
-        self.install_config(servers, Some(content)).await;
+        let bytes = Some(content);
+        {
+            let _guard = self.lifecycle_lock.lock().await;
+            let mut live = self.servers.write().await;
+            if live.values().all(|state| state.connector.is_none()) {
+                *live = servers;
+                *self.revision.lock().unwrap() = bytes.clone();
+                *self.applied.lock().unwrap() = bytes;
+                return Ok(());
+            }
+        }
+        // A repeated initialize cannot discard an existing ownership handle.
+        self.reconcile_config().await?;
         Ok(())
-    }
-
-    async fn install_config(
-        &self,
-        servers: HashMap<String, McpServerState>,
-        bytes: Option<Vec<u8>>,
-    ) {
-        *self.servers.write().await = servers;
-        *self.revision.lock().unwrap() = bytes.clone();
-        *self.applied.lock().unwrap() = bytes;
     }
 
     fn parse_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {
@@ -401,6 +442,18 @@ impl McpServerManager {
         Ok(())
     }
 
+    async fn stop_and_persist(
+        &self,
+        state: &mut McpServerState,
+        configs: &HashMap<String, McpServerConfig>,
+    ) -> Result<()> {
+        state.retry_failed_stop().await?;
+        let edit = transfer::prepare(&self.config_path, &self.revision, configs, false)?;
+        state.stop().await?;
+        edit.publish(|| Ok(()))?;
+        Ok(())
+    }
+
     pub async fn update_server(&self, id: &str, config: McpServerConfig) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let mut servers = self.servers.write().await;
@@ -413,38 +466,25 @@ impl McpServerManager {
             .map(|(id, s)| (id.clone(), s.config.clone()))
             .collect();
         configs.insert(id.to_string(), config.clone());
-        transfer::persist(&self.config_path, &self.revision, &configs, false)?;
-        if let Some(state) = servers.get_mut(id) {
-            let was_running = state.status.running;
-            if state.config != config {
-                state.plugin_start_failed = false;
-            }
-            state.config = config;
-            state.status.name = state.config.name.clone();
-            state.status.command = state.config.command.clone();
-            state.status.args = state.config.args.clone();
-            state.status.env = if state.config.env.is_empty() {
-                None
-            } else {
-                Some(state.config.env.clone())
-            };
-            state.status.cwd = state.config.cwd.clone();
-            state.status.enabled = state.config.enabled;
-            state.status.transport_type = state.config.transport_name().to_string();
-            state.status.url = state.config.url.clone();
-            state.status.headers = state.config.headers.clone();
-
-            if was_running {
-                if let Some(connector) = state.connector.take() {
-                    let mut conn = connector.lock().await;
-                    let _ = conn.stop().await;
-                }
-                state.status.running = false;
-                state.status.pid = None;
-            }
-        } else {
-            return Err(anyhow!("Server not found: {}", id));
+        let state = servers.get_mut(id).unwrap();
+        self.stop_and_persist(state, &configs).await?;
+        if state.config != config {
+            state.plugin_start_failed = false;
         }
+        state.config = config;
+        state.status.name = state.config.name.clone();
+        state.status.command = state.config.command.clone();
+        state.status.args = state.config.args.clone();
+        state.status.env = if state.config.env.is_empty() {
+            None
+        } else {
+            Some(state.config.env.clone())
+        };
+        state.status.cwd = state.config.cwd.clone();
+        state.status.enabled = state.config.enabled;
+        state.status.transport_type = state.config.transport_name().to_string();
+        state.status.url = state.config.url.clone();
+        state.status.headers = state.config.headers.clone();
 
         Ok(())
     }
@@ -458,12 +498,9 @@ impl McpServerManager {
             .filter(|(key, _)| key.as_str() != id)
             .map(|(id, s)| (id.clone(), s.config.clone()))
             .collect();
-        transfer::persist(&self.config_path, &self.revision, &configs, false)?;
-        if let Some(state) = servers.remove(id) {
-            if let Some(connector) = state.connector {
-                let _ = connector.lock().await.stop().await;
-            }
-        }
+        let state = servers.get_mut(id).unwrap();
+        self.stop_and_persist(state, &configs).await?;
+        servers.remove(id);
         Ok(())
     }
 
@@ -488,6 +525,7 @@ impl McpServerManager {
         let _guard = self.lifecycle_lock.lock().await;
         let state = self.servers.read().await.get(id).cloned()
             .ok_or_else(|| anyhow!("Server not found: {id}"))?;
+        state.ensure_unfenced()?;
         if !state.config.enabled || state.plugin_start_failed {
             return Ok(false);
         }
@@ -512,16 +550,14 @@ impl McpServerManager {
         self.start_server_inner(id).await
     }
     async fn start_server_inner(&self,id:&str)->Result<()> {
-        if self.get_server(id).await.is_some_and(|s|s.running) {return Ok(());}
-
         let config = {
             let servers = self.servers.read().await;
-            servers.get(id).map(|s| s.config.clone())
-        };
-
-        let config = match config {
-            Some(c) => c,
-            None => return Err(anyhow!("Server not found: {}", id)),
+            let state = servers.get(id).ok_or_else(|| anyhow!("Server not found: {id}"))?;
+            state.ensure_unfenced()?;
+            if state.status.running {
+                return Ok(());
+            }
+            state.config.clone()
         };
 
         if !config.enabled {
@@ -533,6 +569,12 @@ impl McpServerManager {
             // The status keeps the start failure so `/mcp` and `/doctor errors` can show it.
             let mut servers = self.servers.write().await;
             if let Some(state) = servers.get_mut(id) {
+                if connector.process.is_some() {
+                    // Initialization can fail after spawn. Its process still owns
+                    // the ID if cleanup is refused.
+                    state.connector = Some(Arc::new(Mutex::new(connector)));
+                    state.stop().await?;
+                }
                 state.plugin_start_failed = id.starts_with("plugin:") && state.config == config;
                 state.status.error = Some(format!("{error:#}"));
                 state.status.running = false;
@@ -564,30 +606,9 @@ impl McpServerManager {
         self.stop_server_inner(id).await
     }
     async fn stop_server_inner(&self,id:&str)->Result<()> {
-        let connector = {
-            let mut servers = self.servers.write().await;
-            if let Some(state) = servers.get_mut(id) {
-                state.status.running=false;
-                state.connector.take()
-            } else {
-                return Err(anyhow!("Server not found: {}", id));
-            }
-        };
-
-        if let Some(connector) = connector {
-            let mut conn = connector.lock().await;
-            conn.stop().await?;
-        }
-
-        let mut servers = self.servers.write().await;
-        if let Some(state) = servers.get_mut(id) {
-            state.status.running = false;
-            state.status.pid = None;
-            state.status.tools_count = 0;
-            state.status.resources_count = 0;
-        }
-
-        Ok(())
+        self.servers.write().await.get_mut(id)
+            .ok_or_else(|| anyhow!("Server not found: {id}"))?
+            .stop().await
     }
 
     pub async fn restart_server(&self, id: &str) -> Result<()> {
@@ -602,7 +623,7 @@ impl McpServerManager {
         let mut all_tools = Vec::new();
 
         for state in servers.values() {
-            if state.status.running {
+            if state.status.running && state.stop_error().is_none() {
                 if let Some(connector) = &state.connector {
                     let conn = connector.lock().await;
                     if let Ok(tools) = conn.list_tools().await {
@@ -625,7 +646,7 @@ impl McpServerManager {
         let mut all_resources = Vec::new();
 
         for state in servers.values() {
-            if state.status.running {
+            if state.status.running && state.stop_error().is_none() {
                 if let Some(connector) = &state.connector {
                     let conn = connector.lock().await;
                     if let Ok(resources) = conn.list_resources().await {
@@ -642,6 +663,7 @@ impl McpServerManager {
         let connector = {
             let servers = self.servers.read().await;
             if let Some(state) = servers.get(server_id) {
+                state.ensure_unfenced()?;
                 if let Some(connector) = &state.connector {
                     Some(connector.clone())
                 } else {
@@ -664,6 +686,7 @@ impl McpServerManager {
         let connector = {
             let servers = self.servers.read().await;
             if let Some(state) = servers.get(server_id) {
+                state.ensure_unfenced()?;
                 if let Some(connector) = &state.connector {
                     Some(connector.clone())
                 } else {
@@ -690,13 +713,14 @@ impl McpServerManager {
     }
 
     fn running_connector(servers: &HashMap<String, McpServerState>, server_id: &str) -> Result<Arc<Mutex<McpConnector>>> {
-        servers.get(server_id).ok_or_else(|| anyhow!("Server not found: {server_id}"))?
-            .connector.clone().ok_or_else(|| anyhow!("Server not running: {server_id}"))
+        let state = servers.get(server_id).ok_or_else(|| anyhow!("Server not found: {server_id}"))?;
+        state.ensure_unfenced()?;
+        state.connector.clone().ok_or_else(|| anyhow!("Server not running: {server_id}"))
     }
 
     /// Prompts of every running server, as (server id, prompt).
     pub async fn get_all_prompts(&self) -> Vec<(String, McpPrompt)> {
-        let connectors: Vec<_> = self.servers.read().await.iter().filter_map(|(id, state)| state.connector.clone().map(|c| (id.clone(), c))).collect();
+        let connectors: Vec<_> = self.servers.read().await.iter().filter(|(_, state)| state.stop_error().is_none()).filter_map(|(id, state)| state.connector.clone().map(|c| (id.clone(), c))).collect();
         let mut prompts = Vec::new();
         for (id, connector) in connectors {
             if let Ok(list) = connector.lock().await.list_prompts().await {
@@ -721,22 +745,31 @@ impl McpServerManager {
     }
 
     async fn change_server_enabled(&self, id: &str, enabled: Option<bool>) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
         let mut servers = self.servers.write().await;
-        let state = servers
-            .get(id)
-            .ok_or_else(|| anyhow!("Server not found: {}", id))?;
+        let state = servers.get_mut(id).ok_or_else(|| anyhow!("Server not found: {id}"))?;
         let enabled = enabled.unwrap_or(!state.config.enabled);
-        let mut configs: HashMap<_, _> = servers
-            .iter()
-            .map(|(id, s)| (id.clone(), s.config.clone()))
-            .collect();
-        configs.get_mut(id).unwrap().enabled = enabled;
-        transfer::persist(&self.config_path, &self.revision, &configs, false)?;
-        let state = servers.get_mut(id).unwrap();
+        if enabled {
+            state.ensure_unfenced()?;
+        } else {
+            state.retry_failed_stop().await?;
+        }
         if state.config.enabled != enabled {
+            let mut configs: HashMap<_, _> = servers.iter()
+                .map(|(id, s)| (id.clone(), s.config.clone()))
+                .collect();
+            configs.get_mut(id).unwrap().enabled = enabled;
+            transfer::persist(&self.config_path, &self.revision, &configs, false)?;
+            let state = servers.get_mut(id).unwrap();
+            state.config.enabled = enabled;
             state.plugin_start_failed = false;
         }
-        state.config.enabled = enabled;
+        let state = servers.get_mut(id).unwrap();
+        if !enabled {
+            // The saved intent is durable. Publish the live status only once
+            // the connector and all of its owned processes have stopped.
+            state.stop().await?;
+        }
         state.status.enabled = enabled;
         Ok(())
     }
@@ -757,7 +790,7 @@ impl McpServerManager {
         let server_ids: Vec<String> = {
             let servers = self.servers.read().await;
             servers.keys()
-                .filter(|id| servers.get(*id).map(|s| s.status.running).unwrap_or(false))
+                .filter(|id| servers[*id].connector.is_some())
                 .cloned()
                 .collect()
         };
@@ -819,6 +852,9 @@ impl McpConnector {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        if self.process.is_some() {
+            self.stop().await?;
+        }
         let url = || self.config.url.as_deref().filter(|url| !url.is_empty()).ok_or_else(|| anyhow!("MCP server {} needs a url for the {} transport", self.config.name, self.config.transport_name()));
         let channel = match self.config.transport_name() {
             "stdio" => {
@@ -1169,7 +1205,13 @@ impl McpConnector {
         if let Some(mut channel) = self.channel.lock().await.take() {
             channel.close().await;
         }
-        drop(self.process.take());
+        #[cfg(target_os = "linux")]
+        if let Some(process) = &mut self.process {
+            process.stop().map_err(|error| {
+                anyhow!("MCP server {} could not be stopped: {error}", self.config.id)
+            })?;
+        }
+        self.process = None;
         Ok(())
     }
 }

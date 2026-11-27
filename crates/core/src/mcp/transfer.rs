@@ -44,6 +44,27 @@ fn persist_then(
     backup: bool,
     commit: impl FnOnce() -> Result<()>,
 ) -> Result<Option<PathBuf>> {
+    prepare(path, revision, configs, backup)?.publish(commit)
+}
+
+// The file lock spans the revision check, optional process drain, and rename.
+// Dropping a prepared edit leaves the previous bytes in place.
+pub(super) struct PreparedConfig<'a> {
+    _lock: std::fs::File,
+    path: &'a Path,
+    revision: &'a Mutex<Option<Vec<u8>>>,
+    current: Option<Vec<u8>>,
+    bytes: Vec<u8>,
+    file: tempfile::NamedTempFile,
+    backup: Option<PathBuf>,
+}
+
+pub(super) fn prepare<'a>(
+    path: &'a Path,
+    revision: &'a Mutex<Option<Vec<u8>>>,
+    configs: &HashMap<String, McpServerConfig>,
+    backup: bool,
+) -> Result<PreparedConfig<'a>> {
     let parent = path
         .parent()
         .context("MCP config needs a parent directory")?;
@@ -55,14 +76,13 @@ fn persist_then(
         .write(true)
         .open(path.with_extension("lock"))?;
     crate::fs::try_lock_briefly(&lock).context("MCP configuration is being edited; retry")?;
-    let mut revision = revision.lock().unwrap();
     let current = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
     ensure!(
-        *revision == current,
+        *revision.lock().unwrap() == current,
         "MCP configuration changed in another process; reopen this host before editing"
     );
     let backup = if backup {
@@ -87,22 +107,36 @@ fn persist_then(
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;
-    file.persist(path)?;
-    // Keep the file lock through the catalog commit. A rejected CAS/rename
-    // never reaches the catalog. Restore the exact preimage on a DB failure.
-    if let Err(error) = commit() {
-        if let Some(previous) = &current {
-            let mut restore = tempfile::NamedTempFile::new_in(parent)?;
-            restore.write_all(previous)?;
-            restore.as_file().sync_all()?;
-            restore.persist(path)?;
-        } else {
-            std::fs::remove_file(path)?;
+    Ok(PreparedConfig {
+        _lock: lock,
+        path,
+        revision,
+        current,
+        bytes,
+        file,
+        backup,
+    })
+}
+
+impl PreparedConfig<'_> {
+    pub(super) fn publish(self, commit: impl FnOnce() -> Result<()>) -> Result<Option<PathBuf>> {
+        self.file.persist(self.path)?;
+        // Keep the file lock through the catalog commit. A rejected CAS/rename
+        // never reaches the catalog. Restore the exact preimage on a DB failure.
+        if let Err(error) = commit() {
+            if let Some(previous) = self.current {
+                let mut restore = tempfile::NamedTempFile::new_in(self.path.parent().unwrap())?;
+                restore.write_all(&previous)?;
+                restore.as_file().sync_all()?;
+                restore.persist(self.path)?;
+            } else {
+                std::fs::remove_file(self.path)?;
+            }
+            return Err(error);
         }
-        return Err(error);
+        *self.revision.lock().unwrap() = Some(self.bytes);
+        Ok(self.backup)
     }
-    *revision = Some(bytes);
-    Ok(backup)
 }
 
 impl McpServerManager {

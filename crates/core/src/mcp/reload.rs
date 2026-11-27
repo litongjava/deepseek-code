@@ -36,7 +36,16 @@ impl McpServerManager {
             .collect();
         let mut notices = Vec::new();
         let mut starts = Vec::new();
+        let mut stop_error = None;
         for id in ids {
+            if let Some(state) = live.get(&id) {
+                if let Err(error) = state.ensure_unfenced() {
+                    // An explicit stop/remove/restart can retry. A pre-command
+                    // reconciliation must not spend a second deadline on the ID.
+                    stop_error.get_or_insert(error);
+                    continue;
+                }
+            }
             let next = desired.remove(&id);
             let target = next.as_ref().map(|s| &s.config);
             let same_live = live.get(&id).map(|s| &s.config) == target;
@@ -55,9 +64,11 @@ impl McpServerManager {
                 continue;
             }
             let running = live.get(&id).is_some_and(|s| s.status.running);
-            if let Some(connector) = live.get(&id).and_then(|s| s.connector.as_ref()) {
-                // A call owns this mutex until it receives its response.
-                connector.lock().await.stop().await?;
+            if let Some(state) = live.get_mut(&id) {
+                if let Err(error) = state.stop().await {
+                    stop_error.get_or_insert(error);
+                    continue;
+                }
             }
             if let Some(state) = next {
                 if state.config.enabled {
@@ -71,7 +82,9 @@ impl McpServerManager {
                 notices.push((id, "removed".into()));
             }
         }
-        *self.revision.lock().unwrap() = bytes.clone();
+        if stop_error.is_none() {
+            *self.revision.lock().unwrap() = bytes.clone();
+        }
         drop(live);
         for (id, action) in starts {
             let status = match self.start_server_inner(&id).await {
@@ -79,6 +92,9 @@ impl McpServerManager {
                 Err(error) => format!("failed to start: {error:#}"),
             };
             notices.push((id, status));
+        }
+        if let Some(error) = stop_error {
+            return Err(error);
         }
         *self.applied.lock().unwrap() = bytes;
         Ok(notices)

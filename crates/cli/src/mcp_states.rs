@@ -36,14 +36,9 @@ pub(crate) async fn apply(
 ) -> Result<()> {
     if state == McpState::Off {
         manager.set_server_enabled(&server.id, false).await?;
-        if server.running {
-            manager.stop_server(&server.id).await?;
-        }
     } else {
+        manager.set_server_enabled(&server.id, true).await?;
         states::set(&paths.data_dir, &server.id, state)?;
-        if !server.enabled {
-            manager.set_server_enabled(&server.id, true).await?;
-        }
     }
     Ok(())
 }
