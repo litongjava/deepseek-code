@@ -51,6 +51,61 @@ pub struct UnifiedMessage {
 }
 
 impl UnifiedMessage {
+    pub fn admit(&self, shard: &crate::db::session_store::SessionDb) -> Result<String> {
+        let event = self.raw_data.get("event").unwrap_or(&self.raw_data);
+        let sender = event
+            .pointer("/sender/sender_type")
+            .and_then(|v| v.as_str());
+        let query = match self.platform.as_str() {
+            "feishu"
+                if sender == Some("user")
+                    && event
+                        .pointer("/message/message_type")
+                        .and_then(|v| v.as_str())
+                        == Some("text") =>
+            {
+                event
+                    .pointer("/message/content")
+                    .and_then(|v| v.as_str())
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|payload| payload["text"].as_str().map(str::to_owned))
+            }
+            "telegram" => {
+                let message = self
+                    .raw_data
+                    .get("message")
+                    .filter(|m| m.is_object())
+                    .or_else(|| self.raw_data.get("edited_message"));
+                message
+                    .filter(|m| {
+                        m.pointer("/from/is_bot").and_then(|v| v.as_bool()) == Some(false)
+                            && m.get("sender_chat").is_none_or(|v| v.is_null())
+                    })
+                    .and_then(|m| m["text"].as_str().or_else(|| m["caption"].as_str()))
+                    .map(str::to_owned)
+            }
+            "dingtalk" if !self.user_id.is_empty() && self.raw_data["msgtype"] == "text" => self
+                .raw_data
+                .pointer("/text/content")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            "wechat" if !self.user_id.is_empty() && self.raw_data["MsgType"] == "text" => {
+                self.raw_data["Content"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        };
+        if query.is_some_and(|s| !s.trim().is_empty()) {
+            shard.admit_prompt(&self.content, None, "typed")
+        } else {
+            let origin = if sender == Some("app") {
+                "im_app"
+            } else {
+                "im_event"
+            };
+            shard.admit_prompt(&self.content, None, origin)
+        }
+    }
+
     pub fn session_key(&self) -> String {
         format!("{}:{}:{}", self.platform, self.user_id, self.chat_id)
     }

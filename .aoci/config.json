@@ -275,6 +275,17 @@
         "created_by": "aoci-init",
         "order": 119,
         "enabled": true
+      },
+      {
+        "rule_id": "project-generated-atomcode",
+        "action": "exclude",
+        "pattern": ".atomcode",
+        "pattern_kind": "directory",
+        "reason": "Agent host generated local state, not repository source",
+        "source": "user",
+        "created_by": "agent",
+        "order": 200,
+        "enabled": true
       }
     ]
   },
@@ -340,7 +351,8 @@
     ]
   },
   "installed_agents": [
-    "claude"
+    "claude",
+    "opencode"
   ],
   "automation": {
     "mode": "auto"

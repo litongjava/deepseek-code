@@ -1,12 +1,13 @@
 //! Interactive session settings persisted alongside the shared conversation.
 use deepseek_code_core::db::session_store::{settings, SessionAccess, Stores};
 use crate::session::Session;
+use deepseek_code_core::services::compaction::CompactionTracker;
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::runtime::RuntimePaths;
 #[cfg(test)]
 use deepseek_code_core::db::DbManager;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Settings {
@@ -34,7 +35,7 @@ impl Settings {
 /// Compacts at 80% of the window by default, leaving a fifth for the next
 /// response and for summarization, e.g. 160k of a 200k window.
 fn default_autocompact_tokens(window: u64) -> Option<u64> {
-    Some(window * 4 / 5).filter(|tokens| *tokens > 0)
+    settings::default_autocompact_tokens(window)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -221,7 +222,7 @@ pub async fn handle(
             if argument.is_empty() {
                 let workspace = session
                     .store
-                    .workspace(&session.id, &paths.data_dir.join("workspaces"))?;
+                    .workspace(&session.id, &paths.data_dir.join("data/workspaces"))?;
                 command_eprintln!("Working directory: {}", workspace.display());
                 if command == "/add-dir" {
                     if let Some(project) = session.selected_session()?.repository().workspace_project()? {
@@ -296,7 +297,7 @@ pub async fn handle(
                 save(&session.store.db, &session.id, &settings)?;
             }
             let status = match (settings.autocompact_percent, settings.autocompact_off) {
-                (Some(percent), _) => format!("{percent}% of configured context window (estimated history size, checked before each turn)"),
+                (Some(percent), _) => format!("{percent}% of configured context window (checked before each turn and during long turns)"),
                 (None, true) => "off".into(),
                 (None, false) => match session.context_window().await.and_then(|window| default_autocompact_tokens(window as u64)) {
                     Some(tokens) => format!("on at {tokens} tokens (default: 80% of the context window)"),
@@ -360,7 +361,7 @@ pub fn is_goal_clear(argument: &str) -> bool {
 fn ensure_goal_allowed(session: &Session) -> Result<()> {
     session.selected_session()?.repository().workspace_project()?;
     for path in [
-        session.paths.data_dir.join("settings.json"),
+        session.paths.layout().config_file("settings.json"),
         session.workspace.join(".claude/settings.json"),
         session.workspace.join(".claude/settings.local.json"),
     ] {
@@ -742,28 +743,6 @@ pub async fn context_status(session: &Session) -> Option<String> {
     context_note(left, threshold.is_some())
 }
 
-#[cfg(test)]
-use deepseek_code_core::services::compaction::microcompact::{
-    clear_tool_results, through as microcompact_through, CLEARED_TOOL_RESULT,
-    MICROCOMPACT_MIN_CHARS,
-};
-
-/// As the reference CLI's microcompact: once the conversation passes half the
-/// context window, large tool results older than the last few messages are
-/// replaced with a placeholder. The saved transcript is unchanged.
-pub fn microcompact(session: &Session, history: &mut [Value], window: Option<u32>) -> Result<()> {
-    let rows = session.selected_session()?.repository().messages()?;
-    let boundary = rows.iter().rev().find(|row| row.is_compact_boundary).map(|row| row.id.clone()).unwrap_or_default();
-    use deepseek_code_core::db::session_store::settings::{Microcompact, MICROCOMPACT};
-    let repository = session.selected_session()?.repository();
-    let mut state = repository.preference(MICROCOMPACT)?.filter(|state| state.boundary == boundary).unwrap_or(Microcompact { through: 0, boundary });
-    if deepseek_code_core::services::compaction::microcompact::replay(history, &mut state, window)? {
-        repository.set_preference(MICROCOMPACT, Some(&state))?;
-        crate::compaction::notice("Cleared older tool results to save context.");
-    }
-    Ok(())
-}
-
 /// Whether a turn failed because the request no longer fits the model's
 /// context window, as reported by the engine or the provider.
 pub fn is_context_overflow(error: &anyhow::Error) -> bool {
@@ -773,23 +752,33 @@ pub fn is_context_overflow(error: &anyhow::Error) -> bool {
         .any(|needle| text.contains(needle))
 }
 
-/// As the reference CLI's reactive compact: when a request overflows the
-/// context window, drop the failed attempt, compact the earlier conversation
-/// the way autocompact does, and let the caller send the prompt again. False
-/// (with nothing changed) when there is no earlier conversation to compact.
-pub async fn reactive_compact(session: &Session, prompt: &str, turn: &mut deepseek_code_core::db::turn_repo::TurnTimer) -> Result<bool> {
-    use deepseek_code_core::db::message_repo;
-    let rows = session.selected_session()?.repository().messages()?;
-    let start = rows.iter().rposition(|row| row.is_compact_boundary).unwrap_or(0);
-    let Some(index) = rows.iter().rposition(|row| row.role == "user") else { return Ok(false) };
-    if rows[index].content != prompt || index <= start + 1 {
-        return Ok(false);
+/// Summarize the prefix before the admitted input, then retry that same row.
+pub async fn reactive_compact(
+    session: &Session,
+    admitted: Option<&str>,
+    turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
+) -> Result<Option<String>> {
+    let shard = session.selected_session()?;
+    let input = match admitted {
+        Some(id) => id.to_owned(),
+        None => match shard.read(|r| r.queued_turn_input())? {
+            Some(id) => id,
+            None => return Ok(None),
+        },
+    };
+    let rows = shard.repository().messages()?;
+    let start = rows
+        .iter()
+        .rposition(|row| row.is_compact_boundary)
+        .unwrap_or(0);
+    if !rows.iter().skip(start + 2).any(|row| row.id == input) {
+        return Ok(None);
     }
     crate::compaction::notice("Context limit reached; compacting the conversation and retrying…");
-    session.selected_session()?.write(|w| w.rewind_failed_attempt(&rows[index].id,&turn.record().turn_id))?;
+    shard.write(|w| w.discard_failed_segments(&turn.record().turn_id))?;
     turn.clear_segment();
-    compact_automatic(session, "", None).await?;
-    Ok(true)
+    compact_automatic(session, "", CompactionTracker::before_input(&input)).await?;
+    Ok(Some(input))
 }
 
 /// Run before assembling the next request so the compact boundary is reflected
@@ -802,7 +791,7 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease:
         let claim=shard.delivery_under_lease(lease)?.claim_compaction()?;
         if let Some(claim)=claim {
             crate::compaction::notice("Compacting the conversation as the model requested…");
-            compact_automatic(session, &claim.keep, Some(&claim)).await?;
+            compact_automatic(session, &claim.keep, CompactionTracker::for_claim(&claim)).await?;
             return Ok(());
         }
     }
@@ -823,15 +812,18 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease:
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
-    compact_automatic(session, "", None).await?;
+    compact_automatic(session, "", CompactionTracker::default()).await?;
     Ok(())
 }
 
 /// Both automatic entries retain the commit outcome across cancellation.
-async fn compact_automatic(session: &Session, instructions: &str, claim: Option<&deepseek_code_core::db::session_store::CompactionClaim>) -> Result<()> {
-    use deepseek_code_core::services::compaction::{compact_with_hooks_tracked, CompactionTracker};
+async fn compact_automatic(
+    session: &Session,
+    instructions: &str,
+    tracker: CompactionTracker,
+) -> Result<()> {
+    use deepseek_code_core::services::compaction::compact_with_hooks_tracked;
     let context = crate::services::context(&session.paths)?;
-    let tracker = claim.map(CompactionTracker::for_claim).unwrap_or_default();
     let state = session.binding_state();
     // The SDK frame reader owns stdin; terminal progress must not inspect it.
     let result = {
@@ -926,23 +918,13 @@ mod tests {
         for overflow in ["Input plus output budget exceeds the configured context window; compact the conversation", "Model API error 400: prompt is too long: 210000 tokens > 200000 maximum", "This model's maximum context length is 65536 tokens"] {
             assert!(is_context_overflow(&anyhow::anyhow!(overflow.to_owned())), "{overflow}");
         }
-        assert!(!is_context_overflow(&anyhow::anyhow!("Model API error 429: rate limited")));
-        assert_eq!(microcompact_through(0, 30, 400, Some(1000)), 0);
-        assert_eq!(microcompact_through(0, 30, 600, Some(1000)), 20);
-        assert_eq!(microcompact_through(25, 30, 600, Some(1000)), 25);
-        assert_eq!(microcompact_through(4, 30, 600, None), 4);
-        let big = "x".repeat(MICROCOMPACT_MIN_CHARS + 1);
-        let mut history = vec![
-            json!({"role":"tool","content":big}),
-            json!({"role":"tool","content":"small"}),
-            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":big}]},{"type":"text","text":big}]}),
-        ];
-        clear_tool_results(&mut history);
-        assert_eq!(history[0]["content"], CLEARED_TOOL_RESULT);
-        assert_eq!(history[1]["content"], "small");
-        assert_eq!(history[2]["content"][0]["content"], CLEARED_TOOL_RESULT);
-        assert_eq!(history[2]["content"][1]["text"], big);
-        assert_eq!(context_note(5, false).as_deref(), Some("Context low (5% remaining) \u{b7} Run /compact to compact & continue"));
+        assert!(!is_context_overflow(&anyhow::anyhow!(
+            "Model API error 429: rate limited"
+        )));
+        assert_eq!(
+            context_note(5, false).as_deref(),
+            Some("Context low (5% remaining) \u{b7} Run /compact to compact & continue")
+        );
     }
 
     #[tokio::test]
@@ -955,7 +937,7 @@ mod tests {
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         let script = dir.path().join("cwd.cjs");
         std::fs::write(&script, r#"const fs=require('fs');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>fs.appendFileSync('cwd-events.jsonl',JSON.stringify(JSON.parse(s))+'\n'));"#).unwrap();
-        std::fs::write(paths.data_dir.join("settings.json"), serde_json::json!({"hooks":{"CwdChanged":[{"matcher":"never-matches-but-ignored","hooks":[{"type":"command","command":format!("node \"{}\"",script.display())}]}]}}).to_string()).unwrap();
+        deepseek_code_core::data_layout::write_config_file(paths.layout().config_file("settings.json"), serde_json::json!({"hooks":{"CwdChanged":[{"matcher":"never-matches-but-ignored","hooks":[{"type":"command","command":format!("node \"{}\"",script.display())}]}]}}).to_string()).unwrap();
         let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1/v1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
         let selection = crate::config::Selection {
             providers: vec![provider],

@@ -2,6 +2,16 @@ import React from 'react';
 import { ChevronDown, Check, FileText } from 'lucide-react';
 import ToolDiffView, { shouldUseDiffView, hasExpandableContent, getToolStats } from './ToolDiffView';
 
+function pythonCallPreview(input: any): string {
+  const description = typeof input?.description === 'string' ? input.description.trim() : '';
+  const saved = typeof input?.save_name === 'string' ? input.save_name.trim() : '';
+  const code = typeof input?.code === 'string'
+    ? (input.code.split(/\r?\n/).map((line: string) => line.trim()).find((line: string) => line.length > 0) || '')
+    : '';
+  const detail = (saved || code).slice(0, 80);
+  return [description, detail].filter(Boolean).join(' | ');
+}
+
 interface ToolCallDisplayProps {
   toolCalls: any[];
   msgIdx: number;
@@ -29,7 +39,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
   const toolNames = visibleToolCalls.map((tc: any) => {
     const nameMap: Record<string, string> = {
       'Read': 'Read file', 'Write': 'Write file', 'Edit': 'Edit file',
-      'Bash': 'Run command', 'ListDir': 'List directory',
+      'Bash': 'Run command', 'Python': 'Run Python', 'ListDir': 'List directory',
       'MultiEdit': 'Edit files', 'Search': 'Search',
     };
     return nameMap[tc.name] || tc.name;
@@ -80,11 +90,11 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
             const shortPath = rawPath ? rawPath.split(/[/\\]/).pop() || rawPath : '';
             const actionLabel: Record<string, string> = {
               'Read': 'Read', 'Write': 'Write', 'Edit': 'Edit',
-              'MultiEdit': 'Edit', 'Bash': '', 'Grep': 'Search',
+              'MultiEdit': 'Edit', 'Bash': '', 'Python': '', 'Grep': 'Search',
               'Glob': 'Find', 'ListDir': 'List', 'Skill': 'Skill',
             };
             const prefix = actionLabel[tc.name] ?? tc.name;
-            const fileOrCmd = shortPath || tc.input?.command || (inputStr.length > 80 ? inputStr.slice(0, 80) + '...' : inputStr);
+            const fileOrCmd = shortPath || tc.input?.command || (tc.name === 'Python' ? pythonCallPreview(tc.input) : (inputStr.length > 80 ? inputStr.slice(0, 80) + '...' : inputStr));
             const inputPreview = (prefix && fileOrCmd) ? `${prefix} ${fileOrCmd}` : (fileOrCmd || prefix || tc.name);
             const realStatus = (tc.status === 'running' && isStale) ? 'canceled' : tc.status;
             const expandable = hasExpandableContent(tc.name, tc.input, tc.result);
@@ -113,7 +123,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
                     }}
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
-                      {tc.name === 'Bash' ? (
+                      {tc.name === 'Bash' || tc.name === 'Python' ? (
                         <span className="text-deepseek-textSecondary font-mono font-bold">&gt;_</span>
                       ) : (
                         <FileText size={14} className="text-deepseek-textSecondary flex-shrink-0" />

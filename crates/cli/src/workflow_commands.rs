@@ -84,7 +84,7 @@ fn directory(root: &Path, source: &str) -> Result<Vec<LocalWorkflow>> {
 
 /// Discovers user workflows first, then project workflows (project wins on name).
 pub fn discover(data_dir: &Path, workspace: &Path) -> Result<Vec<LocalWorkflow>> {
-    let mut workflows = directory(&data_dir.join("workflows"), "user workflows")?;
+    let mut workflows = directory(&data_dir.join("tasks/workflows"), "user workflows")?;
     for workflow in directory(&workspace.join(".claude/workflows"), "project workflows")? {
         workflows.retain(|existing| existing.name != workflow.name);
         workflows.push(workflow);
@@ -162,6 +162,7 @@ pub async fn run(
         session,
         &child_id,
         &prompt,
+        crate::session::TurnOrigin::Generated,
         &provider,
     )?;
     let environment = crate::background_commands::worker_environment(session.auto_route, &provider)?;
@@ -190,10 +191,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
         let workspace = temp.path().join("project");
-        std::fs::create_dir_all(data.join("workflows")).unwrap();
+        std::fs::create_dir_all(data.join("tasks/workflows")).unwrap();
         std::fs::create_dir_all(workspace.join(".claude/workflows")).unwrap();
         std::fs::write(
-            data.join("workflows/deploy.md"),
+            data.join("tasks/workflows/deploy.md"),
             "---\ndescription: user deploy\n---\nUSER_BODY",
         )
         .unwrap();

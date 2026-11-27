@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn token_file_is_created_once_and_reused() {
         let dir = std::env::temp_dir().join(format!("dcd-token-{}", uuid::Uuid::new_v4()));
-        let path = dir.join("server-token");
+        let path = dir.join("state/server-token");
         let (first, created) = load_or_create_token(&path).unwrap();
         assert!(created && first.len() == 64);
         let (second, created) = load_or_create_token(&path).unwrap();

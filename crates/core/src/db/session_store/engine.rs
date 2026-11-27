@@ -229,7 +229,11 @@ mod tests {
         let history = stores.executor_history("chat")?;
         assert_eq!(
             stores
-                .engine_workspace(&root.path().join("workspaces"), "chat", None)?
+                .engine_workspace(
+                    &crate::data_layout::DataLayout::from_root(&root.path()).workspaces(),
+                    "chat",
+                    None
+                )?
                 .0,
             shard.workspace()?
         );

@@ -24,7 +24,7 @@ async fn host_generates_real_response_prevents_duplicates_and_cancels_inflight_o
     let calls = Arc::new(AtomicUsize::new(0));
     let fixture_calls = calls.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    std::fs::write(paths.data_dir.join("providers.json"),json!([{"id":"p","name":"p","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"m","name":"m","enabled":true,"supports_vision":false,"supports_web_search":false}]}]).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/providers.json"),json!([{"id":"p","name":"p","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"m","name":"m","enabled":true,"supports_vision":false,"supports_web_search":false}]}]).to_string()).unwrap();
     let app=Router::new().route("/v1/chat/completions",post(move |Json(body):Json<Value>|{let calls=fixture_calls.clone();async move{
         assert!(body.get("tools").is_none());
         if calls.fetch_add(1,Ordering::SeqCst)>0{std::future::pending::<()>().await;}

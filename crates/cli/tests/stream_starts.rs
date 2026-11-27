@@ -198,9 +198,9 @@ async fn run(protocol: Protocol, empty_first: bool) -> Run {
     std::fs::create_dir_all(workspace.join("config")).unwrap();
     std::fs::write(workspace.join("fixture.txt"), "fixture contents\n").unwrap();
     // Shorten only the configured retry wait so the empty handshake can retry.
-    std::fs::write(
+    deepseek_code_core::data_layout::write_config_file(
         workspace.join("config/orchestration.toml"),
-        include_str!("../../../src-tauri/config/orchestration.toml")
+        include_str!("../../../config/orchestration.toml")
             .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
     )
     .unwrap();
@@ -220,8 +220,8 @@ async fn run(protocol: Protocol, empty_first: bool) -> Run {
         .route(route, post(respond))
         .with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         json!([{
             "id": "fixture", "name": "Fixture", "base_url": base,
             "api_key": "fixture-only",
@@ -479,8 +479,8 @@ async fn responses_transport_emits_one_start_per_response() {
         }))
         .unwrap(),
     );
-    std::fs::write(
-        paths.data_dir.join("config.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/config.json"),
         serde_json::to_vec(&config).unwrap(),
     )
     .unwrap();

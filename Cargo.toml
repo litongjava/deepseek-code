@@ -11,3 +11,11 @@ crossterm = { path = "vendor/crossterm" }
 [workspace.package]
 version = "3.1.0"
 edition = "2021"
+
+# Keep line tables for useful test failures without the full variable debug
+# information that dominates link time on Windows.
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

@@ -65,8 +65,9 @@ impl Stores {
             root.canonicalize()? == self.data_dir(),
             "Catalog backup data root changed"
         );
-        let backups = root.join("backups");
+        let backups = crate::data_layout::DataLayout::from_root(&root).backups();
         std::fs::create_dir_all(&backups)?;
+        let backups = backups.canonicalize()?;
         let staged = tempfile::tempdir_in(&backups)?;
         let db = staged.path().join("global.db");
         self.directory_read(|c| {
@@ -80,15 +81,19 @@ impl Stores {
             let rows = q.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let blobs = staged.path().join("global-blobs");
-        std::fs::create_dir(&blobs)?;
+        let blobs = staged.path().join("data/global-blobs");
+        std::fs::create_dir_all(&blobs)?;
         for digest in &refs {
             use sha2::{Digest, Sha256};
             ensure!(
                 digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
                 "Invalid catalog digest"
             );
-            let bytes = std::fs::read(root.join("global-blobs").join(digest))?;
+            let bytes = std::fs::read(
+                crate::data_layout::DataLayout::from_root(&root)
+                    .global_blobs()
+                    .join(digest),
+            )?;
             ensure!(
                 format!("{:x}", Sha256::digest(&bytes)) == *digest,
                 "Catalog backup digest mismatch"
@@ -172,7 +177,7 @@ impl CatalogBodies for crate::db::DbManager {
         _tables: &[&str],
         _references: &str,
     ) -> Result<PathBuf> {
-        let dir = root.join("backups");
+        let dir = crate::data_layout::DataLayout::from_root(&root).backups();
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{name}-{}.sqlite3", uuid::Uuid::new_v4()));
         self.directory_read(|c| {

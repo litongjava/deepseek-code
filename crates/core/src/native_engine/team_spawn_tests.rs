@@ -32,9 +32,21 @@ async fn executor(
         Arc::new(EnvironmentCredentials),
     )
     .unwrap();
-    context.db.create(parent, crate::db::session_store::CreateOptions { model: Some("fixture".into()), provider: Some("fixture".into()), ..Default::default() }).unwrap();
-    let private_root = context.paths.data_dir.join("workspaces");
-    let cwd = context.db.engine_workspace(&private_root, parent, None)
+    context
+        .db
+        .create(
+            parent,
+            crate::db::session_store::CreateOptions {
+                model: Some("fixture".into()),
+                provider: Some("fixture".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let private_root = context.paths.data_dir.join("data/workspaces");
+    let cwd = context
+        .db
+        .engine_workspace(&private_root, parent, None)
         .unwrap()
         .0;
     std::fs::create_dir_all(&cwd).unwrap();
@@ -53,7 +65,7 @@ async fn executor(
         ReasoningMode::Standard,
     )
     .with_conv_id(parent.to_string())
-    .with_search_config_path(context.paths.data_dir.join("settings.json"));
+    .with_search_config_path(context.paths.layout().config_file("settings.json"));
     (executor, context)
 }
 
@@ -245,8 +257,8 @@ async fn teammate_idle_hook_receives_identity_and_blocking_feedback_resumes_the_
         )
     };
     std::fs::create_dir_all(temp.path().join("data")).unwrap();
-    std::fs::write(
-        temp.path().join("data").join("settings.json"),
+    crate::data_layout::write_config_file(
+        temp.path().join("data/config/settings.json"),
         json!({"hooks":{"TeammateIdle":[{"hooks":[{"type":"command","command":command,"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]}})
             .to_string(),
     )
@@ -496,4 +508,40 @@ async fn context_search_scopes_parent_agent_teammate_and_owned_resume() {
         "{output}"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn foreground_agent_uses_child_memory_after_parent_index_changes() {
+    use crate::services::memory_files::FileMemory;
+    let temp = tempfile::tempdir().unwrap();
+    let parent = uuid::Uuid::new_v4().to_string();
+    let (executor, context) = executor(temp.path(), &parent, "http://127.0.0.1:1".into()).await;
+    let memory = FileMemory::session(&context, &parent).unwrap();
+    memory.store(false).unwrap();
+    let index = memory.directory.join("MEMORY.md");
+    let executor = executor.with_context_reminders(vec!["PARENT_ONLY_INDEX".into()]);
+    std::fs::write(&index, "CHILD_FROZEN_INDEX").unwrap();
+    let prepared = executor
+        .prepare_delegated_child(
+            &json!({"prompt":"inspect","agent_type":"general"}),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    std::fs::write(index, "LATER_INDEX").unwrap();
+    let shard = context.db.open_session(&prepared.id).unwrap();
+    let (messages, boundary) = shard
+        .read(|r| r.model_history(&crate::native_engine::provider_manager::ApiFormat::OpenAI))
+        .unwrap();
+    let (stored, _) =
+        crate::services::memory_files::prompt::replay(&shard, boundary.as_deref(), &messages)
+            .unwrap();
+    let stored = stored.join("\n");
+    assert!(stored.contains("CHILD_FROZEN_INDEX"));
+    let request = serde_json::to_value(prepared.child.build_openai_messages().unwrap()).unwrap();
+    let first = request[0]["content"].as_str().unwrap();
+    assert!(first.contains(&stored));
+    assert!(!first.contains("PARENT_ONLY_INDEX"));
 }

@@ -272,8 +272,8 @@ pub(crate) fn image_prompt(workspace: &Path, prompt: &str) -> String {
 }
 
 pub(crate) fn write_provider(data: &Path, endpoint: &str) {
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         serde_json::json!([{
             "id":"fixture","name":"Fixture","base_url":format!("{endpoint}/v1"),
             "api_key":"fixture-only","api_format":"openai","enabled":true,

@@ -85,7 +85,7 @@ async fn sdk_interrupt_during_recovery_preserves_usage_and_committed_summary() {
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            std::fs::write(paths.data_dir.join("providers.json"), json!([{
+            deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/providers.json"), json!([{
                 "id":"fixture","name":"fixture","base_url":address,"api_key":"fixture-only","api_format":if anthropic {"anthropic"} else {"openai"},"enabled":true,
                 "models":[{"id":"fixture-model","name":"Fixture","enabled":true,"context_window":128000,"max_tokens":4096,"supports_tools":true,"supports_web_search":false,"supports_vision":false}]
             }]).to_string()).unwrap();
@@ -155,7 +155,7 @@ async fn sdk_interrupt_during_recovery_preserves_usage_and_committed_summary() {
                     .to_string(),
                 if committed { "1" } else { "0" }
             );
-            let exports = paths.data_dir.join("compactions").join(&id);
+            let exports = paths.data_dir.join("cache/compactions").join(&id);
             assert_eq!(
                 std::fs::read_dir(exports)
                     .map(|entries| entries.count())

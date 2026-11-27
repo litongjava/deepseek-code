@@ -307,14 +307,14 @@ pub async fn prepare_invocation(
         }
         deepseek_code_core::services::agents::bind(&session.store.db, &child_id, &definition)?;
     }
-    let directory = session.paths.data_dir.join("skill-runs");
+    let directory = session.paths.layout().skill_runs();
     std::fs::create_dir_all(&directory)?;
     let mut file = tempfile::NamedTempFile::new_in(&directory)?;
     std::io::Write::write_all(&mut file, expanded.as_bytes())?;
     let instructions = directory.join(format!("{child_id}.md"));
     file.persist(&instructions)?;
     let provider = session.launch_provider().await?;
-    let mut arguments = crate::background_commands::arguments(cli, &session.paths, session, &child_id, "Execute the selected skill in the appended instructions. Report the result concisely. Shell context was already expanded; do not rerun it.", &provider)?;
+    let mut arguments = crate::background_commands::arguments(cli, &session.paths, session, &child_id, "Execute the selected skill in the appended instructions. Report the result concisely. Shell context was already expanded; do not rerun it.", crate::session::TurnOrigin::Generated, &provider)?;
     let position = arguments
         .iter()
         .position(|argument| argument == "--")

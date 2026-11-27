@@ -19,9 +19,10 @@ impl LegacySession {
     pub(super) fn populate(&self, c: &Connection) -> Result<()> {
         let ids = crate::db::transcript::MessageIds::for_shard(c)?;
         for (i, m) in self.messages.iter().enumerate() {
+            let message = ids.issue();
             crate::db::message_repo::insert_message(
                 c,
-                &ids.issue(),
+                &message,
                 &self.id,
                 &m.role,
                 &m.content,
@@ -30,6 +31,12 @@ impl LegacySession {
                 false,
                 i as i64,
             )?;
+            if m.role == "user" {
+                c.execute(
+                    "INSERT INTO message_metadata VALUES(?1,?2)",
+                    [&message, r#"{"promptOrigin":"import"}"#],
+                )?;
+            }
         }
         c.execute(
             "UPDATE manifest SET updated_at=?1,message_count=?2,content_revision=?2",
@@ -403,7 +410,15 @@ impl Stores {
                 let p = project_repo::require_trusted(c, id)?;
                 ensure!(
                     !p.is_archived
-                        && p.workspace_path.as_deref().map(Path::new) == Some(workspace.as_path()),
+                        && p.workspace_path.as_deref().is_some_and(|stored| {
+                            let stored = Path::new(stored);
+                            stored == workspace
+                                || stored
+                                    .canonicalize()
+                                    .ok()
+                                    .zip(workspace.canonicalize().ok())
+                                    .is_some_and(|(left, right)| left == right)
+                        }),
                     "Selected project is unavailable"
                 );
                 ProjectSelection::Existing(id.into())
@@ -463,7 +478,7 @@ impl Stores {
             return Ok(result);
         }
         let batch = Uuid::new_v4().to_string();
-        let backup = self.root.path.join("backups").join(&batch);
+        let backup = self.root.layout().backups().join(&batch);
         fs::create_dir_all(&backup)?;
         self.global().read(|c| {
             c.execute(

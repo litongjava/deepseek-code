@@ -211,8 +211,8 @@ mod tests {
         hook.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        std::fs::write(
-            root.join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
             json!({"hooks":{event:[{"matcher":"Read","hooks":[hook]}]}}).to_string(),
         )
         .unwrap();
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn once_rejects_non_boolean_config() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo ok","once":"true"}]}]}}"#).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo ok","once":"true"}]}]}}"#).unwrap();
         assert!(HookRunner::load(root.path(), root.path()).is_err());
     }
 
@@ -372,7 +372,8 @@ mod tests {
             "cat > payload.json; printf x >> runs"
         };
         fixture(root.path(), "PreToolUse", command, json!({}));
-        let path = root.path().join("settings.json");
+        let path =
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json");
         let mut settings: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = settings["hooks"]["PreToolUse"][0]["hooks"]

@@ -127,7 +127,7 @@ impl Fixture {
             self.store.db.clone(),
             Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
                 vec![self.provider.clone()],
-                self.paths.data_dir.join("providers.json"),
+                self.paths.data_dir.join("config/providers.json"),
             ))),
             runtime::default_permissions(),
             Arc::new(FileCache::new()),
@@ -259,13 +259,28 @@ async fn check_opaque_fallback(window: usize, padding: &str) {
     f.provider.builtin_id = Some("openai".into());
     f.provider.models[0].api = Some("openai-responses".into());
     f.append("user", "Original durable requirement");
-    let boundary = f
-        .store
-        .append(&f.id, "user", "Native Responses compaction completed.")
-        .unwrap();
+    f.append("assistant", "Acknowledged the original requirement.");
     let items = json!([{"type":"compaction","id":"original","encrypted_content":"OPAQUE_WINDOW"}]);
-    f.store.db.open_session(&f.id).unwrap().write(|w| w.native_boundary(&boundary,
-        &json!({"compaction":true,"api":"openai-responses","items":items,"provider":"fixture","model":"model","base_url":f.provider.base_url}))).unwrap();
+    let shard = f.store.db.open_session(&f.id).unwrap();
+    shard
+        .write(|w| w.request_compaction("Keep the requirement", 50, 100))
+        .unwrap();
+    {
+        let owner = shard.delivery_owner().unwrap();
+        let claim = owner.claim_compaction().unwrap().unwrap();
+        owner
+            .finish_compaction(
+                &claim,
+                &compaction::GeneratedSummary {
+                    text: "Native Responses compaction completed.".into(),
+                    native: Some(
+                        json!({"compaction":true,"api":"openai-responses","items":items,
+                "provider":"fixture","model":"model","base_url":f.provider.base_url}),
+                    ),
+                },
+            )
+            .unwrap();
+    }
     f.append(
         "user",
         &format!("Durable correction after boundary {padding}"),
@@ -536,7 +551,14 @@ async fn compaction_records_chat_cache_writes_in_their_own_bucket() {
     assert!(usage.failures.is_empty());
     assert_eq!(usage.days.len(), 1);
     assert_eq!(usage.days[0].tokens, [20, 3, 75, 5]);
-    let (details, input, _) = f.store.db.open_session(&child).unwrap().repository().usage_totals(&[]).unwrap();
+    let (details, input, _) = f
+        .store
+        .db
+        .open_session(&child)
+        .unwrap()
+        .repository()
+        .usage_totals(&[])
+        .unwrap();
     assert_eq!(input, 100);
     assert_eq!(details["cache_write_tokens"], 5);
     f.finish().await;
@@ -556,7 +578,10 @@ async fn historical_bedrock_daily_buckets_survive_a_compaction_fork() -> anyhow:
     assert!(usage.failures.is_empty());
     assert_eq!(usage.days.len(), 1);
     let day = &usage.days[0];
-    assert_eq!((day.requests, day.heat, day.tokens), (1, 103, [20, 3, 75, 5]));
+    assert_eq!(
+        (day.requests, day.heat, day.tokens),
+        (1, 103, [20, 3, 75, 5])
+    );
     f.finish().await;
     Ok(())
 }
@@ -671,10 +696,23 @@ async fn compaction_replays_the_next_normal_body_on_every_protocol() -> anyhow::
         f.provider.models[0].effort = Some("medium".into());
         f.append("user", "DISCARDED_PLAN_GATE");
         let shard = f.store.db.open_session(&f.id)?;
-        shard.write(|w| w.approve_plan("APPROVED_RELEASE_PLAN"))?;
-        shard.write(|w| w.append_user_content("Attached release.txt", &json!([{"type":"attachment","fileName":"release.txt","size":20,"source":{"type":"base64","media_type":"text/plain","data":"REVQTE9ZX09OTFlfQUZURVJfUUE="}}])))?;
+        let context = deepseek_code_core::services::ServiceContext {
+            paths: f.paths.clone(),
+            db: f.store.db.clone(),
+            credentials: Arc::new(deepseek_code_core::services::EnvironmentCredentials),
+        };
+        let memory =
+            deepseek_code_core::services::memory_files::FileMemory::session(&context, &f.id)?;
+        memory.put("saffron.md", "---\nname: saffron\ndescription: saffron\nmetadata:\n  type: user\n---\nADMITTED_RECALL_MARKER\n", None)?;
+        let index = memory.directory.join("MEMORY.md");
+        std::fs::write(&index, "FROZEN_PLAN_INDEX")?;
+        shard.approve_plan("APPROVED_RELEASE_PLAN")?;
+        std::fs::write(&index, "CURRENT_RECEIPT_INDEX")?;
+        shard.admit_prompt("Attached release.txt", Some(&json!([{"type":"attachment","fileName":"release.txt","size":20,"source":{"type":"base64","media_type":"text/plain","data":"REVQTE9ZX09OTFlfQUZURVJfUUE="}}])), "typed")?;
         save_lookup(&f, "STRUCTURED_DECISION")?;
-        f.append("user", "Summarize the current decision");
+        shard.admit_prompt("Summarize the saffron decision", None, "typed")?;
+        std::fs::write(&index, "LATER_DISK_INDEX")?;
+        std::fs::write(memory.directory.join("saffron.md"), "LATER_DISK_RECALL")?;
         f.send_normal(None).await;
         f.compact().await?;
         {
@@ -699,7 +737,17 @@ async fn compaction_replays_the_next_normal_body_on_every_protocol() -> anyhow::
             ] {
                 assert!(compact.contains(marker), "{model}: missing {marker}");
             }
-            assert!(!compact.contains("DISCARDED_PLAN_GATE"));
+            for marker in ["FROZEN_PLAN_INDEX", "LATER_DISK_INDEX"] {
+                assert_eq!(compact.matches(marker).count(), 1, "{model} {marker}");
+            }
+            for marker in [
+                "DISCARDED_PLAN_GATE",
+                "CURRENT_RECEIPT_INDEX",
+                "ADMITTED_RECALL_MARKER",
+                "LATER_DISK_RECALL",
+            ] {
+                assert!(!compact.contains(marker), "{model} {marker}");
+            }
         }
         f.finish().await;
     }
@@ -818,12 +866,11 @@ async fn visual_fixture(
         .join("tests/fixtures")
         .join(filename);
     let image = runtime::image_block_from_file(&path)?;
-    f.store.db.open_session(&f.id)?.write(|w| {
-        w.append_user_content(
-            "Status light",
-            &json!([{"type":"text","text":"Record the status light in this image."},image]),
-        )
-    })?;
+    f.store.db.open_session(&f.id)?.admit_prompt(
+        "Status light",
+        Some(&json!([{"type":"text","text":"Record the status light in this image."},image])),
+        "typed",
+    )?;
     f.append("assistant", "Acknowledged.");
     Ok(f)
 }

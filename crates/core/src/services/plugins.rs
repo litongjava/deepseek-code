@@ -283,7 +283,7 @@ pub async fn run(
             ));
         }
     }
-    let directory = context.paths.data_dir.join("plugin-runs");
+    let directory = context.paths.layout().plugin_runs();
     std::fs::create_dir_all(&directory)?;
     let temporary = tempfile::tempdir_in(directory)?;
     for (path, content) in &bundle.files {

@@ -55,7 +55,7 @@ async fn http_deny_prevents_real_write_and_once_is_not_replayed_after_resume() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    std::fs::write(data.join("settings.json"), json!({"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"http","url":format!("{hook_endpoint}/hook"),"once":true,"timeout":5,"statusMessage":"HTTP integration fixture"}]}]}}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"), json!({"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"http","url":format!("{hook_endpoint}/hook"),"once":true,"timeout":5,"statusMessage":"HTTP integration fixture"}]}]}}).to_string()).unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     for resume in [false, true] {
         let output = tokio::time::timeout(

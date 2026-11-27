@@ -4,7 +4,7 @@ use super::*;
 /// startup lock. A duplicated or forked copy is what keeps the `flock` alive
 /// after the logical owner dropped its `File`.
 fn startup_lock_diagnostics(root: &Path, session: &str) -> String {
-    let base = root.join("session-workers").join(session);
+    let base = root.join("state/workers").join(session);
     let path = base.join("startup.lock");
     let canonical = std::fs::canonicalize(&path).ok();
     let mut open = Vec::new();
@@ -250,7 +250,7 @@ async fn power_loss_metadata_damage_allows_new_request_without_replay() {
     std::fs::write(
         paths
             .data_dir
-            .join("background-tasks")
+            .join("tasks/background")
             .join(&old_job)
             .join("state.json"),
         [0; 409],

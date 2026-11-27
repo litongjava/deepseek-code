@@ -451,9 +451,15 @@ impl AutoClassifier {
         let provider = self.provider.current()?;
         match provider.provider.api_format {
             ApiFormat::OpenAI => {
+                if provider.provider.builtin_id.is_none()
+                    && provider.model.api.as_deref() == Some("openai-responses")
+                {
+                    return self.request_responses(&provider, payload).await;
+                }
                 let response = OpenAIClient::new()
                     .with_request_options(self.request_options.clone())
                     .without_retries()
+                    .with_classifier_bound()
                     .with_response_schema(Some(schema()))
                     .send_message(
                         &provider,
@@ -534,6 +540,96 @@ impl AutoClassifier {
             }
         }
     }
+
+    /// Direct Responses providers have no catalog transport. This path is
+    /// intentionally non-streaming and bounded, and never carries tools.
+    async fn request_responses(
+        &self,
+        provider: &ResolvedProvider,
+        payload: String,
+    ) -> anyhow::Result<(Result<Verdict, Failure>, Option<ClassifierUsage>)> {
+        let body = json!({
+            "model": provider.model.id,
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_text", "text": payload}],
+            }],
+            "instructions": POLICY,
+            "stream": false,
+            "store": false,
+            "max_output_tokens": 256,
+            "text": {"format": {
+                "type": "json_schema",
+                "name": "structured_response",
+                "strict": true,
+                "schema": schema(),
+            }},
+        });
+        let request = reqwest::Client::new()
+            .post(responses_url(&provider.provider.base_url))
+            .header(
+                "authorization",
+                format!("Bearer {}", provider.provider.api_key),
+            )
+            .header("content-type", "application/json")
+            .json(&body);
+        let response = super::request_recording::send(
+            request,
+            &self.request_options,
+            provider,
+            "openai-responses",
+            false,
+        )
+        .await?;
+        let value: Value = bounded_response(response).await?;
+        let usage = value.get("usage").map(|usage| ClassifierUsage {
+            input_tokens: usage["input_tokens"].as_u64().unwrap_or_default(),
+            output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
+            cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or_default(),
+            cache_write_tokens: 0,
+        });
+        if value["status"]
+            .as_str()
+            .is_some_and(|status| status != "completed")
+            || !value["error"].is_null()
+        {
+            return Ok((Err(Failure::InvalidResponse), usage));
+        }
+        let verdict = responses_text(&value)
+            .ok_or(Failure::InvalidResponse)
+            .and_then(parse);
+        Ok((verdict, usage))
+    }
+}
+
+fn responses_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/responses") {
+        base.to_owned()
+    } else {
+        format!(
+            "{}/v1/responses",
+            super::provider_manager::ProviderManager::normalize_base_url(base)
+        )
+    }
+}
+
+fn responses_text(value: &Value) -> Option<&str> {
+    if let Some(text) = value["output_text"].as_str() {
+        return Some(text);
+    }
+    value["output"].as_array()?.iter().find_map(|item| {
+        if item["type"] != "message" {
+            return None;
+        }
+        item["content"].as_array()?.iter().find_map(|part| {
+            (part["type"] == "output_text")
+                .then(|| part["text"].as_str())
+                .flatten()
+        })
+    })
 }
 
 #[cfg(test)]
@@ -635,6 +731,148 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         server.abort();
     }
+    #[tokio::test]
+    async fn direct_responses_classifier_uses_input_and_text_format() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let requests = count.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    assert!(body.get("messages").is_none());
+                    assert!(body.get("tools").is_none());
+                    assert_eq!(body["text"]["format"]["type"], "json_schema");
+                    assert!(body["input"]
+                        .to_string()
+                        .contains("auto_permission_fixture"));
+                    Json(json!({
+                        "id":"resp","object":"response","status":"completed",
+                        "model":"classifier-fixture",
+                        "output":[{"type":"message","role":"assistant","content":[{
+                            "type":"output_text",
+                            "text":"{\"decision\":\"allow\",\"reason_code\":\"authorized\"}"
+                        }]}],
+                        "usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}
+                    }))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provider = ResolvedProvider {
+            provider: serde_json::from_value(json!({
+                "id":"classifier","name":"Classifier","base_url":endpoint,
+                "api_key":"fixture-only","api_format":"openai","enabled":true,"models":[]
+            }))
+            .unwrap(),
+            model: serde_json::from_value(json!({
+                "id":"classifier-fixture","name":"Fixture","enabled":true,
+                "supports_vision":false,"supports_web_search":false,
+                "api":"openai-responses"
+            }))
+            .unwrap(),
+        };
+        let config = AutoConfig {
+            enabled: true,
+            classifier: Some(crate::permissions::auto_config::ClassifierSelection::Current),
+            ..Default::default()
+        };
+        let selected = config.resolve(&[], &provider).unwrap();
+        let classifier = AutoClassifier::new(config, selected);
+        let result = classifier
+            .classify(
+                &[json!({"role":"user","content":"user authorized auto_permission_fixture"})],
+                "FutureTool",
+                &json!({"value":"fixture"}),
+                "fixture",
+            )
+            .await;
+        assert_eq!(result.verdict.unwrap().decision, Decision::Allow);
+        let usage = result.usage.unwrap();
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn builtin_openai_responses_classifier_uses_provider_runtime() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let requests = count.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    assert!(body.get("messages").is_none());
+                    assert!(body.get("tools").is_none());
+                    assert_eq!(body["text"]["format"]["type"], "json_schema");
+                    assert_eq!(body["stream"], true);
+                    let text = r#"{"decision":"allow","reason_code":"authorized"}"#;
+                    let sse = [
+                        json!({"type":"response.output_text.delta","delta":text}),
+                        json!({"type":"response.completed","response":{
+                            "id":"resp","model":"classifier-fixture","status":"completed",
+                            "output":[],
+                            "usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}
+                        }}),
+                    ]
+                    .into_iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>();
+                    axum::response::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from(sse))
+                        .unwrap()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provider = ResolvedProvider {
+            provider: serde_json::from_value(json!({
+                "id":"classifier","name":"Classifier","base_url":format!("{endpoint}/v1"),
+                "api_key":"fixture-only","api_format":"openai","builtin_id":"openai",
+                "enabled":true,"models":[]
+            }))
+            .unwrap(),
+            model: serde_json::from_value(json!({
+                "id":"classifier-fixture","name":"Fixture","enabled":true,
+                "supports_vision":false,"supports_web_search":false,
+                "api":"openai-responses"
+            }))
+            .unwrap(),
+        };
+        let config = AutoConfig {
+            enabled: true,
+            classifier: Some(crate::permissions::auto_config::ClassifierSelection::Current),
+            ..Default::default()
+        };
+        let selected = config.resolve(&[], &provider).unwrap();
+        let classifier = AutoClassifier::new(config, selected);
+        let result = classifier
+            .classify(
+                &[json!({"role":"user","content":"user authorized auto_permission_fixture"})],
+                "FutureTool",
+                &json!({"value":"fixture"}),
+                "fixture",
+            )
+            .await;
+        assert_eq!(result.verdict.unwrap().decision, Decision::Allow);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[test]
     fn transcript_excludes_assistant_claims_tool_results_and_system_secrets() {
         let input = vec![

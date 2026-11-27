@@ -1,7 +1,7 @@
 #AOCI-ROOT-MANIFEST: 1
 #Format-Version: cognition-volumes/v1
 #Locale: zh-CN
-#Project: deepseek-code
-#Global-Invariants: -
+#Project: DeepSeek Code：Rust 内核 + React 前端的跨平台 AI 编码工作台，提供桌面（Tauri）与独立 dcl CLI，经本机 Bridge 与原生引擎驱动多模型会话、工具执行、记忆、知识库与 IM 通道。
+#Global-Invariants: 共享业务逻辑放在 crates/core 且不依赖 Tauri；crates/cli 必须能在没有 Desktop 与 30085 Bridge 时独立工作。Native 与 Bridge 的控制能力必须共用同一个 PermissionManager，不得出现第二种授权来源。内部角色（PTY、sandbox bridge、ToolScript worker）必须在 runtime、Tauri 与数据库初始化前处理并直接退出。凭据只经 secure storage 或环境读取，测试使用临时目录与本地 mock，不得依赖真实凭据。
 #Volume: id=meta kind=meta path=aoci.meta.txt format=meta-v1 depends=- state=enabled
 #Volume: id=code kind=code path=aoci.code.txt format=object-fras-v2 depends=meta state=enabled

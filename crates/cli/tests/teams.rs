@@ -222,10 +222,30 @@ async fn cli_creates_spawns_and_disbands_a_team_standalone() {
     assert!(children >= 3, "{tail:?}");
     drop(requests);
 
+    let stores = deepseek_code_core::db::session_store::Stores::open(&data).unwrap();
+    let mut directives = 0;
+    for entry in stores.global().list_sessions(Default::default()).unwrap() {
+        let shard = stores.open_session(&entry.conversation.id).unwrap();
+        let (rows, _) = shard
+            .read(|r| {
+                r.model_history(
+                    &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                )
+            })
+            .unwrap();
+        for row in rows.iter().filter(|row| row["role"] == "user") {
+            if [ALPHA_PROMPT, BETA_PROMPT].contains(&row["content"].as_str().unwrap_or("")) {
+                assert_eq!(row["origin"], "delegation");
+                directives += 1;
+            }
+        }
+    }
+    assert_eq!(directives, 2);
+
     // A successful TeamDelete removes the persisted team directory.
-    let team_path = data.join("teams").join("cli-team").join("config.json");
+    let team_path = data.join("data/teams").join("cli-team").join("config.json");
     assert!(
-        !data.join("teams").join("cli-team").exists(),
+        !data.join("data/teams").join("cli-team").exists(),
         "team file: {:?}",
         std::fs::read_to_string(team_path).unwrap_or_default()
     );

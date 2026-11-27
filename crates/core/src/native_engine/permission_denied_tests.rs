@@ -26,10 +26,10 @@ fn hooks(root: &std::path::Path, retry: Value) -> HookRunner {
     };
     let output = json!({"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":retry}})
         .to_string();
-    let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":".bashrc","content":"EXACT_FINAL_INPUT"}}}).to_string();
-    std::fs::write(root.join("settings.json"), json!({"hooks":{
-        "PreToolUse":[{"matcher":"^Write$","hooks":[{"type":"command","command":emit(&updated),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}],
-        "PermissionDenied":[{"matcher":"^Write$","hooks":[{"type":"command","command":capture+&emit(&output),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]
+    let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"url":"https://example.invalid/final","prompt":"fixture"}}}).to_string();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"), json!({"hooks":{
+        "PreToolUse":[{"matcher":"^WebFetch$","hooks":[{"type":"command","command":emit(&updated),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}],
+        "PermissionDenied":[{"matcher":"^WebFetch$","hooks":[{"type":"command","command":capture+&emit(&output),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]
     }}).to_string()).unwrap();
     HookRunner::load(root, root).unwrap()
 }
@@ -42,12 +42,12 @@ fn classifier_reply(format: &str, allow: bool) -> Value {
     }
 }
 fn stream(format: &str, index: usize) -> String {
-    let id = format!("write-{index}");
-    let input = json!({"file_path":"original.txt","content":"ORIGINAL_INPUT"});
+    let id = format!("fetch-{index}");
+    let input = json!({"url":"https://example.invalid/original","prompt":"fixture"});
     let events = if format == "openai" {
         if index < 2 || index == 3 {
             vec![
-                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"Write","arguments":input.to_string()}}]},"finish_reason":"tool_calls"}]}),
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"WebFetch","arguments":input.to_string()}}]},"finish_reason":"tool_calls"}]}),
             ]
         } else {
             vec![
@@ -59,7 +59,7 @@ fn stream(format: &str, index: usize) -> String {
             json!({"type":"message_start","message":{"id":"m","model":"fixture","usage":{"input_tokens":1}}}),
         ];
         if index < 2 || index == 3 {
-            events.extend([json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":"Write","input":{}}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}}),json!({"type":"content_block_stop","index":0})]);
+            events.extend([json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":"WebFetch","input":{}}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}}),json!({"type":"content_block_stop","index":0})]);
         } else {
             events.extend([json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"COMPLETE"}}),json!({"type":"content_block_stop","index":0})]);
         }
@@ -122,7 +122,9 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
                     let workspace = workspace.clone();
                     async move {
                         if body["stream"] != true {
-                            assert!(body.to_string().contains("EXACT_FINAL_INPUT"));
+                            assert!(body
+                                .to_string()
+                                .contains("https://example.invalid/final"));
                             if classified.load(Ordering::SeqCst) == 2 {
                                 assert!(body.to_string().contains("OWNER_NEW_CONSTRAINT"));
                                 assert!(!body.to_string().contains("INJECTION_SENTINEL"));
@@ -184,14 +186,15 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
             .with_conv_id(parent.clone())
             .with_search_config_path(root.path().join("data/config.json"))
             .with_permission_manager(manager)
+            .with_loaded_tools(["WebFetch".to_string()])
             .with_hooks(runner);
             let output = if child {
                 let result = tokio::time::timeout(
                     Duration::from_secs(30),
                     executor.execute_delegated_authorized(
-                        &json!({"prompt":"Write the fixture file","agent_type":"general"}),
+                        &json!({"prompt":"Fetch the fixture page","agent_type":"general"}),
                         None,
-                        None,
+                        Some(vec!["WebFetch".to_string()]),
                         true,
                     ),
                 )
@@ -237,10 +240,7 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
                 "retry and child resume require fresh classifications"
             );
             assert!(!root.path().join("original.txt").exists());
-            assert_eq!(
-                std::fs::read_to_string(root.path().join(".bashrc")).unwrap(),
-                "EXACT_FINAL_INPUT"
-            );
+            assert!(!root.path().join(".bashrc").exists());
             let records = std::fs::read_to_string(root.path().join("denials.jsonl")).unwrap();
             let records = records
                 .lines()
@@ -250,12 +250,15 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
             assert_eq!(records.len(), 1);
             let event = &records[0];
             // The denial hook sees the call's occurrence id, not the provider
-            // raw id ("write-0" is only protocol provenance).
+            // raw id ("fetch-0" is only protocol provenance).
             let denied_id = event["tool_use_id"].as_str().unwrap();
             assert!(denied_id.starts_with("inv-"), "{denied_id}");
-            assert_ne!(denied_id, "write-0");
-            assert_eq!(event["tool_name"], "Write");
-            assert_eq!(event["tool_input"]["content"], "EXACT_FINAL_INPUT");
+            assert_ne!(denied_id, "fetch-0");
+            assert_eq!(event["tool_name"], "WebFetch");
+            assert_eq!(
+                event["tool_input"]["url"],
+                "https://example.invalid/final"
+            );
             assert_eq!(event["reason"], "outside_scope");
             assert_eq!(event["session_id"].as_str().unwrap() == parent, !child);
             let requests = requests.lock().await;
@@ -351,7 +354,7 @@ async fn permission_denied_provenance_excludes_static_asks_failures_and_stale_re
             manager.set_session_rules(
                 "fixture",
                 HashMap::from([(
-                    "Write".into(),
+                    "WebFetch".into(),
                     if outcome == "static" {
                         PermissionAction::Deny
                     } else {
@@ -362,8 +365,8 @@ async fn permission_denied_provenance_excludes_static_asks_failures_and_stale_re
         }
         let tool = PermissionContext {
             mcp_read_only: false,
-            tool_name: "Write".into(),
-            tool_input: json!({"file_path":".profile","content":"EXACT_FINAL_INPUT"}),
+            tool_name: "WebFetch".into(),
+            tool_input: json!({"url":"https://example.invalid/original","prompt":"fixture"}),
             conversation_id: "fixture".into(),
             workspace_path: Some(root.path().to_string_lossy().into_owned()),
             user_id: None,

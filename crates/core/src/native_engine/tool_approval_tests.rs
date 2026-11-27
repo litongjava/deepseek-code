@@ -24,10 +24,12 @@ async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
     });
     let root = tempfile::tempdir().unwrap();
     let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
-    executor = executor.with_search_config_path(root.path().join("config.json"));
+    executor = executor.with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    );
     // Isolate local-address approval from the separate discovery gate.
-    std::fs::write(
-        root.path().join("customization.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("customization.json"),
         json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
     )
     .unwrap();
@@ -114,9 +116,11 @@ async fn bypass_mode_fetches_a_local_address_without_a_prompt() {
     });
     let root = tempfile::tempdir().unwrap();
     let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
-    executor = executor.with_search_config_path(root.path().join("config.json"));
-    std::fs::write(
-        root.path().join("customization.json"),
+    executor = executor.with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    );
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("customization.json"),
         json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
     )
     .unwrap();
@@ -611,8 +615,8 @@ fn hook_executor(
             else { format!("printf yes > hook-ran; printf '%s' '{}'", response.to_string().replace('\'', "'\\''")) };
         json!({"type":"command","shell":if cfg!(windows) {"powershell"} else {"sh"},"command":command})
     }).collect();
-    std::fs::write(
-        data.join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
         json!({"hooks":{event:[{"matcher":"Write","hooks":hooks}]}}).to_string(),
     )
     .unwrap();
@@ -636,7 +640,9 @@ fn hook_executor(
     )
     .with_permission_manager(manager.clone())
     .with_permission_host(false)
-    .with_search_config_path(data.join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&data).config_file("config.json"),
+    )
     .with_hooks(crate::services::tool_hooks::HookRunner::load(&data, root).unwrap());
     (executor, rx, manager)
 }
@@ -657,7 +663,7 @@ async fn owned_child_permission_hooks_keep_exact_invocation_and_session_on_both_
         } else {
             format!("cat > permission-payload.json; printf '%s' '{}'", decision)
         };
-        std::fs::write(data.join("settings.json"),json!({"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","shell":if cfg!(windows){"powershell"}else{"sh"},"command":command}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),json!({"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","shell":if cfg!(windows){"powershell"}else{"sh"},"command":command}]}]}}).to_string()).unwrap();
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = count.clone();
         let app = Router::new().route(if format=="openai" {"/v1/chat/completions"}else{"/v1/messages"},post(move |Json(_body):Json<Value>| {
@@ -681,7 +687,9 @@ async fn owned_child_permission_hooks_keep_exact_invocation_and_session_on_both_
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         executor = executor
             .with_conv_id(parent.clone())
-            .with_search_config_path(data.join("config.json"))
+            .with_search_config_path(
+                crate::data_layout::DataLayout::from_root(&data).config_file("config.json"),
+            )
             .with_hooks(crate::services::tool_hooks::HookRunner::load(&data, root.path()).unwrap());
         let result = tokio::time::timeout(
             Duration::from_secs(15),
@@ -951,7 +959,9 @@ fn super_agent_executor(
         ".".into(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(runtime.data_dir.join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&runtime.data_dir).config_file("config.json"),
+    )
     .with_conv_id(runtime.session_id.clone())
     .with_super_agent(role, member, runtime)
 }
@@ -986,8 +996,10 @@ async fn router_tool_visibility_and_execution_guard_are_enforced_at_runtime() {
     let project = temp.path().join("project");
     let (_data, runtime, router) = super_agent_runtime_fixture(&project);
     // Make ApplyPatch resident so its absence proves the Router filter ran.
-    std::fs::write(
-        runtime.data_dir.join("customization.json"),
+    std::fs::create_dir_all(runtime.data_dir.join("config")).unwrap();
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&runtime.data_dir)
+            .config_file("customization.json"),
         json!({"tool_loading":{"ApplyPatch":{"enabled":true,"on_demand":false}}}).to_string(),
     )
     .unwrap();
@@ -1302,8 +1314,8 @@ fn patch_executor(
     crate::config::OrchestrationConfig::init_global().unwrap();
     let data = root.join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("customization.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&data).config_file("customization.json"),
         json!({"tool_loading":{"ApplyPatch":{"enabled":true,"on_demand":false}}}).to_string(),
     )
     .unwrap();
@@ -1337,7 +1349,9 @@ fn patch_executor(
     )
     .with_permission_manager(manager.clone())
     .with_permission_host(true)
-    .with_search_config_path(data.join("config.json"));
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&data).config_file("config.json"),
+    );
     executor.conv_id = Some("patch-session".into());
     (executor, rx, manager)
 }

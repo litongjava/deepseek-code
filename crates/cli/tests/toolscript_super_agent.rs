@@ -65,7 +65,7 @@ impl Fixture {
         .await
         .unwrap();
         let id = task["id"].as_str().unwrap();
-        let job = r.data_dir.join("toolscript-jobs").join(id);
+        let job = r.data_dir.join("tasks/toolscript-jobs").join(id);
         std::fs::create_dir_all(&job).unwrap();
         // Deliberately permissive admission snapshot: durable Super identity
         // and durable plan mode must still restrict every nested call.
@@ -325,7 +325,7 @@ async fn ordinary_plan_mode_matches_direct_bash_and_rejects_edit_tools() {
         }
     }
     let _server_guard = StopServer(server.abort_handle());
-    let provider_path = f.runtime.data_dir.join("providers.json");
+    let provider_path = f.runtime.data_dir.join("config/providers.json");
     let mut providers: Value =
         serde_json::from_slice(&std::fs::read(&provider_path).unwrap()).unwrap();
     providers[0]["base_url"] = json!(base);

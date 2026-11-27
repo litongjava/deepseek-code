@@ -15,7 +15,21 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
         // `TaskOutput` is not advertised. Its dispatch alias remains below for
         // old transcripts and is not discoverable through ToolLoad.
         ("TaskStop", "Stop a task by ID. A managed shell, Monitor, Agent, Workflow or ToolScript job gets a cancellation request and stops through its owner; a shell's process tree is terminated with it. Any other task record is marked cancelled without touching a process. Cancellation is requested rather than confirmed, so use TaskGet to see the final status.",json!({"task_id":{"description":"ID of the task to stop, as returned when it started.","type":"string"},"shell_id":{"description":"Old alias for `task_id`; use `task_id`.","type":"string"}}),vec![]),
-    ].into_iter().map(|(name,description,properties,required)| super::ToolDefinition {name:name.into(),description:description.into(),input_schema:json!({"type":"object","properties":properties,"required":required})}).chain(std::iter::once(super::shell_input::definition())).collect()
+    ].into_iter().map(|(name,description,properties,required)| super::ToolDefinition { summary: task_summary(name).map(str::to_owned),name:name.into(),description:description.into(),input_schema:json!({"type":"object","properties":properties,"required":required})}).chain(std::iter::once(super::shell_input::definition())).collect()
+}
+
+/// The one-line listing text for each task tool.
+fn task_summary(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "TaskCreate" => "Create a durable session task",
+        "TaskGet" => "Read a durable session task by ID, including its output and owner",
+        "TaskList" => "List durable session tasks",
+        "TaskUpdate" => "Update a durable session task",
+        "TaskStop" => "Stop a task by ID",
+        "TodoWrite" => "Replace the session durable todo list",
+        "TodoRead" => "Read the session durable todo list",
+        _ => return None,
+    })
 }
 
 pub fn is_task(name: &str) -> bool {
@@ -47,7 +61,7 @@ pub fn display_title(root: &Path, session: &str, input: &Value) -> Option<String
         .or_else(|| input["shell_id"].as_str())?;
     let title = if uuid::Uuid::parse_str(id).is_ok()
         && root
-            .join("background-tasks")
+            .join("tasks/background")
             .join(id)
             .join("state.json")
             .is_file()
@@ -57,7 +71,8 @@ pub fn display_title(root: &Path, session: &str, input: &Value) -> Option<String
         job.title
     } else {
         let db = rusqlite::Connection::open_with_flags(
-            root.join("tasks").join(format!("{session}.sqlite3")),
+            root.join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .ok()?;
@@ -89,7 +104,9 @@ pub fn execute_for_session(name: &str, input: Value, root: &Path, session: &str)
     execute_at(
         name,
         input,
-        &root.join("tasks").join(format!("{session}.sqlite3")),
+        &root
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3")),
     )
 }
 
@@ -139,7 +156,7 @@ pub async fn execute_for_session_async(
             // read or stop it.
             if uuid::Uuid::parse_str(id).is_ok()
                 && root
-                    .join("toolscript-jobs")
+                    .join("tasks/toolscript-jobs")
                     .join(id)
                     .join("state.json")
                     .is_file()
@@ -159,7 +176,7 @@ pub async fn execute_for_session_async(
             }
             if uuid::Uuid::parse_str(id).is_ok()
                 && root
-                    .join("background-tasks")
+                    .join("tasks/background")
                     .join(id)
                     .join("state.json")
                     .exists()
@@ -481,7 +498,9 @@ pub(crate) fn read_for_session(id: &str, root: &Path, session: &str) -> Result<V
     execute_at(
         "TaskGet",
         json!({"id":id}),
-        &root.join("tasks").join(format!("{session}.sqlite3")),
+        &root
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3")),
     )
 }
 
@@ -511,7 +530,10 @@ pub(super) fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
     execute_at(
         name,
         input,
-        &root.join("tasks/projects").join(format!("{key}.sqlite3")),
+        &crate::data_layout::DataLayout::from_root(&root)
+            .session_tasks()
+            .join("projects")
+            .join(format!("{key}.sqlite3")),
     )
 }
 
@@ -530,7 +552,9 @@ pub(crate) fn execute_for_shell_owner(
     execute_at_owned(
         name,
         input,
-        &root.join("tasks").join(format!("{session}.sqlite3")),
+        &root
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3")),
         true,
     )
 }
@@ -552,7 +576,9 @@ pub(crate) fn update_if_unchanged(
     session: &str,
 ) -> Result<(Value, bool)> {
     let session = uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
-    let path = root.join("tasks").join(format!("{session}.sqlite3"));
+    let path = root
+        .join("data/session-tasks")
+        .join(format!("{session}.sqlite3"));
     std::fs::create_dir_all(path.parent().context("Task storage parent missing")?)?;
     let mut db = rusqlite::Connection::open(&path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -1086,7 +1112,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let parent = uuid::Uuid::new_v4().to_string();
         let id = uuid::Uuid::new_v4().to_string();
-        let dir = root.path().join("background-tasks").join(&id);
+        let dir = root.path().join("tasks/background").join(&id);
         std::fs::create_dir_all(&dir).unwrap();
         let job = json!({"id":id,"parent_session_id":parent,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"completed","supervisor_pid":null,"child_pid":null,"started_ms":0,"heartbeat_ms":0,"finished_ms":1,"exit_code":0,"error":null});
         std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
@@ -1176,10 +1202,12 @@ mod tests {
         .unwrap();
         let id = monitor["id"].as_str().unwrap();
         let db = rusqlite::Connection::open(
-            root.path().join("tasks").join(format!("{session}.sqlite3")),
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
         )
         .unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(id);
+        let directory = root.path().join("tasks/shell").join(&session).join(id);
         let destinations = [
             "pending",
             "running",
@@ -1604,7 +1632,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let id = uuid::Uuid::new_v4().to_string();
-        let dir = root.path().join("background-tasks").join(&id);
+        let dir = root.path().join("tasks/background").join(&id);
         std::fs::create_dir_all(&dir).unwrap();
         let now = || {
             SystemTime::now()
@@ -1738,7 +1766,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let id = uuid::Uuid::new_v4().to_string();
-        let dir = root.path().join("background-tasks").join(&id);
+        let dir = root.path().join("tasks/background").join(&id);
         std::fs::create_dir_all(&dir).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1765,7 +1793,10 @@ mod tests {
         )
         .unwrap();
         let lock = rusqlite::Connection::open_with_flags(
-            root.path().join("sessions").join(child).join("session.db"),
+            root.path()
+                .join("data/sessions")
+                .join(child)
+                .join("session.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )
         .unwrap();
@@ -1798,7 +1829,7 @@ mod tests {
         let job = job_fixture(root.path(), &session, "completed", Some("committed report"));
         let path = root
             .path()
-            .join("sessions")
+            .join("data/sessions")
             .join(&session)
             .join("session.db");
         let writer = rusqlite::Connection::open_with_flags(
@@ -1834,7 +1865,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let id = uuid::Uuid::new_v4().to_string();
-        let dir = root.path().join("background-tasks").join(&id);
+        let dir = root.path().join("tasks/background").join(&id);
         std::fs::create_dir_all(&dir).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1852,7 +1883,10 @@ mod tests {
         )
         .unwrap();
         let lock = rusqlite::Connection::open_with_flags(
-            root.path().join("sessions").join(child).join("session.db"),
+            root.path()
+                .join("data/sessions")
+                .join(child)
+                .join("session.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )
         .unwrap();
@@ -1883,7 +1917,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         assert!(display_title(root.path(), &session, &json!({"id":"1"})).is_none());
-        assert!(!root.path().join("tasks").exists());
+        assert!(!root.path().join("data/session-tasks").exists());
         let task = execute_for_session(
             "TaskCreate",
             json!({"subject":"Build\n项目"}),
@@ -2377,6 +2411,7 @@ mod tests {
         assert_eq!(completed["next_cursor"], Value::Null, "{completed}");
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn job_cursor_with_partial_record_rejects_rotation_and_allows_append() {
         let root = tempfile::tempdir().unwrap();

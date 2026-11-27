@@ -320,7 +320,75 @@ impl SessionRead<'_> {
     }
 }
 
+pub(super) fn mark_input_pending(tx: &Connection, id: &str) -> Result<()> {
+    super::state::set_local(tx, &format!("prompt.pending.{id}"), "true")
+}
+
+impl super::SessionDb {
+    pub(crate) fn acknowledge_model_inputs(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.write(|w| {
+            let mut update = w.0.prepare_cached(
+                "UPDATE peripheral_settings SET value=json_remove(value,'$.pending')
+                WHERE key='memory.prompt.message.'||?1 AND json_extract(value,'$.pending')=1",
+            )?;
+            for id in ids {
+                update.execute([id])?;
+                w.0.execute(
+                    "DELETE FROM peripheral_settings WHERE key='prompt.pending.'||?1",
+                    [id],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn admit_user(&self, id: &str, content: &Value, origin: &str) -> Result<()> {
+        let _guard = self.hold_incarnation()?;
+        let memory = crate::services::memory_files::prompt::Admission::session(self)?;
+        self.write(|w| w.append_user(id, content, origin, Some(&memory)))
+    }
+
+    /// Freeze any resident-index change in the same transaction as its prompt.
+    pub fn admit_prompt(
+        &self,
+        display: &str,
+        content: Option<&Value>,
+        origin: &str,
+    ) -> Result<String> {
+        let _guard = self.hold_incarnation()?;
+        let memory = crate::services::memory_files::prompt::Admission::session(self)?;
+        self.write(|w| {
+            if origin == "hook" {
+                return w.append_hook_user(display);
+            }
+            let id = match content {
+                Some(content) => w.append_user_content(display, content, origin == "typed")?,
+                None => w.append("user", display)?,
+            };
+            w.set_prompt_origin(&id, origin)?;
+            memory.admit(w.0, &id)?;
+            if origin == "typed" {
+                mark_input_pending(w.0, &id)?;
+            }
+            Ok(id)
+        })
+    }
+}
+
 impl SessionWrite<'_> {
+    pub(crate) fn refresh_resident_indexes(
+        &self,
+        memory: &crate::services::memory_files::prompt::Admission,
+    ) -> Result<bool> {
+        memory.refresh_request(self.0, || {
+            let id = self.append("user", "")?;
+            self.set_prompt_origin(&id, "memory_change")?;
+            Ok(id)
+        })
+    }
     pub(super) fn next_order(&self) -> Result<i64> {
         Ok(self.0.query_row(
             "SELECT coalesce(max(sort_order),-1)+1 FROM messages",
@@ -346,10 +414,29 @@ impl SessionWrite<'_> {
             false,
             self.next_order()?,
         )?;
+        if role == "user" {
+            self.set_prompt_origin(&id, "generated")?;
+        }
         self.2.set(true);
         Ok(id)
     }
-    pub fn append_user(&self, id: &str, content: &Value) -> Result<()> {
+    pub(super) fn set_prompt_origin(&self, id: &str, origin: &str) -> Result<()> {
+        self.set_message_metadata(id, &serde_json::json!({"promptOrigin": origin}))
+    }
+    pub(super) fn append_user(
+        &self,
+        id: &str,
+        content: &Value,
+        origin: &str,
+        memory: Option<&crate::services::memory_files::prompt::Admission>,
+    ) -> Result<()> {
+        ensure!(
+            !self
+                .0
+                .prepare("SELECT 1 FROM messages WHERE id=?1")?
+                .exists([id])?,
+            "User message ID already admitted"
+        );
         messages::save_user_message(
             self.0,
             id,
@@ -358,12 +445,19 @@ impl SessionWrite<'_> {
             &chrono::Utc::now().to_rfc3339(),
             self.next_order()?,
         )?;
-        permission_authority::record_conn(
-            self.0,
-            self.1,
-            permission_authority::Source::User,
-            content,
-        )?;
+        self.set_prompt_origin(id, origin)?;
+        if let Some(memory) = memory {
+            memory.admit(self.0, id)?;
+        }
+        if origin == "typed" {
+            mark_input_pending(self.0, id)?;
+            permission_authority::record_conn(
+                self.0,
+                self.1,
+                permission_authority::Source::User,
+                content,
+            )?;
+        }
         self.2.set(true);
         Ok(())
     }
@@ -703,25 +797,30 @@ impl SessionWrite<'_> {
         )
     }
     pub fn rewind_from(&self, message: &str) -> Result<()> {
-        self.remove_tail(message, None)
-    }
-
-    /// The retry will allocate a fresh segment under the original live turn.
-    pub fn rewind_failed_attempt(&self, message:&str, turn:&str)->Result<()> {
-        ensure!(self.0.prepare("SELECT 1 FROM execution_turns WHERE id=?1 AND conversation_id=?2 AND status='running'")?.exists([turn,self.1])?,
-            "Compaction retry lost the active turn");
-        self.remove_tail(message,Some(turn))
-    }
-
-    fn remove_tail(&self,message:&str,retained_turn:Option<&str>)->Result<()> {
         let order: i64 = self.0.query_row(
             "SELECT sort_order FROM messages WHERE id=?1",
             [message],
             |r| r.get(0),
         )?;
-        self.0.execute("DELETE FROM execution_turns WHERE id IS NOT ?2 AND id IN (SELECT t.turn_id FROM message_turns t JOIN messages m ON m.id=t.message_id WHERE m.sort_order>=?1) AND id NOT IN (SELECT t.turn_id FROM message_turns t JOIN messages m ON m.id=t.message_id WHERE m.sort_order<?1)", params![order,retained_turn])?;
+        self.0.execute("DELETE FROM execution_turns WHERE id IN (SELECT t.turn_id FROM message_turns t JOIN messages m ON m.id=t.message_id WHERE m.sort_order>=?1) AND id NOT IN (SELECT t.turn_id FROM message_turns t JOIN messages m ON m.id=t.message_id WHERE m.sort_order<?1)", [order])?;
         self.0
             .execute("DELETE FROM messages WHERE sort_order>=?1", [order])?;
+        self.2.set(true);
+        Ok(())
+    }
+
+    /// Only assistant segments belong to an attempt. A segment carrying delivered
+    /// input must stay replayable with its tool results and receipt.
+    pub fn discard_failed_segments(&self, turn: &str) -> Result<()> {
+        ensure!(self.0.prepare("SELECT 1 FROM execution_turns WHERE id=?1 AND conversation_id=?2 AND status='running'")?.exists([turn,self.1])?,
+            "Compaction retry lost the active turn");
+        self.0.execute(
+            "DELETE FROM messages WHERE role='assistant'
+             AND id IN (SELECT message_id FROM message_turns WHERE turn_id=?1)
+             AND NOT EXISTS (SELECT 1 FROM tool_calls t JOIN tool_queued_inputs q
+                 ON q.tool_call_id=t.id WHERE t.message_id=messages.id)",
+            [turn],
+        )?;
         self.2.set(true);
         Ok(())
     }
@@ -735,25 +834,82 @@ impl SessionRead<'_> {
             |r| r.get(0),
         )?)
     }
+    pub(crate) fn boundary_id(&self) -> Result<Option<String>> {
+        Ok(self.0.query_row("SELECT id FROM messages WHERE is_compact_boundary=1 ORDER BY sort_order DESC,rowid DESC LIMIT 1",
+            [], |r| r.get(0)).optional()?)
+    }
+
+    /// Identify the active exchange even when a new process opens it after
+    /// multiple steers. Next-turn deliveries have their own generation.
+    pub(crate) fn protected_inputs(
+        &self,
+        messages: &[Value],
+    ) -> Result<(Option<usize>, Vec<String>)> {
+        let mut steer = self.0.prepare_cached(
+            "SELECT 1 FROM delivery_receipts d WHERE d.delivery_id=?1 AND NOT EXISTS(
+            SELECT 1 FROM delivery_generations g WHERE g.delivery_id=d.delivery_id)",
+        )?;
+        let mut pending = self.0.prepare_cached(
+            "SELECT 1 FROM peripheral_settings WHERE key='memory.prompt.message.'||?1
+            AND json_extract(value,'$.pending')=1 OR key='prompt.pending.'||?1",
+        )?;
+        let mut unsent = Vec::new();
+        let mut first = None;
+        let mut active = true;
+        for (i, row) in messages.iter().enumerate().rev() {
+            let Some(id) = row["id"].as_str().filter(|_| row["role"] == "user") else {
+                continue;
+            };
+            if row["origin"] == "typed" {
+                let unseen = pending.exists([id])?;
+                if unseen {
+                    unsent.push(id.to_owned());
+                }
+                if active || unseen {
+                    first = Some(i);
+                }
+            }
+            if active && !steer.exists([id])? {
+                active = false;
+            }
+        }
+        Ok((first, unsent))
+    }
+
     pub fn model_history(
         &self,
         format: &crate::native_engine::provider_manager::ApiFormat,
     ) -> Result<(Vec<Value>, Option<String>)> {
+        self.model_history_before(format, None)
+    }
+
+    pub(crate) fn model_history_before(
+        &self,
+        format: &crate::native_engine::provider_manager::ApiFormat,
+        before: Option<&str>,
+    ) -> Result<(Vec<Value>, Option<String>)> {
         let id: String = self
             .0
             .query_row("SELECT id FROM manifest", [], |r| r.get(0))?;
-        crate::runtime::replay_history(self.0, &id, format, |message| {
-            let raw: Option<String> = self
-                .0
-                .query_row(
-                    "SELECT value FROM native_boundaries WHERE message_id=?1",
-                    [message],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            raw.map(|v| serde_json::from_str(&v).map_err(Into::into))
-                .transpose()
-        })
+        crate::runtime::replay_history_with_ids(
+            self.0,
+            &id,
+            format,
+            |message| {
+                let raw: Option<String> = self
+                    .0
+                    .query_row(
+                        "SELECT value FROM native_boundaries WHERE message_id=?1",
+                        [message],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                raw.map(|v| serde_json::from_str(&v).map_err(Into::into))
+                    .transpose()
+            },
+            true,
+            before,
+        )
     }
 }
 impl SessionWrite<'_> {

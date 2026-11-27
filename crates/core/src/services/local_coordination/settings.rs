@@ -1,8 +1,8 @@
 //! Off-by-default local coordination settings.
 //!
 //! Only the `localCoordination` section of the user data directory's
-//! `settings.json` is read. Loading never writes, so unrelated settings are
-//! preserved by never being touched.
+//! `config/settings.json` is read. Loading never writes, so unrelated settings
+//! are preserved by never being touched.
 
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
@@ -29,13 +29,14 @@ impl Default for CoordinationSettings {
     }
 }
 
-/// Read the coordination section from `data_dir/settings.json`.
+/// Read the coordination section from `data_dir/config/settings.json`.
 ///
 /// The file may start with a UTF-8 BOM and must contain an object. Only the
 /// `localCoordination` section is parsed; unknown or mistyped fields inside it
 /// are errors. A missing file or section yields the disabled default.
 pub fn load_settings(data_dir: &Path) -> Result<CoordinationSettings> {
-    let path = data_dir.join(SETTINGS_FILE);
+    let path =
+        crate::data_layout::DataLayout::from_root(data_dir).config_file(SETTINGS_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -63,8 +64,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn write_settings(dir: &Path, text: &str) -> Result<PathBuf> {
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join("settings.json");
+        let layout = crate::data_layout::DataLayout::from_root(dir);
+        std::fs::create_dir_all(layout.config_root())?;
+        let path = layout.config_file(SETTINGS_FILE);
         std::fs::write(&path, text)?;
         Ok(path)
     }

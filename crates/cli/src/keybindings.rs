@@ -386,7 +386,8 @@ mod tests {
     #[test]
     fn template_roundtrips_and_does_not_overwrite_customizations() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keybindings.json");
+        let path = deepseek_code_core::data_layout::DataLayout::from_root(&dir.path())
+            .config_file("keybindings.json");
         ensure_file(&path).unwrap();
         load(&path).unwrap();
         let custom = r#"{"bindings":[{"context":"Chat","bindings":{"f2":"chat:submit"}}]}"#;

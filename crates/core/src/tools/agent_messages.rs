@@ -4,7 +4,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(super) fn definition() -> super::ToolDefinition {
-    super::ToolDefinition {name:"SendMessage".into(),description:"Post a message to another agent's or session's queue. to takes a teammate name, \"*\" for the team, or a `to` value from ListAgents. Messages are queued: a running recipient reads one at its next model boundary, an idle open session on its next turn, and a closed one when resumed. Messages for you arrive on their own; you never check an inbox. operation selects a team-protocol action (default send), such as shutdown_request, shutdown_response or plan_approval_response. Lead message with the point.".into(),input_schema:json!({"type":"object","properties":{
+    super::ToolDefinition { summary: Some("Post a message to another agent or session queue".into()),name:"SendMessage".into(),description:"Post a message to another agent's or session's queue. to takes a teammate name, \"*\" for the team, or a `to` value from ListAgents. Messages are queued: a running recipient reads one at its next model boundary, an idle open session on its next turn, and a closed one when resumed. Messages for you arrive on their own; you never check an inbox. operation selects a team-protocol action (default send), such as shutdown_request, shutdown_response or plan_approval_response. Lead message with the point.".into(),input_schema:json!({"type":"object","properties":{
         "to":{"description":"Recipient: a teammate name, \"*\" for your team, or the `to` value from a ListAgents row","type":"string","maxLength":300},
         "summary":{"description":"Short label (5-10 words) shown only in your transcript; the recipient sees message.","type":"string","maxLength":200},
         "message":{"default":"","description":"Body text, or a structured team-protocol payload. The recipient sees the sender, delivery state and full text, so begin with one self-contained sentence.","type":["string","object"]},
@@ -15,7 +15,7 @@ pub(super) fn definition() -> super::ToolDefinition {
 }
 
 pub(super) fn list_agents_definition() -> super::ToolDefinition {
-    super::ToolDefinition {name:"ListAgents".into(),description:"Show the background agents and project sessions you can message. Rows cover child agents plus other sessions of this project, never the current session; each gives the `to` value for SendMessage, a display name, the kind and whether it is running or idle. An empty result means there is nobody to contact.".into(),input_schema:json!({"type":"object","properties":{
+    super::ToolDefinition { summary: Some("Show the background agents and project sessions you can message".into()),name:"ListAgents".into(),description:"Show the background agents and project sessions you can message. Rows cover child agents plus other sessions of this project, never the current session; each gives the `to` value for SendMessage, a display name, the kind and whether it is running or idle. An empty result means there is nobody to contact.".into(),input_schema:json!({"type":"object","properties":{
         "channel":{"description":"Reserved; no channel filtering in this build.","type":"string","maxLength":256},
         "q":{"description":"Reserved; no text filter in this build.","type":"string","maxLength":256}
     },"additionalProperties":false})}
@@ -463,7 +463,7 @@ mod tests {
         let child = sessions.fork(&parent).unwrap();
         let stranger = sessions.fork(&parent).unwrap();
         let task = uuid::Uuid::new_v4().to_string();
-        let directory = temp.path().join("background-tasks").join(&task);
+        let directory = temp.path().join("tasks/background").join(&task);
         std::fs::create_dir_all(&directory).unwrap();
         let job = crate::services::background_sessions::Job {
             id: task.clone(),

@@ -2,7 +2,6 @@
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::{
-    db::{conversation_repo, message_repo},
     runtime::RuntimePaths,
     services::{checkpoints, compaction},
 };
@@ -78,7 +77,7 @@ pub async fn handle(
 fn ensure_workspace(paths: &RuntimePaths, session: &Session, checkpoint: &checkpoints::Checkpoint) -> Result<()> {
     let workspace = session
         .store
-        .workspace(&session.id, &paths.data_dir.join("workspaces"))?
+        .workspace(&session.id, &paths.data_dir.join("data/workspaces"))?
         .canonicalize()?;
     ensure!(
         workspace == checkpoint.workspace,

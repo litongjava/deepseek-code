@@ -18,7 +18,9 @@ pub(crate) fn transcript_path(root: &Path, session: &str) -> PathBuf {
     } else {
         session.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
     };
-    root.join("hook-transcripts").join(format!("{name}.jsonl"))
+    crate::data_layout::DataLayout::from_root(root)
+        .hook_transcripts()
+        .join(format!("{name}.jsonl"))
 }
 
 /// A real, readable JSONL snapshot of the durable conversation (no request headers).
@@ -28,7 +30,9 @@ pub(crate) fn transcript(root: &Path, session: &str) -> Result<PathBuf> {
 
 pub(crate) fn snapshot_path(root: &Path, session: &str, history: Option<&crate::db::session_store::ExecutorHistory>) -> PathBuf {
     if let Some(crate::db::session_store::ExecutorHistory::Session(s)) = history {
-        root.join("hook-transcripts").join(format!("{}.jsonl",s.incarnation()))
+        crate::data_layout::DataLayout::from_root(root)
+            .hook_transcripts()
+            .join(format!("{}.jsonl",s.incarnation()))
     } else {
         transcript_path(root, session)
     }
@@ -46,7 +50,7 @@ pub(crate) fn snapshot(root:&Path, session:&str, bound:Option<&crate::db::sessio
         selected.as_ref()
     } else { None };
     let path = snapshot_path(root, session, history);
-    let directory = root.join("hook-transcripts");
+    let directory = crate::data_layout::DataLayout::from_root(root).hook_transcripts();
     std::fs::create_dir_all(&directory)?;
     let mut snapshot = tempfile::NamedTempFile::new_in(&directory)?;
     if let Some(history) = history {
@@ -110,7 +114,7 @@ fn configuration_files(
     let sources = [
         (
             "user_settings",
-            context.paths.data_dir.join("settings.json"),
+            context.paths.layout().config_file("settings.json"),
         ),
         ("project_settings", workspace.join(".claude/settings.json")),
         (
@@ -289,7 +293,7 @@ mod tests {
         std::fs::write(&file, "fixture").unwrap();
         let script = dir.path().join("instructions.cjs");
         std::fs::write(&script, r#"const fs=require('fs');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>fs.appendFileSync('instructions.jsonl',JSON.stringify(JSON.parse(s))+'\n'));"#).unwrap();
-        std::fs::write(dir.path().join("settings.json"), json!({"hooks":{"InstructionsLoaded":[{"hooks":[{"type":"command","command":format!("node \"{}\"",script.display())}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"), json!({"hooks":{"InstructionsLoaded":[{"hooks":[{"type":"command","command":format!("node \"{}\"",script.display())}]}]}}).to_string()).unwrap();
         let runner = HookRunner::load(dir.path(), dir.path()).unwrap();
         for _ in 0..2 {
             instructions(
@@ -348,14 +352,15 @@ mod tests {
         context.db.create("session",Default::default()).unwrap();
         let script = dir.path().join("guard.cjs");
         std::fs::write(&script, r#"const fs=require('fs');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{fs.appendFileSync('config-events.jsonl',JSON.stringify(JSON.parse(s))+'\n');console.log(JSON.stringify({decision:'block',reason:'fixture rejection'}))});"#).unwrap();
-        let settings = dir.path().join("settings.json");
+        let settings =
+            crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json");
         let initial = json!({"hooks":{"ConfigChange":[{"matcher":"^user_settings$","hooks":[{"type":"command","command":format!("node \"{}\"",script.display())}]}]}}).to_string();
-        std::fs::write(&settings, &initial).unwrap();
+        crate::data_layout::write_config_file(&settings, &initial).unwrap();
         check_configuration(&context, dir.path(), "session")
             .await
             .unwrap();
         assert!(!dir.path().join("config-events.jsonl").exists());
-        std::fs::write(&settings, "{}").unwrap();
+        crate::data_layout::write_config_file(&settings, "{}").unwrap();
         for _ in 0..2 {
             assert!(check_configuration(&context, dir.path(), "session")
                 .await
@@ -375,7 +380,7 @@ mod tests {
             ]
         );
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
-        std::fs::write(settings, initial).unwrap();
+        crate::data_layout::write_config_file(&settings, initial).unwrap();
         check_configuration(&context, dir.path(), "session")
             .await
             .unwrap();

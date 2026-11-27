@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::str::FromStr;
 
 pub(super) fn definition() -> super::ToolDefinition {
-    super::ToolDefinition{name:"cron".into(),description:"Persist recurring model prompts with UTC cron schedules (five or six fields). Operations create/delete/list/get. A foreground cron service host must be running; creating a record does not start a hidden background process. Scheduled prompts generate text only; they do not execute tools.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","delete","list","get"]},"cron_id":{"type":"string"},"schedule":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"}},"required":["operation"]})}
+    super::ToolDefinition { summary: None,name:"cron".into(),description:"Persist recurring model prompts with UTC cron schedules (five or six fields). Operations create/delete/list/get. A foreground cron service host must be running; creating a record does not start a hidden background process. Scheduled prompts generate text only; they do not execute tools.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","delete","list","get"]},"cron_id":{"type":"string"},"schedule":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"}},"required":["operation"]})}
 }
 
 fn connection(cwd: &str) -> Result<rusqlite::Connection> {

@@ -413,7 +413,7 @@ fn import_uses_the_selected_data_directory_only() {
         ));
         assert_eq!(output.code, Some(0), "{}", output.stderr);
         assert!(data
-            .join("tasks")
+            .join("data/session-tasks")
             .join(format!("{SESSION}.sqlite3"))
             .is_file());
     }

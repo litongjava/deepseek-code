@@ -24,7 +24,7 @@ pub(super) fn run(stores: &Stores, root: &Path, contended: bool) -> Result<()> {
         },
     )?;
     let _lease = parent.acquire_execution()?;
-    let guard = File::open(root.join("session-locks").join(ID))?;
+    let guard = File::open(root.join("state/locks/session").join(ID))?;
     guard.lock_shared()?;
     let db = rusqlite::Connection::open(shard(root))?;
     db.execute_batch(

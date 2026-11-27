@@ -749,8 +749,8 @@ async fn sigterm_cancels_the_codex_agent_tree_then_exits_nonzero() {
     // Offer the Codex tool: enabled and resident, with a controlled executable
     // first on PATH. The script never emits lifecycle events; it only starts a
     // process tree, so the measurement is the cancellation, not the protocol.
-    std::fs::write(
-        data.join("customization.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/customization.json"),
         json!({"tool_loading": {"Codex": {"enabled": true, "on_demand": false}}}).to_string(),
     )
     .unwrap();
@@ -825,8 +825,8 @@ async fn sigint_while_an_agent_is_starting_cancels_the_turn() {
     });
     let temp = tempfile::tempdir().unwrap();
     let (data, project) = workspace(temp.path());
-    std::fs::write(
-        data.join("customization.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/customization.json"),
         json!({"tool_loading": {"Codex": {"enabled": true, "on_demand": false}}}).to_string(),
     )
     .unwrap();

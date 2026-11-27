@@ -182,7 +182,7 @@ pub(crate) fn project_for_model(
         .and_then(|root| {
             Ok(save_output_in(
                 &std::path::absolute(root)?
-                    .join("tool-outputs")
+                    .join("cache/tool-outputs")
                     .join(format!("{:x}", Sha256::digest(session))),
                 raw.as_bytes(),
             )?)

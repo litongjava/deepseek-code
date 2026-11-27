@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn a_tools_write_folds_legacy_entries_and_keeps_unknown_names() {
         let (_root, paths) = fixture();
-        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::create_dir_all(paths.layout().config_root()).unwrap();
         std::fs::write(customization::path(&paths.data_dir), r#"{"disabled_tools":["Write","mcp__fixture__tool"]}"#).unwrap();
         set(&paths, "Read", Switch::Enabled, false).unwrap();
         let saved = customization::load(&paths.data_dir).unwrap();

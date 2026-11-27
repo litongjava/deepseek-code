@@ -283,3 +283,19 @@ Acceptance evidence: development record `acceptance-20261102.md` and `ux-2026110
 - [x] 截断恢复不再提高预算：首次请求已用满配置上限，直接按同一预算按 token 二分、分别摘要并合并；空正文同预算重试一次、超长正文直接拆分、深度/额度上限、取消、检查点复用和原子提交保持不变。缓存键仍区分提示词与预算。
 - [x] 测试：`compaction_truncation` 41 项、`compaction_overflow` 7 项（1 项按设计忽略）；`compaction_overflow` 新增缺失与 0 上限时首个真实 HTTP 请求为 32768、以及 2000 窗口下 0 请求且历史/缓存不变；`native_engine::generation::tests` 13 项。最终验收包记录完整回归为 core 1172 通过/0 失败/10 忽略（46 个外层目标，含 0 项 Doc-tests）、CLI 601 通过/0 失败/13 忽略（33 个目标），见 `repaired-24b0641/复验申请.md`（`round10-core-full.log`、`round11-cli-full.log`）；这些是被接受的 `24b0641` 的历史验收结果，截至本记录本次集成尚未执行完整 core/CLI/Desktop 回归。
 - 未验证：OpenCode 平台真实最大输出、真实 reasoning 用量与真实耗时未测量；Windows/macOS/ConPTY 未运行。候选 CLI 的本地 mock 压缩已确认 32000 配置在首个分段请求生效，并提交一条边界。
+
+## 2026-11-26 会话占用只读观察与切换清理
+
+背景：用户在 Windows 上同时运行两个前台任务时，view 因 goal proposal frontend 易主而 detach；随后普通 prompt 被单任务保护拒绝，另一会话在 worker 取消窗口出现原始 `lock acquisition failed because the operation would block`。
+
+- [x] goal proposal frontend 失主不再结束 task view：记录到 job stderr，重新 acquire 一次；失败后禁用提案 UI 并提示 `Goal proposal status unavailable; task output continues.`，文本/工具/结束观测继续。`attach`/`single_turn` 首次 acquire 失败也只降级提案 UI，不再用 `?` 结束任务视图或回合。
+- [x] 新增统一占用检测（先 managed job，后执行租约），`wake_for_notifications` 和 `dispatch_input` 在取走/消费队列项前检查；通知保留到 owner 释放。
+- [x] `single_turn` 与 `run_and_finalize_turn` 的租约失败改为可操作提示；原始 OS 锁错误只进 tracing，不再上屏。
+- [x] REPL 在恢复或发现占用时进入只读观察：banner 显示任务 ID/开始时间，普通 prompt 和 `/plan`、`/goal`、`/loop`、`/btw`、`/compact`、MCP、技能不提交；`/continue`、`/tasks`、`/clear` 可用；owner 结束后恢复输入，不自动提交。
+- [x] `read_prompt` 等待期间每秒的 `background_refresh.tick()` 也做同一占用检查：检测到 owner 时立即 `hold_automatic_wake`，未公告则打印 banner 并刷新为只读提示符；`async_hooks`、cron、wakeup、`/loop`、agent question、desktop input 不再触发或消费到期项。owner 结束后若 `yield_prompt` 成功则 `continue 'repl`，把 `… ` 提示符恢复为正常提示符。
+- [x] 观察器新增 `preannounce`：REPL 已打印 `observation_banner` 后，首次轮询只渲染发布进度，不再重复 `still running in another process` 公告；owner 尚未取得租约时也不会被误判为已结束。
+- [x] `/resume`、`/branch`、`/clear` 切换会话时断开 Remote Control，清空 published/deferred/remote_prompts、session relay、`/loop`、草稿、`NEXT_DRAFT` 和 TerminalInput 队列。`repl::handle` 返回后若 `session.id` 已变化，先让下一轮 `'repl` 清理旧会话草稿，不再提前恢复 `NEXT_DRAFT`。
+- [x] `starts_turn_command` 的 `/loop` 只把首个词为 `stop` 的参数当停止命令；`/loop stop-watching-build` 等仍会开回合并在占用期间被拒绝。
+- [x] `session_worker::current` 校验 worker 记录属于目标会话。
+- 测试：CLI 全量单测 607 项（593 passed / 1 个既有 `plugins_panel` 失败 / 13 ignored，新增 4 项通过）；排除该既有失败后为 593 passed / 0 failed；`cargo check` 与 `git diff --check` 通过。core `services::session_worker` 24 项、Desktop `--all-targets` 检查通过；macOS tmux 真实 pty 场景通过。详见 `docs/cli-regression-tests.md` D9 与 `dev-support/deepseek-code/session-occupancy-20261126/`。
+- 未验证：Windows ConPTY；`tick` 期间被另一进程接管的真实 pty 场景（本轮由代码路径、单元测试与全量单测覆盖，未重新跑 tmux 二次占用）；`attach`/`single_turn` 首次 `acquire_proposal_frontend` 失败的降级路径（需等待竞争 frontend 过期，未单独自动化）；core 全量在 macOS 上两次运行约为 `2164 passed / 95 failed / 12 ignored`，失败集中在进程/超时/临时 DB 环境类，未获得全绿。已隔离确认 `services::session_worker` 24 项通过、`resume_cancellation...` 通过；`workspace_lock`、`durability` 单独仍失败，属于当前 macOS 环境问题。

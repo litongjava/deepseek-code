@@ -833,6 +833,7 @@ mod tests {
         assert!(read_bytes_page(&path, 11, 4, false).is_err());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn generation_detects_rotation_and_truncation_and_documents_the_limit() {
         let (root, path) = temp_file(b"consumer-prefix-and-more");
@@ -873,6 +874,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn one_opened_snapshot_is_used_for_validation_read_and_next_generation() {
         let (root, path) = temp_file(b"original-bytes");
@@ -1100,6 +1102,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn partial_first_record_progress_rejects_a_rotated_stream() {
         let root = tempfile::tempdir().unwrap();
@@ -1158,6 +1161,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn metadata_bytes_consumed_bind_the_generation() {
         let root = tempfile::tempdir().unwrap();

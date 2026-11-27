@@ -111,7 +111,7 @@ async fn distinct_requests_accumulate_once_without_compaction_and_new_turns_star
             )
             .with_state(fixture.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        std::fs::write(data.join("providers.json"),json!([{"id":"fixture","name":"Fixture","base_url":base,"api_key":"fixture-only","api_format":if anthropic {"anthropic"} else {"openai"},"enabled":true,
+        deepseek_code_core::data_layout::write_config_file(data.join("config/providers.json"),json!([{"id":"fixture","name":"Fixture","base_url":base,"api_key":"fixture-only","api_format":if anthropic {"anthropic"} else {"openai"},"enabled":true,
             "models":[{"id":"fixture-model","name":"Fixture","enabled":true,"context_window":128000,"max_tokens":4096,"supports_web_search":false,"supports_vision":false}]}]).to_string()).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         for followup in [false, true] {

@@ -62,8 +62,9 @@ fn asked_session(root: &Path, confirm: &[&str]) -> String {
 
 /// Optional settings such as hooks, without a second permission source.
 fn settings(root: &Path, value: Value) {
-    std::fs::create_dir_all(data(root)).unwrap();
-    std::fs::write(data(root).join("settings.json"), value.to_string()).unwrap();
+    let path = deepseek_code_core::data_layout::DataLayout::from_root(data(root))
+        .config_file("settings.json");
+    deepseek_code_core::data_layout::write_config_file(path, value.to_string()).unwrap();
 }
 
 /// ApplyPatch is resident, so a missing-tool rejection cannot be mistaken for

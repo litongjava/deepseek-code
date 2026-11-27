@@ -133,6 +133,17 @@ impl LiveTurn {
         history: Vec<String>,
         tip: Option<String>,
     ) -> Option<Self> {
+        Self::start_with_initial(mode, bindings, history, tip, None, None)
+    }
+
+    pub fn start_with_initial(
+        mode: &str,
+        bindings: crate::keybindings::Keybindings,
+        history: Vec<String>,
+        tip: Option<String>,
+        model_label: Option<String>,
+        pinned_prompt: Option<String>,
+    ) -> Option<Self> {
         if crate::terminal::screen_reader()
             || !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
@@ -142,9 +153,9 @@ impl LiveTurn {
             return None;
         }
         *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        // The first frame clears from the cursor down, over any input box the
-        // previous turn left for the prompt.
-        crate::terminal::take_handoff();
+        // Take over any input box the idle prompt left on the bottom rows so
+        // the first live frame paints in place without erasing the box first.
+        let handoff = crate::terminal::take_handoff();
         let (updates, receiver) = mpsc::channel();
         let (actions, action_receiver) = async_mpsc::unbounded_channel();
         let (ready, initialized) = mpsc::sync_channel(1);
@@ -165,18 +176,26 @@ impl LiveTurn {
             state.history = history;
             state.history_index = state.history.len();
             state.tip = tip;
+            if let Some(label) = model_label {
+                state.model_label = label;
+            }
             let scrollback = super::scrollback::Scrollback::take();
             // The welcome banner is outside conversation history. On the first
             // turn, keep it in place instead of shifting the whole screen down.
             let aligned = scrollback.has_welcome();
+            let pinned_text = pinned_prompt
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| scrollback.latest_prompt().to_owned());
             let pinned = super::pinned_prompt::PinnedPrompt {
-                text: scrollback.latest_prompt().to_owned(),
+                text: pinned_text,
                 ..Default::default()
             };
             let mut screen = Frame {
                 scrollback,
                 pinned,
                 aligned,
+                top: handoff,
+                handed_off: handoff.is_some(),
                 ..Frame::default()
             };
             // Publish terminal loss before dropping the action and answer senders.
@@ -425,7 +444,7 @@ struct Choice {
 }
 impl Choice {
     fn command_preview(&self) -> bool {
-        self.preview.first().is_some_and(|line| matches!(change_view::plain(std::slice::from_ref(line)).trim(), "Bash command" | "PowerShell command"))
+        self.preview.first().is_some_and(|line| matches!(change_view::plain(std::slice::from_ref(line)).trim(), "Bash command" | "PowerShell command" | "Python code"))
     }
     fn click_preview(&mut self, row: usize, total: usize) -> bool {
         if !self.command_preview() || row < 3 || row >= total.saturating_sub(self.options.len() + 2) {
@@ -1479,10 +1498,15 @@ struct Frame {
     logs: Vec<(String, usize)>,
     /// Screen row of the frame's first line; the transcript ends right above.
     top: Option<u16>,
+    /// True when taking over a bottom input box left by the idle editor so the
+    /// first live frame overwrites it in place without a full clear-down.
+    handed_off: bool,
     /// Blank rows between the live content and the status line. The content
     /// stays right below the transcript, where its finished form is written,
     /// while the input box keeps the bottom rows.
     padding: usize,
+    /// Screen row of the bottom-right content corner, just above the input box.
+    content_bottom: Option<u16>,
     /// Whether the frame ends with the input box, rather than a menu question.
     input_box: bool,
     /// Rows of the input text in the current frame.
@@ -1648,7 +1672,8 @@ impl Frame {
     }
     /// The hand-off output and the row the prompt continues on.
     fn hand_off_output(&mut self, rows: usize) -> Option<(String, u16)> {
-        let box_height = 3 + self.input_rows.max(1);
+        let box_height =
+            super::prompt_display::COMPOSER_CHROME_ROWS + self.input_rows.max(1);
         if !self.input_box || self.lines.len() < box_height || self.top.is_none() || rows < box_height + 4 {
             return None;
         }
@@ -1656,8 +1681,9 @@ impl Frame {
         let mut out = std::mem::take(&mut self.pending);
         self.write_logs(&mut out, rows);
         let mut top = self.top.unwrap_or(0) as usize;
-        // The prompt writes a separator row and its own blank row above the box.
-        let height = 2 + input_box.len();
+        // The prompt writes a separator row only when the transcript does not
+        // already end with a blank row, plus its own reserved blank row above the box.
+        let height = usize::from(self.scrollback.needs_separator()) + 1 + input_box.len();
         if top + height > rows {
             out.push_str(&format!("\x1b[{rows};1H"));
             for _ in 0..top + height - rows {
@@ -1770,6 +1796,7 @@ impl Frame {
     ) -> Option<String> {
         let rows = (size.1 as usize).max(1);
         let mut out = std::mem::take(&mut self.pending);
+        let handed_off = std::mem::take(&mut self.handed_off);
         if self.top.is_none() || self.size != size {
             // The first frame, a terminal reflow after a resize, or a
             // full-screen view in between: the cursor shows where we are.
@@ -1777,12 +1804,25 @@ impl Frame {
                 // Recompute hit targets without discarding conversation history.
                 self.scrollback.reflow(size.0 as usize);
             }
-            let cursor_y = cursor_y();
-            let top = if self.lines.is_empty() { cursor_y } else { cursor_y.saturating_sub(self.input_row) };
-            let top = top.min(rows - 1);
-            out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
-            self.top = Some(top as u16);
-            self.lines.clear();
+            if handed_off && self.size == (0, 0) {
+                let top = self.top.unwrap_or(0).min(rows.saturating_sub(1) as u16) as usize;
+                let log_rows: usize = self.logs.iter().map(|(_, height)| height).sum();
+                let lift = (top + log_rows + lines.len()).saturating_sub(rows).min(top);
+                // Clear the retained idle box only before scrolling up so it
+                // never enters scrollback; otherwise overwrite in place.
+                if lift > 0 {
+                    out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
+                }
+                self.top = Some(top as u16);
+                self.lines.clear();
+            } else {
+                let cursor_y = cursor_y();
+                let top = if self.lines.is_empty() { cursor_y } else { cursor_y.saturating_sub(self.input_row) };
+                let top = top.min(rows - 1);
+                out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
+                self.top = Some(top as u16);
+                self.lines.clear();
+            }
         }
         // Scroll before writing the new rows. ConPTY paints what is pending
         // right before each scroll, so the first scroll comes before any
@@ -1833,6 +1873,8 @@ impl Frame {
         }
         lines.splice(content_rows..content_rows, std::iter::repeat_n(String::new(), padding));
         input_row += padding;
+        self.content_bottom =
+            (padding > 0).then_some((top + content_rows + padding - 1) as u16);
         for (index, line) in lines.iter().enumerate() {
             if !repaint && self.lines.get(index) == Some(line) {
                 continue;
@@ -1867,7 +1909,8 @@ impl Frame {
         };
         let draft_height = draft_rows.len();
         // Counted from the frame's end: the footer rule, the footer, then the rows below the cursor.
-        let cursor_from_end = 3 + draft_height - 1 - draft_cursor_row;
+        let cursor_from_end =
+            super::prompt_display::COMPOSER_CHROME_ROWS + draft_height - 1 - draft_cursor_row;
         let status = clip(&state.status_line(), width);
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
         let mode = format!(
@@ -2054,6 +2097,7 @@ impl Frame {
                 .saturating_sub(choice_cursor.map_or(cursor_from_end, |(row, _)| row));
             let cursor_column = choice_cursor.map_or(draft_column.min(width), |(_, column)| column);
             self.lines = lines.clone();
+            self.content_bottom = None;
             self.history_view
                 .draw(&lines, input_row, cursor_column, size)?;
             return Ok(());
@@ -2189,6 +2233,27 @@ fn write(text: &str) -> io::Result<()> {
     output.write_all(b"\x1b[?2026l")?;
     output.flush()
 }
+fn paint_selection_badge(
+    screen: &Frame,
+    selection: &super::mouse_selection::Selection,
+    selection_copy: Option<(usize, bool)>,
+    badge: &mut super::corner_badge::CornerBadge,
+) -> io::Result<()> {
+    if screen.history_view.active() {
+        return badge.clear();
+    }
+    let text = if selection.retained() {
+        Some(super::corner_badge::copy_hint())
+    } else {
+        selection_copy
+            .map(|(characters, copied)| super::corner_badge::copy_result(characters, copied))
+    };
+    match text.zip(screen.content_bottom) {
+        Some((text, row)) => badge.show(row, &text),
+        None => badge.clear(),
+    }
+}
+
 fn run(
     state: &mut State,
     screen: &mut Frame,
@@ -2204,12 +2269,29 @@ fn run(
     let mut agent_preview = String::new();
     let mut agent_click: Option<(usize, Instant)> = None;
     let mut copy_click = super::mouse_selection::CopyClick::default();
+    let mut copy_feedback_at: Option<Instant> = None;
+    let mut selection_copy: Option<(usize, bool)> = None;
+    let mut selection_copy_at: Option<Instant> = None;
+    let mut badge = super::corner_badge::CornerBadge::default();
     let mut drag_mouse = None;
     let mut last_drag = Instant::now();
     let mut input_reader = super::paste_input::Reader::new()?;
     screen.draw(state)?;
     loop {
         let mut dirty = false;
+        if state.copy_feedback.is_some()
+            && copy_feedback_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+        {
+            state.copy_feedback = None;
+            copy_feedback_at = None;
+            dirty = true;
+        }
+        if selection_copy.is_some()
+            && selection_copy_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+        {
+            selection_copy = None;
+            selection_copy_at = None;
+        }
         while !selection.retained() {
             match updates.try_recv() {
                 Ok(Update::Copy(number, command, body)) => {
@@ -2241,6 +2323,7 @@ fn run(
                         // Feedback occupies the existing footer, so copying
                         // never moves the running tool or allocates notice rows.
                         state.copy_feedback = Some(text);
+                        copy_feedback_at = None;
                     } else if command.trim() == "/status" || command.trim().starts_with("/tasks") {
                         if state.status_page.is_none() {
                             execute!(crate::terminal_output::stderr(), terminal::EnterAlternateScreen)?;
@@ -2633,8 +2716,24 @@ fn run(
             }
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if selection.retained()
+                        && key.modifiers.is_empty()
+                        && key.code == KeyCode::Char('c')
+                    {
+                        if selection.copy_retained()? {
+                            if let Some((characters, copied)) = selection.take_copy_feedback() {
+                                selection_copy = Some((characters, copied));
+                                selection_copy_at = Some(Instant::now());
+                            }
+                            screen.draw(state)?;
+                            continue;
+                        }
+                    }
                     selection.clear()?;
                     state.copy_feedback = None;
+                    copy_feedback_at = None;
+                    selection_copy = None;
+                    selection_copy_at = None;
                     if state.draft.cursor < state.draft.paste_end
                         || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home)
                     {
@@ -2994,6 +3093,12 @@ fn run(
                         } else {
                             selection.screen_event(mouse, snapshot.clone())?
                         };
+                        if let Some((characters, copied)) = selection.take_copy_feedback() {
+                            selection_copy = Some((characters, copied));
+                            selection_copy_at = Some(Instant::now());
+                            screen.draw(state)?;
+                            continue;
+                        }
                         if let Some(click) = event {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if (click.row as usize) < screen.history_view.header_rows(page) {
@@ -3037,7 +3142,14 @@ fn run(
                             *row = text.clone();
                         }
                     }
-                    let Some(mouse) = selection.screen_event(mouse, snapshot.clone())? else {
+                    let event = selection.screen_event(mouse, snapshot.clone())?;
+                    if let Some((characters, copied)) = selection.take_copy_feedback() {
+                        selection_copy = Some((characters, copied));
+                        selection_copy_at = Some(Instant::now());
+                        screen.draw(state)?;
+                        continue;
+                    }
+                    let Some(mouse) = event else {
                         continue;
                     };
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -3213,6 +3325,11 @@ fn run(
                     )?;
                 }
             }
+        }
+        if subagents.is_none() && state.status_page.is_none() && state.agent_detail.is_none() {
+            paint_selection_badge(screen, &selection, selection_copy, &mut badge)?;
+        } else {
+            badge.clear()?;
         }
     }
 }
@@ -3596,6 +3713,32 @@ mod tests {
     }
 
     #[test]
+    fn hand_off_output_skips_extra_separator_when_scrollback_ends_blank() {
+        let rows = 20usize;
+        let mut terminal = vt100::Parser::new(rows as u16, 80, 200);
+        let mut frame = Frame::default();
+        for index in 0..20 {
+            let line = format!("row {index}");
+            frame.log_rendered(&line);
+        }
+        place(&mut frame, &mut terminal, &[], "working", 0);
+        frame.log_rendered("before interrupt");
+        frame.log_rendered("Interrupted");
+        frame.log_rendered("");
+        frame.input_box = true;
+        let (output, row) = frame.hand_off_output(rows).unwrap();
+        terminal.process(output.as_bytes());
+        let done = screen(&terminal);
+        // Scrollback already ends with a blank separator, so only the idle
+        // composer's single reserved blank row sits above the 4-row input box.
+        assert_eq!(row as usize, rows - 5);
+        assert_eq!(done[rows - 7], "Interrupted");
+        assert_eq!(done[rows - 6], "");
+        assert_eq!(done[rows - 5], "");
+        assert_eq!(terminal.screen().cursor_position(), (rows as u16 - 5, 0));
+    }
+
+    #[test]
     fn a_turn_starting_on_the_bottom_row_keeps_the_rows_above_it() {
         let mut terminal = vt100::Parser::new(20, 80, 200);
         for index in 0..20 {
@@ -3608,6 +3751,74 @@ mod tests {
         assert_eq!(rows[11], "row 19");
         assert_eq!(rows[13], "status");
         assert_eq!(rows[19], "footer");
+    }
+
+    #[test]
+    fn live_first_frame_takes_over_idle_handoff_without_clear_down_or_box_shift() {
+        let mut terminal = vt100::Parser::new(24, 80, 200);
+        terminal.process(b"WELCOME\r\nworkspace\r\n\r\n-----\r\n> hello\r\n-----\r\n\r\n");
+        // Paint the idle handoff box on the bottom 4 rows (rows 20..24).
+        terminal.process(b"\x1b[21;1Hrule\x1b[22;1H> draft\x1b[23;1Hrule\x1b[24;1Hfooter");
+        let before = screen(&terminal);
+        let mut frame = Frame {
+            top: Some(7),
+            handed_off: true,
+            aligned: true,
+            ..Frame::default()
+        };
+        let mut lines = composer("working");
+        let input_row = lines.len() - 3;
+        let output = frame
+            .place(lines.drain(..).collect(), 0, input_row, 2, (80, 24), &mut || {
+                panic!("handoff takeover must not query cursor position")
+            })
+            .expect("first live frame should render");
+        assert!(
+            !output.contains("\x1b[J"),
+            "handoff takeover with room must not clear-down over the bottom box: {output:?}"
+        );
+        terminal.process(output.as_bytes());
+        let after = screen(&terminal);
+        assert_eq!(after[0], "WELCOME");
+        assert_eq!(after[4], "> hello");
+        assert_eq!(after[17], "working");
+        assert_eq!(after[18], "hint");
+        for row in 20..24 {
+            assert_eq!(after[row], before[row], "bottom box row {row} moved on takeover");
+        }
+    }
+
+    #[test]
+    fn live_first_frame_handoff_on_full_screen_scrolls_without_leaking_old_box() {
+        let mut terminal = vt100::Parser::new(14, 80, 200);
+        for index in 0..10 {
+            terminal.process(format!("transcript {index}\r\n").as_bytes());
+        }
+        // Bottom 4 rows hold the idle handoff box (rows 10..14).
+        terminal.process(b"\x1b[11;1H-----\x1b[12;1H> old\x1b[13;1H-----\x1b[14;1HOLD_FOOTER");
+        let mut frame = Frame {
+            top: Some(10),
+            handed_off: true,
+            aligned: true,
+            ..Frame::default()
+        };
+        let lines = composer("working");
+        let input_row = lines.len() - 3;
+        let output = frame
+            .place(lines, 0, input_row, 2, (80, 14), &mut || {
+                panic!("handoff takeover must not query cursor position")
+            })
+            .expect("first live frame should render");
+        terminal.process(output.as_bytes());
+        let after = screen(&terminal);
+        assert_eq!(after[5], "transcript 9");
+        assert_eq!(after[7], "working");
+        assert_eq!(after[8], "hint");
+        assert_eq!(after[13], "footer");
+        assert!(
+            !after[..6].iter().any(|row| row.contains("OLD_FOOTER")),
+            "old handoff footer must not leak into transcript: {after:?}"
+        );
     }
 
     #[test]
@@ -4439,6 +4650,17 @@ mod tests {
     }
 }
 
+/// Resolves the data directory root from a keybindings path in both layout v2
+/// (`<data_dir>/config/keybindings.json`) and flat test fixtures (`<dir>/keys.json`).
+fn tips_data_dir(keybindings: &std::path::Path) -> Option<&std::path::Path> {
+    let parent = keybindings.parent()?;
+    if parent.file_name().is_some_and(|name| name == "config") {
+        parent.parent()
+    } else {
+        Some(parent)
+    }
+}
+
 /// Unified API: exactly one of the live actor and legacy progress writes output.
 pub struct TurnDisplay {
     running_title: Option<super::title::RunningTitle>,
@@ -4465,12 +4687,36 @@ impl TurnDisplay {
         keybindings: &std::path::Path,
         history: Vec<String>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_initial(
+            interactive,
+            mode,
+            keybindings,
+            history,
+            tips_data_dir(keybindings),
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_initial(
+        interactive: bool,
+        mode: &str,
+        keybindings: &std::path::Path,
+        history: Vec<String>,
+        data_dir: Option<&std::path::Path>,
+        model_label: Option<String>,
+        pinned_prompt: Option<String>,
+    ) -> anyhow::Result<Self> {
         let live = if interactive {
-            LiveTurn::start(
+            LiveTurn::start_with_initial(
                 mode,
                 crate::keybindings::load(keybindings)?,
                 history,
-                keybindings.parent().and_then(super::tips::next),
+                data_dir
+                    .or_else(|| tips_data_dir(keybindings))
+                    .and_then(super::tips::next),
+                model_label,
+                pinned_prompt,
             )
         } else {
             None
@@ -4611,7 +4857,7 @@ impl TurnDisplay {
             let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
             let number = Some(*self.numbers.entry(id.to_owned()).or_insert(next));
             let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
-            live.tool_started(id, header.into_iter().next().unwrap_or_else(|| change_view::tool_call(&label, "", false)), matches!(name, "Bash" | "PowerShell"));
+            live.tool_started(id, header.into_iter().next().unwrap_or_else(|| change_view::tool_call(&label, "", false)), matches!(name, "Bash" | "PowerShell" | "Python"));
             let activity = super::tool_view::task_output_activity(name, input)
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("Running {label}"));
@@ -4933,6 +5179,34 @@ mod completion_tests {
         assert!(!text.contains("failed"));
     }
 
+    #[test]
+    fn tips_data_dir_resolves_layout_v2_config_dir_without_nesting_config_twice() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let layout = deepseek_code_core::data_layout::DataLayout::from_root(data_dir);
+        let keybindings = layout.config_file("keybindings.json");
+        assert_eq!(tips_data_dir(&keybindings), Some(data_dir));
+        // Flat test fixture paths still resolve to their immediate parent.
+        let flat = data_dir.join("keys.json");
+        assert_eq!(tips_data_dir(&flat), Some(data_dir));
+
+        deepseek_code_core::data_layout::write_config_file(
+            layout.config_file("settings.json"),
+            r#"{"spinnerTipsEnabled":false}"#,
+        )
+        .unwrap();
+        assert!(
+            tips_data_dir(&keybindings)
+                .and_then(super::super::tips::next)
+                .is_none(),
+            "spinnerTipsEnabled:false in layout v2 config/settings.json must disable turn tips"
+        );
+        assert!(
+            !data_dir.join("config").join("config").exists(),
+            "tips resolution must never create nested config/config directories"
+        );
+    }
+
     #[tokio::test]
     async fn restore_numbers_counts_every_row_when_legacy_raw_ids_repeat() {
         use clap::Parser;
@@ -4955,7 +5229,13 @@ mod completion_tests {
             conn.execute("UPDATE manifest SET message_count=(SELECT count(*) FROM messages),content_revision=content_revision+1",[])?;
                 Ok(())
         }).unwrap().unwrap();
-        let mut display = TurnDisplay::new(false, "ask", &paths.data_dir.join("keybindings.json"), vec![]).unwrap();
+        let mut display = TurnDisplay::new(
+            false,
+            "ask",
+            &paths.layout().config_file("keybindings.json"),
+            vec![],
+        )
+        .unwrap();
         display.restore_numbers(&session).unwrap();
         assert_eq!(display.numbers.len(), 2);
         assert_eq!(display.numbers.values().copied().max(), Some(2));

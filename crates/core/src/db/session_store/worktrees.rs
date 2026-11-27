@@ -219,7 +219,7 @@ mod tests {
         let shard = stores.create_code_session(&source, "model", "provider", &id)?;
         let owner = shard.select_session(&id)?;
         let changed = owner.change_workspace(&source, &extra, true)?;
-        assert_eq!(changed, source.canonicalize()?);
+        assert_eq!(changed.canonicalize()?, source.canonicalize()?);
         let project = owner.inspect_project_trust()?;
         assert_eq!(project.folders.len(), 2);
         let repaired = owner.repair_project_trust(
@@ -237,21 +237,28 @@ mod tests {
         assert!(owner.bind_prepared_worktree(&source, &prepared).is_err());
         assert!(owner.worktree_status().is_err());
         assert_eq!(
-            stores
-                .select_session(&id)?
-                .inspect_project_trust()?
-                .workspace_path
-                .as_deref(),
-            extra.canonicalize()?.to_str()
+            std::path::Path::new(
+                stores
+                    .select_session(&id)?
+                    .inspect_project_trust()?
+                    .workspace_path
+                    .as_deref()
+                    .unwrap()
+            )
+            .canonicalize()?,
+            extra.canonicalize()?
         );
         Ok(())
     }
 }
 
 impl super::Stores {
-    pub fn workspace_roots(&self,scope:&crate::services::workspace_files::Scope) -> Result<Vec<crate::services::workspace_files::Root>> {
-        let root=self.data_dir().join("workspaces");
-        if let Some(id)=scope.conversation_id.as_deref() {
+    pub fn workspace_roots(
+        &self,
+        scope: &crate::services::workspace_files::Scope,
+    ) -> Result<Vec<crate::services::workspace_files::Root>> {
+        let root = self.layout().workspaces();
+        if let Some(id) = scope.conversation_id.as_deref() {
             use super::SessionAccess;
             return self.select_session(id)?.directory_snapshot(|c,_| crate::services::workspace_files::roots(c,&root,scope));
         }

@@ -47,7 +47,18 @@ fn summary_preserves_transcript_and_projects_after_reopen_and_fork() {
             .contains("run remaining tests"));
         assert_eq!(history[1]["content"], "Continue");
         let fork = reopened.fork(&id).unwrap();
-        assert_eq!(reopened.model_history(&fork, &format).unwrap(), history);
+        fn without_ids(mut history: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+            for message in &mut history {
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("id");
+                }
+            }
+            history
+        }
+        assert_eq!(
+            without_ids(reopened.model_history(&fork, &format).unwrap()),
+            without_ids(history)
+        );
     }
 }
 

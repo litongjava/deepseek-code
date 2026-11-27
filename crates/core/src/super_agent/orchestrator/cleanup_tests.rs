@@ -115,7 +115,7 @@ async fn cleanup_archives_before_removal_and_reopen_is_idempotent() {
             );
             let paths: Vec<_> = std::fs::read_dir(
                 f.data
-                    .join("super-agent")
+                    .join("tasks/super-agent")
                     .join(&f.task_id)
                     .join("artifacts"),
             )
@@ -287,7 +287,7 @@ async fn cleanup_artifact_write_failure_deletes_nothing() {
     let repo = f.task().repositories.remove(0);
     let artifacts = f
         .data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&f.task_id)
         .join("artifacts");
     std::fs::create_dir_all(artifacts.parent().unwrap()).unwrap();
@@ -331,7 +331,7 @@ async fn cleanup_reopen_retries_only_branch_after_worktree_success() {
     );
     let artifacts = f
         .data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&f.task_id)
         .join("artifacts");
     let snapshot = || {
@@ -440,7 +440,7 @@ async fn cleanup_corrupt_archive_blocks_remaining_deletion() {
     .unwrap_err();
     let artifacts = f
         .data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&f.task_id)
         .join("artifacts");
     let diff = std::fs::read_dir(artifacts)
@@ -567,7 +567,7 @@ async fn cleanup_active_and_unknown_descendant_jobs_preserve_worktree() {
         f.context.db.save_child_owner(&f.context.db.worker_pair(&parent, &child).unwrap(), &owner)
             .unwrap();
         if status != "missing" {
-            let directory = f.data.join("background-tasks").join(&job_id);
+            let directory = f.data.join("tasks/background").join(&job_id);
             std::fs::create_dir(&directory).unwrap();
             let job = crate::services::background_sessions::Job {
                 id: job_id.clone(),
@@ -869,7 +869,7 @@ async fn cleanup_unknown_jobs_are_filtered_by_readable_identity() {
         for damage in ["unknown", "lifecycle", "publication"] {
             let f = cleanup_fixture(1).await;
             let id = uuid::Uuid::new_v4().to_string();
-            let directory = f.data.join("background-tasks").join(&id);
+            let directory = f.data.join("tasks/background").join(&id);
             std::fs::create_dir(&directory).unwrap();
             let coder = f.task().coder.session_id.unwrap();
             let job = crate::services::background_sessions::Job {
@@ -987,7 +987,7 @@ async fn cleanup_finishes_after_retirement_of_a_previous_coder() {
         .replace_coder_session(&f.task_id, &current)
         .unwrap();
     let host = f.orchestrator();
-    let shard = f.data.join("sessions").join(&former).join("session.db");
+    let shard = f.data.join("data/sessions").join(&former).join("session.db");
     let backup = shard.with_extension("fixture");
     std::fs::rename(&shard, &backup).unwrap();
     assert!(crate::super_agent::cleanup::cleanup_completed(
@@ -1017,7 +1017,7 @@ async fn cleanup_finishes_after_retirement_of_a_previous_coder() {
         .db
         .save_child_owner(&f.context.db.worker_pair(&former, &child).unwrap(), &owner)
         .unwrap();
-    let job_dir = f.data.join("background-tasks").join(&job_id);
+    let job_dir = f.data.join("tasks/background").join(&job_id);
     std::fs::create_dir(&job_dir).unwrap();
     let state = json!({"id":job_id,"session_id":child,"parent_session_id":former,
         "title":"descendant","status":"completed","started_ms":1,"heartbeat_ms":1,"finished_ms":2,"exit_code":0});
@@ -1028,7 +1028,7 @@ async fn cleanup_finishes_after_retirement_of_a_previous_coder() {
     // A live job of the replacement is unrelated. An unfinished job of the
     // surviving child still blocks this cleanup even after its parent retires.
     let other_job = uuid::Uuid::new_v4().to_string();
-    let directory = f.data.join("background-tasks").join(&other_job);
+    let directory = f.data.join("tasks/background").join(&other_job);
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(
         directory.join("session-owners.json"),
@@ -1096,7 +1096,7 @@ async fn cleanup_checks_grandchild_after_intermediate_retirement() {
         };
         let pair = f.context.db.worker_pair(parent.id(), child.id()).unwrap();
         f.context.db.save_child_owner(&pair, &owner).unwrap();
-        let path = f.data.join("background-tasks").join(&job);
+        let path = f.data.join("tasks/background").join(&job);
         std::fs::create_dir(&path).unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         let state = json!({"id":job,"session_id":child.id(),"parent_session_id":parent.id(),
@@ -1133,7 +1133,7 @@ async fn cleanup_checks_grandchild_after_intermediate_retirement() {
     );
     let path = f
         .data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(leaf_job.unwrap())
         .join("state.json");
     let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1229,7 +1229,7 @@ async fn cleanup_releases_fences_when_participant_is_busy() -> anyhow::Result<()
     let key = File::options()
         .read(true)
         .write(true)
-        .open(f.data.join("session-locks").join(first))?;
+        .open(f.data.join("state/locks/session").join(first))?;
     key.try_lock()?;
     let host = f.orchestrator();
     let task = f.task_id.clone();
@@ -1303,7 +1303,7 @@ async fn cleanup_preserves_all_engine_paths_until_lease_ends() -> anyhow::Result
         if !before {
             change(db.as_ref(), s.id(), &a, wt.to_str().unwrap(), secondary)?;
         }
-        let (cwd, project, _) = db.engine_workspace(&f.data.join("workspaces"), s.id(), None)?;
+        let (cwd, project, _) = db.engine_workspace(&f.data.join("data/workspaces"), s.id(), None)?;
         let project = project.unwrap();
         assert!(if secondary {
             project

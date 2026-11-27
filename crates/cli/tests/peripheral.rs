@@ -39,6 +39,26 @@ async fn run(path: &Path, args: &[&str]) -> Value {
 }
 
 #[tokio::test]
+async fn config_memory_switch_is_global_and_shared() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], true);
+    assert_eq!(run(dir.path(), &["config", "memory", "off"]).await["enabled"], false);
+    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], false);
+    assert_eq!(run(dir.path(), &["config", "show"]).await["memory"]["enabled"], false);
+    assert!(!output(dir.path(), &["config", "memory", "sideways"]).await.status.success());
+    assert_eq!(run(dir.path(), &["config", "memory", "on"]).await["enabled"], true);
+    // The generic setting reaches the same switch.
+    assert!(output(dir.path(), &["config", "set", "memory.enabled", "false"]).await.status.success());
+    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], false);
+    // Experience defaults on and uses the same generic setting path.
+    assert_eq!(run(dir.path(), &["config", "show"]).await["experience"]["enabled"], true);
+    assert!(output(dir.path(), &["config", "set", "experience.enabled", "false"]).await.status.success());
+    assert_eq!(run(dir.path(), &["config", "show"]).await["experience"]["enabled"], false);
+    assert!(output(dir.path(), &["config", "set", "experience.enabled", "true"]).await.status.success());
+    assert_eq!(run(dir.path(), &["config", "show"]).await["experience"]["enabled"], true);
+}
+
+#[tokio::test]
 async fn personal_memory_transfer_is_standalone_and_clear_requires_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("legacy.json");
@@ -65,7 +85,11 @@ async fn auto_dream_host_is_shared_and_stoppable_between_processes() {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider = json!({"id":"fixture","name":"Fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]});
-    std::fs::write(dir.path().join("providers.json"),json!([provider]).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        dir.path().join("config/providers.json"),
+        json!([provider]).to_string(),
+    )
+    .unwrap();
     let app = Router::new().route("/v1/chat/completions", post(|| async {Json(json!({"id":"r","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"Project uses PostgreSQL."},"finish_reason":"stop"}]}))}));
     let server = tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
     let source=dir.path().join("memory.json");

@@ -5,3 +5,5 @@ target-dir = "target"
 [env]
 # Debug builds of the engine need more than the default 2 MiB test thread stack.
 RUST_MIN_STACK = "16777216"
+# Tests bind local mock servers; a developer HTTP proxy must not intercept them.
+NO_PROXY = "127.0.0.1,localhost,::1"

@@ -21,7 +21,7 @@ impl Fixture {
         let id = uuid::Uuid::new_v4().to_string();
         let path = paths
             .data_dir
-            .join("background-tasks")
+            .join("tasks/background")
             .join(&id)
             .join("state.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

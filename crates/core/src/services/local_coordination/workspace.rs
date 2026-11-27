@@ -5,8 +5,10 @@
 //! also stops a recycled path from impersonating the old one. Git is only ever
 //! read: a failing or timed-out probe leaves the metadata absent rather than
 //! inventing a repository.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

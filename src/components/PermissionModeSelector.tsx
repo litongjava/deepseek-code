@@ -36,6 +36,14 @@ const MODE_OPTIONS: PermissionModeOption[] = [
     icon: <ShieldCheck size={14} />,
   },
   {
+    value: 'auto',
+    label: 'Auto permissions',
+    labelZh: '自动权限',
+    description: 'Let a classifier judge calls against your request',
+    descriptionZh: '由分类器判断每次调用是否在授权范围内',
+    icon: <ShieldCheck size={14} />,
+  },
+  {
     value: 'plan_mode',
     label: 'Plan mode',
     labelZh: '计划模式',
@@ -91,9 +99,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
 
-  const currentMode = permissionMode === 'auto'
-    ? { label: 'Auto permissions', icon: <ShieldCheck size={14} /> }
-    : MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
+  const currentMode = MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
 
   useEffect(() => {
     if (value !== undefined || !hasNativeDesktop()) return;

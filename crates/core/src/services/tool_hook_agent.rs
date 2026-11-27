@@ -87,8 +87,10 @@ impl ReadOnlyContext {
 
 fn definitions() -> Vec<ToolDefinition> {
     vec![
-        ToolDefinition { name: "Read".into(), description: "Read a UTF-8 workspace file (maximum 64 KiB); no external paths or other tools are permitted.".into(), input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["file_path"],"additionalProperties":false}) },
-        ToolDefinition { name: "StructuredOutput".into(), description: "Return the final verification result.".into(), input_schema: json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"}},"required":["ok"],"additionalProperties":false}) },
+        ToolDefinition {
+        summary: None, name: "Read".into(), description: "Read a UTF-8 workspace file (maximum 64 KiB); no external paths or other tools are permitted.".into(), input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["file_path"],"additionalProperties":false}) },
+        ToolDefinition {
+    summary: None, name: "StructuredOutput".into(), description: "Return the final verification result.".into(), input_schema: json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"}},"required":["ok"],"additionalProperties":false}) },
     ]
 }
 

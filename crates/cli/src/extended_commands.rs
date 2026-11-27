@@ -496,20 +496,54 @@ fn clipboard_sequence(text: &str) -> Option<String> {
     (text.len() <= 74_994).then(|| format!("\x1b]52;c;{}\x07", base64(text.as_bytes())))
 }
 
-/// Copies through the OS clipboard program, then tmux's buffer, then OSC 52,
-/// so headless hosts and tmux panes without xclip still get the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardTarget {
+    Tmux,
+    Osc52,
+    System,
+}
+
+/// Route the text to the clipboard the user can actually paste from. Shell
+/// helpers write the machine running dcl, which is the wrong computer when the
+/// session is remote; tmux and OSC 52 hand the text to the terminal on the
+/// other end of the SSH connection instead.
+fn clipboard_order(tmux: bool, ssh: bool) -> Vec<ClipboardTarget> {
+    if tmux {
+        vec![
+            ClipboardTarget::Tmux,
+            ClipboardTarget::Osc52,
+            ClipboardTarget::System,
+        ]
+    } else if ssh {
+        vec![ClipboardTarget::Osc52, ClipboardTarget::System]
+    } else {
+        vec![ClipboardTarget::System, ClipboardTarget::Osc52]
+    }
+}
+
 pub(crate) fn copy_text(text: &str) -> Result<()> {
-    let error = match copy_system(text) {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    if std::env::var_os("TMUX").is_some() && copy_tmux(text).is_ok() {
-        return Ok(());
+    let tmux = std::env::var_os("TMUX").is_some();
+    let ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+    let mut error = None;
+    for target in clipboard_order(tmux, ssh) {
+        let copied = match target {
+            ClipboardTarget::Tmux => copy_tmux(text).is_ok(),
+            ClipboardTarget::Osc52 => copy_osc52(text),
+            ClipboardTarget::System => match copy_system(text) {
+                Ok(()) => true,
+                Err(cause) => {
+                    error = Some(cause);
+                    false
+                }
+            },
+        };
+        if copied {
+            return Ok(());
+        }
     }
-    if copy_osc52(text) {
-        return Ok(());
-    }
-    Err(error)
+    Err(error.unwrap_or_else(|| anyhow::anyhow!("No clipboard is available")))
 }
 
 /// `load-buffer -w` also forwards the text to the outer terminal's clipboard.
@@ -578,6 +612,15 @@ fn copy_system(text: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn clipboard_route_reaches_the_terminal_on_the_other_end_of_ssh() {
+        use ClipboardTarget::{Osc52, System, Tmux};
+        assert_eq!(clipboard_order(true, true), vec![Tmux, Osc52, System]);
+        assert_eq!(clipboard_order(true, false), vec![Tmux, Osc52, System]);
+        assert_eq!(clipboard_order(false, true), vec![Osc52, System]);
+        assert_eq!(clipboard_order(false, false), vec![System, Osc52]);
+    }
 
     #[test]
     fn clipboard_sequence_never_contains_display_controls_from_the_payload() {

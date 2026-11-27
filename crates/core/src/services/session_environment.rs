@@ -8,7 +8,7 @@ fn directory(root: &Path, session: &str) -> PathBuf {
     // Session IDs also come from SDK clients; never use them as path components.
     let digest = ring::digest::digest(&ring::digest::SHA256, session.as_bytes());
     let name: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    root.join("session-env").join(name)
+    root.join("state/session-env").join(name)
 }
 
 fn kind(event: HookEvent) -> Option<&'static str> {
@@ -37,8 +37,12 @@ pub fn hook_file(
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-        for path in [root.join("session-env"), dir.clone()] {
-            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        for path in [root.join("state/session-env"), dir.clone()] {
+            match std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+            {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
                 Err(e) => return Err(e.into()),
@@ -80,7 +84,7 @@ pub fn hook_file(
 
 fn files(root: &Path, session: &str) -> Result<Vec<(usize, usize, PathBuf)>> {
     let mut files = Vec::new();
-    for path in [root.join("session-env"), directory(root, session)] {
+    for path in [root.join("state/session-env"), directory(root, session)] {
         match std::fs::symlink_metadata(path) {
             Ok(meta) => anyhow::ensure!(
                 meta.is_dir() && !meta.file_type().is_symlink(),

@@ -138,14 +138,14 @@ async fn cli_toolscript_repeated_calls_keep_history_across_model_rounds_and_reop
         .route("/v1/chat/completions", post(respond))
         .with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(data.join("providers.json"), json!([{
+    deepseek_code_core::data_layout::write_config_file(data.join("config/providers.json"), json!([{
         "id":"fixture", "name":"Fixture", "base_url":base, "api_key":"fixture-only",
         "api_format":"openai", "enabled":true,
         "models":[{"id":"fixture-model", "name":"Fixture", "enabled":true,
             "context_window":128000,"max_tokens":4096,"supports_web_search":false,"supports_vision":false}]
     }]).to_string()).unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         json!({"permissions":{"deny":["Write"]}}).to_string(),
     )
     .unwrap();
@@ -185,7 +185,7 @@ async fn cli_toolscript_repeated_calls_keep_history_across_model_rounds_and_reop
         json!(rows)
     );
     let mut jobs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(data.join("toolscript-jobs")) {
+    if let Ok(entries) = std::fs::read_dir(data.join("tasks/toolscript-jobs")) {
         for entry in entries {
             let dir = entry.unwrap().path();
             let state: Value =

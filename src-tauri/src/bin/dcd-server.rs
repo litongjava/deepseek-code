@@ -114,7 +114,12 @@ fn main() {
 
 fn run(mut args: Args) -> anyhow::Result<()> {
     let data_dir = deepseek_code_core::runtime::RuntimePaths::default_data_dir()?;
-    let token_file = args.token_file.clone().unwrap_or_else(|| data_dir.join("server-token"));
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(std::path::absolute(&data_dir)?)?;
+    paths.layout().migrate_if_needed()?;
+    let token_file = args
+        .token_file
+        .clone()
+        .unwrap_or_else(|| paths.layout().server_token());
     let (token, created) = server_mode::load_or_create_token(&token_file)?;
     if args.print_token {
         println!("{token}");
@@ -137,8 +142,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
         )
         .init();
 
-    let db = deepseek_code_core::runtime::RuntimePaths::new(std::path::absolute(&data_dir)?)?
-        .open_database()?;
+    let db = paths.open_database()?;
 
     let runtime = deepseek_desktop_tauri_lib::build_runtime()?;
     runtime.block_on(async move {

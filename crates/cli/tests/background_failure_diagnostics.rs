@@ -116,14 +116,14 @@ impl Project {
         std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
         std::fs::write(
             temp.path().join("project/config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml")
+            include_str!("../../../config/orchestration.toml")
                 .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
         )
         .unwrap();
         std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
         std::fs::write(
             temp.path().join("project/config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml")
+            include_str!("../../../config/orchestration.toml")
                 .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
         )
         .unwrap();

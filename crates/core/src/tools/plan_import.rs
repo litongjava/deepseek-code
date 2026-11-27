@@ -146,7 +146,7 @@ pub fn import(request: ImportRequest<'_>) -> Result<ImportReport> {
     let workspace_key = workspace.to_string_lossy().into_owned();
     let target = request
         .data_dir
-        .join("tasks")
+        .join("data/session-tasks")
         .join(format!("{session}.sqlite3"));
     if request.dry_run {
         return dry_run(&target, &workspace_key, &plan, &source_hash);
@@ -1089,7 +1089,8 @@ mod tests {
     }
 
     fn target_path(data: &Path, session: &str) -> PathBuf {
-        data.join("tasks").join(format!("{session}.sqlite3"))
+        data.join("data/session-tasks")
+            .join(format!("{session}.sqlite3"))
     }
 
     fn list_tasks(data: &Path, session: &str) -> Vec<Value> {

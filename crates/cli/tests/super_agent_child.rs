@@ -34,7 +34,7 @@ fn call(id: &str, name: &str, input: Value, index: usize) -> Value {
 
 async fn wait_for_job(data: &Path, job_id: &str) -> String {
     let state_path = data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(job_id)
         .join("state.json");
     for _ in 0..480 {
@@ -135,8 +135,8 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
     });
 
     // The child CLI resolves its provider from the shared configuration.
-    std::fs::write(
-        data.join("config.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/config.json"),
         serde_json::to_vec(&json!({
             "providers":[{
                 "id":"fixture","name":"Fixture","provider_type":"openai","api_key":null,
@@ -208,6 +208,16 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
     .await
     .unwrap();
     wait_for_job(&data, &first.job_id).await;
+    let rows = sessions
+        .model_history(
+            &first.session_id,
+            &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
+        )
+        .unwrap();
+    assert_eq!(
+        rows.iter().find(|r| r["content"] == "first run").unwrap()["origin"],
+        "delegation"
+    );
     let canonical = child_workspace.canonicalize().unwrap();
     assert_eq!(
         std::fs::read_to_string(&first_out).unwrap().trim(),
@@ -258,7 +268,7 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
     wait_for_job(&data, &second.job_id).await;
     if let Err(error) = std::fs::read_to_string(&second_out) {
         let state = std::fs::read_to_string(
-            data.join("background-tasks")
+            data.join("tasks/background")
                 .join(&second.job_id)
                 .join("state.json"),
         )

@@ -104,7 +104,7 @@ mod tests {
         let db = paths.open_database().unwrap();
         db.create("session", Default::default()).unwrap();
         db.create("other", Default::default()).unwrap();
-        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
+        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
         let request = Checkpoint::request_key("system", "fragment", 4096);
         Checkpoint::open(&db, "session", &provider, "system")
             .unwrap()
@@ -157,7 +157,7 @@ mod tests {
         let db = paths.open_database().unwrap();
         db.create("session", Default::default()).unwrap();
         db.create("other", Default::default()).unwrap();
-        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
+        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
         let request = Checkpoint::request_key("system", "fragment", 4096);
         // A version 1 fingerprint is what the earlier strategy stored.
         let fingerprint = digest(
@@ -205,7 +205,7 @@ mod tests {
         let db = paths.open_database().unwrap();
         db.create("session", Default::default()).unwrap();
         db.create("other", Default::default()).unwrap();
-        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
+        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
         let request = Checkpoint::request_key("system", "fragment", 4096);
         Checkpoint::open(&db, "session", &provider, "system")
             .unwrap()

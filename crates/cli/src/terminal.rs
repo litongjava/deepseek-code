@@ -60,6 +60,10 @@ pub(crate) fn cursor_position() -> std::io::Result<(u16, u16)> {
     // Windows reports `Err` instead of `Ok(false)` when the handle is not a
     // console, so a failure to query raw mode means "not raw" on both platforms.
     let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    cursor_position_when(raw)
+}
+
+fn cursor_position_when(raw: bool) -> std::io::Result<(u16, u16)> {
     if !raw {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotConnected,
@@ -201,6 +205,7 @@ pub mod vim;
 mod display_path;
 mod file_review;
 pub(crate) mod scrollback;
+mod corner_badge;
 mod mouse_selection;
 mod pinned_prompt;
 pub mod style;
@@ -437,9 +442,17 @@ mod cursor_tests {
     #[test]
     fn cursor_position_is_unavailable_without_raw_mode() {
         assert_eq!(
-            super::cursor_position().unwrap_err().kind(),
+            super::cursor_position_when(false).unwrap_err().kind(),
             std::io::ErrorKind::NotConnected
         );
+        // When the test runner's host console itself is not already in raw mode,
+        // verify the live wrapper rejects cursor queries without toggling raw mode.
+        if !crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+            assert_eq!(
+                super::cursor_position().unwrap_err().kind(),
+                std::io::ErrorKind::NotConnected
+            );
+        }
     }
 }
 

@@ -68,6 +68,7 @@ async fn delayed_command_tail_cannot_overwrite_newer_callback_output() {
         ("sh", "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"updatedMCPToolOutput\":\"earlier command\"}}'", "printf yes > waiting; while [ ! -f release ]; do sleep 0.01; done; printf '{}'")
     };
     let mut runner = HookRunner::default().with_session_callbacks(&session);
+    runner.data_dir = root.path().to_path_buf();
     runner.workspace = root.path().to_path_buf();
     runner.hooks = [first, tail]
         .into_iter()
@@ -197,6 +198,7 @@ async fn initial_message_observation_order_survives_delayed_command_tail() {
         ("sh", "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"initialUserMessage\":\"earlier command\"}}'", "printf yes > waiting; while [ ! -f release ]; do sleep 0.01; done; printf '{}'")
     };
     let mut runner = HookRunner::default().with_session_callbacks(&session);
+    runner.data_dir = root.path().to_path_buf();
     runner.workspace = root.path().to_path_buf();
     runner.hooks = [first, tail]
         .into_iter()

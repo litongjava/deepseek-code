@@ -26,6 +26,7 @@ pub struct Job {
 pub fn definitions() -> Vec<super::ToolDefinition> {
     vec![
         super::ToolDefinition {
+            summary: Some("Schedule a prompt to run later".into()),
             name: "CronCreate".into(),
             description: "Schedule a prompt to run later. `cron` has five local-time fields (minute, hour, day-of-month, month, day-of-week); the result shows the first fire time. `recurring: true` (default) fires at every match, `recurring: false` fires once and deletes the job. Jobs run only while the session is idle, so a missed match fires once at the next idle check. Recurring jobs expire 7 days after creation, firing once more at the first due time and then being removed. Session jobs (default) end with the session; `durable: true` saves them in `.claude/scheduled_tasks.json`. Prompts are limited to 64 KiB.".into(),
             input_schema: json!({"type":"object","properties":{
@@ -36,11 +37,13 @@ pub fn definitions() -> Vec<super::ToolDefinition> {
             },"required":["cron","prompt"],"additionalProperties":false}),
         },
         super::ToolDefinition {
+            summary: Some("Remove a scheduled job created by CronCreate".into()),
             name: "CronDelete".into(),
             description: "Remove a scheduled job created by CronCreate. The job is deleted from whichever store holds it, the session's job file or the project's .claude/scheduled_tasks.json, so it will not fire again. An unknown id returns an error and leaves other jobs alone.".into(),
             input_schema: json!({"type":"object","properties":{"id":{"description":"Identifier CronCreate returned for the job to remove.","type":"string"}},"required":["id"],"additionalProperties":false}),
         },
         super::ToolDefinition {
+            summary: Some("Read the session scheduled prompts and the project saved ones".into()),
             name: "CronList".into(),
             description: "Read the current session’s scheduled prompts together with those saved for the project. Each entry gives its ID, cron expression, prompt, recurrence and durability flags, and next run in local time. The result includes the total count.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -197,7 +200,7 @@ fn claim(root: &Path, jobs_file: &Path) -> Result<Option<crate::fs::OwnedFileLoc
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     jobs_file.hash(&mut hash);
-    let directory = root.join("cron-locks");
+    let directory = root.join("state/locks/cron");
     std::fs::create_dir_all(&directory)?;
     let file = std::fs::OpenOptions::new()
         .write(true)

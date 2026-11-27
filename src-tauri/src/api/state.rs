@@ -16,7 +16,7 @@ use crate::memory::{ContextManager, MemExClient};
 use crate::native_engine::NativeEngine;
 use crate::notification::NotificationManager;
 use crate::orchestration::MultiAgentOrchestrator;
-use crate::permissions::PermissionManager;
+use crate::permissions::{PermissionManager, PermissionMode};
 use crate::preview_engine::PreviewEngine;
 use crate::process::ProcessManager;
 use crate::skills::SkillsManager;
@@ -101,9 +101,13 @@ impl AppState {
             git_integration: Arc::new(GitIntegration::new(
                 std::env::current_dir().unwrap_or_default(),
             )),
-            permission_manager: Arc::new(PermissionManager::new(
-                Arc::new(crate::permissions::AuditLogger::new(1000)),
-            )),
+            permission_manager: {
+                let manager = Arc::new(PermissionManager::new(
+                    Arc::new(crate::permissions::AuditLogger::new(1000)),
+                ));
+                manager.set_mode(PermissionMode::Auto);
+                manager
+            },
             generation_runs: Arc::default(),
             peripheral_host: Arc::default(),
             data_dir: Arc::new(crate::commands::app_data_dir().unwrap_or_default()),

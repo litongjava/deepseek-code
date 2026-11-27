@@ -1,6 +1,7 @@
 # Path, token, matching lines, SHA-256 of sorted trimmed matching lines, reviewed use
 crates/cli/src/session.rs	peripheral_settings	1	b6f148166fd173121496e329fa682befdbc2d9108dc9cbf36551137ff83e1557	Colocated test setup or SQL fault injection for session
 crates/cli/src/session_binding_tests.rs	peripheral_settings	2	18e92e8978de18be85f3660b2cca0bd522dba2165720550b8dedf18d696b6e90	Colocated test setup or SQL fault injection for session_binding_tests
+crates/cli/src/session_origin_tests.rs	peripheral_settings	1	202e6d3ebc8f6ff2cd1447ed24cdc28b099dd382f2fcb10f003c547ab6b728af	Producer and queued-compaction fixtures inspect durable receipts on the admitted rows.
 crates/cli/src/startup_contention_tests.rs	Connection::open	1	556ec7ec48a423d89404683a7813e63e3d33aa93bfbaf326bd5e396c47294afa	Colocated test setup or SQL fault injection for startup_contention_tests
 crates/cli/src/terminal/scrollback.rs	with_conn	1	abccba0e9d55777ced6c325a470957c4ed21d4e4b3fc3ff5ea5d99c7a7fb38bc	Standalone task database fixture
 crates/cli/src/worker_frontend.rs	peripheral_settings	2	4a6c17f633b3166506e5abce35720bdab8d5c15241cf77fc95e58fda6b4ed9db	Colocated test setup or SQL fault injection for worker_frontend
@@ -8,7 +9,7 @@ crates/cli/tests/apply_patch_tool.rs	peripheral_settings	1	bdf67221e833a7fa95ed5
 crates/cli/tests/batch.rs	peripheral_settings	2	18e92e8978de18be85f3660b2cca0bd522dba2165720550b8dedf18d696b6e90	batch integration or repository fixture
 crates/cli/tests/local_coordination_registry.rs	Connection::open	1	f2a9358e7f288b4ae460ba95ad8a0e928221e8594a44cb0c15d8fb7335ebcd15	local_coordination_registry integration or repository fixture
 crates/cli/tests/sdk/apply_patch_permissions.rs	peripheral_settings	2	665b4ff00df9b40408c41aad2bd5a817f1c79c74991879bac94c1c85c04cc813	apply_patch_permissions integration or repository fixture
-crates/cli/tests/session_export.rs	Connection::open	4	f750d22a80ee556bee4ab816b83ab3c1d2fd8b19cbfedae6ae68fbece993706c	Request body corruption and lifecycle state in disposable export fixtures
+crates/cli/tests/session_export.rs	Connection::open	4	720e9f74cf04be76f828863a6631e6d49f2a089ac458f352b7624e7b0606b20f	Request body corruption and lifecycle state in disposable export fixtures
 crates/cli/tests/session_export.rs	deepseek_code.db	3	7f59df4961b74e4bcad013a60411bb5ef978b0ca1b214366837977ed47c10d94	CLI startup and export sentinel files
 crates/cli/tests/session_export/race.rs	Connection::open	2	6fae9c960b78062c65f9df380983d8ead52049ec532b7afec550a222e0f920a1	Directory metadata and projection fixtures for export snapshot fences
 crates/cli/tests/session_trust.rs	with_conn	1	9949d5a7ae8a5785b8f319bbd0cd57ec496bfb21a0eae53edeeeea929b6c9a54	Standalone task database fixture
@@ -21,6 +22,7 @@ crates/core/src/db/activity_tests.rs	Connection::open	2	fb05ce67c179e1af6f114383
 crates/core/src/db/activity_tests.rs	peripheral_settings	2	ecf3b999b3e9e84d76abeb89b9eb69ae0ee0baa6e6180a340d759b980fcbc723	activity_tests integration or repository fixture
 crates/core/src/db/activity_tests.rs	with_conn	3	0e22da1bfdf66327d4e1bca716cd9d86f85e28591ac36682bee35f418de32d65	activity_tests integration or repository fixture
 crates/core/src/db/context_search_repo.rs	Connection::open	2	c0489a664d8ff6264fce166e7d13405a55a68d384ca52891155fbd55557ea0f5	Colocated context_search_repo repository fixture
+crates/core/src/db/context_search_index.rs	Connection::open	1	163ce64ba5917a2e56a187b507b856eb05ccc3fae9d62033e6f80ed652db9607	In-memory context-search migration fixture
 crates/core/src/db/conversation_repo.rs	Connection::open	6	c8b1f371832f5784c89e1c40cf2f071be7fc393d97155f5f2eb23edb873bc623	Repository branch SQL and in-memory branch/order fixtures
 crates/core/src/db/conversation_repo.rs	peripheral_settings	2	6a358f836ef25188a405570f1c141fd81c6d67e45c7711098f00e229b99900a4	Repository branch SQL and in-memory branch/order fixtures
 crates/core/src/db/conversation_repo.rs	with_conn	3	e6bb8531238986eb09d02d2238dd7144edc0b9c013d2eba7a37cd1a8913b0eec	Repository branch SQL and in-memory branch/order fixtures
@@ -32,7 +34,7 @@ crates/core/src/db/turn_repo.rs	with_conn	15	a68645a01a50e3617dad818e2ba12206cc9
 crates/core/src/mcp/control.rs	Connection::open	1	e373254f1d65ebceb8806e6523743eb6e0a975dcc1b05ed9198a90fce348d9fa	Colocated control repository fixture
 crates/core/src/memory/local.rs	Connection::open	1	0ba1fd3817e5f8aa608bcc9c88a4b21d7f415ef33a56b07c9d4dc73631197e36	Independent local memory database
 crates/core/src/native_engine/deep_research.rs	peripheral_settings	1	1799c1aebf5c536b8bf33472e803a2f4ad0b245e16fe970a79f57460a944b4dd	Colocated deep_research repository fixture
-crates/core/src/native_engine/delegation_task_cleanup_tests.rs	Connection::open	1	8155ef59730b02fba1f5b8b2be0d2cb0a4aa0af2b542b5bab99de25ed61200c4	delegation_task_cleanup_tests integration or repository fixture
+crates/core/src/native_engine/delegation_task_cleanup_tests.rs	Connection::open	1	3caf389a30e97dcba3fd0245ec52f516d5b30205cf8c06cbfc63693bcc44cbb4	delegation_task_cleanup_tests integration or repository fixture
 crates/core/src/native_engine/plan_approval_tests.rs	peripheral_settings	1	31793372be89d7c94c4757f5cdd45b8d3dc7633353ce42af6261aa022a335826	plan_approval_tests integration or repository fixture
 crates/core/src/native_engine/session_binding.rs	Connection::open	1	3e5bcdedef6f2a159f9afc3e9da89662cc68c19d5228d901c8a694652fd13996	Provider binding fixture schema and DbManager adapter
 crates/core/src/native_engine/session_binding.rs	peripheral_settings	3	dc2a8a3ea33e092efd93e34bfb04b3aa4a289510844008678e7004fdd7b4518c	Provider binding fixture schema and DbManager adapter
@@ -43,7 +45,7 @@ crates/core/src/native_engine/session_binding/store.rs	with_conn	2	7e016c0314916
 crates/core/src/native_engine/toolscript_job.rs	peripheral_settings	1	1d476f47afb184d96eff628954c27469ed25d71bdfaa9e00cadcc33560c0a88a	Colocated toolscript_job repository fixture
 crates/core/src/native_engine/workspace.rs	Connection::open	2	d135e602ebf1f8bcb111a3d4840b43522e29f99bcf401607edfa8a5035ff72fd	Colocated workspace repository fixture
 crates/core/src/runtime.rs	peripheral_settings	1	217d9659b57fa37fc302ab30db4eb6c2974940a88911b5ecb0f1429729381c0f	SessionStore<DbManager> fixture backend
-crates/core/src/runtime.rs	with_conn	9	92fd3b0bedc253d93d56a9d7b4decad0fecf9d71d3c2f4167e150f5253c033aa	SessionStore<DbManager> fixture backend
+crates/core/src/runtime.rs	with_conn	9	75fba6d7414dbed05fad6082a6c6097ac78bd3b71d55806dfe88b9abd9e41a57	SessionStore<DbManager> fixture backend
 crates/core/src/services/compaction.rs	peripheral_settings	11	4c9ec75b98af001a302a43883bc7fd11c5fec71aec1056c88df7fea8aa9544e7	Connection-scoped compaction SQL for DbManager and repository tests
 crates/core/src/services/compaction.rs	with_conn	2	fa6bf7ddfdcbef622fe1c9ab2792af3e9cfdbea800de28b6d15541eb8fccc73a	Connection-scoped compaction SQL for DbManager and repository tests
 crates/core/src/services/compaction/native.rs	peripheral_settings	1	4e804e1beaaec97169beee4c5edefd8f7bd80e4dd22d1ada363da025a73f12b6	DbManager native-boundary reader
@@ -57,6 +59,8 @@ crates/core/src/services/input_queue.rs	Connection::open	1	dbe0e23324f3cec780b9f
 crates/core/src/services/input_queue.rs	with_conn	14	225b097397455614e3294fac400238b33043e9026a324ebba0c12444000cf9a2	Shared queue repository and isolated tests
 crates/core/src/services/local_coordination/paths.rs	DATABASE_FILE	2	cb5a49ce7c9409446a15c4b6526f1c930d82f0e19a434e1ce8cdae81b64c6796	Coordination registry filename
 crates/core/src/services/local_coordination/store.rs	Connection::open	5	a21bd5f04185154363ffd89b21bfe32eb020b0f98f815afa1134a998d499a255	Independent coordination registry and corruption fixtures
+crates/core/src/services/memory_files.rs	Connection::open	2	b742a7ac59205f819a87de2f622212882847fe35fd280e2773ed47495c75de46	Read-only import of legacy memory.sqlite3 settings and an isolated archive fixture
+crates/core/src/services/memory_files/prompt.rs	peripheral_settings	4	fad08b80b52c8742eaa69266178fb01ecf7525e96e1977a5b54412abf3464fe5	Memory prompt lifecycle reads and writes the per-session peripheral settings row
 crates/core/src/services/mod.rs	peripheral_settings	3	5e60a5962ac4aaefc92ce50197145f7993efaccc9048b0abaac070ce294d70d5	ServiceContext<DbManager> fixture setting adapters
 crates/core/src/services/mod.rs	with_conn	2	3eaea3f074a7ba4bccd75c03f8fd2213d8f37d69ea9b3e63bf1c3325f1624cf9	ServiceContext<DbManager> fixture setting adapters
 crates/core/src/services/permission_authority.rs	with_conn	1	bb5a8ce5afccd0e5afa26a1fb60e28129d536f826d665dca848eedca5eef43dc	DbManager parent-child inheritance adapter
@@ -84,7 +88,7 @@ crates/core/src/tools/background_shell.rs	Connection::open	2	fe5c3a9773afa4eba60
 crates/core/src/tools/context_search.rs	Connection::open	1	a8c4f14fa397a031189e3aaab4a269d400b3e0e194970914ce5f352b026f7f2d	Optional in-memory FTS candidate selection and repository fixture adapter
 crates/core/src/tools/context_search.rs	with_conn	1	d16fd11ed25d97f8f1071c9cdbf76d557822462c5f61ce22eafa3117d0fcc90c	Optional in-memory FTS candidate selection and repository fixture adapter
 crates/core/src/tools/coordination.rs	Connection::open	1	4b6545bb10cd46282f5a60377bd075729f223f32c8c66260c37c1cdcb1dd8893	Independent coordination registry fixture
-crates/core/src/tools/monitor.rs	Connection::open	3	7c174759a5f46fb83495ef522bc9bb64af25553327380ce72856dfd24a63b049	Standalone task database for monitor state
+crates/core/src/tools/monitor.rs	Connection::open	3	7221756bfec45b8b06b1bccfdca3d8a430c14818b12de04abb30190f7670351b	Standalone task database for monitor state
 crates/core/src/tools/monitor_completion.rs	Connection::open	1	0be7acd37e776769f8229416b233309ab333a5af6f2f7b9c6e54452054765c6c	Close monitor records in the standalone task database
 crates/core/src/tools/plan_import.rs	Connection::open	14	6b4b29b931044aa29edd9c06f3635eaa32560b1f48e0859d4608619c2003fa53	Explicit standalone task database import and rollback fixtures
 crates/core/src/tools/scheduled.rs	Connection::open	2	e3615be898f929a49a84e1e4b0d9bd6dd60847c24710aebf957f48f963bbfe1f	Standalone schedule database
@@ -98,15 +102,15 @@ crates/core/tests/first_chat_recovery.rs	peripheral_settings	1	a5171b8c7c0c3c176
 crates/core/tests/scheduled_prompts.rs	Connection::open	1	924c148587f1992956162241fa3906edd5f2e07266c8f50b8073c0fb1d696195	scheduled_prompts integration or repository fixture
 crates/core/tests/session_concurrency.rs	Connection::open	1	e373254f1d65ebceb8806e6523743eb6e0a975dcc1b05ed9198a90fce348d9fa	session_concurrency integration or repository fixture
 crates/core/tests/session_db_conversation_edits.rs	Connection::open	1	6e79af0040f8c677f7fec9322ca5fd3fd14d6f5da0d4e6b69e69cb4056ed748d	Temporary global trigger for combined-edit failure injection
-crates/core/tests/session_db_delivery.rs	Connection::open	7	708c8684ed875c888d87e70ff46810ef154bf13280d6944c1553a089a31a5638	Independent SQLite writer, occurrence corruption and schema fixtures
+crates/core/tests/session_db_delivery.rs	Connection::open	7	10fe01b0d8130859a948d30970b4041121aee2fbe695644bd1957c8abd10a117	Independent SQLite writer, occurrence corruption and schema fixtures
 crates/core/tests/session_db_lifecycle.rs	Connection::open	11	a0a6f79b821af4000b39aeee62a6402d2d5d1bd4ecec3510f4c1b4c079518faa	Lifecycle damage, interruption, durability and legacy sentinel fixtures
 crates/core/tests/session_db_lifecycle.rs	deepseek_code.db	3	7f59df4961b74e4bcad013a60411bb5ef978b0ca1b214366837977ed47c10d94	Untouched legacy-file sentinel assertion
-crates/core/tests/session_db_projection.rs	Connection::open	12	3b0301a0b3b06ccf47b329ab40c4ecfb7034bc3847e8cac6126bc3664499212f	Projection damage, stale revisions and schema recovery fixtures
+crates/core/tests/session_db_projection.rs	Connection::open	12	fa78d716f32ae669f6bfcbb12f056e31c94f2ae5ef29c4070ad01d44003807e8	Projection damage, stale revisions and schema recovery fixtures
 crates/core/tests/session_db_projection.rs	peripheral_settings	2	0ba20f61469e5170300baf1560241a14feec346a042ebfe47221a3717df5ed6e	Projection damage, stale revisions and schema recovery fixtures
 crates/core/tests/session_db_readers.rs	Connection::open	1	cbda0bdb44496220228e1da8e83524b9adc5d99590d427af6a338ae48e1a3703	Directory writer contention and legacy-file sentinel
 crates/core/tests/session_db_readers.rs	deepseek_code.db	1	2c4a695641be9b8419879991ba23a5dbe1f4b1838a9db2e4482368bea9856505	Untouched legacy-file sentinel assertion
-crates/core/tests/session_db_resume_parity.rs	Connection::open	4	86697b952156048211e26db1264095416323e1920289cbc0238bc57b7a66d2bc	Temporary worktree migration fixture and tied directory activity
+crates/core/tests/session_db_resume_parity.rs	Connection::open	4	d604a0b0e7b44eb4b8f1a87fd4fecb1c1c1dae9a9e22e023108a1bbfbd22ff1b	Temporary worktree migration fixture and tied directory activity
 crates/core/tests/support/session_sql.rs	Connection::open	1	7439f4f54f862e02509d4a0e97407507877c82334e1930807f73b6fd3cd23342	Fixture SQL opens existing files only and validates the selected shard identity
-src-tauri/tests/conversation_images_bridge.rs	Connection::open	1	06ef95e4704a8b311beb4a172f2d6bea2da032abb79f9596d78ea363b1fc1a90	conversation_images_bridge integration or repository fixture
+src-tauri/tests/conversation_images_bridge.rs	Connection::open	1	530fc5389ffed006d5e3c1f2419ac8e971175d0bf8b0f070beea343acd92e70c	conversation_images_bridge integration or repository fixture
 crates/core/tests/detail_projection.rs	Connection::open	1	82a50157dac6b63a662a88a06217dc2818b6136a29acc08f2170cb5c783c2a5b	Test-only directory writer holds projection publication busy while the shard commits.
 crates/core/tests/session_db_lifecycle/child_upgrade.rs	Connection::open	1	d4a97814ef97e89db44dc410642ae010cd753e99f06c6fc14b89d08a303365c2	Reconstruct and inspect the old child shard in the bounded format upgrade fixture.

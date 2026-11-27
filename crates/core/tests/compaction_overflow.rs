@@ -111,7 +111,7 @@ async fn fixture(
         store.db.clone(),
         Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
             vec![provider],
-            paths.data_dir.join("providers.json"),
+            paths.data_dir.join("config/providers.json"),
         ))),
         runtime::default_permissions(),
         Arc::new(FileCache::new()),

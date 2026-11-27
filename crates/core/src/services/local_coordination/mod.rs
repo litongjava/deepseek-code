@@ -65,8 +65,8 @@ mod tests {
         // An explicit enabled:false is disabled as well.
         let data = temp.path().join("data");
         std::fs::create_dir_all(&data)?;
-        std::fs::write(
-            data.join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
             r#"{"localCoordination":{"enabled":false,"registry":true}}"#,
         )?;
         let settings = load_settings(&data)?;

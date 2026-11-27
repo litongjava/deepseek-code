@@ -853,7 +853,7 @@ pub(crate) fn retain_tool_output_with_ranges(
     if output == preview && output.len() <= limit {
         return (output.to_string(), Some(PreviewRanges::whole(output.len())));
     }
-    match save_output_in(&root.join("tool-outputs"), output.as_bytes()) {
+    match save_output_in(&root.join("cache/tool-outputs"), output.as_bytes()) {
         Ok(path) => {
             let note = format!(
                 "\nSaved tool result ({} bytes, may already be truncated by the tool): {}",
@@ -998,8 +998,8 @@ mod tests {
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"},{"type":"text","text":""}]}]});
         apply_conversation_cache(&mut body);
         let blocks = body["system"].as_array().unwrap();
-        assert_eq!(blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<String>().len() + 4, system.len());
-        assert_eq!(blocks.iter().map(|b| !b["cache_control"].is_null()).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<String>().len() + 8, system.len());
+        assert_eq!(blocks.iter().map(|b| !b["cache_control"].is_null()).collect::<Vec<_>>(), [true, true, true, true, false]);
         assert_eq!(body["messages"][0]["content"], "first");
         assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
         assert!(body["messages"][2]["content"][1].get("cache_control").is_none());

@@ -333,7 +333,7 @@ async fn a_crash_after_the_reservation_reuses_the_same_identity() {
     assert!(fixture.child_sessions().is_empty());
     assert!(!fixture
         .data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(&reserved.job_id)
         .exists());
     assert_eq!(fixture.child_runs(), 0);
@@ -370,7 +370,7 @@ async fn a_crash_after_session_allocation_continues_the_same_session() {
     assert!(fixture.task().coder.session_id.is_none());
     assert!(!fixture
         .data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(&reserved.job_id)
         .exists());
     assert_eq!(fixture.child_runs(), 0);
@@ -757,7 +757,7 @@ fn review_and_integration_operations_are_identified_by_evidence_stage() {
                 "spec_version": task.spec_version,
                 "review_round": task.review_round,
                 "purpose": "implementation",
-                "workspace": "/workspace",
+                "workspace": crate::super_agent::TEST_WORKSPACE,
                 "session_id": "reviewer-session",
                 "job_id": "implementation-job",
                 "prompt": "implementation review",

@@ -162,8 +162,8 @@ fn reconstruct_history_related_records_and_fork_after_rewind() -> Result<()> {
     )?;
     let typed = json!([{"type":"text","text":"one\ntwo"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]);
     let large = "界🙂\n".repeat(32000);
+    session.admit_user("user", &typed, "typed")?;
     let message = session.write(|w| {
-        w.append_user("user", &typed)?;
         let turn = w.start_turn()?;
         let message = w.segment(&turn)?;
         w.message_content(&message, &large)?;
@@ -204,7 +204,6 @@ fn reconstruct_history_related_records_and_fork_after_rewind() -> Result<()> {
         w.diff(&serde_json::from_value(json!({"id":"d","conversation_id":"source","message_id":message,
             "file_path":"f","original_content":"old","modified_content":"new","diff_text":"change","status":"pending","created_at":"2026-01-01"}))?)?;
         w.set_goal("finish export")?;
-        w.approve_plan("approved plan")?;
         w.set_message_metadata(&message, &json!({"fixture":true}))?;
         w.set_request_metadata("r1", &json!({"fixture":1}))?;
         w.bind_agent("agent definition")?;
@@ -218,6 +217,7 @@ fn reconstruct_history_related_records_and_fork_after_rewind() -> Result<()> {
         w.rewind_from(&tail)?;
         Ok(message)
     })?;
+    session.approve_plan("approved plan")?;
     session.save_mcp(
         &message,
         "child",
@@ -232,6 +232,7 @@ fn reconstruct_history_related_records_and_fork_after_rewind() -> Result<()> {
             text: "queued".into(),
             content: json!("queued"),
             origin: "user".into(),
+            prompt_origin: Some("typed".into()),
             message_id: None,
         },
     )?;
@@ -485,7 +486,7 @@ async fn export_sessions_generated_by_both_streaming_protocols() -> Result<()> {
             post(move || async move { ([("content-type", "text/event-stream")], body) }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        fs::write(data.join("providers.json"),json!([{"id":"fixture","name":"fixture","api_key":"excluded-provider-secret","base_url":url,
+        deepseek_code_core::data_layout::write_config_file(data.join("config/providers.json"),json!([{"id":"fixture","name":"fixture","api_key":"excluded-provider-secret","base_url":url,
             "api_format":protocol,"enabled":true,"models":[{"id":"model","name":"model","max_tokens":4096,"supports_web_search":false,"supports_vision":false,"enabled":true}]}]).to_string())?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_dcl"));
@@ -662,20 +663,15 @@ fn fresh_install_creates_only_directory_shard_and_lifecycle_files() -> Result<()
     assert_eq!(decode(&result.stdout)?[0]["session_id"], id);
     assert_layout(
         &data,
-        &[
-            ".session-bootstrap",
-            "global.db",
-            "session-locks",
-            "sessions",
-        ],
+        &["README.md", "data", "global.db", "layout.json", "state"],
         &["global.db-shm", "global.db-wal"],
     )?;
     assert_layout(
-        &data.join("session-locks"),
+        &data.join("state/locks/session"),
         &[".directory", ".initialized", ".orphan-sweep", &id],
         &[],
     )?;
-    let sessions = data.join("sessions");
+    let sessions = data.join("data/sessions");
     assert_layout(&sessions, &[".staging", ".trash", ".quarantine", &id], &[])?;
     for dir in [".staging", ".trash", ".quarantine"] {
         assert_layout(&sessions.join(dir), &[], &[])?;
@@ -706,8 +702,12 @@ fn check_bad_blob(missing: bool) -> Result<()> {
         w.snapshots(&msg, &json!([request]))
     })?;
     if !missing {
-        let db =
-            rusqlite::Connection::open(root.path().join("sessions").join(id).join("session.db"))?;
+        let db = rusqlite::Connection::open(
+            root.path()
+                .join("data/sessions")
+                .join(id)
+                .join("session.db"),
+        )?;
         assert_eq!(
             db.execute("UPDATE request_blobs SET body=?1", ["wrong body"])?,
             1
@@ -789,8 +789,8 @@ fn export_leaves_unknown_roots_and_sessions_untouched() -> Result<()> {
     }
     let store = Stores::open(empty.path())?;
     store.create("known", Default::default())?;
-    let locks = empty.path().join("session-locks");
-    let sessions = empty.path().join("sessions");
+    let locks = empty.path().join("state/locks/session");
+    let sessions = empty.path().join("data/sessions");
     let before = (directory_names(&locks)?, directory_names(&sessions)?);
     assert!(!export(empty.path(), "unknown").output()?.status.success());
     assert_eq!(
@@ -820,7 +820,11 @@ fn leave_pending_delete_for_host_recovery() -> Result<()> {
         })
     };
     let pending = intent()?;
-    let shard = root.path().join("sessions").join(id).join("session.db");
+    let shard = root
+        .path()
+        .join("data/sessions")
+        .join(id)
+        .join("session.db");
     assert!(shard.is_file());
     let out = export(root.path(), id).output()?;
     assert!(
@@ -839,7 +843,7 @@ fn export_closed_databases_without_creating_sqlite_sidecars() -> Result<()> {
     let store = Stores::open(root.path())?;
     store.create(id, Default::default())?;
     drop(store);
-    let shard = root.path().join("sessions").join(id);
+    let shard = root.path().join("data/sessions").join(id);
     for path in [root.path().join("global.db"), shard.join("session.db")] {
         // Close the last writer to checkpoint the fixture and remove its WAL.
         rusqlite::Connection::open(&path)?.execute_batch("BEGIN IMMEDIATE; COMMIT")?;
@@ -862,7 +866,11 @@ fn killed_cold_reader_leaves_no_private_snapshot_files() -> Result<()> {
         .create(id, Default::default())?
         .write(|w| w.append("assistant", &"x".repeat(1_000_000)))?;
     drop(store);
-    let shard = root.path().join("sessions").join(id).join("session.db");
+    let shard = root
+        .path()
+        .join("data/sessions")
+        .join(id)
+        .join("session.db");
     rusqlite::Connection::open(&shard)?.execute_batch("BEGIN IMMEDIATE; COMMIT")?;
     assert!(!shard.with_extension("db-wal").exists());
     let mut child = export(root.path(), id)
@@ -892,7 +900,7 @@ fn interrupt_named_export_and_reclaim_abandoned_staging() -> Result<()> {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
         let out = tempfile::tempdir()?;
         let path = out.path().join("backup.jsonl");
-        let guard = fs::File::open(root.path().join("session-locks").join(id))?;
+        let guard = fs::File::open(root.path().join("state/locks/session").join(id))?;
         guard.lock()?;
         let mut child = export(root.path(), id).arg("--output").arg(&path).spawn()?;
         let stage = out

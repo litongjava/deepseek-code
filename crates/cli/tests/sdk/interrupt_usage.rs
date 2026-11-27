@@ -261,7 +261,7 @@ async fn interrupt_preserves_reported_usage_and_finalizes_each_turn_once() {
             let log = std::fs::read_to_string(
                 paths
                     .data_dir
-                    .join("logs/request-attempts")
+                    .join("diagnostics/logs/request-attempts")
                     .join(format!("{}.jsonl", result["session_id"].as_str().unwrap())),
             )
             .unwrap();

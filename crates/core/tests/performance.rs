@@ -23,7 +23,7 @@ fn persisted_tool_output_is_complete_and_unicode_preview_is_bounded() {
     let preview = performance::retain_tool_output(dir.path(), &text, &text);
     assert!(preview.len() < 17_000);
     assert!(preview.contains("Saved tool result"));
-    let files: Vec<_> = std::fs::read_dir(dir.path().join("tool-outputs"))
+    let files: Vec<_> = std::fs::read_dir(dir.path().join("cache/tool-outputs"))
         .unwrap()
         .collect();
     assert_eq!(files.len(), 1);
@@ -180,8 +180,8 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
     let paths = RuntimePaths::new(dir.path().into()).unwrap();
     let ctx = ServiceContext::open(paths.clone(), Arc::new(EnvironmentCredentials)).unwrap();
     let provider: Provider = serde_json::from_value(json!({"id":"local","name":"Local","base_url":format!("http://{addr}"),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"primary","name":"Primary","enabled":true,"max_tokens":100,"supports_vision":false,"supports_web_search":false},{"id":"cheap","name":"Cheap","enabled":true,"max_tokens":100,"supports_vision":false,"supports_web_search":false}]})).unwrap();
-    std::fs::write(
-        dir.path().join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        dir.path().join("config/providers.json"),
         serde_json::to_vec(&vec![provider.clone()]).unwrap(),
     )
     .unwrap();
@@ -197,7 +197,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
     ctx.save_global_setting(GlobalSetting::LearningRecord("learning.enabled"), &true).unwrap();
     let manager = Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
         vec![provider],
-        dir.path().join("providers.json"),
+        dir.path().join("config/providers.json"),
     )));
     let skills = deepseek_code_core::skills::SkillsManager::with_path(dir.path().join("skills"));
     skills

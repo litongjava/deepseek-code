@@ -29,6 +29,7 @@ pub mod hook_callbacks;
 pub mod session_hooks;
 pub mod session_environment;
 pub mod shell_settings;
+pub mod python_settings;
 pub mod wsl;
 pub mod teams;
 pub mod lifecycle_events;
@@ -66,6 +67,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
 pub mod workspace_files;
+pub mod memory_files;
 pub mod subagents;
 
 pub trait Credentials: Send + Sync {

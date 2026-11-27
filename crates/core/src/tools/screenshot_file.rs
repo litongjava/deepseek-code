@@ -36,7 +36,13 @@ pub(super) fn save(directory: &Path, encoded: &str) -> Result<(String, &'static 
 pub(crate) fn readable(path: &Path) -> bool {
     crate::runtime::resolve_default_data_dir()
         .ok()
-        .is_some_and(|root| verified(&root.join("screenshots"), path).unwrap_or(false))
+        .is_some_and(|root| {
+            verified(
+                &crate::data_layout::DataLayout::from_root(&root).screenshots(),
+                path,
+            )
+            .unwrap_or(false)
+        })
 }
 
 fn verified(directory: &Path, path: &Path) -> Result<bool> {

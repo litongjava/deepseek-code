@@ -52,8 +52,9 @@ pub(crate) fn errors_text(checks: &[DoctorCheck], failed_mcp: &[(String, String)
 pub(crate) async fn run(name: &str, paths: &RuntimePaths, session: &Session) -> Result<String> {
     match name {
         "skills" => {
-            let model = plugins_panel::load(paths, session).await?;
-            Ok(plugins_panel::stats_rows(&model, chrono::Utc::now(), false).join("\n"))
+            let scope = plugins_panel::Scope::Skills;
+            let model = plugins_panel::load(paths, session, scope).await?;
+            Ok(plugins_panel::stats_rows(scope, &model, chrono::Utc::now(), false).join("\n"))
         }
         "errors" => {
             let mut failed_mcp = Vec::new();
@@ -83,7 +84,7 @@ pub(crate) async fn run(name: &str, paths: &RuntimePaths, session: &Session) -> 
 /// an error check when the file exists but is unreadable, oversized or
 /// rejected, `None` when it is absent or the parser accepts it.
 fn keybindings_check(paths: &RuntimePaths) -> Option<DoctorCheck> {
-    let path = paths.data_dir.join("keybindings.json");
+    let path = paths.layout().config_file("keybindings.json");
     if !path.exists() {
         return None;
     }
@@ -101,7 +102,7 @@ fn keybindings_check(paths: &RuntimePaths) -> Option<DoctorCheck> {
 
 pub fn snapshot(workspace: &Path, paths: &RuntimePaths) -> String {
     let mut report = doctor::inspect(workspace, Some(paths)).render();
-    if paths.data_dir.join("keybindings.json").exists() {
+    if paths.layout().config_file("keybindings.json").exists() {
         let line = match keybindings_check(paths) {
             Some(check) => format!("CLI keybindings: error \u{2014} {}\n", check.detail),
             None => "CLI keybindings: ok \u{2014} runtime parser accepted the application keybindings\n".to_owned(),
@@ -216,7 +217,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        let file = paths.data_dir.join("keybindings.json");
+        let file = paths.layout().config_file("keybindings.json");
+        std::fs::create_dir_all(paths.layout().config_root()).unwrap();
         std::fs::write(
             &file,
             r#"{"bindings":[{"context":"Chat","bindings":{"ctrl+j":"unknown"}}]}"#,
@@ -241,8 +243,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(
-            paths.data_dir.join("keybindings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("keybindings.json"),
             r#"{"bindings":[{"context":"Global","bindings":{"ctrl+c":null}}]}"#,
         )
         .unwrap();

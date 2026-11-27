@@ -48,12 +48,38 @@ impl ProposalRetry {
     }
 }
 
-fn log_proposal_observation(root: &std::path::Path, id: &str, message: &str) {
+/// Tolerates brief task-state read failures without ending the turn. The
+/// supervisor replaces `state.json` about every 100 ms and a filesystem filter
+/// can briefly hide it; one lost poll must not look like a dead worker.
+#[derive(Default)]
+struct StateRetry {
+    since: Option<std::time::Instant>,
+    failures: u32,
+}
+
+impl StateRetry {
+    const FAILURES: u32 = 5;
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// Records a failure and reports whether the view must now give up.
+    fn failed(&mut self, now: std::time::Instant) -> bool {
+        let since = *self.since.get_or_insert(now);
+        self.failures += 1;
+        self.failures > Self::FAILURES || now.duration_since(since) > Self::WINDOW
+    }
+    fn recovered(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let elapsed = self.since.map(|since| now.duration_since(since));
+        *self = Self::default();
+        elapsed
+    }
+}
+
+fn log_job_observation(root: &std::path::Path, id: &str, message: &str) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(root.join("background-tasks").join(id).join("stderr.log"))
+        .open(root.join("tasks/background").join(id).join("stderr.log"))
     {
         let _ = writeln!(file, "{} {message}", chrono::Utc::now().to_rfc3339());
     }
@@ -79,16 +105,45 @@ fn proposal_contention_retries_without_blocking_and_reports_only_sustained_failu
     assert!(!retry.failed(now));
 }
 
+#[test]
+fn task_state_retry_tolerates_brief_failures_and_gives_up_after_the_window() {
+    let start = std::time::Instant::now();
+    let mut retry = StateRetry::default();
+    for step in 1..=5 {
+        assert!(
+            !retry.failed(start + std::time::Duration::from_millis(step * 100)),
+            "failure {step} must be tolerated"
+        );
+    }
+    assert!(retry.failed(start + std::time::Duration::from_millis(600)));
+
+    let mut retry = StateRetry::default();
+    assert!(!retry.failed(start));
+    assert!(retry.failed(start + std::time::Duration::from_millis(2_001)));
+
+    let mut retry = StateRetry::default();
+    assert!(!retry.failed(start));
+    assert_eq!(
+        retry.recovered(start + std::time::Duration::from_millis(300)),
+        Some(std::time::Duration::from_millis(300))
+    );
+    assert!(retry.recovered(start).is_none());
+}
+
 pub async fn turn(
     cli: &Cli,
     session: &Session,
     prompt: &str,
     input: &mut Option<TerminalInput>,
+    mut origin: crate::session::TurnOrigin<'_>,
 ) -> Result<()> {
     let mut next = prompt.to_owned();
     while !crate::signals::terminating() {
-        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input)).await? else { return Ok(()) };
+        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input, origin)).await? else {
+            return Ok(());
+        };
         next = kickoff;
+        origin = crate::session::TurnOrigin::GoalContinuation;
     }
     Ok(())
 }
@@ -125,15 +180,78 @@ pub(crate) fn active_worker_message(job: &jobs::Job) -> String {
     }
 }
 
+/// What keeps this session from admitting a new turn. A managed task and a
+/// direct print/json owner are different kinds of occupancy: only the former
+/// can be attached interactively.
+pub(crate) enum Occupancy {
+    Job(jobs::Job),
+    Lease,
+}
+
+/// Reports the owner of the session, checking the managed task first because
+/// it has the actionable attach/cancel commands. This only observes; it never
+/// takes the execution lease.
+pub(crate) fn occupancy(session: &Session) -> Result<Option<Occupancy>> {
+    if let Some(job) = settle_session(session)? {
+        return Ok(Some(Occupancy::Job(job)));
+    }
+    if crate::observe::execution_lease_active(session)? {
+        return Ok(Some(Occupancy::Lease));
+    }
+    Ok(None)
+}
+
+/// How to get past an occupied session, without the read-only guidance.
+pub(crate) fn occupancy_message(session: &Session, occupancy: &Occupancy) -> String {
+    match occupancy {
+        Occupancy::Job(job) => active_worker_message(job),
+        Occupancy::Lease => crate::observe::running_notice(session).unwrap_or_else(|_| {
+            "A turn is still running in another process; observe it or wait for it to finish."
+                .into()
+        }),
+    }
+}
+
+/// The banner shown once when the REPL enters read-only observation.
+pub(crate) fn observation_banner(session: &Session, occupancy: &Occupancy) -> String {
+    match occupancy {
+        Occupancy::Job(job) => {
+            let since =
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(job.started_ms as i64)
+                    .map(|time| {
+                        time.with_timezone(&chrono::Local)
+                            .format("%-I:%M %p")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "an earlier time".into());
+            format!(
+                "✻ Task {} is executing this session since {since}. Read-only observation: ordinary prompts are not submitted. /continue returns to it, /tasks attach {} opens the full view, Esc exits.",
+                job.id, job.id
+            )
+        }
+        Occupancy::Lease => format!(
+            "{} Ordinary prompts are not submitted; /continue shows the running turn. Esc exits.",
+            occupancy_message(session, occupancy)
+        ),
+    }
+}
+
 async fn single_turn(
     cli: &Cli,
     session: &Session,
     prompt: &str,
     input: &mut Option<TerminalInput>,
+    origin: crate::session::TurnOrigin<'_>,
 ) -> Result<Option<String>> {
     let root = &session.paths.data_dir;
     if let Some(job) = settle_session(session)? {
         anyhow::bail!("{} The current prompt was not submitted.", active_worker_message(&job));
+    }
+    if crate::observe::execution_lease_active(session)? {
+        anyhow::bail!(
+            "{} The current prompt was not submitted.",
+            crate::observe::running_notice(session)?
+        );
     }
     let provider = session.launch_provider().await?;
     let executable = std::env::current_exe()?;
@@ -147,29 +265,57 @@ async fn single_turn(
         // Task notifications are not prompts to recall.
         .filter(|text| !crate::background_commands::is_notification(text))
         .collect();
-    let mut display = TurnDisplay::new(
+    let model_label = crate::session_commands::model_label(session).await;
+    let mut display = TurnDisplay::new_with_initial(
         true,
         session.permission_mode(),
-        &root.join("keybindings.json"),
+        &deepseek_code_core::data_layout::DataLayout::from_root(&root)
+            .config_file("keybindings.json"),
         history,
-    )?.with_workspace(&session.workspace);
+        Some(root),
+        Some(model_label),
+        Some(prompt.to_owned()),
+    )?
+    .with_workspace(&session.workspace);
     display.restore_numbers(session)?;
     display.set_session_context(root, session.selected_session()?);
-    display.set_pinned_prompt(prompt);
-    display.set_model_label(&crate::session_commands::model_label(session).await);
     if display.is_live() {
         display.set_transcript(crate::repl::transcript(session).unwrap_or_default());
         display.set_todos(crate::background_commands::todo_items(&session.paths, &session.id));
     }
     let proposal_frontend = if display.live.is_some() {
-        Some(acquire_proposal_frontend(session).await?)
+        match acquire_proposal_frontend(session).await {
+            Ok(frontend) => Some(frontend),
+            Err(error) => {
+                // Goal proposals are auxiliary UI; losing their frontend must
+                // never abort the turn itself.
+                tracing::warn!(
+                    "Goal proposal frontend unavailable for session {}: {error:#}",
+                    session.id
+                );
+                display.notice("Goal proposal controls are unavailable; the turn continues.");
+                None
+            }
+        }
     } else { None };
     let owner = session.binding.selected_session(&session.id)?;
     let _admission = owner.hold_incarnation()?;
     let job = if std::env::var("DEEPSEEK_CODE_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
-        let arguments = crate::background_commands::arguments(cli, &session.paths, session, &session.id, prompt, &provider)?;
-        let mut environment = crate::background_commands::worker_environment(session.auto_route, &provider)?;
-        environment.push((jobs::WORKER_GENERATION_ENV.into(), format!("{}:{}", session.id, session.binding_state().generation)));
+        let arguments = crate::background_commands::arguments(
+            cli,
+            &session.paths,
+            session,
+            &session.id,
+            prompt,
+            origin,
+            &provider,
+        )?;
+        let mut environment =
+            crate::background_commands::worker_environment(session.auto_route, &provider)?;
+        environment.push((
+            jobs::WORKER_GENERATION_ENV.into(),
+            format!("{}:{}", session.id, session.binding_state().generation),
+        ));
         jobs::spawn_foreground(
             root,
             &executable,
@@ -187,11 +333,30 @@ async fn single_turn(
         let mut worker =
             session_worker::ensure_worker(root, &executable, &session.id, &session.workspace)
                 .await?;
-        let arguments = crate::background_commands::turn_arguments(cli, &session.paths, session, &session.id, prompt, &provider)?;
-        let mut environment = vec![("DEEPSEEK_CODE_WORKER_AUTO_ROUTE".to_owned(),session.auto_route.to_string())];
-        if session_worker::call(&worker, &Request::Ping).await?.generation_supported != Some(true) {
-            session_worker::shutdown_worker(&worker).await.context("Provider switch pending; observe the legacy job with /continue")?;
-            worker = session_worker::ensure_worker(root, &executable, &session.id, &session.workspace).await?;
+        let arguments = crate::background_commands::turn_arguments(
+            cli,
+            &session.paths,
+            session,
+            &session.id,
+            prompt,
+            origin,
+            &provider,
+        )?;
+        let mut environment = vec![(
+            "DEEPSEEK_CODE_WORKER_AUTO_ROUTE".to_owned(),
+            session.auto_route.to_string(),
+        )];
+        if session_worker::call(&worker, &Request::Ping)
+            .await?
+            .generation_supported
+            != Some(true)
+        {
+            session_worker::shutdown_worker(&worker)
+                .await
+                .context("Provider switch pending; observe the legacy job with /continue")?;
+            worker =
+                session_worker::ensure_worker(root, &executable, &session.id, &session.workspace)
+                    .await?;
         }
         let state = session.binding.read().context("Missing session binding")?;
         environment.push((crate::worker_binding::SNAPSHOT_ENV.into(), serde_json::to_string(state.as_ref())?));
@@ -216,7 +381,7 @@ async fn single_turn(
         }
     };
     drop(_admission);
-    present(session, &job, input, &mut display, true, proposal_frontend.as_ref()).await?;
+    present(session, &job, input, &mut display, true, proposal_frontend).await?;
     if jobs::get(root, &job.id)?.status == "completed" { activate_goal_proposal(session, &job.id) } else { Ok(None) }
 }
 
@@ -229,17 +394,25 @@ fn activate_goal_proposal(session: &Session, job: &str) -> Result<Option<String>
 /// Attach to durable events only: never submit or recreate a worker request.
 pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<TerminalInput>) -> Result<()> {
     let job = jobs::get(&session.paths.data_dir, id)?;
-    let _participants = jobs::hold_attachment(&session.paths.data_dir, &job, &session.selected_session()?)?;
-    let workspace = session.store.workspace(&job.session_id, &session.paths.data_dir.join("workspaces"))?;
-    let mut display = TurnDisplay::new(
+    let _participants =
+        jobs::hold_attachment(&session.paths.data_dir, &job, &session.selected_session()?)?;
+    let workspace = session.store.workspace(
+        &job.session_id,
+        &session.paths.data_dir.join("data/workspaces"),
+    )?;
+    let model_label = crate::session_commands::model_label(session).await;
+    let mut display = TurnDisplay::new_with_initial(
         true,
         session.permission_mode(),
-        &session.paths.data_dir.join("keybindings.json"),
+        &session.paths.layout().config_file("keybindings.json"),
         Vec::new(),
-    )?.with_workspace(&workspace);
+        Some(&session.paths.data_dir),
+        Some(model_label),
+        None,
+    )?
+    .with_workspace(&workspace);
     display.restore_numbers(session)?;
     display.set_session_context(&session.paths.data_dir, jobs::participant_execution(&session.paths.data_dir, &session.selected_session()?, &job)?);
-    display.set_model_label(&crate::session_commands::model_label(session).await);
     display.notice(&format!(
         "Attached to task {id}. Esc cancels; Ctrl+B or /background detaches without restarting."
     ));
@@ -248,12 +421,31 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
     }
     let main_execution = is_main_execution(&session.paths.data_dir, &job, &session.id)?;
     let proposal_frontend = if display.live.is_some() && main_execution {
-        Some(acquire_proposal_frontend(session).await?)
+        match acquire_proposal_frontend(session).await {
+            Ok(frontend) => Some(frontend),
+            Err(error) => {
+                log_job_observation(
+                    &session.paths.data_dir,
+                    id,
+                    &format!("Goal proposal frontend unavailable: {error:#}"),
+                );
+                display.notice("Goal proposal controls are unavailable; task output continues.");
+                None
+            }
+        }
     } else { None };
-    present(session, &job, input, &mut display, false, proposal_frontend.as_ref()).await?;
+    present(session, &job, input, &mut display, false, proposal_frontend).await?;
     let kickoff = if main_execution && jobs::get(&session.paths.data_dir, &job.id)?.status == "completed" { activate_goal_proposal(session, &job.id)? } else { None };
-    drop(proposal_frontend);
-    if let Some(kickoff) = kickoff { Box::pin(turn(cli, session, &kickoff, input)).await?; }
+    if let Some(kickoff) = kickoff {
+        Box::pin(turn(
+            cli,
+            session,
+            &kickoff,
+            input,
+            crate::session::TurnOrigin::GoalContinuation,
+        ))
+        .await?;
+    }
     Ok(())
 }
 
@@ -285,7 +477,7 @@ async fn present(
     input: &mut Option<TerminalInput>,
     display: &mut TurnDisplay,
     sync_plan_mode: bool,
-    proposal_frontend: Option<&deepseek_code_core::services::goal_proposals::Frontend>,
+    proposal_frontend: Option<deepseek_code_core::services::goal_proposals::Frontend>,
 ) -> Result<()> {
     let _participants =
         jobs::hold_attachment(&session.paths.data_dir, job, &session.selected_session()?)?;
@@ -321,7 +513,7 @@ async fn present(
     if let Err(error) = &result {
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(
-            root.join("background-tasks")
+            root.join("tasks/background")
                 .join(&job.id)
                 .join("stderr.log"),
         ) {
@@ -370,7 +562,7 @@ async fn observe(
     input: &mut Option<TerminalInput>,
     display: &mut TurnDisplay,
     sync_plan_mode: bool,
-    proposal_frontend: Option<&deepseek_code_core::services::goal_proposals::Frontend>,
+    proposal_frontend: Option<deepseek_code_core::services::goal_proposals::Frontend>,
 ) -> Result<bool> {
     let root = &session.paths.data_dir;
     let initial_job = jobs::get(root, id)?;
@@ -404,7 +596,12 @@ async fn observe(
     let mut final_mode_synced = false;
     let mut shown_proposal = None::<String>;
     let mut proposal_retry = ProposalRetry::default();
+    let mut state_retry = StateRetry::default();
     let mut current_proposal = None;
+    // Goal proposals are auxiliary UI. This frontend may be replaced while a
+    // turn runs; that must never end the task view.
+    let mut proposal_frontend = proposal_frontend;
+    let mut proposal_reacquired = false;
     let relay = session.remote_relay();
     let mut remote_request: Option<deepseek_code_core::services::remote_control::PermissionRequest> = None;
     let mut remote_interrupts = session.remote_interrupts();
@@ -431,23 +628,50 @@ async fn observe(
             },
             _ = tick.tick() => {
                 if proposal_retry.due(std::time::Instant::now()) {
-                  match proposal_frontend.map(|frontend| frontend.poll()).transpose() {
-                    Ok(proposal) => {
+                  let polled = proposal_frontend.as_ref().map(|frontend| frontend.poll());
+                  match polled {
+                    Some(Ok(proposal)) => {
                         if let Some(elapsed) = proposal_retry.recovered(std::time::Instant::now()) {
-                            log_proposal_observation(root, id, &format!("Goal proposal observation recovered after {} ms", elapsed.as_millis()));
+                            log_job_observation(root, id, &format!("Goal proposal observation recovered after {} ms", elapsed.as_millis()));
                         }
-                        current_proposal = proposal.flatten();
+                        current_proposal = proposal;
                     },
-                    Err(error) if deepseek_code_core::db::is_contention(&error) => {
+                    Some(Err(error)) if deepseek_code_core::db::is_contention(&error) => {
                         if proposal_retry.since.is_none() {
-                            log_proposal_observation(root, id, &format!("Goal proposal observation deferred: {error:#}"));
+                            log_job_observation(root, id, &format!("Goal proposal observation deferred: {error:#}"));
                         }
                         if proposal_retry.failed(std::time::Instant::now()) {
                             display.notice("Goal proposal status is delayed by database contention. Task output continues.");
-                            log_proposal_observation(root, id, "Goal proposal observation still deferred after 5000 ms");
+                            log_job_observation(root, id, "Goal proposal observation still deferred after 5000 ms");
                         }
                     },
-                    Err(error) => return Err(error.context("Reading goal proposal status")),
+                    Some(Err(error)) => {
+                        log_job_observation(root, id, &format!("Goal proposal observation failed: {error:#}"));
+                        current_proposal = None;
+                        shown_proposal = None;
+                        if let Some(live) = &display.live { live.goal_proposal(None); }
+                        proposal_frontend = if proposal_reacquired {
+                            None
+                        } else {
+                            proposal_reacquired = true;
+                            use deepseek_code_core::services::goal_proposals::Frontend;
+                            match Frontend::acquire(session.store.db.clone(), &session.id) {
+                                Ok(frontend) => {
+                                    log_job_observation(root, id, "Goal proposal frontend reacquired");
+                                    Some(frontend)
+                                }
+                                Err(retry) => {
+                                    log_job_observation(root, id, &format!("Goal proposal frontend could not be reacquired: {retry:#}"));
+                                    None
+                                }
+                            }
+                        };
+                        if proposal_frontend.is_none() {
+                            display.notice("Goal proposal status unavailable; task output continues.");
+                            log_job_observation(root, id, "Goal proposal observation disabled for this view");
+                        }
+                    },
+                    None => {}
                   }
                 }
                 let proposal = current_proposal.clone();
@@ -456,7 +680,26 @@ async fn observe(
                     shown_proposal = proposal.as_ref().map(|p| p.id.clone());
                     if let Some(live) = &display.live { live.goal_proposal(proposal.map(|p| (p.id, p.condition))); }
                 }
-                let (job, next, events) = jobs::events_since(root, id, owner, cursor)?;
+                let observation = jobs::events_since(root, id, owner, cursor);
+                let (job, next, events) = match observation {
+                    Ok(observed) => {
+                        if let Some(elapsed) = state_retry.recovered(std::time::Instant::now()) {
+                            log_job_observation(root, id, &format!("Task state observation recovered after {} ms", elapsed.as_millis()));
+                        }
+                        observed
+                    }
+                    // A transient filesystem failure loses one poll, not the turn.
+                    Err(error)
+                        if jobs::is_transient_state_error(&error)
+                            && !state_retry.failed(std::time::Instant::now()) =>
+                    {
+                        if state_retry.failures == 1 {
+                            log_job_observation(root, id, &format!("Task state observation deferred: {error:#}"));
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let drained = cursor == next;
                 cursor = next;
                 let finished_mode = job.finished_ms.is_some() && matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
@@ -643,7 +886,7 @@ async fn observe(
                 terminal_actions_open = action.is_some();
                 match action {
                     Some(Action::GoalDecision { id, approved }) => {
-                        if let Some(frontend) = proposal_frontend {
+                        if let Some(frontend) = proposal_frontend.as_ref() {
                             match frontend.decide(&id, approved, root, &session.workspace, &session.permissions) {
                                 Ok(true) => display.notice(if approved { "Goal approved. It will start after the current turn finishes." } else { "Goal proposal declined. Current work continues." }),
                                 Ok(false) => display.notice("That goal proposal is no longer current."),
@@ -652,6 +895,8 @@ async fn observe(
                             shown_proposal = None;
                             current_proposal = None;
                             if let Some(live) = &display.live { live.goal_proposal(None); }
+                        } else {
+                            display.notice("Goal proposal controls are unavailable; task output continues.");
                         }
                     },
                     Some(Action::CyclePermission) => {
@@ -714,7 +959,7 @@ async fn observe(
                                     // As in the reference CLI the running turn reads it after its
                                     // next tool results; unread messages become the next prompt.
                                     crate::images::share(&session.id, &prompt);
-                                    session.selected_session()?.enqueue_cli_prompt(&prompt)?;
+                                    session.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::User, &prompt)?;
                                     queued_inputs.push(prompt);
                                     display.queued(queued_inputs.clone());
                                 } else {
@@ -999,6 +1244,17 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
     if let Some(failure) = deepseek_code_core::performance::parse_failure_summary(diagnostic) {
         return structured_failure_message(id, &failure, diagnostic);
     }
+    // The task's own durable records could not be read. That is not a provider
+    // failure, and the worker may still be running.
+    if lower.contains("reading task state")
+        || lower.contains("parsing task state")
+        || lower.contains("opening task output")
+        || lower.contains("reading pending question")
+    {
+        return format!(
+            "Could not read the task state; the task may still be running. Details: /tasks show {id}"
+        );
+    }
     let reason = if lower.contains("timed out") || lower.contains("timeout") {
         "Request timed out".to_owned()
     } else if lower.contains("error sending request") || lower.contains("connection") {
@@ -1125,7 +1381,7 @@ mod failure_tests {
         let stores = paths.open_database().unwrap();
         let parent = stores.open_session(&job.parent_session_id).unwrap();
         let target = stores.open_session(&job.session_id).unwrap();
-        let dir = paths.data_dir.join("background-tasks").join(&job.id);
+        let dir = paths.data_dir.join("tasks/background").join(&job.id);
         std::fs::write(
             dir.join("session-owners.json"),
             serde_json::json!({
@@ -1212,13 +1468,13 @@ mod failure_tests {
         frontend.decide(&proposal.id, true, &paths.data_dir, &session.workspace, &session.permissions).unwrap();
         drop(frontend);
         let id = uuid::Uuid::new_v4().to_string();
-        let directory = paths.data_dir.join("background-tasks").join(&id);
+        let directory = paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let mut job = jobs::Job { id: id.clone(), foreground: false, parent_session_id: parent.clone(), session_id: parent.clone(),
             title: "idle child".into(), status: "completed".into(), supervisor_pid: None, child_pid: None,
             started_ms: 1, heartbeat_ms: 2, finished_ms: Some(2), exit_code: Some(0), error: None, launched: true };
         let source_id = uuid::Uuid::new_v4().to_string();
-        let source_directory = paths.data_dir.join("background-tasks").join(&source_id);
+        let source_directory = paths.data_dir.join("tasks/background").join(&source_id);
         std::fs::create_dir_all(&source_directory).unwrap();
         let mut source_job = job.clone();
         source_job.id = source_id.clone(); source_job.status = "running".into(); source_job.finished_ms = None;
@@ -1289,7 +1545,7 @@ mod failure_tests {
             error: None,
             launched: true,
         };
-        let directory = paths.data_dir.join("background-tasks").join(&id);
+        let directory = paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let state = serde_json::to_vec(&job).unwrap();
         std::fs::write(directory.join("state.json"), &state).unwrap();
@@ -1355,6 +1611,7 @@ mod failure_tests {
                         &cli,
                         "/tasks",
                         &show,
+                        crate::session::TurnOrigin::User(&show),
                         &paths,
                         &mut session,
                         &mut None
@@ -1390,7 +1647,7 @@ mod failure_tests {
             events
         );
         assert!(!directory.join("cancel").exists());
-        assert!(!paths.data_dir.join("session-workers").exists());
+        assert!(!paths.data_dir.join("state/workers").exists());
         let expected = store.db.open_session(&parent).unwrap();
         let other = uuid::Uuid::new_v4().to_string();
         std::fs::write(
@@ -1430,7 +1687,7 @@ mod failure_tests {
         .await
         .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let directory = paths.data_dir.join("background-tasks").join(&id);
+        let directory = paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let job = jobs::Job {
             id: id.clone(),
@@ -1466,6 +1723,137 @@ mod failure_tests {
     }
 
     #[tokio::test]
+    async fn losing_the_goal_proposal_frontend_keeps_the_task_view_and_its_output() {
+        use clap::Parser;
+        use deepseek_code_core::services::goal_proposals;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let parent = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let mut provider = deepseek_code_core::runtime::provider_from_config(
+            &crate::config::provider_template("fixture"),
+        );
+        provider.id = "fixture".into();
+        let cli = Cli::try_parse_from(["dcl"]).unwrap();
+        let session = Session::open(
+            &cli,
+            &paths,
+            crate::config::Selection {
+                providers: vec![provider],
+                model: "fixture".into(),
+                provider_id: "fixture".into(),
+            },
+            Some(&parent),
+        )
+        .await
+        .unwrap();
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let directory = paths.data_dir.join("tasks/background").join(&id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let job = jobs::Job {
+            id: id.clone(),
+            foreground: true,
+            parent_session_id: parent.clone(),
+            session_id: parent.clone(),
+            title: "goal proposal takeover".into(),
+            status: "running".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            started_ms: 1,
+            heartbeat_ms: chrono::Utc::now().timestamp_millis() as u64,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        record_fixture_owners(&paths, &job);
+        std::fs::write(directory.join("state.json"), serde_json::to_vec(&job).unwrap()).unwrap();
+        std::fs::write(
+            directory.join("output.jsonl"),
+            concat!(
+                "{\"type\":\"text\",\"delta\":\"published before the takeover\\n\"}\n",
+                "{\"type\":\"result\",\"result\":\"published before the takeover\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let frontend = goal_proposals::Frontend::acquire(session.store.db.clone(), &parent).unwrap();
+        // Another live frontend takes over the proposal presence while this
+        // view keeps the same proposal Frontend.
+        session.store.db.shard_sql(&parent, |conn| -> anyhow::Result<()> {
+            let key = format!("session.goal-proposals.{parent}");
+            let text: String = conn.query_row(
+                "SELECT value FROM peripheral_settings WHERE key=?1",
+                [&key],
+                |row| row.get(0),
+            )?;
+            let mut state: Value = serde_json::from_str(&text)?;
+            state["frontend"] = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "touched_ms": chrono::Utc::now().timestamp_millis(),
+            });
+            conn.execute(
+                "UPDATE peripheral_settings SET value=?1 WHERE key=?2",
+                [serde_json::to_string(&state)?, key],
+            )?;
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(frontend.poll().is_err(), "the takeover must be effective");
+
+        // The task finishes after the view has seen the failed proposal poll.
+        let completion_directory = directory.clone();
+        let completion_job = job.clone();
+        let completion = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mut completed = completion_job;
+            completed.status = "completed".into();
+            completed.finished_ms = Some(chrono::Utc::now().timestamp_millis() as u64);
+            completed.exit_code = Some(0);
+            std::fs::write(
+                completion_directory.join("state.json"),
+                serde_json::to_vec(&completed).unwrap(),
+            )
+            .unwrap();
+        });
+        let mut display = TurnDisplay::new_with_initial(
+            true,
+            session.permission_mode(),
+            &session.paths.layout().config_file("keybindings.json"),
+            Vec::new(),
+            Some(&session.paths.data_dir),
+            None,
+            None,
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            present(&session, &job, &mut None, &mut display, false, Some(frontend)),
+        )
+        .await
+        .unwrap();
+        completion.await.unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(jobs::get(&paths.data_dir, &id).unwrap().status, "completed");
+        assert!(!directory.join("cancel").exists(), "the job was cancelled");
+        assert!(!directory.join("detached").exists(), "the view detached");
+        let log = std::fs::read_to_string(directory.join("stderr.log")).unwrap();
+        assert!(
+            log.contains("Goal proposal observation failed"),
+            "{log}"
+        );
+        assert!(
+            log.contains("Goal proposal frontend could not be reacquired"),
+            "{log}"
+        );
+        assert!(
+            log.contains("Goal proposal observation disabled for this view"),
+            "{log}"
+        );
+    }
+
+    #[tokio::test]
     async fn permission_refresh_recovers_completion_race_but_preserves_active_errors() {
         use clap::Parser;
         let temp = tempfile::tempdir().unwrap();
@@ -1490,7 +1878,7 @@ mod failure_tests {
         .await
         .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let directory = paths.data_dir.join("background-tasks").join(&id);
+        let directory = paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let job = jobs::Job {
             id: id.clone(),
@@ -1613,6 +2001,11 @@ mod failure_tests {
                 "failed",
                 "unknown private credential max_tokens",
                 "Request failed. Details: /tasks show id",
+            ),
+            (
+                "failed",
+                r#"Reading task state C:\Users\me\.deepseek-code\background-tasks\id\state.json: The system cannot find the file specified. (os error 2)"#,
+                "Could not read the task state; the task may still be running. Details: /tasks show id",
             ),
         ] {
             assert_eq!(failure_message("id", status, diagnostic), expected);
@@ -1761,7 +2154,7 @@ mod failure_tests {
         .await
         .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let directory = paths.data_dir.join("background-tasks").join(&id);
+        let directory = paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let job = jobs::Job {
             id: id.clone(),
@@ -1976,7 +2369,7 @@ mod failure_tests {
         assert_eq!(unsafe { kill(pid as std::ffi::c_int, SIGINT) }, 0);
         std::thread::sleep(std::time::Duration::from_millis(200));
         let _ = release_tx.send(());
-        let cancel = data.join("background-tasks").join(&id).join("cancel");
+        let cancel = data.join("tasks/background").join(&id).join("cancel");
         assert!(
             signal_wait_for_path(&cancel, 10),
             "a Ctrl-C received during a tick was lost: no {}",
@@ -2010,7 +2403,7 @@ mod failure_tests {
         std::thread::sleep(std::time::Duration::from_millis(500));
         // SAFETY: sending a signal to the child this test started.
         assert_eq!(unsafe { kill(pid as std::ffi::c_int, SIGTERM) }, 0);
-        let cancel = data.join("background-tasks").join(&id).join("cancel");
+        let cancel = data.join("tasks/background").join(&id).join("cancel");
         assert!(
             signal_wait_for_path(&cancel, 10),
             "SIGTERM did not cancel the worker: no {}",

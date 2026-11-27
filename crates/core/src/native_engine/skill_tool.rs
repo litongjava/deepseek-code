@@ -76,7 +76,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(Path::parent)
+            .and_then(crate::data_layout::data_root_of)
             .context("Skill runtime directory unavailable")?;
         let context = ServiceContext::open(
             RuntimePaths::new(root.to_path_buf())?,
@@ -277,24 +277,22 @@ mod tests {
             workspace.to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(paths.data_dir.join("config.json"));
+        .with_search_config_path(paths.layout().config_file("config.json"));
         let result = executor
             .execute_skill_tool(&json!({"skill":"data-dir-check","args":"the fixture"}))
             .await
             .unwrap();
         let instructions = result["instructions"].as_str().unwrap();
         assert!(instructions.contains("the fixture"), "{instructions}");
-        let rendered = directory.to_string_lossy().replace('\\', "/");
+        let normalize = |text: &str| text.replace('\\', "/").replace("//?/", "");
+        let rendered = normalize(&directory.to_string_lossy());
         assert!(
-            instructions.contains(&rendered),
+            normalize(instructions).contains(&rendered),
             "instructions must name the data-dir skill directory: {instructions}"
         );
         assert_eq!(
-            result["path"].as_str().unwrap().replace('\\', "/"),
-            directory
-                .join("SKILL.md")
-                .to_string_lossy()
-                .replace('\\', "/")
+            normalize(result["path"].as_str().unwrap()),
+            normalize(&directory.join("SKILL.md").to_string_lossy())
         );
     }
 
@@ -324,16 +322,17 @@ mod tests {
             workspace.to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(paths.data_dir.join("config.json"));
+        .with_search_config_path(paths.layout().config_file("config.json"));
         let result = executor
             .execute_skill_tool(&json!({"skill":"my-skill","args":"the fixture"}))
             .await
             .unwrap();
         let instructions = result["instructions"].as_str().unwrap();
         assert!(instructions.contains("the fixture"), "{instructions}");
-        let rendered = directory.to_string_lossy().replace('\\', "/");
+        let normalize = |text: &str| text.replace('\\', "/").replace("//?/", "");
+        let rendered = normalize(&directory.to_string_lossy());
         assert!(
-            instructions.contains(&rendered),
+            normalize(instructions).contains(&rendered),
             "instructions must name the data-dir skill directory: {instructions}"
         );
         let error = executor
@@ -378,7 +377,7 @@ mod tests {
             workspace.to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(paths.data_dir.join("config.json"));
+        .with_search_config_path(paths.layout().config_file("config.json"));
         let error = executor
             .execute_skill_tool(&json!({"skill":"disabled-fixture"}))
             .await
@@ -453,7 +452,7 @@ mod tests {
             temp.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(paths.data_dir.join("config.json"));
+        .with_search_config_path(paths.layout().config_file("config.json"));
         let input = json!({"skill":"code-review","args":"high path review.txt"});
         assert!(executor
             .execute_skill_tool(&input)
@@ -528,7 +527,7 @@ mod tests {
         )
         .with_conv_id(parent)
         .with_permission_manager(manager)
-        .with_search_config_path(paths.data_dir.join("config.json"))
+        .with_search_config_path(paths.layout().config_file("config.json"))
         .with_user_skill(Some(json!({"skill":"isolated"})));
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), executor.execute())
             .await
@@ -619,7 +618,7 @@ mod tests {
             )
             .with_conv_id(id)
             .with_permission_manager(manager)
-            .with_search_config_path(paths.data_dir.join("config.json"));
+            .with_search_config_path(paths.layout().config_file("config.json"));
             executor.manual_skill_active = manual;
             let waiters = executor.answer_waiters.clone();
             let task = tokio::spawn(async move {

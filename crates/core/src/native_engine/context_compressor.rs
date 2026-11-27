@@ -611,6 +611,50 @@ impl ContextCompressor {
         turns
     }
 
+    /// Select a physical cut before generating a durable summary. Keep the
+    /// same recent turns as the request compressor and always protect this turn.
+    pub(super) fn retained_input(
+        &self,
+        messages: &[serde_json::Value],
+        end: usize,
+        level: &CompressionLevel,
+    ) -> Option<usize> {
+        let inputs: Vec<_> = messages[..end]
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m["role"] == "user" && m["origin"] != "memory_change")
+            .map(|(i, _)| i)
+            .collect();
+        let keep = match level {
+            CompressionLevel::Medium => self.config.preserve_recent_turns,
+            CompressionLevel::Heavy => 2,
+            CompressionLevel::Critical => usize::from(inputs.len() > 1),
+            _ => return None,
+        };
+        if inputs.len() <= keep {
+            return None;
+        }
+        Some(inputs.get(inputs.len() - keep).copied().unwrap_or(end))
+    }
+
+    pub(super) async fn window_summary(
+        &self,
+        messages: &[serde_json::Value],
+        level: &CompressionLevel,
+    ) -> String {
+        let rows = messages.iter().collect::<Vec<_>>();
+        let turns = self.parse_turns(&rows);
+        let text = self
+            .generate_summary_text(&turns.iter().collect::<Vec<_>>(), None)
+            .await;
+        let heading = match level {
+            CompressionLevel::Critical => "[CRITICAL: Context Compressed]",
+            CompressionLevel::Heavy => "[Compressed Context]",
+            _ => "[Conversation Summary]",
+        };
+        format!("{heading}\n\n{text}")
+    }
+
     /// Generate summary text for a set of turns
     async fn generate_summary_text(
         &self,
@@ -713,7 +757,10 @@ impl ContextCompressor {
                 let content = user_msg.get("content")
                     .and_then(|c| c.as_str())
                     .unwrap_or("");
-                summary.push_str(&format!("**Latest request**: {}\n", content));
+                summary.push_str(&format!(
+                    "**Latest request**: {}\n",
+                    utf8_prefix(content, 500)
+                ));
             }
         }
 

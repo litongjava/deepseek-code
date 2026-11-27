@@ -536,6 +536,10 @@ impl Scrollback {
     }
     /// Keep prompt text and its disclosure target together across turns.
     pub(crate) fn prompt(&mut self, text: &str) -> (usize, Vec<String>) {
+        let width = crate::terminal::size().0.saturating_sub(1) as usize;
+        self.prompt_at_width(text, width)
+    }
+    pub(crate) fn prompt_at_width(&mut self, text: &str, width: usize) -> (usize, Vec<String>) {
         if let Some(summary) = crate::background_commands::notification_text(text) {
             let lines = summary.lines().map(change_view::body).collect::<Vec<_>>();
             let (id, rows) = self.block(lines.clone(), lines);
@@ -546,7 +550,6 @@ impl Scrollback {
         if !text.trim_start().starts_with('/') {
             self.latest_prompt = text.to_owned();
         }
-        let width = crate::terminal::size().0.saturating_sub(1) as usize;
         let (short, full) = prompt_lines(text, width);
         let (id, rows) = self.block(short, full);
         self.blocks[id].prompt = Some(text.to_owned());
@@ -554,7 +557,11 @@ impl Scrollback {
         (id, rows)
     }
     pub(crate) fn record_prompt(&mut self, text: &str) -> Vec<String> {
-        let (id, content) = self.prompt(text);
+        let width = crate::terminal::size().0.saturating_sub(1) as usize;
+        self.record_prompt_at_width(text, width)
+    }
+    pub(crate) fn record_prompt_at_width(&mut self, text: &str, width: usize) -> Vec<String> {
+        let (id, content) = self.prompt_at_width(text, width);
         let mut rows = Vec::new();
         if self.logged.is_empty() || self.needs_separator() {
             self.push(String::new(), None);
@@ -725,7 +732,7 @@ impl Scrollback {
             };
             failed += usize::from(*error);
             let kind = match name.as_str() {
-                "Bash" | "PowerShell" => Some(0),
+                "Bash" | "PowerShell" | "Python" => Some(0),
                 "Read" => Some(1),
                 "Grep" => Some(2),
                 "Glob" => Some(3),
@@ -1111,7 +1118,7 @@ fn rendered_at_width(lines: &[Line], width: usize) -> Vec<String> {
 }
 
 /// Screen rows a written line takes at `columns`, style escapes excluded.
-fn screen_rows(text: &str, columns: usize) -> usize {
+pub(crate) fn screen_rows(text: &str, columns: usize) -> usize {
     let columns = columns.max(1);
     text.split("\r\n")
         .map(|line| {
@@ -1391,14 +1398,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let task = uuid::Uuid::new_v4().to_string();
-        std::fs::create_dir_all(root.path().join("tasks")).unwrap();
-        let db = deepseek_code_core::db::DbManager::new(root.path().join("tasks").join(format!("{session}.sqlite3"))).unwrap();
+        std::fs::create_dir_all(root.path().join("data/session-tasks")).unwrap();
+        let db = deepseek_code_core::db::DbManager::new(
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
+        )
+        .unwrap();
         let record = json!({"id":task,"status":"completed","metadata":{"managed_shell":true},"output":{"exit_code":0}});
         db.with_conn(|conn| {
-            conn.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL)").unwrap();
-            conn.execute("INSERT INTO tasks VALUES (?1,?2)", [&task, &record.to_string()]).unwrap();
-        }).unwrap();
-        let logs = root.path().join("shell-tasks").join(&session).join(&task);
+            conn.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO tasks VALUES (?1,?2)",
+                [&task, &record.to_string()],
+            )
+            .unwrap();
+        })
+        .unwrap();
+        let logs = root.path().join("tasks/shell").join(&session).join(&task);
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("stdout.log"), "FIRST\n").unwrap();
         std::fs::write(logs.join("stderr.log"), "\x1b[31mERROR\x1b[0m\n").unwrap();

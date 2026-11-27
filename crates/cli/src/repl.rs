@@ -3,11 +3,7 @@
 use crate::fixture_sql::FixtureSql;
 use crate::session::Session;
 use anyhow::{ensure, Result};
-use deepseek_code_core::{
-    db::conversation_repo,
-    runtime::{RuntimePaths, SessionStore},
-    skills::SkillsManager,
-};
+use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 
 /// The whole conversation for the Ctrl+O transcript, as in the reference CLI:
 /// each prompt, each answer under its time and model, its thinking and every
@@ -52,17 +48,11 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
         let active = crate::worker_frontend::settle_session(session)
             .ok()
             .flatten();
-        if let Some(job) = &active {
-            command_eprintln!("{}", resumed_notice(Some(job)));
-        } else if crate::observe::execution_lease_active(session).unwrap_or(false) {
-            // A direct print/json owner keeps the execution lease. Show that the
-            // turn runs elsewhere so /continue cannot start a second one.
-            command_eprintln!(
-                "{}",
-                crate::observe::running_notice(session).unwrap_or_else(|_| {
-                    "✻ A turn is still running in another process; observing its published progress. Esc returns without stopping it.".into()
-                })
-            );
+        let leased = active.is_none()
+            && crate::observe::execution_lease_active(session).unwrap_or(false);
+        if active.is_some() || leased {
+            // The REPL prints a read-only observation banner and blocks
+            // ordinary prompts; do not claim the session is waiting for input.
         } else if crate::observe::latest_interrupted(session).unwrap_or(false) {
             command_eprintln!("Session restored; the previous turn was interrupted before it completed and its request was not replayed. Send a new message or /continue to continue explicitly.");
         } else {
@@ -94,7 +84,7 @@ pub fn save_completion(session: &Session) -> Result<()> {
     };
     let messages = session.selected_session()?.repository().messages()?;
     if let Some(message) = messages.last().filter(|m| m.role == "assistant") {
-        let directory = session.paths.data_dir.join("turn-completions");
+        let directory = session.paths.data_dir.join("state/turn-completions");
         std::fs::create_dir_all(&directory)?;
         let key = hex_message_id(&message.id);
         std::fs::write(directory.join(key), status)?;
@@ -118,7 +108,7 @@ fn completion_for_message(
         return None;
     }
     let path = data_dir
-        .join("turn-completions")
+        .join("state/turn-completions")
         .join(hex_message_id(&message.id));
     if let Ok(status) = std::fs::read_to_string(path) {
         return Some(status);
@@ -383,7 +373,7 @@ fn conversation(
             let saved = session
                 .paths
                 .data_dir
-                .join("turn-completions")
+                .join("state/turn-completions")
                 .join(hex_message_id(&message.id));
             // Only the final legacy message has a fallback; intermediate tool
             // messages must not be presented as completed turns.
@@ -512,7 +502,7 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
     let mut display = crate::terminal::live::TurnDisplay::new(
         false,
         "ask",
-        &paths.data_dir.join("keybindings.json"),
+        &paths.layout().config_file("keybindings.json"),
         vec![],
     )
     .unwrap();
@@ -797,14 +787,6 @@ pub async fn handle(
                 .conversations()?;
             command_println!("{}", serde_json::to_string_pretty(&sessions)?);
         }
-        "/skills" => {
-            ensure!(argument.trim().is_empty(), "Usage: /skills");
-            let manager = SkillsManager::with_path(paths.data_dir.join("skills"));
-            command_println!(
-                "{}",
-                serde_json::to_string_pretty(&manager.load_skills().await?)?
-            );
-        }
         "/mcp" if argument.trim().is_empty() && crate::terminal::picker::available() => {
             crate::mcp_menu::run(session).await?;
         }
@@ -934,7 +916,7 @@ mod tests {
         assert!(completion_for_message(&paths.data_dir, &messages[0], None)
             .unwrap()
             .contains("duration unavailable"));
-        let directory = paths.data_dir.join("turn-completions");
+        let directory = paths.data_dir.join("state/turn-completions");
         std::fs::create_dir_all(&directory).unwrap();
         let status = "✻ Worked for 1m 30s · done 5:45 PM";
         std::fs::write(directory.join(hex_message_id(&messages[0].id)), status).unwrap();

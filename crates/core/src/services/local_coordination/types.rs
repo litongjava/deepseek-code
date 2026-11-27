@@ -86,6 +86,8 @@ pub struct NativePath {
     pub bytes: Vec<u8>,
 }
 
+/// Only used by the Unix codec; Windows builds keep the label for validation.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const UNIX_BYTES: &str = "unix_bytes";
 /// Only used by the Windows codec; Linux builds keep the label for validation.
 #[cfg_attr(not(windows), allow(dead_code))]

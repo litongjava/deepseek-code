@@ -55,7 +55,7 @@ pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
     }
     session.workspace = session
         .store
-        .workspace(&session.id, &session.paths.data_dir.join("workspaces"))?;
+        .workspace(&session.id, &session.paths.data_dir.join("data/workspaces"))?;
     std::env::set_current_dir(&session.workspace).context("Cannot enter managed worktree")?;
     eprintln!("Worktree: {}\nSession: {}. This worktree is retained on exit; use --resume {} to continue.",session.workspace.display(),session.id,session.id);
     Ok(())

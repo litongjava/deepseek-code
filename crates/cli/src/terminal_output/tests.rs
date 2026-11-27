@@ -137,12 +137,13 @@ async fn fail_stream(screen_reader: bool, failure: DisplayFailure) {
         axum::serve(listener, app).await.unwrap();
     });
     linux_terminal::write_provider(&data, &endpoint);
-    fs::write(
-        data.join("startup-prompts.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        deepseek_code_core::data_layout::DataLayout::from_root(&data)
+            .config_file("startup-prompts.json"),
         json!({"trusted_folders":[workspace]}).to_string(),
     )
     .unwrap();
-    fs::write(data.join("settings.json"), json!({"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"cat >> session-end.json"}]}]}}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(deepseek_code_core::data_layout::DataLayout::from_root(&data).config_file("settings.json"), json!({"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"cat >> session-end.json"}]}]}}).to_string()).unwrap();
 
     let mut command = Terminal::command(
         CommandBuilder::new(std::env::current_exe().unwrap()),
@@ -189,7 +190,10 @@ async fn fail_stream(screen_reader: bool, failure: DisplayFailure) {
             if volume.is_some() {
                 prefix.extend([
                     "-P".into(),
-                    data.join("sessions").join(&session_id).join("session.db-wal").into_os_string(),
+                    data.join("data/sessions")
+                        .join(&session_id)
+                        .join("session.db-wal")
+                        .into_os_string(),
                 ]);
             } else {
                 prefix.extend(["-e".into(), "inject=write:error=EIO".into()]);

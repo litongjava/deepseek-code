@@ -17,7 +17,12 @@ use std::sync::Arc;
 
 /// A workflow agent is a separate session: it must not inherit the parent
 /// worker's control channel, job or model snapshot.
-fn agent_command(executable: &Path, args: &[String], cwd: &Path) -> tokio::process::Command {
+fn agent_command(
+    executable: &Path,
+    args: &[String],
+    cwd: &Path,
+    prompt: &str,
+) -> tokio::process::Command {
     let mut process = tokio::process::Command::new(executable);
     background_sessions::strip_internal_env(&mut process);
     process.env_remove(CHILD_API_KEY_ENV);
@@ -37,6 +42,7 @@ fn agent_command(executable: &Path, args: &[String], cwd: &Path) -> tokio::proce
     }
     process
         .args(args)
+        .args(background_sessions::PromptOrigin::Generated.arguments(prompt))
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -158,12 +164,13 @@ impl Runner {
                 args.extend(["--model".into(), model.into()]);
             }
         }
-        let mut command = agent_command(&self.exe, &args, &self.cwd);
-        command.args(["-p", "--output-format", "json"]);
+        args.extend(["-p", "--output-format", "json"].map(String::from));
         if !opts["schema"].is_null() {
-            command.arg("--json-schema").arg(opts["schema"].to_string());
+            args.extend(["--json-schema".into(), opts["schema"].to_string()]);
         }
-        let output = command.arg("--").arg(prompt).output().await
+        let output = agent_command(&self.exe, &args, &self.cwd, prompt)
+            .output()
+            .await
             .with_context(|| format!("Cannot start agent {label}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let result: Value = serde_json::from_str(stdout.trim()).with_context(|| {
@@ -248,7 +255,14 @@ mod tests {
             Path::new("fixture"),
             &["-p".to_owned()],
             Path::new("fixture-workspace"),
+            "workflow prompt",
         );
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert!(args.ends_with(&[
+            "--prompt-origin=generated".as_ref(),
+            "--".as_ref(),
+            "workflow prompt".as_ref()
+        ]));
         let stripped: Vec<_> = command.as_std().get_envs().collect();
         for name in deepseek_code_core::services::background_sessions::INTERNAL_ENV {
             assert!(

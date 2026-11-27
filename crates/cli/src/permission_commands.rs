@@ -320,8 +320,14 @@ mod tests {
             provider_id: "fixture".into(),
             model: "fixture".into(),
         };
-        let cli =
-            Cli::try_parse_with_mode_source(["dcl", "--path", temp.path().to_str().unwrap()]).unwrap();
+        let cli = Cli::try_parse_with_mode_source([
+            "dcl",
+            "--permission-mode",
+            "ask",
+            "--path",
+            temp.path().to_str().unwrap(),
+        ])
+        .unwrap();
         let session = Session::open(&cli, &paths, selection, None).await.unwrap();
         let context = crate::services::context(&paths).unwrap();
         assert!(session.approval_auto_available().await);

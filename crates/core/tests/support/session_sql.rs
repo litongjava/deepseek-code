@@ -105,7 +105,7 @@ impl FixtureSql for Stores {
         );
         Ok(self
             .data_dir()
-            .join("sessions")
+            .join("data/sessions")
             .join(key)
             .join("session.db"))
     }

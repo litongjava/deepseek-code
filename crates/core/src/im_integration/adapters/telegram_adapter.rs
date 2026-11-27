@@ -62,6 +62,8 @@ struct TelegramMessage {
     chat: TelegramChat,
     date: i64,
     text: Option<String>,
+    caption: Option<String>,
+    sender_chat: Option<serde_json::Value>,
     photo: Option<Vec<PhotoSize>>,
     document: Option<TelegramDocument>,
 }
@@ -69,6 +71,7 @@ struct TelegramMessage {
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramUser {
     id: i64,
+    is_bot: Option<bool>,
     username: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
@@ -265,7 +268,7 @@ impl TelegramAdapter {
             let (content, msg_type) = if let Some(ref text) = msg.text {
                 (text.clone(), MessageType::Text)
             } else if msg.photo.is_some() {
-                let caption = msg.text.clone().unwrap_or_default();
+                let caption = msg.caption.clone().unwrap_or_default();
                 (caption, MessageType::Image)
             } else if msg.document.is_some() {
                 let file_name = msg

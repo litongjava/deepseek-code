@@ -12,11 +12,18 @@ use serde_json::{json, Value};
 use std::process::Command;
 
 fn git_run(cwd: &Path, args: &[&str]) -> String {
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| crate::super_agent::test_git_text(arg))
+        .collect();
     let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+        .current_dir(crate::super_agent::test_git_path(cwd))
+        .args(&args)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+        .env("GIT_CONFIG_VALUE_0", "false")
         .output()
         .unwrap();
     assert!(
@@ -1418,6 +1425,9 @@ fn run_command(cwd: &Path, command: &str) -> std::process::Output {
         .current_dir(cwd)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+        .env("GIT_CONFIG_VALUE_0", "false")
         .output()
         .unwrap()
 }

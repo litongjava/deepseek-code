@@ -88,7 +88,7 @@ fn sessions_live_empty_does_not_create_state() {
         "a read must not create the coordination root"
     );
     assert!(!data.exists(), "a read must not create the data directory");
-    assert!(!temp.path().join("logs").exists());
+    assert!(!temp.path().join("diagnostics/logs").exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -611,7 +611,7 @@ fn private_file(path: &Path, bytes: &[u8]) {
 
 /// A root the product itself creates: `prepare_private` makes it 0700 and
 /// refuses to change the mode of a directory it did not create.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn private_root(dir: &Path) -> CoordinationPaths {
     let paths = CoordinationPaths {
         root: dir.to_path_buf(),
@@ -622,7 +622,7 @@ fn private_root(dir: &Path) -> CoordinationPaths {
 
 /// A failed read reports one fixed category, exits nonzero, and leaves every
 /// piece of evidence and the conversation data directory untouched.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn assert_category(root: &Path, data: &Path, expected: &str) {
     let run = run_live(
         &[
@@ -649,7 +649,7 @@ fn assert_category(root: &Path, data: &Path, expected: &str) {
 
 /// Corrupt, missing and newer-schema registries are reported and preserved:
 /// inspection never resets, recreates or migrates anything.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn sessions_live_errors_do_not_reset() {
     let temp = tempfile::tempdir().unwrap();
@@ -1099,8 +1099,8 @@ fn create_session(data: &Path, workspace: &Path) -> String {
 #[cfg(target_os = "linux")]
 fn write_settings(data: &Path, enabled: bool) {
     std::fs::create_dir_all(data).unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         format!(r#"{{"localCoordination":{{"enabled":{enabled},"registry":true}}}}"#),
     )
     .unwrap();
@@ -1938,8 +1938,8 @@ async fn registry_relative_override_uses_launch_root_for_frontend_and_child() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(&data).unwrap();
     // A synchronous SessionStart hook records the exact value its child inherits.
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         serde_json::json!({
             "localCoordination": {"enabled": true, "registry": true},
             "hooks": {"SessionStart": [{"hooks": [{
@@ -2217,7 +2217,7 @@ async fn registry_failed_host_bind_publishes_no_row() {
 
     let session = uuid::Uuid::new_v4().to_string();
     let id = uuid::Uuid::new_v4().to_string();
-    let dir = data.join("session-workers").join(&session).join(&id);
+    let dir = data.join("state/workers").join(&session).join(&id);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("host.lock"), b"").unwrap();
     std::fs::write(
@@ -2527,7 +2527,7 @@ async fn registry_rejects_noncanonical_worker_id_without_stopping_host() {
 
     let sentinel = "sentinel-free-form-worker-id";
     let session = uuid::Uuid::new_v4().to_string();
-    let dir = data.join("session-workers").join(&session).join(sentinel);
+    let dir = data.join("state/workers").join(&session).join(sentinel);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("host.lock"), b"").unwrap();
     // A short path keeps this Unix socket address under the platform limit.
@@ -2802,8 +2802,8 @@ async fn registry_print_with_hook_prompt_publishes_incarnation() {
         "#!/bin/sh\nprintf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"initialUserMessage\":\"ROUND06_GATE\"}}'\n",
     )
     .unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         serde_json::json!({
             "localCoordination": {"enabled": true, "registry": true},
             "hooks": {"SessionStart": [{"matcher": "startup", "hooks": [{
@@ -2927,8 +2927,8 @@ async fn registry_clear_sigint_after_commit_returns_success() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         serde_json::json!({
             "localCoordination": {"enabled": true, "registry": true},
             "hooks": {"SessionStart": [{"matcher": "clear", "hooks": [{

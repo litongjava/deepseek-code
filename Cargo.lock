@@ -1737,6 +1737,8 @@ dependencies = [
  "toml 0.8.2",
  "tower-http",
  "tracing",
+ "unicode-normalization",
+ "unsafe-libyaml",
  "urlencoding",
  "uuid",
  "walkdir",

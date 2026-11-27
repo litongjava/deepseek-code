@@ -6,11 +6,10 @@
 use super::model::{
     decode_body, AgentRole, AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus,
     Event, EventType, GateEvidence, HarnessAnalysisReport, ImplementationReport, NewEvent,
-    NonGitStatus, Phase, RepoTarget, Report, ReportKind, ReviewStage, ReviewVerdict, SessionRef,
+    NonGitStatus, Phase, RepoTarget, Report, ReportKind, ReviewStage, ReviewVerdict,
     Status, TaskRecord, TaskReviewReport, Unmet,
 };
 use serde_json::Value;
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy)]
@@ -1046,8 +1045,8 @@ mod tests {
     fn spec() -> TaskSpec {
         TaskSpec {
             title: "Task".into(),
-            workspace: std::path::PathBuf::from("/workspace"),
-            targets: vec!["/workspace/code".into()],
+            workspace: std::path::PathBuf::from(crate::super_agent::TEST_WORKSPACE),
+            targets: vec![format!("{}/code", crate::super_agent::TEST_WORKSPACE)],
             goal: "Do the thing".into(),
             requirements: vec![],
             acceptance_criteria: vec![AcceptanceCriterion {
@@ -1332,13 +1331,15 @@ mod tests {
         RepoTarget {
             task_id: "task-001".into(),
             repository_id: "repo-code".into(),
-            repo_root: "/workspace/code".into(),
-            git_common_dir: "/workspace/code/.git".into(),
-            target_path: "/workspace/code".into(),
+            repo_root: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
+            git_common_dir: format!("{}/code/.git", crate::super_agent::TEST_WORKSPACE).into(),
+            target_path: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
             target_branch: "develop".into(),
             task_branch: "agent/task-001".into(),
-            worktree_path: "/data/worktrees/task-001".into(),
-            working_path: "/data/worktrees/task-001".into(),
+            worktree_path: format!("{}/data/worktrees/task-001", crate::super_agent::TEST_WORKSPACE)
+                .into(),
+            working_path: format!("{}/data/worktrees/task-001", crate::super_agent::TEST_WORKSPACE)
+                .into(),
             base_commit: "base".into(),
             submitted_commit: Some("submitted".into()),
             reviewed_commit: Some("integrated".into()),
@@ -1670,12 +1671,15 @@ mod tests {
         let mut non_git = state.clone();
         non_git.non_git_targets = vec![NonGitTarget {
             task_id: "task-001".into(),
-            path: "/workspace/scripts".into(),
+            path: format!("{}/scripts", crate::super_agent::TEST_WORKSPACE).into(),
             snapshot_dir: "/data/snapshots/1".into(),
             snapshot_manifest_json: "{}".into(),
             diff_ref: None,
             status: NonGitStatus::Prepared,
-            lock_key: "path:/workspace/scripts".into(),
+            lock_key: format!(
+                "path:{}/scripts",
+                crate::super_agent::TEST_WORKSPACE
+            ),
             submission: None,
         }];
         let unmet = gate(&non_git, &non_git.repositories, &reports, &[]).unwrap_err();
@@ -1950,16 +1954,22 @@ mod tests {
     fn non_git_targets_require_a_verified_snapshot() {
         let mut state = record(Phase::Finalizing, Status::Running);
         state.repositories.clear();
-        let path = std::path::PathBuf::from("/workspace/scripts");
+        let path = std::path::PathBuf::from(crate::super_agent::TEST_WORKSPACE).join("scripts");
         let artifact_id = "non-git-test-content-1".to_string();
         state.non_git_targets = vec![NonGitTarget {
             task_id: "task-001".into(),
             path: path.clone(),
             snapshot_dir: "/data/snapshots/1".into(),
-            snapshot_manifest_json: "{\"source\":\"/workspace/scripts\"}".into(),
+            snapshot_manifest_json: format!(
+                "{{\"source\":\"{}/scripts\"}}",
+                crate::super_agent::TEST_WORKSPACE
+            ),
             diff_ref: Some("diff-1".into()),
             status: NonGitStatus::Completed,
-            lock_key: "path:/workspace/scripts".into(),
+            lock_key: format!(
+                "path:{}/scripts",
+                crate::super_agent::TEST_WORKSPACE
+            ),
             submission: Some(NonGitSubmission {
                 artifact_id: artifact_id.clone(),
                 task_id: "task-001".into(),

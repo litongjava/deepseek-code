@@ -95,7 +95,7 @@ async fn fixture(
     (base, seen, server)
 }
 fn metas(root: &Path) -> Vec<(PathBuf, Value)> {
-    let mut files = fs::read_dir(root.join("request-records/session-test"))
+    let mut files = fs::read_dir(root.join("diagnostics/request-records/session-test"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.to_string_lossy().ends_with(".meta.json"))
@@ -181,8 +181,10 @@ async fn three_transports_record_exact_wire_bytes_and_private_files() {
         let captured_headers = seen.lock().unwrap()[0].0.clone();
         let expected = captured_headers
             .iter()
-            .filter(|(name, _)| !matches!(name.as_str(), "authorization" | "x-api-key"))
-            .count();
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !matches!(*name, "authorization" | "x-api-key"))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert_eq!(recorded.as_object().unwrap().len(), expected);
         for (name, value) in &captured_headers {
             if !matches!(name.as_str(), "authorization" | "x-api-key") {
@@ -299,7 +301,8 @@ async fn disabled_and_disk_failure_do_not_change_output() {
         let temp = tempfile::tempdir().unwrap();
         let (base, _, server) = fixture(OPENAI, false, false).await;
         let opts = if fail {
-            fs::write(temp.path().join("request-records"), b"block").unwrap();
+            std::fs::create_dir_all(temp.path().join("diagnostics")).unwrap();
+            fs::write(temp.path().join("diagnostics/request-records"), b"block").unwrap();
             options(temp.path())
         } else {
             RequestOptions::for_session(Some("session-test"))
@@ -315,7 +318,7 @@ async fn disabled_and_disk_failure_do_not_change_output() {
         }
         assert_eq!(output, OPENAI);
         if !fail {
-            assert!(!temp.path().join("request-records").exists());
+            assert!(!temp.path().join("diagnostics/request-records").exists());
         }
         server.abort();
     }
@@ -404,7 +407,7 @@ fn concurrent_sequences_and_reopen_never_collide() {
 #[test]
 fn retention_uses_latest_file_and_excludes_active_sessions() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("request-records");
+    let root = temp.path().join("diagnostics/request-records");
     let now = SystemTime::now() + Duration::from_secs(15 * 86400);
     let mut active = None;
     for session in ["old", "new", "active", "recent-file"] {
@@ -487,10 +490,13 @@ fn launch_policy_is_session_scoped_and_inherited_by_explicit_parent() {
         Some("child")
     );
     parent.delete().unwrap();
-    db.create("parent-test",Default::default()).unwrap();
-    db.set_request_recording_policy("parent-test",true,false).unwrap();
-    assert!(RequestOptions::from_db(&db, Some("child"),"main").recording.is_none());
-    assert!(!temp.path().join("request-records").exists());
+    db.create("parent-test", Default::default()).unwrap();
+    db.set_request_recording_policy("parent-test", true, false)
+        .unwrap();
+    assert!(RequestOptions::from_db(&db, Some("child"), "main")
+        .recording
+        .is_none());
+    assert!(!temp.path().join("diagnostics/request-records").exists());
 }
 
 #[tokio::test]

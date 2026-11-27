@@ -77,6 +77,7 @@ const MAX_PAGE: u32 = 10_000;
 
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Read and write GitHub issues, pull requests and repository details through the gh CLI".into()),
         name: "GitHub".into(),
         description: "Read and write GitHub issues, pull requests and repository details through the `gh` CLI already installed and signed in on this machine. Supported operations: repo_view; issue_list, issue_view, issue_create, issue_comment; pr_list, pr_view, pr_create, pr_comment, pr_merge. Reads return normalized JSON; issue_list and pr_list are paginated with page/per_page and report next_page when GitHub has more; only issue_list accepts a labels filter. Writes pass the body literally on stdin, report a URL and identifier, and are never retried: a timeout or transport failure after submission returns outcome:\"unknown\" because repeating it could create a duplicate. Use repo:\"owner/name\" for another repository; omitting it uses the session's current directory. merge always names a method, accepts match_head_commit as a safety guard, and reports \"accepted\" unless a follow-up read shows the merge completed. Every mutation needs the normal approval; loading this tool does not authorize a write.".into(),
         input_schema: json!({

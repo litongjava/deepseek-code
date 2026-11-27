@@ -145,9 +145,27 @@ async fn builtin_provider_and_shared_tools_run_without_node_on_path() {
     std::fs::write(temp.path().join("fixture.txt"),"native-only fixture").unwrap();
     let (url, fixture, task) = server(Some("Read"), false).await;
     let providers = json!([{"id":"builtin","name":"Built-in DeepSeek","base_url":format!("{url}/v1"),"api_key":"fixture-only-secret","api_format":"openai","builtin_id":"deepseek","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false,"max_tokens":8192,"api":"openai-completions"}]}]);
-    std::fs::write(data.join("providers.json"),providers.to_string()).unwrap();
-    let mut cli = command(&data,temp.path());
-    cli.env("PATH","").args(["--provider","builtin","--model","fixture-model","--api-key-env","CLAUDE_FIXTURE_KEY","--output-format","json","--permission-mode","accept-edits","query","-p","Read the fixture"]);
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
+        providers.to_string(),
+    )
+    .unwrap();
+    let mut cli = command(&data, temp.path());
+    cli.env("PATH", "").args([
+        "--provider",
+        "builtin",
+        "--model",
+        "fixture-model",
+        "--api-key-env",
+        "CLAUDE_FIXTURE_KEY",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "accept-edits",
+        "query",
+        "-p",
+        "Read the fixture",
+    ]);
     let output = execute(cli).await;
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let output: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -259,8 +277,8 @@ async fn single_query_and_resume_share_sqlite_without_desktop_or_saved_credentia
     assert_eq!(first["result"], "fixture response 中文");
     assert_durable_turn(&data, &first, "completed");
     assert_eq!(first["is_error"], false);
-    assert!(!data.join("providers.json").exists());
-    assert!(!data.join("config.json").exists());
+    assert!(!data.join("config/providers.json").exists());
+    assert!(!data.join("config/config.json").exists());
     let mut cli = query(&data, &project, &url);
     cli.args([
         "--resume",
@@ -471,14 +489,15 @@ async fn empty_stdin_and_malformed_config_fail_without_overwriting() {
     assert!(!output.status.success());
     // Startup diagnostics may create logs, but no session or configuration is saved.
     assert!(!data.join("deepseek_code.db").exists());
-    assert!(!data.join("config.json").exists());
+    assert!(!data.join("config/config.json").exists());
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(data.join("config.json"), "not json").unwrap();
+    deepseek_code_core::data_layout::write_config_file(data.join("config/config.json"), "not json")
+        .unwrap();
     let mut cli = command(&data, temp.path());
     cli.args(["config", "set", "model", "sonnet"]);
     assert!(!execute(cli).await.status.success());
     assert_eq!(
-        std::fs::read_to_string(data.join("config.json")).unwrap(),
+        std::fs::read_to_string(data.join("config/config.json")).unwrap(),
         "not json"
     );
 }
@@ -838,7 +857,7 @@ async fn session_lifecycle_hooks_run_once_per_frontend_and_resume_context_reache
     let data = temp.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::write(temp.path().join("session-hook.cjs"), r#"const fs=require('fs');let text='';process.stdin.on('data',x=>text+=x);process.stdin.on('end',()=>{const v=JSON.parse(text);fs.appendFileSync('session-events.jsonl',JSON.stringify(v)+'\n');if(v.hook_event_name==='SessionStart')console.log('LIFECYCLE_CONTEXT:'+v.source);});"#).unwrap();
-    std::fs::write(data.join("settings.json"),json!({"hooks":{
+    deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"),json!({"hooks":{
         "SessionStart":[{"matcher":"startup|resume","hooks":[{"type":"command","command":"node session-hook.cjs"}]}],
         "SessionEnd":[{"matcher":"other","hooks":[{"type":"command","command":"node session-hook.cjs"}]}]
     }}).to_string()).unwrap();
@@ -1285,7 +1304,8 @@ async fn redirected_output_config_confirmation_reports_enospc() {
         .unwrap();
     assert_eq!(status.code(), Some(1));
     let saved: Value =
-        serde_json::from_slice(&std::fs::read(data.join("customization.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(data.join("config/customization.json")).unwrap())
+            .unwrap();
     assert_eq!(saved["tool_loading"]["Read"]["enabled"], true);
 }
 
@@ -1323,7 +1343,7 @@ async fn cold_sessions_list_reads_the_directory_without_opening_history() -> any
         String::from_utf8_lossy(&result.stderr)
     );
 
-    let shard = data.join("sessions").join(&id).join("session.db");
+    let shard = data.join("data/sessions").join(&id).join("session.db");
     let path = CString::new(shard.as_os_str().as_bytes())?;
     let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
     anyhow::ensure!(fd >= 0, std::io::Error::last_os_error());

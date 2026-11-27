@@ -20,7 +20,10 @@ use tokio::sync::Mutex;
 #[path = "runtime_user_content.rs"]
 mod user_content;
 pub(crate) use user_content::attachment_text;
-pub use user_content::{image_block_from_file, image_media_type, normalize_user_content, MAX_IMAGE_BYTES};
+pub use user_content::{
+    image_block_from_file, image_media_type, image_media_type_from_bytes, normalize_user_content,
+    MAX_IMAGE_BYTES,
+};
 
 /// Default data directory under the user's home.
 pub const DATA_DIR_NAME: &str = ".deepseek-code";
@@ -69,7 +72,7 @@ impl RuntimePaths {
 
     /// Read without silently discarding malformed configuration or creating defaults.
     pub fn read_config(&self) -> Result<AppConfig> {
-        let path = self.data_dir.join("config.json");
+        let path = self.layout().config_file("config.json");
         if !path.exists() {
             return Ok(AppConfig::default());
         }
@@ -78,7 +81,7 @@ impl RuntimePaths {
     }
 
     pub fn providers(&self) -> Result<Vec<Provider>> {
-        if self.data_dir.join("config.json").exists() {
+        if self.layout().config_file("config.json").exists() {
             return Ok(self
                 .read_config()?
                 .providers
@@ -86,12 +89,17 @@ impl RuntimePaths {
                 .map(provider_from_config)
                 .collect());
         }
-        let path = self.data_dir.join("providers.json");
+        let path = self.layout().config_file("providers.json");
         if !path.exists() {
             return Ok(Vec::new());
         }
         serde_json::from_str(&std::fs::read_to_string(&path)?)
             .with_context(|| format!("Invalid providers: {}", path.display()))
+    }
+
+    /// The single path contract for this data directory.
+    pub fn layout(&self) -> crate::data_layout::DataLayout {
+        crate::data_layout::DataLayout::new(self.data_dir.clone())
     }
 }
 
@@ -145,7 +153,7 @@ pub fn create_engine(
     let engine = NativeEngine::new(
         providers,
         db,
-        paths.data_dir.join("workspaces"),
+        paths.layout().workspaces(),
         permissions,
         cache,
     );
@@ -211,9 +219,34 @@ pub(crate) fn replay_history(
     format: &ApiFormat,
     native: impl Fn(&str) -> Result<Option<Value>>,
 ) -> Result<(Vec<Value>, Option<String>)> {
+    replay_history_with_ids(conn, id, format, native, false, None)
+}
+
+pub(crate) fn replay_history_with_ids(
+    conn: &rusqlite::Connection,
+    id: &str,
+    format: &ApiFormat,
+    native: impl Fn(&str) -> Result<Option<Value>>,
+    include_provenance: bool,
+    before: Option<&str>,
+) -> Result<(Vec<Value>, Option<String>)> {
     let messages =
         crate::db::model_results::read_messages(conn, id, |row, collapsed| (row, collapsed))?;
-    replay_rows(conn, id, &messages, format, native)
+    let end = match before {
+        Some(input) => messages
+            .iter()
+            .position(|(row, _)| row.id == input)
+            .context("Admitted input missing")?,
+        None => messages.len(),
+    };
+    replay_rows(
+        conn,
+        id,
+        &messages[..end],
+        format,
+        native,
+        include_provenance,
+    )
 }
 
 pub(crate) fn replay_rows(
@@ -222,6 +255,7 @@ pub(crate) fn replay_rows(
     messages: &[(message_repo::MessageRow, bool)],
     format: &ApiFormat,
     native: impl Fn(&str) -> Result<Option<Value>>,
+    include_provenance: bool,
 ) -> Result<(Vec<Value>, Option<String>)> {
     let mut history = Vec::new();
     let start = messages
@@ -239,9 +273,16 @@ pub(crate) fn replay_rows(
                 crate::db::model_results::data_root(conn)?.as_deref(),
                 id,
             );
-            history.push(
-                json!({"role":message.role,"content":message.content,"provider_content":native}),
-            );
+            let mut row =
+                json!({"role":message.role,"content":message.content,"provider_content":native});
+            if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+                row["reasoning_content"] = json!(thinking);
+            }
+            if include_provenance {
+                row["id"] = json!(message.id);
+                row["origin"] = json!("compaction");
+            }
+            history.push(row);
             continue;
         }
         let mut calls = crate::db::model_results::replay_calls(conn, &message.id, id)?;
@@ -252,11 +293,17 @@ pub(crate) fn replay_rows(
         let nested =
             crate::services::tool_history::nested_ids_for_message(conn, &message.id)?;
         calls.retain(|tool| !nested.contains(&tool.id));
+        let mut thinking_replayed = false;
         if message.role == "assistant" && !calls.is_empty() {
             match format {
                 ApiFormat::OpenAI => {
                     let tool_calls: Vec<_> = calls.iter().map(|t| json!({"id":t.id,"type":"function","function":{"name":t.name,"arguments":t.input.as_deref().unwrap_or("{}")}})).collect();
-                    history.push(json!({"role":"assistant","content":"","tool_calls":tool_calls}));
+                    let mut assistant = json!({"role":"assistant","content":"","tool_calls":tool_calls});
+                    if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+                        assistant["reasoning_content"] = json!(thinking);
+                        thinking_replayed = true;
+                    }
+                    history.push(assistant);
                     for tool in &calls {
                         history.push(json!({
                             "role":"tool",
@@ -265,7 +312,11 @@ pub(crate) fn replay_rows(
                         }));
                     }
                     for tool in &calls {
-                        if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? { history.push(json!({"role":"user","content":note})); }
+                        if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? {
+                            history.push(
+                                json!({"role":"user","content":note,"origin":"approval_note"}),
+                            );
+                        }
                     }
                 }
                 ApiFormat::Anthropic => {
@@ -276,13 +327,17 @@ pub(crate) fn replay_rows(
                     for tool in &calls {
                         if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? { results.push(json!({"type":"text","text":note})); }
                     }
-                    history.push(json!({"role":"user","content":results}));
+                    history.push(json!({"role":"user","content":results,"origin":"tool_result"}));
                 }
             }
             for tool in &calls {
                 for input in crate::services::input_queue::load_delivered(conn, &tool.id)? {
-                    let origin = input.origin.clone();
-                    history.push(json!({"role":"user","content":input.model_content(crate::db::model_results::data_root(conn)?.as_deref(),id),"origin":origin}));
+                    let mut message = input.model_message();
+                    message["content"] = input.model_content(
+                        crate::db::model_results::data_root(conn)?.as_deref(),
+                        id,
+                    );
+                    history.push(message);
                 }
             }
         }
@@ -311,8 +366,19 @@ pub(crate) fn replay_rows(
             continue;
         };
         let mut item = json!({"role":message.role,"content":content});
+        if message.role == "assistant" && !thinking_replayed {
+            if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+                item["reasoning_content"] = json!(thinking);
+            }
+        }
         if collapsed {
             item["_collapsed_monitor"] = Value::Bool(true);
+        }
+        if include_provenance && message.role == "user" {
+            item["id"] = json!(message.id);
+            if let Some(origin) = crate::db::session_store::message_origin(conn, &message.id)? {
+                item["origin"] = json!(origin);
+            }
         }
         history.push(item);
     }
@@ -560,16 +626,22 @@ impl SessionStore<DbManager> {
     }
 
     pub fn append(&self, id: &str, role: &str, text: &str) -> Result<String> {
-        self.append_with_content(id, role, text, None, false)
+        self.append_with_content(id, role, text, None, "generated")
     }
 
-    pub fn append_user_content(&self, id: &str, text: &str, content: &Value) -> Result<String> {
+    pub fn append_user_content(
+        &self,
+        id: &str,
+        text: &str,
+        content: &Value,
+        origin: &str,
+    ) -> Result<String> {
         let content = normalize_user_content(content)?;
-        self.append_with_content(id, "user", text, Some(&content), false)
+        self.append_with_content(id, "user", text, Some(&content), origin)
     }
 
     pub fn append_hook_user(&self, id: &str, text: &str) -> Result<String> {
-        self.append_with_content(id, "user", text, None, true)
+        self.append_with_content(id, "user", text, None, "hook")
     }
 
     fn append_with_content(
@@ -578,7 +650,7 @@ impl SessionStore<DbManager> {
         role: &str,
         text: &str,
         content: Option<&Value>,
-        initial_hook: bool,
+        origin: &str,
     ) -> Result<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
         self.db.with_conn(|conn| -> Result<()> {
@@ -603,12 +675,17 @@ impl SessionStore<DbManager> {
                     false,
                     order,
                 )?;
-                if initial_hook {
+                if role == "user" {
+                    let mut metadata = json!({"promptOrigin":origin});
+                    if origin == "hook" {
+                        metadata["type"] = json!("hook");
+                        metadata["hookEvent"] = json!("SessionStart");
+                    }
                     tx.execute(
                         "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
                         rusqlite::params![
                             format!("message-origin:{message_id}"),
-                            r#"{"type":"hook","hookEvent":"SessionStart"}"#
+                            metadata.to_string()
                         ],
                     )?;
                 }

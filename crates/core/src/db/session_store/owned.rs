@@ -263,8 +263,9 @@ impl SessionRepository<'_> {
         match &self.0 {
             Backend::Admitted(s) => {
                 let _locks=s.stores.key_lock(&s.key,false,false)?;
+                let memory = reset.then(|| crate::services::memory_files::prompt::Admission::session(s)).transpose()?;
                 s.write_locked_with_commit(label,super::WRITE_DEADLINE,false,|w|{
-                    let message=reset.then(||w.plan_marker(text)).transpose()?;
+                    let message=memory.as_ref().map(|memory|w.plan_marker(text, memory)).transpose()?;
                     policy(w.0,w.1)?;
                     Ok(message)
                 },commit)
@@ -273,8 +274,7 @@ impl SessionRepository<'_> {
                 let message=if reset {
                     anyhow::ensure!(crate::db::conversation_repo::conversation_metadata(&tx,id)?.is_some(),"Plan session not found");
                     let order=tx.query_row("SELECT coalesce(max(sort_order),-1)+1 FROM messages WHERE conversation_id=?1",[id],|r|r.get(0))?;
-                    let message=uuid::Uuid::new_v4().to_string();
-                    crate::db::message_repo::insert_message(&tx,&message,id,"user",text,None,&chrono::Utc::now().to_rfc3339(),true,order)?;
+                    let message=super::boundary::create(&tx,id,order,text,super::boundary::Kind::ApprovedPlan,super::boundary::Storage::Shared)?;
                     crate::db::conversation_repo::increment_message_count(&tx,id)?;
                     super::state::set_local(&tx,&format!("plan.context_boundary.{id}"),&serde_json::json!({"boundary_id":message}).to_string())?;
                     Some(message)

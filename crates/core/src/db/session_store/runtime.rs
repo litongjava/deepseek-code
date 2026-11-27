@@ -55,7 +55,7 @@ impl Stores {
                 let matches: bool = snapshot.query_row("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1 AND incarnation=?2 AND archived=0 AND workspace_mode='code')",
                     [&row.conversation.id,&row.incarnation], |r|r.get(0))?;
                 if !matches {return Ok(None);}
-                let actual = super::lifecycle::workspace(&snapshot,&self.data_dir().join("workspaces"),&row.conversation.id);
+                let actual = super::lifecycle::workspace(&snapshot,&self.layout().workspaces(),&row.conversation.id);
                 Ok(actual.ok().and_then(|p|p.canonicalize().ok()).filter(|p|p==&workspace))
             })?;
             if current.is_some() && self.open_listed(&row).is_ok() {
@@ -81,7 +81,8 @@ impl SessionDb {
             );
             ensure!(!row.archived, "Session is archived");
             crate::native_engine::workspace::conversation_project(&tx, self.id())?;
-            let path = super::lifecycle::workspace(&tx, &self.stores.root.path.join("workspaces"), self.id())?;
+            let path =
+                super::lifecycle::workspace(&tx, &self.stores.layout().workspaces(), self.id())?;
             if row.project_id.is_none() {
                 row.workspace_path = Some(path.to_string_lossy().into_owned());
             }
@@ -91,25 +92,35 @@ impl SessionDb {
 }
 
 impl SessionWrite<'_> {
-    pub fn append_user_content(&self, display: &str, content: &Value) -> Result<String> {
+    pub(super) fn append_user_content(
+        &self,
+        display: &str,
+        content: &Value,
+        typed: bool,
+    ) -> Result<String> {
         let content = crate::runtime::normalize_user_content(content)?;
         let message = self.append("user", display)?;
         self.0.execute(
             "INSERT INTO message_user_content(message_id,content_json) VALUES(?1,?2)",
             params![message, serde_json::to_string(&content)?],
         )?;
-        crate::services::permission_authority::record_conn(
-            self.0,
-            self.1,
-            crate::services::permission_authority::Source::User,
-            &content,
-        )?;
+        if typed {
+            crate::services::permission_authority::record_conn(
+                self.0,
+                self.1,
+                crate::services::permission_authority::Source::User,
+                &content,
+            )?;
+        }
         Ok(message)
     }
 
     pub fn append_hook_user(&self, text: &str) -> Result<String> {
         let message = self.append("user", text)?;
-        self.set_message_metadata(&message, &json!({"type":"hook","hookEvent":"SessionStart"}))?;
+        self.set_message_metadata(
+            &message,
+            &json!({"type":"hook","hookEvent":"SessionStart","promptOrigin":"hook"}),
+        )?;
         Ok(message)
     }
 }

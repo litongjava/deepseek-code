@@ -140,8 +140,9 @@ impl SessionImport for crate::db::DbManager {
         let backup = if preview {
             None
         } else {
-            let directory = paths.data_dir.join("backups");
+            let directory = paths.layout().backups();
             std::fs::create_dir_all(&directory)?;
+            let directory = directory.canonicalize()?;
             let path = directory.join(format!("sessions-{}.sqlite3", uuid::Uuid::new_v4()));
             self.with_conn(|c| c.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()]))??;
             Some(path.to_string_lossy().into_owned())

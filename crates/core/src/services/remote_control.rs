@@ -19,7 +19,6 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 pub mod mock;
 pub mod peer;
 
-const SETTINGS_FILE: &str = "remote-control.json";
 pub const SERVER_ENV: &str = "CLAUDE_BRIDGE_BASE_URL";
 pub const TOKEN_ENV: &str = "CLAUDE_BRIDGE_OAUTH_TOKEN";
 pub const WEB_ENV: &str = "CLAUDE_BRIDGE_WEB_URL";
@@ -37,7 +36,8 @@ pub struct Settings {
 }
 
 pub fn load_settings(data_dir: &Path) -> Result<Settings> {
-    match std::fs::read(data_dir.join(SETTINGS_FILE)) {
+    let path = crate::data_layout::DataLayout::from_root(data_dir).remote_control_settings();
+    match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("Invalid remote-control.json"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(error) => Err(error.into()),
@@ -51,9 +51,10 @@ pub fn save_settings(data_dir: &Path, settings: &Settings) -> Result<()> {
     if let Some(url) = &settings.web_url {
         validate_url(url)?;
     }
-    std::fs::create_dir_all(data_dir)?;
+    let layout = crate::data_layout::DataLayout::from_root(data_dir);
+    std::fs::create_dir_all(layout.config_root())?;
     std::fs::write(
-        data_dir.join(SETTINGS_FILE),
+        layout.remote_control_settings(),
         serde_json::to_vec_pretty(settings)?,
     )?;
     Ok(())
@@ -1131,7 +1132,10 @@ mod tests {
             },
         )
         .unwrap();
-        let saved = std::fs::read_to_string(temp.path().join(SETTINGS_FILE)).unwrap();
+        let saved = std::fs::read_to_string(
+            crate::data_layout::DataLayout::from_root(temp.path()).remote_control_settings(),
+        )
+        .unwrap();
         assert!(!saved.to_lowercase().contains("token"));
         assert_eq!(
             Endpoint::resolve(temp.path(), None).unwrap().base_url,

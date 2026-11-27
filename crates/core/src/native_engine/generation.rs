@@ -1748,6 +1748,45 @@ pub(crate) async fn generate_with_options(
     .await
 }
 
+/// A fixed output budget for an auxiliary request that needs more room than the
+/// 4,096-token default, such as a long page summary.
+pub(crate) async fn generate_with_budget(
+    provider: ResolvedProvider,
+    system: &str,
+    input: &str,
+    max_tokens: u32,
+    options: super::request_options::RequestOptions,
+) -> Result<String> {
+    generate_request(
+        provider,
+        system,
+        input,
+        max_tokens,
+        true,
+        None,
+        BudgetSource::Fixed,
+        options,
+    )
+    .await
+}
+
+/// Whether a generation error is the structured "stopped at its output limit"
+/// failure, which a caller may replace with a bounded fallback.
+pub(crate) fn is_truncated_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<Truncated>())
+}
+
+/// Whether a generation failure is a summary failure a caller may replace with
+/// bounded fallback text: the output limit, or a finished response with no
+/// usable body (empty or oversized). An HTTP error is not covered, because it
+/// needs a different response.
+pub(crate) fn is_summary_fallback_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<Truncated>().is_some()
+            || cause.downcast_ref::<InvalidSummary>().is_some()
+    })
+}
+
 async fn generation_deadline<T>(
     operation: impl std::future::Future<Output = Result<T>>,
     short_deadline: bool,
@@ -2145,6 +2184,20 @@ mod tests {
         // Whitespace only is empty, and a truncated stop stays an output limit.
         assert!(validate_result(" \n\t".into(), 4096, "stop".into(), None).is_err());
         assert!(validate_result("summary".into(), 4096, "stop".into(), None).is_ok());
+    }
+
+    #[test]
+    fn truncated_errors_are_recognised_through_context_wrapping() {
+        let plain = anyhow::Error::new(Truncated { budget: 4096 });
+        assert!(is_truncated_error(&plain));
+        let wrapped = plain.context("Web page summary failed");
+        assert!(
+            is_truncated_error(&wrapped),
+            "an outer context must not hide the output limit: {wrapped:#}"
+        );
+        assert!(!is_truncated_error(&anyhow::anyhow!(
+            "Generation did not finish normally"
+        )));
     }
 
     #[test]

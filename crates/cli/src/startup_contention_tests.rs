@@ -35,7 +35,7 @@ impl Fixture {
     fn with_active_job() -> Self {
         let fixture = Self::new();
         let job = uuid::Uuid::new_v4().to_string();
-        let directory = fixture.paths.data_dir.join("background-tasks").join(&job);
+        let directory = fixture.paths.data_dir.join("tasks/background").join(&job);
         std::fs::create_dir_all(&directory).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

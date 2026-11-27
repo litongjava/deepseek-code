@@ -15,7 +15,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const DEFAULT_CLIENT_ID: &str = "Ov23liWiTL6v74GsI2U7";
-const TOKEN_FILE: &str = "github-token.json";
 const STATE_LIFETIME: Duration = Duration::from_secs(600);
 const USER_AGENT: &str = "DeepSeek-Code";
 
@@ -80,7 +79,7 @@ impl GithubConnector {
     }
 
     fn token_path(&self) -> PathBuf {
-        self.data_dir.join(TOKEN_FILE)
+        crate::data_layout::DataLayout::from_root(&self.data_dir).github_token()
     }
 
     pub fn token(&self) -> Option<StoredToken> {
@@ -89,7 +88,8 @@ impl GithubConnector {
     }
 
     fn save_token(&self, token: &StoredToken) -> Result<()> {
-        std::fs::create_dir_all(&self.data_dir)?;
+        let layout = crate::data_layout::DataLayout::from_root(&self.data_dir);
+        std::fs::create_dir_all(layout.config_root())?;
         let path = self.token_path();
         let text = serde_json::to_string_pretty(token)?;
         let mut options = std::fs::OpenOptions::new();
@@ -388,7 +388,12 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.path().join(TOKEN_FILE)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(
+                crate::data_layout::DataLayout::from_root(dir.path()).github_token(),
+            )
+            .unwrap()
+            .permissions()
+            .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let repos = github.repos(1).await.unwrap();

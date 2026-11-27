@@ -51,7 +51,10 @@ pub async fn handle(
         "/debug" => {
             match argument {
                 "" | "on" => crate::debug_logging::configure(Some(
-                    paths.data_dir.join(format!("debug-{}.log", session.id)),
+                    paths
+                        .layout()
+                        .debug_logs()
+                        .join(format!("debug-{}.log", session.id)),
                 ))?,
                 "off" => crate::debug_logging::configure(None)?,
                 "status" => {}
@@ -84,7 +87,7 @@ pub async fn handle(
         }
         "/keybindings" => {
             ensure!(argument.is_empty(), "Usage: /keybindings");
-            let path = paths.data_dir.join("keybindings.json");
+            let path = paths.layout().config_file("keybindings.json");
             crate::keybindings::ensure_file(&path)?;
             edit_file(&path, "").await?;
             crate::keybindings::load(&path)?;
@@ -309,7 +312,8 @@ pub async fn handle(
                         command_println!("{instructions}");
                     }
                 }
-                "entries" => crate::memory::manage(paths).await?,
+                "entries" => crate::memory::manage_files(paths, &session.id).await?,
+                "legacy" => crate::memory::manage(paths).await?,
                 "user" => {
                     let (_, path) = &paths_by_scope[0];
                     edit_file(path, "# User instructions\n\n").await?;

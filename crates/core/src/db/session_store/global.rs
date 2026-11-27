@@ -82,8 +82,8 @@ impl GlobalDb {
         }
         ensure!(
             std::fs::read_to_string(
-                self.path
-                    .with_file_name("session-locks")
+                crate::data_layout::DataLayout::from_root(self.path.parent().unwrap())
+                    .lock_path("session")
                     .join(".initialized")
             )? == self.uuid,
             "Global store UUID changed"

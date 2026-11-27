@@ -104,8 +104,8 @@ async fn scenario(malformed_first_fragment: bool) {
     );
     let original_id = store.append(&session, "user", &original).unwrap();
     store.append(&session, "assistant", "Prior reply.").unwrap();
-    std::fs::write(
-        paths.data_dir.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/providers.json"),
         json!([{
             "id":provider, "builtin_id":provider, "name":"Local fixture",
             "base_url":base, "api_key":"test-only", "api_format":"openai", "enabled":true,

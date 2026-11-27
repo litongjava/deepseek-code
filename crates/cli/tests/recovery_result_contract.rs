@@ -84,7 +84,7 @@ async fn recovery_results_keep_the_sdk_contract_and_logging_is_nonfatal() {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        std::fs::write(paths.data_dir.join("providers.json"),json!([{
+        deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/providers.json"),json!([{
             "id":"fixture","name":"fixture","base_url":address,"api_key":"fixture-only","api_format":"openai","enabled":true,
             "models":[{"id":"fixture-model","name":"Fixture","enabled":true,"context_window":128000,"max_tokens":4096,"supports_web_search":false,"supports_vision":false}]
         }]).to_string()).unwrap();
@@ -92,7 +92,7 @@ async fn recovery_results_keep_the_sdk_contract_and_logging_is_nonfatal() {
             std::fs::create_dir_all(
                 paths
                     .data_dir
-                    .join("logs/request-attempts")
+                    .join("diagnostics/logs/request-attempts")
                     .join(format!("{id}.jsonl")),
             )
             .unwrap();
@@ -165,7 +165,7 @@ async fn recovery_results_keep_the_sdk_contract_and_logging_is_nonfatal() {
             let log = std::fs::read_to_string(
                 paths
                     .data_dir
-                    .join("logs/request-attempts")
+                    .join("diagnostics/logs/request-attempts")
                     .join(format!("{id}.jsonl")),
             )
             .unwrap();

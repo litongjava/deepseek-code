@@ -45,7 +45,7 @@ async fn standalone_cron_host_generates_and_second_process_stops_pending_request
     std::fs::create_dir(&project).unwrap();
     std::fs::create_dir(&data).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    std::fs::write(data.join("providers.json"),json!([{"id":"fixture","name":"Fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]}]).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(data.join("config/providers.json"),json!([{"id":"fixture","name":"Fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]}]).to_string()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let fixture_calls = calls.clone();
     let app=Router::new().route("/v1/chat/completions",post(move |Json(body):Json<Value>|{let calls=fixture_calls.clone();async move{

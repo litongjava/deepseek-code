@@ -466,7 +466,11 @@ mod tests {
             Json(json!({"id":"r","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"REAL MODEL ANSWER"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}))
         }));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        std::fs::write(dir.path().join("providers.json"), json!([provider("p", true, &format!("{url}/v1"), &[("m", true)])]).to_string()).unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json"),
+            json!([provider("p", true, &format!("{url}/v1"), &[("m", true)])]).to_string(),
+        )
+        .unwrap();
         let paths = crate::runtime::RuntimePaths::new(dir.path().to_path_buf()).unwrap();
         let db=Arc::new(paths.open_stores().unwrap());
         let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
@@ -509,7 +513,11 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut anthropic = provider("p", true, &url, &[("m", true)]);
         anthropic["api_format"] = json!("anthropic");
-        std::fs::write(dir.path().join("providers.json"), json!([anthropic]).to_string()).unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json"),
+            json!([anthropic]).to_string(),
+        )
+        .unwrap();
         let paths = crate::runtime::RuntimePaths::new(dir.path().to_path_buf()).unwrap();
         let scheduler = ScheduledTaskScheduler::new(paths.open_database().unwrap()).with_data_dir(dir.path().to_path_buf());
         assert_eq!(scheduler.request_generation("hello", "system").await.unwrap(), "ANSWER");

@@ -114,13 +114,18 @@ fn directory_listing_opens_zero_shards() -> Result<()> {
     for _ in 0..count {
         let id = uuid::Uuid::new_v4().to_string();
         stores.create(&id, Default::default())?;
-        paths.push(root.path().join("sessions").join(id).join("session.db"));
+        paths.push(
+            root.path()
+                .join("data/sessions")
+                .join(id)
+                .join("session.db"),
+        );
     }
     // This isolates the measured query from the independent repair thread.
     let namespace = std::fs::File::options()
         .read(true)
         .write(true)
-        .open(root.path().join("session-locks/.directory"))?;
+        .open(root.path().join("state/locks/session/.directory"))?;
     namespace.lock()?;
     for path in &paths {
         let c = CString::new(path.as_os_str().as_bytes())?;
@@ -162,7 +167,10 @@ fn usage_reports_exact_prices_and_retains_healthy_sessions_when_one_is_missing()
     let b = uuid::Uuid::new_v4().to_string();
     stores.create(&b, Default::default())?;
     std::fs::rename(
-        root.path().join("sessions").join(&b).join("session.db"),
+        root.path()
+            .join("data/sessions")
+            .join(&b)
+            .join("session.db"),
         root.path().join("damaged.db"),
     )?;
     let usage = stores.usage(|| false)?;
@@ -419,13 +427,15 @@ fn runtime_resolves_new_resume_clear_and_child_under_one_root() -> Result<()> {
         &id,
         "question",
         &json!([{"type":"text","text":"first input"}]),
+        "typed",
     )?;
     assert_eq!(store.history(&id)?[1]["content"], "question");
     assert_eq!(store.resume(&id)?.model.as_deref(), Some("model"));
     assert_eq!(store.latest(root.path())?.unwrap().id, id);
-    let child = store.derive_owned_child(&id, &paths.data_dir.join("workspaces"), root.path())?;
+    let child =
+        store.derive_owned_child(&id, &paths.data_dir.join("data/workspaces"), root.path())?;
     assert_eq!(
-        store.workspace(&child, &paths.data_dir.join("workspaces"))?,
+        store.workspace(&child, &paths.data_dir.join("data/workspaces"))?,
         root.path()
     );
     let cleared = store.clear(&id)?;
@@ -695,7 +705,10 @@ fn project_chat_rechecks_trust_and_recovers_the_prepared_workspace() -> Result<(
     assert_eq!(chats[0].project_id.as_deref(), Some(project.id.as_str()));
     assert_eq!(chats[0].title.as_deref(), Some("Desktop chat"));
     assert_eq!(
-        reopened.open_session(&chats[0].id)?.workspace()?,
+        reopened
+            .open_session(&chats[0].id)?
+            .workspace()?
+            .canonicalize()?,
         workspace.path().canonicalize()?
     );
     Ok(())
@@ -771,7 +784,7 @@ fn first_bridge_message_is_published_with_typed_history_and_chat_authority() -> 
     let root = tempfile::tempdir()?;
     let stores = Stores::open(root.path())?;
     let blocks = json!([{"type":"text","text":"typed hello"}]);
-    stores.admit_chat_message("chat", "model", Some(&blocks))?;
+    stores.admit_chat_message("chat", "model", Some(&blocks), "typed")?;
     let shard = stores.open_session("chat")?;
     shard.read(|r| {
         let messages = r.messages()?;
@@ -781,10 +794,10 @@ fn first_bridge_message_is_published_with_typed_history_and_chat_authority() -> 
         assert_eq!(r.authority()?.len(), 1);
         Ok(())
     })?;
-    stores.admit_chat_message("chat", "model", Some(&json!("second")))?;
+    stores.admit_chat_message("chat", "model", Some(&json!("second")), "typed")?;
     assert_eq!(shard.read(|r| r.messages())?.len(), 2);
     assert!(stores
-        .admit_chat_message("invalid", "model", Some(&json!({"type":"text"})))
+        .admit_chat_message("invalid", "model", Some(&json!({"type":"text"})), "typed")
         .is_err());
     assert!(stores.global().conversation("invalid")?.is_none());
     Ok(())
@@ -812,8 +825,8 @@ fn synced_project_chat_uses_the_locally_trusted_workspace() -> Result<()> {
     let (catalog, _) = stores.sync_contents()?;
     let selected = catalog.iter().find(|row| row.id == header.id).unwrap();
     assert_eq!(
-        selected.workspace_path.as_deref(),
-        project.path().canonicalize()?.to_str()
+        std::path::Path::new(selected.workspace_path.as_deref().unwrap()).canonicalize()?,
+        project.path().canonicalize()?
     );
     Ok(())
 }
@@ -956,15 +969,32 @@ fn host_queue_mutations_return_the_committed_payload_and_preserve_claims() -> Re
     let stores = Stores::open(root.path())?;
     let shard = stores.create("chat",Default::default())?;
     let content = serde_json::json!("first");
-    let first = queue::enqueue(&stores,shard.id(),"request",content.clone(),QueueMode::NextTurn)?;
-    let edited = queue::edit(&stores,shard.id(),first.id,first.revision,"edited")?;
-    assert_eq!(edited.content,"edited");
-    assert_eq!(queue::enqueue(&stores,shard.id(),"request",content,QueueMode::NextTurn)?,edited);
-    queue::set_paused(&stores,shard.id(),true)?;
-    assert!(queue::is_paused(&stores,shard.id())?);
-    queue::set_paused(&stores,shard.id(),false)?;
-    let interrupted=stores.with_fault_hook(|phase| {
-        anyhow::ensure!(phase!=Phase::DeliveryCommitted,"interrupted before ack");
+    let first = queue::enqueue(
+        &stores,
+        shard.id(),
+        "request",
+        content.clone(),
+        QueueMode::NextTurn,
+        queue::QueueOrigin::User,
+    )?;
+    let edited = queue::edit(&stores, shard.id(), first.id, first.revision, "edited")?;
+    assert_eq!(edited.content, "edited");
+    assert_eq!(
+        queue::enqueue(
+            &stores,
+            shard.id(),
+            "request",
+            content,
+            QueueMode::NextTurn,
+            queue::QueueOrigin::User
+        )?,
+        edited
+    );
+    queue::set_paused(&stores, shard.id(), true)?;
+    assert!(queue::is_paused(&stores, shard.id())?);
+    queue::set_paused(&stores, shard.id(), false)?;
+    let interrupted = stores.with_fault_hook(|phase| {
+        anyhow::ensure!(phase != Phase::DeliveryCommitted, "interrupted before ack");
         Ok(())
     });
     assert!(interrupted.open_session(shard.id())?.delivery_owner()?.next_queue(QueueMode::NextTurn,None).is_err());
@@ -983,7 +1013,14 @@ fn desktop_recovers_ack_before_dispatch_and_starts_only_the_receipted_turn() -> 
     let root = tempfile::tempdir()?;
     let stores = Stores::open(root.path())?;
     let session = stores.create("chat", Default::default())?;
-    let first = queue::enqueue(&session,session.id(),"request",serde_json::json!("first"),QueueMode::NextTurn)?;
+    let first = queue::enqueue(
+        &session,
+        session.id(),
+        "request",
+        serde_json::json!("first"),
+        QueueMode::NextTurn,
+        queue::QueueOrigin::User,
+    )?;
     let stale = stores.next_desktop_input(session.id())?.unwrap();
     let edited = queue::edit(&session,session.id(),first.id,first.revision,"current")?;
     let lease=Arc::new(session.acquire_execution()?);
@@ -1012,25 +1049,41 @@ fn document_previews_and_import_backups_resolve_immutable_bodies() -> Result<()>
         runtime::RuntimePaths,
         services::{EnvironmentCredentials,ServiceContext,magic_docs::{self,Preview}},
     };
-    let root=tempfile::tempdir()?;
-    let paths=RuntimePaths::new(root.path().join("data"))?;
-    let ctx=ServiceContext::from_stores(paths,std::sync::Arc::new(EnvironmentCredentials))?;
-    let path=root.path().join("design.md");
-    let original="# MAGIC DOC: design\nOld body".to_owned();
-    let proposed="# MAGIC DOC: design\nNew body".to_owned();
-    std::fs::write(&path,&original)?;
-    let doc=magic_docs::check(&ctx,root.path(),&path)?;
-    ctx.db.save_preview(&Preview{id:"p".into(),document_id:doc.id.clone(),original:original.clone(),proposed:proposed.clone(),diff:String::new()})?;
-    ctx.db.record_input(&doc.id,"private source material")?;
-    assert!(!ctx.db.input_changed(&doc.id,"private source material")?);
-    assert_eq!(magic_docs::previews(&ctx,root.path())?[0].proposed,proposed);
-    let archive=root.path().join("archive.json");
-    std::fs::write(&archive,"[]")?;
-    let backup=magic_docs::import_legacy(&ctx,root.path(),&archive,false)?.backup.unwrap();
-    let manifest:serde_json::Value=serde_json::from_slice(&std::fs::read(&backup)?)?;
-    assert_eq!(manifest["blobs"].as_array().unwrap().len(),3);
-    for digest in manifest["blobs"].as_array().unwrap(){
-        assert!(std::path::Path::new(&backup).parent().unwrap().join("global-blobs").join(digest.as_str().unwrap()).is_file());
+    let root = tempfile::tempdir()?;
+    let paths = RuntimePaths::new(root.path().join("data"))?;
+    let ctx = ServiceContext::from_stores(paths, std::sync::Arc::new(EnvironmentCredentials))?;
+    let path = root.path().join("design.md");
+    let original = "# MAGIC DOC: design\nOld body".to_owned();
+    let proposed = "# MAGIC DOC: design\nNew body".to_owned();
+    std::fs::write(&path, &original)?;
+    let doc = magic_docs::check(&ctx, root.path(), &path)?;
+    ctx.db.save_preview(&Preview {
+        id: "p".into(),
+        document_id: doc.id.clone(),
+        original: original.clone(),
+        proposed: proposed.clone(),
+        diff: String::new(),
+    })?;
+    ctx.db.record_input(&doc.id, "private source material")?;
+    assert!(!ctx.db.input_changed(&doc.id, "private source material")?);
+    assert_eq!(
+        magic_docs::previews(&ctx, root.path())?[0].proposed,
+        proposed
+    );
+    let archive = root.path().join("archive.json");
+    std::fs::write(&archive, "[]")?;
+    let backup = magic_docs::import_legacy(&ctx, root.path(), &archive, false)?
+        .backup
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&backup)?)?;
+    assert_eq!(manifest["blobs"].as_array().unwrap().len(), 3);
+    for digest in manifest["blobs"].as_array().unwrap() {
+        assert!(std::path::Path::new(&backup)
+            .parent()
+            .unwrap()
+            .join("data/global-blobs")
+            .join(digest.as_str().unwrap())
+            .is_file());
     }
     let permissions=deepseek_code_core::runtime::default_permissions();
     permissions.set_mode(deepseek_code_core::permissions::PermissionMode::AcceptEdits);

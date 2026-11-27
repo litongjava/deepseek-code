@@ -176,6 +176,7 @@ impl<D> Clone for TaskStore<D> {
         }
     }
 }
+#[allow(private_bounds)]
 impl<D: TaskDatabase> TaskStore<D> {
     pub fn new(db: Arc<D>, data_dir: PathBuf) -> Self {
         let router = db.router_address().map(|address| RouterScope {
@@ -1649,7 +1650,7 @@ impl<D: TaskDatabase> TaskStore<D> {
         }
         let directory = self
             .data_dir
-            .join("super-agent")
+            .join("tasks/super-agent")
             .join(task_id)
             .join("artifacts");
         std::fs::create_dir_all(&directory)?;

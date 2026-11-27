@@ -409,10 +409,10 @@ async fn managed_worktree_owned_child_can_message_parent_without_new_source_trus
     );
     assert_eq!(
         store
-            .workspace(child, &paths.data_dir.join("workspaces"))
+            .workspace(child, &paths.data_dir.join("data/workspaces"))
             .unwrap(),
         store
-            .workspace(&parent, &paths.data_dir.join("workspaces"))
+            .workspace(&parent, &paths.data_dir.join("data/workspaces"))
             .unwrap()
     );
     assert_eq!(mail::peers(&context, &parent).unwrap().len(), 2);

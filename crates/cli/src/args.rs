@@ -2,6 +2,27 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Continuation {
+    Goal,
+    Resume,
+    Delegation,
+    McpPrompt,
+    Scheduled,
+}
+
+impl Continuation {
+    pub fn worker_argument(self) -> &'static str {
+        match self {
+            Self::Goal => "--generated-continuation=goal",
+            Self::Delegation => "--generated-continuation=delegation",
+            Self::McpPrompt => "--generated-continuation=mcp-prompt",
+            Self::Scheduled => "--generated-continuation=scheduled",
+            Self::Resume => "--generated-continuation=resume",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "dcl",
@@ -22,6 +43,9 @@ pub struct Cli {
     pub maintenance: bool,
     /// Initial prompt; piped stdin is appended in non-interactive mode.
     pub prompt: Option<String>,
+    /// Origin of the positional prompt forwarded to this process.
+    #[arg(long, default_value = "typed")]
+    pub prompt_origin: deepseek_code_core::services::background_sessions::PromptOrigin,
     #[command(subcommand)]
     pub command: Option<Commands>,
     /// Project directory (defaults to the current directory).
@@ -87,10 +111,16 @@ pub struct Cli {
     /// Require a provider-enforced JSON result matching this JSON Schema string.
     #[arg(long, global = true)]
     pub json_schema: Option<String>,
-    #[arg(long, value_enum, default_value = "ask", global = true)]
+    #[arg(long, value_enum, default_value = "auto", global = true)]
     pub permission_mode: PermissionModeArg,
     #[arg(skip)]
     pub permission_mode_explicit: bool,
+    /// The frontend submitted a generated continuation to this worker.
+    #[arg(long, hide = true, requires = "resume", value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "goal")]
+    pub generated_continuation: Option<Continuation>,
+    /// Original user text when a worker receives expanded model-facing content.
+    #[arg(long, hide = true, requires = "resume", allow_hyphen_values = true)]
+    pub original_user_input: Option<String>,
     /// The generation observed by the terminal requesting a process transfer.
     #[arg(long, hide = true, requires = "resume")]
     pub binding_generation: Option<u64>,
@@ -510,7 +540,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: MagicCommands,
     },
-    /// Manage personal memory shared with Desktop.
+    /// Manage project Markdown with `memory files`; other subcommands access the legacy archive.
     Memory {
         #[command(subcommand)]
         action: MemoryCommands,
@@ -634,6 +664,15 @@ pub enum AuthCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum MemoryCommands {
+    /// Manage scoped Markdown memories. Other memory commands access the legacy archive.
+    Files {
+        #[arg(long, conflicts_with = "project")]
+        session: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[command(subcommand)]
+        action: FileMemoryCommands,
+    },
     /// Consolidate new local memories using the selected model, preserving originals.
     Dream,
     /// Force one consolidation, ignoring automatic time/count gates.
@@ -838,12 +877,15 @@ pub enum ConfigCommands {
     /// Show effective saved configuration with credentials redacted.
     Show,
     /// Set model, base_url, api_format, api_key, max_tokens, tools.<name>.enabled|on_demand, or permissions.auto for the CLI provider;
-    /// search.api_key, search.base_url and search.model configure DeepSeek web search.
+    /// search.api_key, search.base_url, search.model and search.provider configure web search (provider: deepseek, openai, anthropic);
+    /// fetch.proxy (alias web_fetch.proxy) sets or clears the WebFetch HTTP proxy.
     Set { key: String, value: String },
     /// Remove only the CLI-managed provider and CLI preferences.
     Reset,
     /// Import an old .claude-code/settings.json; the source is read-only.
     ImportLegacy { source: PathBuf },
+    /// Show or set the global long-term memory switch: on or off.
+    Memory { state: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1036,11 +1078,9 @@ mod tests {
     }
     #[test]
     fn permission_mode_tracks_explicit_ask_without_confusing_default() {
-        assert!(
-            !super::Cli::try_parse_with_mode_source(["dcl"])
-                .unwrap()
-                .permission_mode_explicit
-        );
+        let default = super::Cli::try_parse_with_mode_source(["dcl"]).unwrap();
+        assert!(matches!(default.permission_mode, super::PermissionModeArg::Auto));
+        assert!(!default.permission_mode_explicit);
         assert!(
             super::Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"])
                 .unwrap()
@@ -1201,4 +1241,28 @@ mod tests {
             matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Connect { token: Some(token), .. } }) if token.is_empty())
         );
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FileMemoryCommands {
+    /// Preview catalog pointer repairs; pass the returned token to apply that exact preview.
+    Repair {
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    List {
+        query: Option<String>,
+    },
+    /// Store a UTF-8 Markdown file; omit version only when creating a new entry.
+    Put {
+        name: String,
+        source: PathBuf,
+        #[arg(long)]
+        version: Option<String>,
+    },
+    Delete {
+        name: String,
+        #[arg(long)]
+        version: String,
+    },
 }

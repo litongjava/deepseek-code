@@ -273,7 +273,14 @@ pub async fn run(
             eprintln!("Transcribing…");
             let text = deepseek_code_core::services::voice::transcribe(context, bytes, mime).await?;
             if let Some(session) = &session {
-                session.turn(cli, &text, &mut input).await?;
+                session
+                    .turn(
+                        cli,
+                        &text,
+                        &mut input,
+                        crate::session::TurnOrigin::User(&text),
+                    )
+                    .await?;
             } else {
                 crate::services::print(&serde_json::json!({"text":text}))?;
             }

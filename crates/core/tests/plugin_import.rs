@@ -25,7 +25,7 @@ async fn legacy_preview_backup_execution_idempotence_conflict_and_disable() {
     let preview = plugins::import_legacy(&context, &source, true).unwrap();
     assert!(preview.preview && preview.backup.is_none());
     assert!(plugins::list(&context).unwrap().is_empty());
-    assert!(!context.paths.data_dir.join("backups").exists());
+    assert!(!context.paths.data_dir.join("data/backups").exists());
     let imported = plugins::import_legacy(&context, &source, false).unwrap();
     assert!(imported.imported);
     assert!(std::path::Path::new(&imported.backup.unwrap()).is_file());
@@ -94,5 +94,5 @@ fn unsupported_legacy_contracts_fail_without_installing() {
         );
         assert!(plugins::list(&context).unwrap().is_empty());
     }
-    assert!(!context.paths.data_dir.join("backups").exists());
+    assert!(!context.paths.data_dir.join("data/backups").exists());
 }

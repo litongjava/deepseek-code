@@ -11,6 +11,7 @@ pub fn is_toolscript(name: &str) -> bool {
 
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Run a bounded JavaScript program that calls real tools".into()),
         name: NAME.into(),
         description: "Run a bounded JavaScript program that calls real tools with \
 `await tools.call(name, args)`. Use it when one turn should sequence many tool calls, \

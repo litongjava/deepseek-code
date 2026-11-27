@@ -707,9 +707,13 @@ mod tests {
     use std::process::Command;
 
     fn git(cwd: &Path, args: &[&str]) -> String {
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| crate::super_agent::test_git_text(arg))
+            .collect();
         let output = Command::new("git")
-            .current_dir(cwd)
-            .args(args)
+            .current_dir(crate::super_agent::test_git_path(cwd))
+            .args(&args)
             .env("LC_ALL", "C")
             .output()
             .unwrap();
@@ -1069,17 +1073,18 @@ mod tests {
         git(&parent, &["config", "user.email", "test@example.invalid"]);
         git(&parent, &["config", "user.name", "Test"]);
         git(&parent, &["commit", "-q", "--allow-empty", "-m", "parent"]);
+        let args = vec![
+            "-c".to_string(),
+            "protocol.file.allow=always".to_string(),
+            "submodule".to_string(),
+            "add".to_string(),
+            "-q".to_string(),
+            crate::super_agent::test_git_text(child.to_str().unwrap()),
+            "sub".to_string(),
+        ];
         let added = Command::new("git")
-            .current_dir(&parent)
-            .args([
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "add",
-                "-q",
-                child.to_str().unwrap(),
-                "sub",
-            ])
+            .current_dir(crate::super_agent::test_git_path(&parent))
+            .args(&args)
             .output()
             .unwrap();
         assert!(

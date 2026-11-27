@@ -51,13 +51,13 @@ async fn actual_cli_switches_and_requests_listing() {
         let id = store
             .create(temp.path(), "fixture-model", "fixture")
             .unwrap();
-        std::fs::write(paths.data_dir.join("providers.json"),json!([{
+        deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/providers.json"),json!([{
             "id":"fixture","name":"fixture","base_url":base,"api_key":"sk-test-only","api_format":"openai","enabled":true,
             "models":[{"id":"fixture-model","name":"fixture","enabled":true,"context_window":128000,"max_tokens":4096,"supports_web_search":false}]
         }]).to_string()).unwrap();
         if let Some(setting) = setting {
-            std::fs::write(
-                paths.data_dir.join("settings.json"),
+            deepseek_code_core::data_layout::write_config_file(
+                paths.data_dir.join("config/settings.json"),
                 json!({"requestRecording":{"enabled":setting}}).to_string(),
             )
             .unwrap();
@@ -92,7 +92,7 @@ async fn actual_cli_switches_and_requests_listing() {
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("RECORD_REPLY"));
         assert_eq!(
-            paths.data_dir.join("request-records").exists(),
+            paths.data_dir.join("diagnostics/request-records").exists(),
             *expected,
             "case {index}"
         );

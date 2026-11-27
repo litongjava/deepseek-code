@@ -28,6 +28,7 @@ fn advanced_tools_respect_read_edit_and_execution_modes() {
         "EnterWorktree",
         "ExitWorktree",
         "CronCreate",
+        "Python",
     ] {
         assert!(
             matches!(
@@ -93,6 +94,7 @@ async fn registered_tools_dispatch_and_project_reads_have_no_side_effects() {
         "EnterWorktree",
         "ExitWorktree",
         "CronCreate",
+        "Python",
     ] {
         assert_eq!(registered.iter().filter(|t| t.name == name).count(), 1);
     }

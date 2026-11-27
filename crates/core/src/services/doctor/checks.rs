@@ -89,8 +89,9 @@ pub fn inspect(
         markdown_agents(report, &root.join("agents"), &mut agents);
     }
     if let Some(data) = data {
-        settings(report, &data.join("settings.json"));
-        keybindings(report, &data.join("keybindings.json"));
+        let layout = crate::data_layout::DataLayout::from_root(&data);
+        settings(report, &layout.config_file("settings.json"));
+        keybindings(report, &layout.config_file("keybindings.json"));
         report.json("application MCP", &data.join("mcp-servers.json"));
     }
     installation(report, env);

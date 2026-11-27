@@ -20,6 +20,33 @@ pub mod state;
 pub mod store;
 pub mod watcher;
 
+/// Absolute, slash-separated fixture root for logical task specs. Windows has
+/// no POSIX `/workspace` root, so tests use a drive-qualified path there.
+#[cfg(all(test, windows))]
+pub(crate) const TEST_WORKSPACE: &str = "C:/workspace";
+#[cfg(all(test, not(windows)))]
+pub(crate) const TEST_WORKSPACE: &str = "/workspace";
+
+/// Git for Windows rejects the extended-length prefix that canonicalization
+/// adds. Test helpers pass these normalized arguments to Git; product paths
+/// remain canonical so identity checks still compare like with like.
+#[cfg(all(test, windows))]
+pub(crate) fn test_git_text(value: &str) -> String {
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
+}
+#[cfg(all(test, not(windows)))]
+pub(crate) fn test_git_text(value: &str) -> String {
+    value.to_string()
+}
+#[cfg(all(test, windows))]
+pub(crate) fn test_git_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(test_git_text(&path.to_string_lossy()))
+}
+#[cfg(all(test, not(windows)))]
+pub(crate) fn test_git_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
 pub use config::{PlanApprovalPolicy, SuperAgentConfig};
 pub use model::{
     AcceptanceCriterion, AgentRole, AgentStatus, Approval, ApprovalStatus, ApprovalType,

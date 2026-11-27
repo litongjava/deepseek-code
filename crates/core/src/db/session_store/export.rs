@@ -69,17 +69,18 @@ impl Stores {
         layout::allow_entry()?;
         check()?;
         let key = layout::storage_key(id)?;
-        let locks = path.join("session-locks");
+        let data_layout = crate::data_layout::DataLayout::from_root(&path);
+        let locks = data_layout.lock_path("session");
         let _namespace = shared_lock(&locks.join(".directory"), check)?;
         let _key = shared_lock(&locks.join(&key), check)?;
-        let shard = path.join("sessions").join(&key);
+        let shard = data_layout.sessions().join(&key);
         ensure!(
             shard.join("session.db").is_file()
                 && !shard.join(super::conversation_edit::PENDING).try_exists()?,
             "Session unavailable"
         );
         let uuid = std::fs::read_to_string(locks.join(".initialized"))?;
-        let global = path.join("global.db");
+        let global = data_layout.global_db();
         let _permit = layout::Permits::take(1);
         let mut stream = Stream {
             output,

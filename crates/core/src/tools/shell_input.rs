@@ -15,8 +15,10 @@ use serde_json::{json, Value};
 use std::{
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(unix)]
+use std::time::Instant;
 
 /// Bytes one call may write. Smaller than typical demand so a call stays bounded.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -27,6 +29,7 @@ pub(crate) const MAX_WRITE_MS: u64 = 60_000;
 
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Write UTF-8 data to a managed pipe or PTY in the owning session".into()),
         name: "TaskInput".into(),
         description: "Write UTF-8 data to a managed Bash pipe, Linux PTY or Windows ConPTY in the owning session. data is written before eof. For pipe, eof permanently closes stdin; for PTY, eof sends the terminal's current canonical VEOF character, which is not a permanent close and may only deliver buffered input. Raw mode/disabled VEOF rejects EOF. Windows eof:true is unsupported and rejects the entire call before data: Ctrl+Z/Ctrl+D are application-specific input, not a universal close; send them explicitly with data if appropriate. Windows input works only in the original owner process (including persistent worker resume). PTY resize:{rows,cols} must be a separate call, without data/eof. Validate all arguments before effects. timeout bounds one call (default 10000, max 60000 ms); bytes_written counts OS-accepted bytes, not consumption. On Windows write errors, bytes_written_lower_bound:true means unreported partial progress is possible. Partial/unknown writes are never retried automatically. Normal permissions, hooks and cancellation apply; plan mode refuses input. Use TaskGet for merged PTY output and TaskStop to terminate the session.".into(),
         input_schema: json!({

@@ -159,7 +159,7 @@ pub(crate) fn start(
         &session,
     )?;
     let id = task["id"].as_str().context("Task ID missing")?.to_string();
-    let directory = root.join("shell-tasks").join(&session).join(&id);
+    let directory = root.join("tasks/shell").join(&session).join(&id);
     // Register on the caller's thread, before the child exists and before the
     // owner thread is spawned. `has_active()` is therefore true for every
     // instant in which a started PTY is alive, and shutdown cannot observe a
@@ -3331,7 +3331,7 @@ mod tests {
 
         fn directory(&self) -> PathBuf {
             self.root
-                .join("shell-tasks")
+                .join("tasks/shell")
                 .join(&self.session)
                 .join(&self.id)
         }
@@ -3708,7 +3708,7 @@ mod tests {
         .unwrap();
         let stale_directory = fixture
             .root
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&stale_session)
             .join(stale_id);
         std::fs::create_dir_all(&stale_directory).unwrap();
@@ -4386,7 +4386,7 @@ mod tests {
             &session,
         )
         .unwrap();
-        let task_directory = root.join("shell-tasks").join(&session).join(&id);
+        let task_directory = root.join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&task_directory).unwrap();
         // Missing: the historical presentation is unchanged, and nothing is
         // reported as finished.
@@ -4442,7 +4442,7 @@ mod tests {
             &pipe_session,
         )
         .unwrap();
-        let pipe_directory = root.join("shell-tasks").join(&pipe_session).join(&pipe_id);
+        let pipe_directory = root.join("tasks/shell").join(&pipe_session).join(&pipe_id);
         std::fs::create_dir_all(&pipe_directory).unwrap();
         std::fs::write(
             pipe_directory.join("supervisor-state.json"),
@@ -4533,7 +4533,7 @@ mod tests {
             message.contains("Spawning the managed PTY owner thread"),
             "{message}"
         );
-        let task_root = root.join("shell-tasks").join(&session);
+        let task_root = root.join("tasks/shell").join(&session);
         let ids: Vec<String> = std::fs::read_dir(&task_root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -5593,7 +5593,7 @@ mod tests {
         let owner_pid = started["owner_pid"].as_u64().unwrap() as u32;
         let task_id = started["task_id"].as_str().unwrap().to_owned();
         let leader = started["terminal_pid"].as_u64().unwrap() as u32;
-        let task_directory = root.join("shell-tasks").join(&session).join(&task_id);
+        let task_directory = root.join("tasks/shell").join(&session).join(&task_id);
         // The supervisor is a separate process started before the gate: its own
         // PID differs from the owner's, and it records the owner identity it
         // will watch. The cleanup state written after the owner dies is
@@ -6006,7 +6006,7 @@ mod tests {
             Some(session.as_str()),
             "{reached}"
         );
-        let task_directory = root.join("shell-tasks").join(&session).join(&task_id);
+        let task_directory = root.join("tasks/shell").join(&session).join(&task_id);
         assert_eq!(helper.0.id(), owner_pid);
         assert_eq!(
             process_identity(owner_pid).map(|(_, start)| start),

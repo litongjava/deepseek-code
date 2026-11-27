@@ -64,6 +64,7 @@ mod monitor_completion;
 pub(crate) mod output_page;
 pub(crate) mod path_scope;
 pub(crate) mod provider_search;
+pub mod python;
 mod pty_bash;
 #[cfg(target_os = "linux")]
 pub(crate) mod pty_gate;
@@ -111,42 +112,29 @@ pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
 }
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-// ---- memory tool stubs (dispatched to MemEx at runtime by tool_loop) ----
-
-fn tool_memory_search(input: serde_json::Value) -> Result<serde_json::Value> {
-    Ok(serde_json::json!({
-        "stub": true,
-        "message": "memory_search should be intercepted by ToolLoopExecutor",
-        "query": input["query"],
-        "results": []
-    }))
-}
-
-fn tool_memory_ingest(input: serde_json::Value) -> Result<serde_json::Value> {
-    Ok(serde_json::json!({
-        "stub": true,
-        "message": "memory_ingest should be intercepted by ToolLoopExecutor",
-        "content": input["content"],
-        "stored": false
-    }))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// One line for the loadable-tool listing. It is shown as written (only
+    /// whitespace is collapsed) and never cut, so a tool can keep a detail that
+    /// its first description sentence does not carry. Without it the listing
+    /// falls back to the complete `description`; `Customization::tool_summaries`
+    /// overrides both. It is never serialized: request bodies, snapshots and
+    /// cached tool JSON keep their exact bytes.
+    #[serde(default, skip_serializing)]
+    pub summary: Option<String>,
 }
 
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let bash_tool = shell_tool_description::bash_tool();
     let mut defs = vec![
         image_generation::definition(),
-        ToolDefinition { name: "Skill".into(), description: "Invoke a skill by name. The available skills are listed in a system reminder in the conversation, one line each with an optional description and execution context. Pass the exact name from that list without a leading slash; plugin-provided skills use the plugin:skill form. args is optional and is passed to the skill's template. A skill marked context: fork runs in an isolated child conversation and returns its result. Call this tool rather than opening a skill's file yourself; the tool supplies shell context and fork isolation.".into(), input_schema:serde_json::json!({"type":"object","properties":{"skill":{"description":"Exact skill name from the reminder, without a leading slash; plugin skills use plugin:skill.","type":"string"},"args":{"description":"Optional arguments passed to the skill's template.","type":"string"}},"required":["skill"],"additionalProperties":false}) },
+        ToolDefinition {
+        summary: Some("Invoke a skill by name; its instructions come back in this turn".into()), name: "Skill".into(), description: "Invoke a skill by name. The available skills are listed in a system reminder in the conversation, one line each with an optional description and execution context. Pass the exact name from that list without a leading slash; plugin-provided skills use the plugin:skill form. args is optional and is passed to the skill's template. A skill marked context: fork runs in an isolated child conversation and returns its result. Call this tool rather than opening a skill's file yourself; the tool supplies shell context and fork isolation.".into(), input_schema:serde_json::json!({"type":"object","properties":{"skill":{"description":"Exact skill name from the reminder, without a leading slash; plugin skills use plugin:skill.","type":"string"},"args":{"description":"Optional arguments passed to the skill's template.","type":"string"}},"required":["skill"],"additionalProperties":false}) },
         notebook::definition(),
         lsp::definition(),
         // `worktree` stays dispatchable for older transcripts; the model sees Enter/ExitWorktree.
@@ -157,6 +145,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         crate::services::compaction_requests::definition(),
         context_search::definition(),
         ToolDefinition {
+            summary: Some("Load deferred tools by their exact names so the next request carries them".into()),
             name: TOOL_LOAD_NAME.into(),
             description: "Load deferred tools by their exact, case-sensitive names. Use the names listed in the conversation's system reminder and pass them as an array, for example {\"names\":[\"ListDir\",\"WebFetch\"]}. Call the loaded tools starting with the next model request. Tool loading does not grant permission to run a tool.".into(),
             input_schema: serde_json::json!({
@@ -175,6 +164,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Execute an installed, enabled plugin command with OS user permissions".into()),
             name: "PluginRun".into(),
             description: "Execute an installed, enabled plugin command with OS user permissions. Requires execution approval.".into(),
             input_schema: serde_json::json!({"type":"object","properties":{"plugin":{"type":"string"},"command":{"type":"string"},"input":{}},"required":["plugin","command"]}),
@@ -182,6 +172,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         github::definition(),
         read::definition(),
         ToolDefinition {
+            summary: Some("Create a file or replace its whole contents".into()),
             name: "Write".to_string(),
             description: "Create a file or replace its whole contents with UTF-8 text. Missing parent directories are created. If the path already exists, read it in this conversation first and leave it unchanged since, or the call is refused. For a partial change to an existing file, use Edit or MultiEdit instead. The result reports the resolved path and how many bytes were written.".to_string(),
             input_schema: serde_json::json!({
@@ -195,8 +186,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Replace one exact string in a workspace file".into()),
             name: "Edit".to_string(),
-            description: "Change a file by replacing an exact string. Read the file first in this conversation and leave it unchanged since, or the call is refused. old_string must match exactly once, indentation included, unless replace_all is true. LF and CRLF compare as equal, and replacements keep the file's existing line-ending style. A miss or duplicate match returns an error and writes nothing. Exclude the line-number prefix that Read adds; match only the file text.".to_string(),
+            description: "Change a file by replacing one exact string. If you need two or more non-adjacent edits in the same file, use MultiEdit in one call instead of sequential Edit calls; batch edits to independent files in parallel in one turn. Read the file first in this conversation and leave it unchanged since, or the call is refused. old_string must match exactly once, indentation included, unless replace_all is true. LF and CRLF compare as equal, and replacements keep the file's existing line-ending style. A miss or duplicate match returns an error and writes nothing. Exclude the line-number prefix that Read adds; match only the file text.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -210,6 +202,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Run a shell command in the session shell; background and detached runs survive the call".into()),
             name: "Bash".to_string(),
             description: bash_tool.description().to_owned(),
             input_schema: serde_json::json!({
@@ -231,6 +224,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Run a script in the background and get notified for each matching output line".into()),
             name: "Monitor".to_string(),
             description: format!("Runs a shell script in the background for this session and streams its output to you: every stdout line becomes a notification that wakes you, so you never poll. Lines within 200 ms arrive together. Use it to watch logs, builds, CI or any condition over time: write a script that prints a line only when something you would act on happens (for example `tail -f app.log | grep --line-buffered ERROR`, or a polling loop that echoes on change). Each pipe stage must flush per line. stderr is logged, not notified. The monitor expires after timeout_ms (default 30 min, max 60 min). Set max_runtime_ms to keep watching the same live script for another timeout_ms at each deadline, up to that total runtime. A renewal can send one notification, with at most one renewal notice per minute. You are notified when the monitor exits, expires or is stopped. More than 30 output events a minute stops it, so filter tightly. It runs only while this session runs. TaskStop with its task_id stops it. For a single 'tell me when X finishes', use Bash run_in_background instead.{}", bash_tool.monitor_suffix()),
             input_schema: serde_json::json!({
@@ -246,7 +240,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        python::definition(),
         ToolDefinition {
+            summary: Some("List the contents of a directory".into()),
             name: "ListDir".to_string(),
             description: "List the contents of a directory.".to_string(),
             input_schema: serde_json::json!({
@@ -258,8 +254,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Read a web page and answer a prompt from it with the session model".into()),
             name: "WebFetch".to_string(),
-            description: "Read a web page and answer prompt from it with the session's model. The result is that answer, not the page markup or the raw response body. http(s) only; public http is upgraded to https. Local and private addresses need the user's approval unless the session is in bypass mode. Same-host redirects are followed; a cross-host redirect is returned for you to fetch. HTML becomes readable text, and text, JSON, XML and JavaScript are read as-is. Downloads stop at 2 MiB, answers cover up to 50,000 characters from offset, and next_offset continues a truncated page; a successful download is reused for fifteen minutes. When you need the exact response body, such as from a local JSON endpoint, run curl or a similar command through Bash instead.".to_string(),
+            description: "Read a web page and answer prompt from it with the session's model. The result is that answer, not the page markup or the raw response body. http(s) only; public http is upgraded to https. Local and private addresses need the user's approval unless the session is in bypass mode. Public redirects are followed automatically, but a public page is never allowed to redirect to a local or private address. HTML becomes readable text, and text, JSON, XML and JavaScript are read as-is. Cleaned text of 20,000 characters or fewer is returned directly; only longer text is summarized by the model from prompt, and a summary that exceeds its output limit falls back to the first 20,000 characters of the page text. A failed direct fetch or a JavaScript-only shell page falls back to the Jina Reader automatically. Downloads stop at 2 MiB, answers cover up to 50,000 characters from offset, and next_offset continues a truncated page; a successful download is reused for fifteen minutes. When you need the exact response body, such as from a local JSON endpoint, run curl or a similar command through Bash instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -272,6 +269,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Search the web with the provider native search, or its public adapter when configured".into()),
             name: "WebSearch".to_string(),
             description: "Use the provider's native web search, or its public adapter when configured. Each call returns at most eight results with a title, URL and snippet. allowed_domains keeps matching hosts and blocked_domains drops them; both include subdomains. The query must be non-empty and at most 2,000 characters. If the provider has no native search or has search disabled, the call fails with a settings error; do not report that as a successful search. Use the system prompt date to judge recency.".to_string(),
             input_schema: serde_json::json!({
@@ -287,8 +285,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         apply_patch_tool::definition(),
         ToolDefinition {
+            summary: Some("Apply several exact replacements to one file in a single call".into()),
             name: "MultiEdit".to_string(),
-            description: "Apply several exact replacements to one file in a single call. Edits run in order against the working text, and the file is written only if every edit succeeds; one failure returns the failing edit's error and leaves the file unchanged. Read the file first and leave it unchanged since. Each old_string must be unique unless its replace_all is true, and LF and CRLF compare as equal.".to_string(),
+            description: "Apply several exact replacements to one file in a single call. Prefer MultiEdit over sequential Edit calls whenever making two or more non-adjacent changes to the same file (e.g. imports + logic + tests in one call: {\"file_path\":\"src/lib.rs\",\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"},{\"old_string\":\"...\",\"new_string\":\"...\"}]}). Edits run in order against the working text, and the file is written only if every edit succeeds; one failure returns the failing edit's error and leaves the file unchanged. Read the file first and leave it unchanged since. Each old_string must be unique unless its replace_all is true, and LF and CRLF compare as equal.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -309,6 +308,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Ask the user up to four questions and wait for the answers".into()),
             name: "AskUserQuestion".to_string(),
             description: "Ask when a decision belongs to the user: the request, the code and sensible defaults leave it open, and the answer changes what you do next. The schema allows 1-4 questions per call; each question has a short header, 2-4 options with a label and a description, and an optional multiSelect flag. Put your recommended option first. If a conventional default or something you can check settles it, decide yourself, say why, and continue.".to_string(),
             input_schema: serde_json::json!({
@@ -351,6 +351,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: Some("Control the computer: move the mouse, click, type text, press keys and take screenshots".into()),
             name: "computer_use".to_string(),
             description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally; results contain screenshot_path (absolute path) and mime_type, not Base64 image data.".to_string(),
             input_schema: serde_json::json!({
@@ -396,30 +397,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["action_type"]
-            }),
-        },
-        ToolDefinition {
-            name: "memory_search".to_string(),
-            description: "Search your persistent memory for relevant information from previous conversations. Use this to recall important context, decisions, or facts from past interactions.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The search query to find relevant memories" },
-                    "top_k": { "type": "number", "description": "Number of results to return (default: 5)" }
-                },
-                "required": ["query"]
-            }),
-        },
-        ToolDefinition {
-            name: "memory_ingest".to_string(),
-            description: "Store important information in persistent memory for future retrieval. Use this to remember key decisions, architecture, configurations, or any information that should persist across conversations.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "The information to store in memory" },
-                    "importance": { "type": "number", "description": "Importance score 0.0-1.0 (default: auto-estimated)" }
-                },
-                "required": ["content"]
             }),
         },
     ];
@@ -481,8 +458,6 @@ macro_rules! tool_dispatch {
             "ApplyPatch" => apply_patch_tool::execute($input, $cwd),
             "AskUserQuestion" => tool_ask_user_question($input),
             "computer_use" => tool_computer_use($input),
-            "memory_search" => tool_memory_search($input),
-            "memory_ingest" => tool_memory_ingest($input),
             _ if $name.is_empty() => Ok(serde_json::json!({
                 "error": "Tool call has no name; the model returned an incomplete tool call"
             })),
@@ -514,6 +489,9 @@ pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<s
         name != "Monitor",
         "Monitor requires the asynchronous tool entry point"
     );
+    if name == "Python" {
+        return python::execute_blocking(input, cwd);
+    }
     tool_dispatch!(name, input, cwd,
         Bash => tool_bash(input, cwd),
         WebFetch => tool_web_fetch_blocking(input),
@@ -529,6 +507,9 @@ pub async fn execute_tool_async(
     let input = directory_input(name, input, cwd)?;
     if name == "Monitor" {
         return tool_bash_async(monitor_input(input)?, cwd).await;
+    }
+    if name == "Python" {
+        return python::execute(input, cwd).await;
     }
     if name == "computer_use" {
         return tool_computer_use_async(input).await;
@@ -735,6 +716,293 @@ fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {
     false
 }
 
+/// Whether two working directories name the same place; the shell footer
+/// writes canonical paths while the engine may have started from a symlink.
+fn same_directory(a: &str, b: &str) -> bool {
+    match (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => Path::new(a) == Path::new(b),
+    }
+}
+
+/// Prefix of the one-line coaching note added to a foreground `Bash` result
+/// when the command starts with a redundant `cd` into the already-active cwd.
+pub(crate) const REDUNDANT_CD_NOTE_PREFIX: &str = "Bash already runs in ";
+
+/// Prefix of the one-line coaching note added to a foreground `Bash` result
+/// when the command only reads or searches files via shell utilities instead
+/// of using parallel `Read`/`Grep`/`Glob` tool calls.
+pub(crate) const SHELL_READ_SEARCH_NOTE_PREFIX: &str = "Use dedicated Read/Grep/Glob";
+
+/// Returns true when `command` only uses shell read/search utilities (`cat`,
+/// `sed -n`, `head`, `tail`, `grep`, `rg`, `find`) — optionally separated by
+/// `echo`, `;`, `&&`, or a leading `cd` — with no file writes or real build/git
+/// commands. Commands like `cargo test | tail -40`, `git diff | grep`, or
+/// `sed -i` return `false`.
+pub(crate) fn is_pure_shell_read_or_search(command: &str) -> bool {
+    // Any output redirection or in-place sed edit is not a pure read/search.
+    if command.contains('>') {
+        return false;
+    }
+    let mut saw_read_or_search = false;
+    for raw_part in command.split([';', '\n']) {
+        for sub in raw_part.split("&&") {
+            let segment = sub.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            // Ignore separator echoes and leading `cd` segments.
+            let first = segment.split_whitespace().next().unwrap_or_default();
+            if matches!(first, "echo" | "printf" | "cd") {
+                continue;
+            }
+            // Every pipe stage in this segment must be a read/search/filter utility.
+            for (idx, pipe_stage) in segment.split('|').enumerate() {
+                let stage = pipe_stage.trim();
+                let mut words = stage.split_whitespace();
+                let Some(cmd) = words.next() else {
+                    return false;
+                };
+                if idx == 0 {
+                    match cmd {
+                        "cat" | "head" | "tail" | "grep" | "rg" | "find" => {
+                            saw_read_or_search = true;
+                        }
+                        "sed" => {
+                            // Only treat `sed -n` (line-range printing) as read; never `sed -i`.
+                            let args: Vec<&str> = words.collect();
+                            if args.iter().any(|a| *a == "-i" || a.starts_with("-i"))
+                                || !args.iter().any(|a| *a == "-n")
+                            {
+                                return false;
+                            }
+                            saw_read_or_search = true;
+                        }
+                        _ => return false,
+                    }
+                } else if !matches!(
+                    cmd,
+                    "head" | "tail" | "grep" | "rg" | "sed" | "wc" | "sort" | "uniq" | "cut"
+                ) {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_read_or_search
+}
+
+/// Returns true when `command` begins with a leading `cd <target>` that
+/// resolves to `current_cwd` itself (so the `cd` is a no-op).
+///
+/// Only recognizes unambiguous literal targets (unquoted, single-quoted, or
+/// double-quoted without shell expansion) followed by `&&`, `;`, newline, or
+/// end-of-command. Subshells, variables, `cd -`, bare `cd`, and moves into a
+/// different directory return `false`.
+pub(crate) fn has_redundant_leading_cd(command: &str, current_cwd: &str) -> bool {
+    let trimmed = command.trim_start();
+    let Some(rest) = trimmed.strip_prefix("cd") else {
+        return false;
+    };
+    let Some(first) = rest.chars().next() else {
+        return false;
+    };
+    if !matches!(first, ' ' | '\t') {
+        return false;
+    }
+    let mut rest = rest.trim_start_matches([' ', '\t']);
+    if let Some(after_dash) = rest.strip_prefix("--") {
+        if after_dash.starts_with([' ', '\t']) {
+            rest = after_dash.trim_start_matches([' ', '\t']);
+        }
+    }
+    if rest.is_empty() || rest.starts_with('-') {
+        return false;
+    }
+    let (target, after) = match rest.as_bytes()[0] {
+        b'\'' => {
+            let inner = &rest[1..];
+            let Some(end) = inner.find('\'') else {
+                return false;
+            };
+            (&inner[..end], &inner[end + 1..])
+        }
+        b'"' => {
+            let inner = &rest[1..];
+            let Some(end) = inner.find('"') else {
+                return false;
+            };
+            let candidate = &inner[..end];
+            if candidate.contains(['$', '`', '\\']) {
+                return false;
+            }
+            (candidate, &inner[end + 1..])
+        }
+        _ => {
+            let end = rest
+                .find(|c: char| c.is_ascii_whitespace() || matches!(c, '&' | ';' | '|' | '>' | '<'))
+                .unwrap_or(rest.len());
+            let candidate = &rest[..end];
+            if candidate.is_empty() || candidate.contains(['$', '`', '\\', '~', '*', '?']) {
+                return false;
+            }
+            (candidate, &rest[end..])
+        }
+    };
+    if target.is_empty() {
+        return false;
+    }
+    let after = after.trim_start_matches([' ', '\t']);
+    if !(after.is_empty()
+        || after.starts_with('\n')
+        || after.starts_with('\r')
+        || after.starts_with(';')
+        || after.starts_with("&&"))
+    {
+        return false;
+    }
+    if target == "." || target == "./" {
+        return true;
+    }
+    let resolved = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        Path::new(current_cwd).join(target)
+    };
+    let Some(resolved) = resolved.to_str() else {
+        return false;
+    };
+    same_directory(resolved, current_cwd)
+}
+
+#[cfg(test)]
+#[test]
+fn redundant_leading_cd_detection_cases() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    let sub = project.join("sub");
+    let spaced = project.join("my repo");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::create_dir_all(&spaced).unwrap();
+    let cwd = project.to_str().unwrap();
+    let sub_str = sub.to_str().unwrap();
+    let spaced_str = spaced.to_str().unwrap();
+
+    // Redundant leading `cd` into the already-active cwd.
+    assert!(has_redundant_leading_cd(&format!("cd {cwd} && git status"), cwd));
+    assert!(has_redundant_leading_cd(&format!("  cd {cwd}/ && ls"), cwd));
+    assert!(has_redundant_leading_cd(&format!("cd -- {cwd}; pwd"), cwd));
+    assert!(has_redundant_leading_cd(&format!("cd '{spaced_str}' && ls"), spaced_str));
+    assert!(has_redundant_leading_cd(&format!("cd \"{spaced_str}\"\nls"), spaced_str));
+    assert!(has_redundant_leading_cd("cd . && git diff", cwd));
+    assert!(has_redundant_leading_cd("cd ./ ; git diff", cwd));
+    assert!(has_redundant_leading_cd(&format!("cd {cwd}"), cwd));
+
+    // Legitimate directory changes or ambiguous shell syntax must not match.
+    assert!(!has_redundant_leading_cd(&format!("cd {sub_str} && ls"), cwd));
+    assert!(!has_redundant_leading_cd("cd sub && ls", cwd));
+    assert!(!has_redundant_leading_cd("cd .. && ls", cwd));
+    assert!(!has_redundant_leading_cd("cd - && ls", cwd));
+    assert!(!has_redundant_leading_cd("cd && ls", cwd));
+    assert!(!has_redundant_leading_cd("cd $REPO && ls", cwd));
+    assert!(!has_redundant_leading_cd("cd \"$REPO\" && ls", cwd));
+    assert!(!has_redundant_leading_cd(&format!("(cd {cwd} && ls)"), cwd));
+    assert!(!has_redundant_leading_cd(&format!("git status && cd {cwd}"), cwd));
+    assert!(!has_redundant_leading_cd(&format!("echo 'cd {cwd}'"), cwd));
+    assert!(!has_redundant_leading_cd(&format!("cd {cwd} || exit 1"), cwd));
+}
+
+#[cfg(test)]
+#[test]
+fn pure_shell_read_or_search_detection_cases() {
+    assert!(is_pure_shell_read_or_search("sed -n '1,100p' src/lib.rs"));
+    assert!(is_pure_shell_read_or_search(
+        "sed -n '1,50p' a.rs; echo '==='; sed -n '60,120p' b.rs"
+    ));
+    assert!(is_pure_shell_read_or_search("grep -rn \"foo\" src/ | head -30"));
+    assert!(is_pure_shell_read_or_search("cd /repo && grep -n \"bar\" a.rs"));
+    assert!(is_pure_shell_read_or_search("cat src/lib.rs"));
+
+    assert!(!is_pure_shell_read_or_search("cargo test 2>&1 | tail -40"));
+    assert!(!is_pure_shell_read_or_search("git diff | grep foo"));
+    assert!(!is_pure_shell_read_or_search("sed -i '' 's/a/b/' a.rs"));
+    assert!(!is_pure_shell_read_or_search("cat a.rs > b.rs"));
+    assert!(!is_pure_shell_read_or_search("codegraph explore foo | head -20"));
+    assert!(!is_pure_shell_read_or_search("git status --short"));
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn bash_adds_redundant_cd_note_only_when_requested_for_same_cwd() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    let sub = project.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let cwd = project.to_str().unwrap();
+    let sub_str = sub.to_str().unwrap();
+    let state = project.join("cwd-state");
+
+    // Without __hint_redundant_cd, no coaching note is attached.
+    let quiet = tool_bash_async(
+        serde_json::json!({
+            "command": format!("cd {cwd} && pwd -P"),
+            "__cwd_state": state.to_string_lossy()
+        }),
+        cwd,
+    )
+    .await
+    .unwrap();
+    assert!(quiet.get("note").is_none(), "{quiet}");
+
+    // With __hint_redundant_cd, redundant leading cd gets a concise note.
+    let hinted = tool_bash_async(
+        serde_json::json!({
+            "command": format!("cd {cwd} && pwd -P"),
+            "__cwd_state": state.to_string_lossy(),
+            "__hint_redundant_cd": true
+        }),
+        cwd,
+    )
+    .await
+    .unwrap();
+    let note = hinted["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with(REDUNDANT_CD_NOTE_PREFIX) && note.contains(cwd),
+        "expected redundant-cd note, got: {hinted}"
+    );
+
+    // Moving into a different directory never triggers the redundant-cd note.
+    let moved = tool_bash_async(
+        serde_json::json!({
+            "command": format!("cd {sub_str} && pwd -P"),
+            "__cwd_state": state.to_string_lossy(),
+            "__hint_redundant_cd": true
+        }),
+        cwd,
+    )
+    .await
+    .unwrap();
+    assert!(moved.get("note").is_none(), "{moved}");
+
+    // Once persisted cwd is `sub`, a redundant `cd sub_str` is detected against `sub`.
+    let hinted_sub = tool_bash_async(
+        serde_json::json!({
+            "command": format!("cd {sub_str} && pwd -P"),
+            "__cwd_state": state.to_string_lossy(),
+            "__hint_redundant_cd": true
+        }),
+        cwd,
+    )
+    .await
+    .unwrap();
+    let sub_note = hinted_sub["note"].as_str().unwrap_or_default();
+    assert!(
+        sub_note.starts_with(REDUNDANT_CD_NOTE_PREFIX) && sub_note.contains(sub_str),
+        "expected redundant-cd note for persisted sub cwd, got: {hinted_sub}"
+    );
+}
+
 #[cfg(all(test, unix))]
 #[tokio::test]
 async fn bash_keeps_its_directory_and_resets_outside_the_project() {
@@ -745,20 +1013,40 @@ async fn bash_keeps_its_directory_and_resets_outside_the_project() {
     let cwd = project.to_str().unwrap();
     let state = project.join("cwd-state");
     let run = |command: &str| serde_json::json!({"command":command,"__cwd_state":state.to_string_lossy()});
-    tool_bash_async(run("cd sub"), cwd).await.unwrap();
+    let initial = tool_bash_async(run("pwd -P"), cwd).await.unwrap();
+    assert_eq!(initial["cwd"], serde_json::json!(cwd));
+    let moved = tool_bash_async(run("cd sub"), cwd).await.unwrap();
+    assert_eq!(
+        moved["cwd"].as_str().unwrap(),
+        project.join("sub").to_str().unwrap()
+    );
     let out = tool_bash_async(run("pwd -P"), cwd).await.unwrap();
+    assert!(out.get("cwd").is_none(), "{out}");
     assert_eq!(
         out["stdout"].as_str().unwrap().trim(),
         project.join("sub").to_str().unwrap()
     );
+    // Resume/compaction forces a single cwd reminder even when unchanged.
+    let reminded = tool_bash_async(
+        serde_json::json!({"command":"pwd -P","__cwd_state":state.to_string_lossy(),"__report_cwd":true}),
+        cwd,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reminded["cwd"].as_str().unwrap(),
+        project.join("sub").to_str().unwrap()
+    );
     // Exiting early keeps the previous directory.
-    let _ = tool_bash_async(run("cd /; exit 3"), cwd).await;
+    let early = tool_bash_async(run("cd /; exit 3"), cwd).await.unwrap();
+    assert!(early.get("cwd").is_none(), "{early}");
     assert!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"]
         .as_str()
         .unwrap()
         .contains("sub"));
     let reset = tool_bash_async(run("cd /"), cwd).await.unwrap();
     assert_eq!(reset["note"], format!("Shell cwd was reset to {cwd}"));
+    assert_eq!(reset["cwd"], serde_json::json!(cwd));
     assert_eq!(
         tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"]
             .as_str()
@@ -780,6 +1068,32 @@ async fn bash_keeps_its_directory_and_resets_outside_the_project() {
             .trim(),
         cwd
     );
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn concurrent_foreground_bash_calls_preserve_saved_cwd() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    let sub = project.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let cwd = project.to_str().unwrap();
+    let state = project.join("cwd-state");
+    let run = |command: &str| serde_json::json!({"command":command,"__cwd_state":state.to_string_lossy()});
+    let moved = tool_bash_async(run("cd sub"), cwd).await.unwrap();
+    assert_eq!(moved["cwd"], serde_json::json!(sub.to_str().unwrap()));
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| tool_bash_async(run("pwd -P"), cwd))
+        .collect();
+    for result in futures::future::try_join_all(handles).await.unwrap() {
+        assert!(result.get("cwd").is_none(), "{result}");
+        assert_eq!(
+            result["stdout"].as_str().unwrap().trim(),
+            sub.to_str().unwrap()
+        );
+    }
 }
 
 /// A batch file captures errorlevel on a separate parsed line before bookkeeping.
@@ -1097,7 +1411,10 @@ async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json:
     let result = manager.execute_action(action).await?;
     let screenshot = match result.screenshot.as_deref().filter(|data| !data.is_empty()) {
         Some(data) => {
-            let directory = crate::runtime::resolve_default_data_dir()?.join("screenshots");
+            let directory = crate::data_layout::DataLayout::from_root(
+                &crate::runtime::resolve_default_data_dir()?,
+            )
+            .screenshots();
             Some(screenshot_file::save(&directory, data)?)
         }
         None => None,
@@ -1311,13 +1628,19 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             .ok()
             .map(|text| text.trim_start_matches('\u{feff}').trim().to_owned())
     };
-    let safe_cwd = match cwd_state.as_ref().and_then(saved_cwd) {
-        Some(saved) if Path::new(&saved).is_dir() && is_path_allowed(Path::new(&saved), cwd) => {
-            saved
+    let saved_before = cwd_state.as_ref().and_then(saved_cwd);
+    let report_initial = cwd_state.is_some()
+        && !saved_before.as_deref().is_some_and(|saved| {
+            Path::new(saved).is_dir() && is_path_allowed(Path::new(saved), cwd)
+        });
+    let safe_cwd = match saved_before.as_deref() {
+        Some(saved) if Path::new(saved).is_dir() && is_path_allowed(Path::new(saved), cwd) => {
+            saved.to_owned()
         }
         _ => safe_cwd,
     };
 
+    let raw_command = command.to_owned();
     let command = if flag == "-Command" {
         cmd.args(["-NoProfile", "-NonInteractive"]);
         utf8::powershell_command(command)
@@ -1353,22 +1676,45 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     } else {
         command
     };
-    let command = match &cwd_state {
-        // A command that exits early keeps the previous directory.
-        Some(state) if resolved.wsl.is_some() => {
-            let path = crate::services::wsl::linux_path(resolved.wsl.as_ref().unwrap(), state).await?;
+    struct CwdCaptureFile(PathBuf);
+    impl Drop for CwdCaptureFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let cwd_capture = cwd_state.as_ref().map(|state| {
+        if let Some(parent) = state.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let name = state
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("shell-cwd");
+        CwdCaptureFile(
+            state.with_file_name(format!(".{name}.tmp.{}", uuid::Uuid::new_v4())),
+        )
+    });
+    let command = match &cwd_capture {
+        // Each call writes its ending directory to a per-call temp file so
+        // concurrent read-only foreground calls never truncate the shared state.
+        // A command that exits early leaves the temp file unwritten and keeps
+        // the previous directory.
+        Some(capture) if resolved.wsl.is_some() => {
+            let path =
+                crate::services::wsl::linux_path(resolved.wsl.as_ref().unwrap(), &capture.0)
+                    .await?;
             format!("{command}\n__dcl_status=$?\nwslpath -w \"$PWD\" > '{}' 2>/dev/null\nexit $__dcl_status", path.replace('\'', "'\"'\"'"))
         }
-        Some(state) if powershell => format!(
+        Some(capture) if powershell => format!(
             "{command}\n$__dcl_ok = $?; $__dcl_code = $global:LASTEXITCODE\ntry {{ [System.IO.File]::WriteAllText('{}', (Get-Location).ProviderPath) }} catch {{}}\nif (-not $__dcl_ok) {{ if ($__dcl_code) {{ exit $__dcl_code }} else {{ exit 1 }} }}",
-            state.to_string_lossy().replace('\'', "''")
+            capture.0.to_string_lossy().replace('\'', "''")
         ),
-        Some(state) if cmd_shell => cmd_cwd_footer(&command, &state.to_string_lossy()),
+        Some(capture) if cmd_shell => cmd_cwd_footer(&command, &capture.0.to_string_lossy()),
         // Git Bash on Windows prints C:/... with -W; elsewhere -P is the path.
-        Some(state) => format!(
+        Some(capture) => format!(
             "{command}\n__dcl_status=$?\n{} > '{}' 2>/dev/null\nexit $__dcl_status",
             if cfg!(windows) { "{ pwd -W 2>/dev/null || pwd -P; }" } else { "pwd -P" },
-            state.to_string_lossy().replace('\'', "'\"'\"'")
+            capture.0.to_string_lossy().replace('\'', "'\"'\"'")
         ),
         None => command,
     };
@@ -1434,7 +1780,7 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let _ = pty_size;
     if detach {
         let directory = crate::runtime::resolve_default_data_dir()?
-            .join("detached-shells")
+            .join("tasks/detached-shells")
             .join(uuid::Uuid::new_v4().to_string());
         let mut result = bash_process::start_detached(cmd, &directory, display_shell)?;
         std::fs::write(directory.join("command.txt"), command.as_bytes())?;
@@ -1493,18 +1839,59 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
                 object.insert("sandbox_network".into(), serde_json::json!(format!("The sandbox blocked network access to {}: not in sandbox.network.allowedDomains (or listed in deniedDomains) in settings.json. Ask the user to allow the domain; do not retry with other hosts.", hosts.join(", "))));
             }
         }
-        if let Some(state) = &cwd_state {
-            let moved = saved_cwd(state);
-            if moved
+        let force_report_cwd = input["__report_cwd"].as_bool().unwrap_or(false);
+        if let (Some(state), Some(capture)) = (&cwd_state, &cwd_capture) {
+            let moved = saved_cwd(&capture.0).filter(|dir| !dir.is_empty());
+            let reset = moved
                 .as_deref()
-                .is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd))
-            {
+                .is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd));
+            if reset {
                 let _ = fs::remove_file(state);
                 if let Some(object) = result.as_object_mut() {
                     object.insert(
                         "note".into(),
                         serde_json::json!(format!("Shell cwd was reset to {cwd}")),
                     );
+                    object.insert("cwd".into(), serde_json::json!(cwd));
+                }
+            } else if let Some(moved) = moved {
+                let changed = report_initial || !same_directory(&moved, &safe_cwd);
+                if changed || !state.exists() {
+                    // Atomically promote the per-call capture file so concurrent
+                    // readers never observe a truncated state file.
+                    if fs::rename(&capture.0, state).is_err() {
+                        let _ = fs::write(state, format!("{moved}\n"));
+                    }
+                }
+                if changed || force_report_cwd {
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert("cwd".into(), serde_json::json!(moved));
+                    }
+                }
+            } else if (report_initial || force_report_cwd)
+                && result.as_object().is_some()
+            {
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("cwd".into(), serde_json::json!(safe_cwd));
+                }
+            }
+        }
+        if input["__hint_redundant_cd"].as_bool().unwrap_or(false) {
+            if has_redundant_leading_cd(&raw_command, &safe_cwd) {
+                if let Some(object) = result.as_object_mut() {
+                    object.entry("note".to_owned()).or_insert_with(|| {
+                        serde_json::json!(format!(
+                            "{REDUNDANT_CD_NOTE_PREFIX}{safe_cwd}; omit redundant leading 'cd'."
+                        ))
+                    });
+                }
+            } else if is_pure_shell_read_or_search(&raw_command) {
+                if let Some(object) = result.as_object_mut() {
+                    object.entry("note".to_owned()).or_insert_with(|| {
+                        serde_json::json!(format!(
+                            "{SHELL_READ_SEARCH_NOTE_PREFIX} tools in parallel instead of Bash cat/sed/grep."
+                        ))
+                    });
                 }
             }
         }
@@ -1715,6 +2102,13 @@ fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value
 async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> {
     web::fetch(model_fetch_input(input)?).await
 }
+/// WebFetch with the configured transport proxy, after the same URL policy.
+pub(crate) async fn execute_web_fetch_async(
+    input: serde_json::Value,
+    proxy: Option<&str>,
+) -> Result<serde_json::Value> {
+    web::fetch_with_proxy(model_fetch_input(input)?, proxy).await
+}
 fn tool_web_search_blocking(_input: serde_json::Value) -> Result<serde_json::Value> {
     Err(anyhow!("WebSearch requires a conversation provider and its search settings. Start search from a conversation."))
 }
@@ -1913,5 +2307,34 @@ mod directory_edit_regressions {
         .unwrap();
         assert_eq!(passed["success"], true, "{passed}");
         assert_eq!(passed["stdout"].as_str().unwrap().trim(), "a");
+    }
+}
+
+#[cfg(test)]
+mod retired_tool_tests {
+    #[test]
+    fn catalog_excludes_retired_memory_tools() {
+        let names = super::get_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        for retired in ["memory_search", "memory_ingest"] {
+            assert!(!names.iter().any(|name| name == retired), "{retired}: {names:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    /// The loadable-tool listing shows `summary`; a missing one falls back to the
+    /// whole description, so every advertised built-in must carry one.
+    #[test]
+    fn every_advertised_tool_carries_a_listing_summary() {
+        let missing = crate::native_engine::tool_loop::builtin_tool_catalog()
+            .into_iter()
+            .filter(|tool| tool.summary.as_deref().is_none_or(|text| text.trim().is_empty()))
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "tools without a summary: {missing:?}");
     }
 }

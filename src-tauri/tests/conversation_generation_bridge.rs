@@ -31,7 +31,11 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         axum::serve(model_listener, app).await.unwrap();
     });
     let config = json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{model_addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"context_window":64000,"supports_vision":false,"supports_tools":true,"supports_streaming":true}]}]});
-    std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        dir.path().join("config/config.json"),
+        config.to_string(),
+    )
+    .unwrap();
     let paths = RuntimePaths::new(dir.path().into()).unwrap();
     let db = paths.open_database().unwrap();
     let sessions = SessionStore::new(db.clone());

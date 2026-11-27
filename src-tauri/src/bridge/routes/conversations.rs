@@ -54,8 +54,6 @@ async fn conversations_create(State(state): State<AppState>, Json(body): Json<Cr
     })))
 }
 
-pub(super) use deepseek_code_core::db::transcript::enriched_messages;
-
 /// Request snapshot fields that repeat across model requests: the system prompt
 /// and tool schemas are usually identical for every request in a session.
 const SHARED_SNAPSHOT_FIELDS: [&str; 3] = ["systemPrompt", "systemMessages", "tools"];
@@ -286,7 +284,6 @@ async fn conversation_warm_handler(
     // may initialize an idle engine, but cannot change any running conversation.
     if let Some(mode) = req["permission_mode"].as_str() {
         let mode = PermissionMode::parse(mode).map_err(|_| StatusCode::BAD_REQUEST)?;
-        if mode == PermissionMode::Auto { return Err(StatusCode::NOT_IMPLEMENTED); }
         if mode == PermissionMode::BypassPermissions && !state.permission_manager.bypass_available() {
             return Err(StatusCode::FORBIDDEN);
         }

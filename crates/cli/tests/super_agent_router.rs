@@ -261,8 +261,8 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    std::fs::write(
-        data.join("config.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/config.json"),
         serde_json::to_vec(&json!({
             "providers":[{
                 "id":"fixture","name":"Fixture","provider_type":"openai","api_key":"fixture-key",

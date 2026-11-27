@@ -29,7 +29,6 @@ use crate::super_agent::role::MemberRole;
 use crate::super_agent::store::TaskStore;
 use crate::super_agent::{Phase, TaskRecord};
 use anyhow::{anyhow, ensure, Context, Result};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -341,7 +340,7 @@ impl Launcher {
             self.context
                 .paths
                 .data_dir
-                .join("super-agent")
+                .join("tasks/super-agent")
                 .join(&task.task_id)
                 .join("workspace")
         };
@@ -1916,7 +1915,7 @@ impl Launcher {
             .context
             .paths
             .data_dir
-            .join("super-agent")
+            .join("tasks/super-agent")
             .join(&task.task_id)
             .join(format!("review-workspace-{}", task.review_round));
         std::fs::create_dir_all(&workspace)?;
@@ -1967,7 +1966,7 @@ impl Launcher {
             .context
             .paths
             .data_dir
-            .join("super-agent")
+            .join("tasks/super-agent")
             .join(&task.task_id)
             .join(format!(
                 "final-review-workspace-s{}-r{}",

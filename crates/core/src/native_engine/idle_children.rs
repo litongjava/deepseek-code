@@ -79,14 +79,10 @@ impl QueryEngine {
         if ids.is_empty() {
             return Ok(None);
         }
-        let root = self
-            .provider_manager
-            .lock()
-            .await
-            .config_path()
-            .parent()
-            .context("Runtime directory missing")?
-            .to_path_buf();
+        let root =
+            crate::data_layout::data_root_of(self.provider_manager.lock().await.config_path())
+                .context("Runtime directory missing")?
+                .to_path_buf();
         if session_messages::receiver_active(&root, owner)? {
             return Ok(None);
         }
@@ -122,14 +118,10 @@ impl QueryEngine {
             !self.active_turns.lock().await.contains_key(owner),
             "Owner has an active turn"
         );
-        let root = self
-            .provider_manager
-            .lock()
-            .await
-            .config_path()
-            .parent()
-            .context("Runtime directory missing")?
-            .to_path_buf();
+        let root =
+            crate::data_layout::data_root_of(self.provider_manager.lock().await.config_path())
+                .context("Runtime directory missing")?
+                .to_path_buf();
         let context = ServiceContext {
             paths: crate::runtime::RuntimePaths::new(root.clone())?,
             db: self.db_manager.clone(),

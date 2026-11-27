@@ -6,8 +6,8 @@ async fn sdk_updated_permissions_persist_user_settings_and_apply_to_the_session(
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(
-            data.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            data.join("config/settings.json"),
             json!({"theme":"dark","permissions":{"allow":["Read"]}}).to_string(),
         )
         .unwrap();
@@ -31,9 +31,10 @@ async fn sdk_updated_permissions_persist_user_settings_and_apply_to_the_session(
         assert_eq!(result["is_error"], false, "{result}");
         assert!(root.path().join("approval.txt").exists());
 
-        let value: Value =
-            serde_json::from_str(&std::fs::read_to_string(data.join("settings.json")).unwrap())
-                .unwrap();
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(data.join("config/settings.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["permissions"]["allow"], json!(["Read", "Write"]));
         assert_eq!(value["permissions"]["defaultMode"], "acceptEdits");

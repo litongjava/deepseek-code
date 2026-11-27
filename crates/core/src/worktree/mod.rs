@@ -11,6 +11,17 @@ pub mod session;
 pub mod hooks;
 pub mod changes;
 
+/// Git for Windows rejects the extended-length prefix that canonicalization
+/// adds. Git command arguments must carry the drive-qualified spelling.
+#[cfg(windows)]
+pub(crate) fn git_path_text(value: &str) -> &str {
+    value.strip_prefix(r"\\?\").unwrap_or(value)
+}
+#[cfg(not(windows))]
+pub(crate) fn git_path_text(value: &str) -> &str {
+    value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub id: String,
@@ -91,9 +102,12 @@ impl WorktreeManager {
     }
 
     fn run_git(&self, args: &[&str]) -> Result<String> {
+        let root = self.repo_root.to_string_lossy();
+        let root = git_path_text(&root);
+        let args: Vec<String> = args.iter().map(|arg| git_path_text(arg).to_string()).collect();
         let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_root)
+            .args(&args)
+            .current_dir(root)
             .output()?;
 
         if output.status.success() {

@@ -10,6 +10,7 @@ use tokio::net::UnixStream;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions as PipeClientOptions;
 
+#[cfg(unix)]
 const SOCKET_PATH: &str = "/tmp/agent-worker.sock";
 #[cfg(windows)]
 const PIPE_NAME: &str = r"\\.\pipe\agent-worker";

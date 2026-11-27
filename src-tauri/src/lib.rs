@@ -114,7 +114,7 @@ fn prepare_linux_environment(data_dir: &std::path::Path) {
     if !proot.is_file() {
         return tracing::warn!(module = "LinuxEnv", "PRoot is not bundled in this build");
     }
-    let rootfs = data_dir.join("linux").join("rootfs");
+    let rootfs = deepseek_code_core::data_layout::DataLayout::from_root(data_dir).linux_rootfs();
     std::env::set_var(linux_env::PROOT_ENV, &proot);
     std::env::set_var(linux_env::LOADER_ENV, libs.join("libproot-loader.so"));
     std::env::set_var(linux_env::ROOTFS_ENV, &rootfs);

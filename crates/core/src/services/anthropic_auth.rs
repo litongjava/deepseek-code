@@ -27,13 +27,17 @@ const MARKER: &str = "anthropic-oauth:";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 pub const FAST_BETA: &str = "fast-mode-2026-02-01";
 async fn token_lock(data_dir: &Path) -> Result<std::fs::File> {
-    std::fs::create_dir_all(data_dir)?;
+    let path =
+        crate::data_layout::DataLayout::from_root(&data_dir).config_file("anthropic-oauth.lock");
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(data_dir.join("anthropic-oauth.lock"))?;
+        .open(path)?;
     loop {
         match crate::fs::try_lock_file(&file) {
             Ok(()) => return Ok(file),
@@ -301,13 +305,15 @@ pub(crate) fn tokens_from_response(response: Value, previous: Option<&Tokens>) -
 }
 
 fn credential_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("anthropic-oauth.dat")
+    crate::data_layout::DataLayout::from_root(&data_dir).config_file("anthropic-oauth.dat")
 }
 
 pub(crate) fn save(data_dir: &Path, tokens: &Tokens) -> Result<()> {
-    std::fs::create_dir_all(data_dir)?;
+    let path = credential_path(data_dir);
+    let directory = path.parent().context("OAuth credential has no parent")?;
+    std::fs::create_dir_all(directory)?;
     let data = protect(&serde_json::to_vec(tokens)?)?;
-    let mut file = tempfile::NamedTempFile::new_in(data_dir)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -316,7 +322,7 @@ pub(crate) fn save(data_dir: &Path, tokens: &Tokens) -> Result<()> {
     }
     file.write_all(&data)?;
     file.as_file().sync_all()?;
-    file.persist(credential_path(data_dir))
+    file.persist(path)
         .map_err(|_| anyhow::anyhow!("Could not persist OAuth credentials"))?;
     Ok(())
 }

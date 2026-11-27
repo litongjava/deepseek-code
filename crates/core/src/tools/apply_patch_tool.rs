@@ -72,6 +72,7 @@ pub(crate) enum PathAuthorization {
 
 pub(crate) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Apply one multi-file text patch in the workspace".into()),
         name: "ApplyPatch".into(),
         description: "Apply one multi-file text patch in the workspace.\n\n\
 The patch is line-oriented and must start with `*** Begin Patch` and end with `*** End Patch`:\n\

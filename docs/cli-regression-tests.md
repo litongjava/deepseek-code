@@ -156,6 +156,35 @@ cargo test --locked -p deepseek-code-cli --test session_worker
 4. 模型运行中重复第 1 步：文本进入草稿，同样不发送。
 5. Windows 说明：ConPTY 把粘贴中的换行（U+000A）报成 `VK_RETURN` 加 `CONTROL` 状态，读成按键就是 Ctrl+Enter。`crates/cli/src/terminal/paste_input.rs` 把这种记录还原成粘贴文本；真实按下的 Enter 带 `\r`，不受影响。改动后要在真实 ConPTY 里复测本条和场景 A 第 6 条。
 
+### A3. 提交提示词时输入框交接无抖动
+
+修改 `crates/cli/src/terminal/editor.rs`、`crates/cli/src/terminal/live.rs`、`crates/cli/src/session.rs` 或 `crates/cli/src/worker_frontend.rs` 的提交/交接渲染逻辑后执行：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl -- submit_handoff idle_tip_above_input live_first_frame
+cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --nocapture
+```
+
+1. 36×100 真实 PTY/ConPTY 首轮打开时，Tip 位于输入框上方而不是 footer 下方；底部的上边框、输入行、下边框、footer 固定占据最后 4 行（`rows - 4 .. rows`）。
+2. 首轮按 `Enter` 提交后（模型响应门控延迟期间），不擦除底部输入框，不产生一行下移；工作态状态行直接出现在输入框上方，且带有初始模型标签。
+3. 首轮流式回复完成并交棒回空闲态、以及第二轮提交并在请求门控期按 `Esc` 取消期间，底部输入框边框与 footer 始终停留在同一组屏幕行，且请求期 `Esc` 可正常中断并返回空闲态。
+4. 满屏状态下提交与接管不会把旧输入框/旧 footer 滚进 transcript。
+
+### A4. 斜杠补全菜单输入不闪烁、不残留
+
+修改 `crates/cli/src/terminal/editor.rs` 的 `CommandOverlay` 或空闲输入事件循环后执行：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl -- slash_menu_overlay startup_banner_and_slash_menu
+cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --nocapture
+```
+
+1. 对话历史（含已提交提示词的白色 `────` 分隔线）紧邻空闲输入框上方时，输入 `/` 弹出 5 行命令补全菜单，再继续输入 `c`、`o`、`x` 与退格：
+   - 保持 5 行菜单期间，普通编辑/导航按键不先清空菜单再重画，中间帧不得闪出菜单底层的 `────` 分隔线或空白（普通视图与 `Alt+M` 紧凑视图均为单帧合成）；
+   - 匹配行数收缩（如输入 `/cox` 变为 1 行 `/context`、`/coxz` 变为 `No commands match`）时，仅恢复露出的背景行，仍被菜单覆盖的行原地更新且隐藏光标；
+   - 按单次 `Esc` 可直接关闭菜单或 `No commands match` 提示（保留草稿），提交 `Enter`、输入框增高触发滚屏或缩放/鼠标操作前菜单干净清除，历史与滚动缓冲中不残留任何菜单行；
+   - 取消回合后 `hand_off_output` 若历史已以空行结尾不再多预留 1 行，交接回空闲态时历史不向下跳动。
+
 ### B. 运行中排队和撤回
 
 让模型运行一个较长的命令（如 `sleep 40`），在此期间操作：
@@ -184,6 +213,25 @@ cargo test --locked -p deepseek-code-cli --test session_worker
 2. 本地模型 fixture 运行 Bash、Glob、失败 Read，Alt+M 摘要应显示 shell/read/patterns 和失败数。点摘要展开，点组顶部 `click to collapse` 收起；组内工具仍可独立切换短结果/完整结果。Alt+M 关闭再打开恢复摘要；普通视图和 Ctrl+O 不受影响。恢复会话后重复同一检查。
 3. `cargo test --locked -p deepseek-code-cli --bin dcl terminal::scrollback` 覆盖真实工具名分类（包括 PowerShell 和全部编辑工具）、同名计数、宽度截断/剩余调用数、失败数、组级状态、模式重开和 reasoning 不算工具。自定义标题包含 Bash/Read 文本不能改变工具分类。
 4. 本地 mock 返回未知名称的 `ToolLoad` 调用（例如 12 个 `✈️`），确认结果记为失败。恢复会话，在 64 列打开紧凑模式并调整到 32 列。CLI 应继续运行，摘要按终端列宽保留完整字素和右括号。在 `terminal::tool_view`、`terminal::scrollback`、`terminal::progress` 中回归 CJK、变体选择符、ZWJ emoji 和组合字符，包括极窄列宽。
+
+### C3. 拖动选择与右击复制（SSH/tmux）
+
+1. 在提示符、模型输出和 `Ctrl+O` 记录里按住左键拖动：出现反色选择，松开后高亮保留，输入框上方内容区右下角显示 `按 c 复制`（英文界面为 `Press c to copy`）；在保留的选择上右击或按 `c`，所选文本进入剪贴板，高亮消失，同一位置显示 `已复制 N 个字符`（英文为 `Copied N characters`），且 `c` 不会插入草稿。提示约 2 秒后自动消失，按任意键也会立即消失；底部状态栏保持默认。提示行不得出现反色或其他背景色。没有选区时再次右击不复制、不报错，按 `c` 正常输入。
+2. 复制失败的路径在内容区显示 `复制失败`，选择同样取消；滚轮、左键点击展开、单双击状态行复制保持原行为。
+3. 本地桌面终端：右击后粘贴应得到原文，包含中文和换行；本地会话仍优先使用系统剪贴板。
+4. 在 tmux 中运行（含 SSH 远程主机）：tmux 需已开启 `set -g mouse on`，应用才能收到鼠标事件；拖动选择后右击，`tmux show-buffer` 应为所选文本，屏幕上不再保留反色高亮，内容区右下角显示 `已复制 N 个字符`。外层终端支持 OSC 52 时，`load-buffer -w` 也应把同一文本送到本地剪贴板。即使远端存在 `pbcopy`/`xclip`，也不能只写远端剪贴板。
+5. 运行中的反馈还要单独验证：模型流式输出时拖动选择并右击，内容区右下角提示出现且流式输出继续；等待约 2 秒确认提示自动消失。分别用 `LC_ALL=zh_CN.UTF-8` 和 `en_US.UTF-8`（或 `config.json` 的 `language`）启动，确认中英文提示都正确，且提示行没有背景色。`Ctrl+O` 全页记录和文件差异页仍在各自页脚显示 `Copied N characters to clipboard`。
+6. 自动回归（分别执行）：
+
+   ```bash
+   cargo test --locked -p deepseek-code-cli --bin dcl terminal::mouse_selection::tests::
+   cargo test --locked -p deepseek-code-cli --bin dcl terminal::file_review
+   cargo test --locked -p deepseek-code-cli --bin dcl terminal::transcript_pager
+   cargo test --locked -p deepseek-code-cli --bin dcl editor_keeps_right_click_events_for_selection_copy
+   cargo test --locked -p deepseek-code-cli --bin dcl extended_commands::tests::clipboard
+   ```
+
+7. 平台说明：Windows ConPTY 的右击由 crossterm 鼠标事件驱动；macOS/Linux 的 SSH+tmux 需要真实终端复验，不能用本机单测替代。
 
 ### D. 中途关闭后恢复
 
@@ -231,6 +279,31 @@ python3 dev-support/deepseek-code/super-agent-20261110/harness-fix/h1_pty_accept
 
 脚本写入独立的 `results.json`，覆盖上述 1–5 条与正常结束、被杀两类结束方式：观察在附件之后才产生的文本标记、同一观察端跨过完成和被杀的显示、无重复行、排队通知保持不变、退出终端不影响 owner、无换行长文本可见。计数的前提是只统计该回合的请求；仅为会话标题或输入建议发出的请求不属于回合，脚本按请求体把标题请求单独分类，并关闭输入建议。
 
+#### D9. 占用时的只读观察与自动唤醒门禁
+
+另一个进程持有执行租约时，恢复的 REPL 必须保持只读，并且所有会自动开回合的入口都必须先检查占用。
+
+1. **后台任务占用**：`/resume` 显示 `✻ Task … is executing this session since …`，普通消息提示未提交；`/continue` 接回任务，`/tasks attach ID` 打开完整视图，`Esc` 退出。
+2. **直接执行占用**：显示 `A turn is still running in another process since …`，继续显示已发布的文本和工具行；不得出现原始的 `lock acquisition failed`。
+3. **自动入口**：占用期间 task notification、`/loop`、cron、hook wake、remote deferred prompt 都不得创建新 turn；通知留在队列中，占用结束后也不自动提交，直到用户显式输入或 `/continue`。`dispatch_input` 自身也必须再次检查，不能消费队列项。
+4. **恢复输入**：owner 结束后显示 `The other turn finished; input is enabled`，只读 banner 不再出现；之后输入的消息可以提交。
+5. **goal proposal 失主**：另一个 frontend 接管 goal proposal 时，任务 view 不退出、不 detach；日志记录一次，重新 acquire 一次，失败则提示 `Goal proposal status unavailable; task output continues.`，文本和工具行继续。
+6. **切换会话清理**：`/resume`、`/branch`、`/clear` 后，Remote Control 断开并提示，旧 `/loop`、草稿、`NEXT_DRAFT` 和排队提示被丢弃；新会话不会收到旧 remote 注册的消息或权限。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl notifications_and_direct_input_wait
+cargo test --locked -p deepseek-code-cli --bin dcl reset_for_session_change
+cargo test --locked -p deepseek-code-cli --bin dcl a_second_top_level_turn_is_rejected
+cargo test --locked -p deepseek-code-cli --bin dcl losing_the_goal_proposal_frontend
+cargo test --locked -p deepseek-code-cli --bin dcl a_caller_banner_suppresses
+cargo test --locked -p deepseek-code-cli --bin dcl turn_command_tests
+cargo test --locked -p deepseek-code-core --lib current_rejects_a_worker_record
+```
+
+第 1、2、4 条及 banner 的终端渲染需要真实 pty。2026-11-26 已在 macOS 用 tmux + 本地 mock SSE 跑通：owner 为 `dcl --resume ID --print`，observer 在 40×140 tmux 面板中 `dcl --resume ID`；banner、已发布文本、未提交提示、owner 结束后的输入恢复均通过，且观察期间没有模型请求。脚本和日志见 `dev-support/deepseek-code/session-occupancy-20261126/`（`dcl_occupancy_tmux.py`、`pty-run.log`）。Windows ConPTY 尚未运行。第 5 条由 `worker_frontend::failure_tests::losing_the_goal_proposal_frontend_keeps_the_task_view_and_its_output` 覆盖：running job 的 proposal presence 被另一 live frontend 接管后，观察只记录失败、禁用提案 UI，任务完成且无 cancel/detach。banner 去重由 `observe::tests::a_caller_banner_suppresses_the_first_running_notice` 覆盖；`/loop stop-*` 边界由 `turn_command_tests` 覆盖。`read_prompt` 期间被另一进程接管的 tick 门禁尚未用真实 pty 重跑。
+
 ### F. /tasks
 
 有两个后台命令时输入 `/tasks`：
@@ -273,6 +346,29 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 2. `/memory` 菜单有 Long-term memories；列表可以搜索，`+ Add a memory` 能添加。
 3. 详情里 `e` 编辑后列表立即更新并保留重要性，`x` 删除，`←` 返回，`Esc` 关闭。
 4. `/memory` 的说明文件选项和 `/memory show` 不受影响。
+5. `dcl config memory` 输出当前开关；`dcl config memory off` 后 `config show` 的 `memory.enabled` 为 `false`，CLI 与 Desktop 新请求的系统提示词不再包含 `<memory_guidance>`，MEMORY.md 索引和记忆目录写入同时停止；`dcl config memory on` 和 `dcl config set memory.enabled true/false` 作用于同一开关。`cargo test --locked -p deepseek-code-cli --test peripheral config_memory_switch` 覆盖这些分支。
+
+提示词分段由 `cargo test --locked -p deepseek-code-core --lib prompt::` 覆盖：Code 与 Desktop 都按“身份行、`code.md`、`behavior.md`、`memory.md`”组装，记忆关闭时省略第四段，`cache_blocks` 同时识别四段和三段布局并在 Anthropic 请求中分别设置缓存断点。
+
+#### 文件记忆（独立 core 模块）
+
+修改 `crates/core/src/memory/files/` 后运行 `cargo test --locked -j 2 -p deepseek-code-core --lib memory::files::tests:: -- --nocapture`，并运行现有 `cargo test --locked -j 2 -p deepseek-code-core --test memory_transfer --test dream`、`cargo test --locked -j 2 -p deepseek-code-cli --test peripheral`。构建/测试命令使用任务指定的 run_checked.py 和共享 Cargo 队列；保留完整日志、真实退出码、实际测试名和数量。
+
+- `scope_git_common_directory_shares_worktrees_and_subdirectories`：临时 Git 元数据夹具，只读 rev-parse；同仓库 worktree/子目录同 key，不同 clone 不同 key。`scope_non_git_multi_root_private_and_trust_are_explicit` 覆盖非 Git、多根去重/排序与 trust，`default_home_and_empty_workspace_use_persistent_private_owner` 覆盖默认 Home/空工作区及 owner 隔离；Unix 另测非 UTF-8 路径无 lossy 碰撞。
+- `format_*` 与 `external_bad_files_are_retained_diagnosed_and_not_indexed`：中英文、四类/必填字段、Why/How、重复 YAML key、alias/tag、深度/大小/编码、凭据；坏文件留在磁盘且不进索引。
+- `two_processes_racing_one_hash_yield_one_success_and_one_conflict`：两个真实子进程先读同一 hash，再由屏障同时放行，断言恰好 1 success/1 Conflict 和最终 generation。`cross_process_lock_times_out_and_cancellation_does_not_write` 另验真实进程锁和取消。
+- `process_crashes_at_each_commit_boundary_recover_consistent_index_and_generation`：暂存、journal、正文、索引、catalog、generation、清理七个边界使真实子进程不运行析构直接退出，重开核对内容/索引/generation 和重复恢复幂等；另测删除恢复、外部冲突和 journal checksum 损坏不覆盖。
+- `index_*` 与 `external_body_only_changes_invalidate_generation_without_rewriting_index`：索引自动修复/CAS/不能隐藏文件，200 行、25 KiB、4096 tokens 独立限额，整行截断与省略数；仅正文变化同样使 generation 失效。
+- Unix 运行 `symlink_files_and_directory_swaps_never_follow_outside_targets`、`symlink_in_state_or_project_parent_is_rejected_before_creation`、`hardlinks_are_never_read_modified_or_deleted_by_the_store` 和路径穿越/设备名用例。
+- Windows CI 预期运行同一测试过滤及 `windows_reparse_points_are_rejected_and_pinned_directories_cannot_be_swapped`、`windows_directory_reparse_point_is_not_a_managed_project_root`、`windows_junction_is_rejected_before_any_external_file_is_created`、`windows_canonical_path_case_aliases_have_one_scope`；符号链接用例要求 Developer Mode/创建符号链接权限，不能无声跳过。Linux 结果不构成 Windows 测试通过。
+- P1 未切换旧 SQLite 后端，不把上述存储层测试当成模型权限、自动召回、CLI picker 或 Desktop/WebView2 验收；后续接入仍要执行本节原有 1–4 与 Desktop A。
+
+#### M3 常驻索引（替代逐消息正文召回）
+
+- 用独立临时 data-dir 和本地模型端点；给 global、team、project、subagent、session 的索引和正文各写不同标记。捕获主会话与子代理的实际请求：首条用户消息里先项目指令再按上述顺序放 scope/路径；主会话无 subagent，子代理无父 session，team 未配置或索引空缺时无对应块。搜索所有消息，确认正文标记从未自动出现。
+- 同时改两个索引，下次请求应只有一条新提醒，只含改动的 scope；原首条前缀逐字节不变。再发一轮，不新增提醒。用普通文件工具写索引再重复；用 CRLF、多字节字符、200/201 行和 25 KiB 临界值检查截断和路径提示。
+- 对 summary/native、自动/手动、partial、plan clear context 和 overflow recovery，各在边界前改索引并发送一次，边界后独立改另一个。比较请求与从会话库恢复的重放：当前索引各一次，不重复边界前提醒；仅边界后的改动有新提醒。退出并用同一 data-dir 恢复，比较相同历史前缀的序列化字节。另核对 fork 复制、删除清理及 home/private 项目隔离。
+- 运行 core 的 `resident_indexes` 单测、`--test compaction_history --test native_compaction` 及 CLI 的 `--test memory_files --test memory_compaction`；分别记录实际覆盖的边界、协议、请求层和进程层。仅重放测试不能替代真实 provider 请求或 Desktop 验收。
 
 ### H. 提示词与工具配置
 
@@ -288,18 +384,18 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 8. 真实进程重启：加载工具后退出 `dcl`，用 `--resume` 打开同一会话，首个请求就应包含该工具；在同一数据目录新建会话则不应包含。
 9. Responses 协议：使用带 Responses 适配的供应商模型，确认首请求不含按需工具、加载后的下一请求带真实参数结构、工具能实际执行，且恢复后的首个请求已带此前加载的工具。
 10. 运行中改配置：在模型响应期间把常驻工具改成“仅按需加载”，该轮后续调用应被拒绝并提示先加载，且下一次请求不再带该工具。
-11. `tool_descriptions`：模型读到修改后的说明，`ToolLoad` 返回相同的工具说明。
+11. `tool_descriptions`：模型读到修改后的说明，`ToolLoad` 返回相同的工具说明；未设置 `tool_summaries` 时，可加载目录里的这一行也使用该说明。
 12. `system_prompt`：`replace` 和 `append` 生效，环境信息仍然存在。
 13. 文件语法错误时这一轮报错退出；删除文件后恢复默认。
 14. 按需加载后的权限：先加载一个需要审批的工具（例如 `Write`），拒绝审批时工具不执行、目标文件不产生，拒绝结果进入下一次请求；审批等待期间取消本轮，不执行工具也不再发起请求。
 15. 请求级一致性：加载后让某个请求先遇到一次可重试错误，同一次逻辑请求的各次 HTTP 尝试携带相同的工具列表；请求快照的工具条目应逐项包含实际发送的名称、说明和参数 schema，token 估算应由该请求体重算得到相同结果；只有下一逻辑请求才按最新加载集合生成新列表，且加载后 schema 字节数确实增长。覆盖 OpenAI 与 Anthropic，并确认 Responses 适配结果。
 16. 实际压缩：先成功加载一个按需工具，执行一次真实压缩后重开会话，首个请求不再带该工具（摘要不能授权），模型重新加载后下一请求恢复。
 17. Responses 真实进程重启：用隔离数据目录 `config.json` 配置 Responses 适配供应商（模型 `api` 为 `openai-responses`，内置供应商 ID 为 `openai`），真实 `dcl` 进程加载后退出，`--resume` 新进程的首个 Responses 请求应包含此前加载的工具。不要用 `--base-url` 覆盖，它会清除内置供应商 ID。
-18. 命令改开关：在隔离数据目录执行 `dcl config set tools.<name>.enabled|on_demand true|false`，`dcl config show` 的 `tools` 项与文件内容一致；下一次模型请求的工具集合按新开关变化（两个都关的工具不出现且不能加载，只开启用的工具直接出现在请求里）。同一次写入把 `disabled_tools` 里的内置名折算成开关，非内置名保留。交互终端执行 `/tools`，用 `Space` 改“启用”、`Tab` 改“按需加载”，关闭面板后文件与面板一致；非终端下 `/tools` 打印文本清单。`crates/cli/src/tool_settings.rs` 的单元测试覆盖只改一个开关、双关、迁移保留非内置名和非法输入。
+18. 命令改开关：在隔离数据目录执行 `dcl config set tools.<name>.enabled|on_demand true|false`，`dcl config show` 的 `tools` 项与文件内容一致；下一次模型请求的工具集合按新开关变化（两个都关的工具不出现且不能加载，只开启用的工具直接出现在请求里）。同一次写入把 `disabled_tools` 里的内置名折算成开关，非内置名保留。交互终端执行 `/tools`，面板以 `Built-in / Skills / Mcp / Plugin` 四个标签打开：`Built-in` 用 `Space` 改“启用”、`Tab` 改“按需加载”，并按 `Files & workspace`、`Shell & system`、`Web & services`、`Agents & delegation`、`Tasks & plans`、`Automation`、`Context & interaction` 分组；未分类的新工具落入 `Other`，`every_builtin_tool_has_one_group` 会在新增工具未归类时失败；切换后只重绘标题行和被改的那一行，**列表其余内容必须仍然可见**（不能只剩标题和一行）；`Skills` 复用技能行；`Mcp` 复用服务器行（启动失败标记在行上，详情里给首行错误）；`Plugin` 只列插件包。关闭面板后文件与面板一致；非终端下 `/tools` 打印文本清单。`/skills` 打开同款整页面板（`Installed / Errors / Stats`，只含技能）；`/plugins` 打开同款面板但只列插件包；`/skills state`、`dcl config set tools...` 的脚本路径不变。`crates/cli/src/tool_settings.rs` 的单元测试覆盖只改一个开关、双关、迁移保留非内置名和非法输入；`plugins_panel::tests`（`cargo test --locked -p deepseek-code-cli --bin dcl plugins_panel::tests`）覆盖三种标题的标签栏、scope 过滤、插件统计和 MCP 失败标记。
 
 19. 精确名称：`ToolLoad` 接收 `{"names":["WebSearch","ListDir"]}`。数组含 1–64 个非空字符串，名称区分大小写，重复项按首次出现的位置处理。已在请求中或已加载的工具作为 `already_available` 返回，避免重复加载。未知或不可用的名称逐项报告；调用报错且本次不加载任何工具。测试还验证空数组、字符串、额外字段、大小写错误、关键词及 `select:` 输入。
 
-20. 工具目录：每次真实请求的系统提示词（OpenAI 的 system 消息、Anthropic 的 `system`、Responses 的 `instructions`）包含当前可加载的内置工具名和一句话用途，并说明 `ToolLoad` 只能加载这里列出的内置工具。目录与本次请求的工具 schema 来自同一份设置和目录快照，描述覆盖一致。内置目录省略常驻、已加载、两个开关都关、代理未允许及自定义工具。MCP 按需目录使用相同的加载资格判断，省略已加载、旧禁用列表中的工具及代理未获授权的工具。两部分都要求本次请求携带 `ToolLoad`。成功加载后，定义从下一次请求起可调用，本次响应中的调用会被拒绝。是否声称可加载取决于本次请求是否真的有可调用的 `ToolLoad`：两个开关都关或按需但尚未加载时，目录说明它不可用且不列出可加载名称；有 `ToolLoad` 但没有可加载工具时如实说明；受限代理没有 `ToolLoad` 时仍只直接暴露已授权的按需工具。已删除的 Git 工具和 `smart_project_scan` 不在目录中，直接调用返回 `Unknown tool`；Git 命令仍可通过 `Bash` 在临时仓库中执行。自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests::every_transport_sends_a_dynamic_directory_of_loadable_builtins`、`tool_loading_tests::a_request_without_callable_tool_load_does_not_promise_loading`、`tool_loading_tests::an_empty_directory_is_reported_truthfully`、`tool_loading_tests::removed_git_tools_cannot_be_restored_configured_or_called` 与 `tools::directory_edit_regressions::git_commands_run_through_bash_after_the_native_tools_are_removed`。
+20. 工具目录：每次真实请求的系统提示词（OpenAI 的 system 消息、Anthropic 的 `system`、Responses 的 `instructions`）包含当前可加载的内置工具名和一句话用途，并说明 `ToolLoad` 只能加载这里列出的内置工具。目录与本次请求的工具 schema 来自同一份设置和目录快照，描述覆盖一致。内置目录省略常驻、已加载、两个开关都关、代理未允许及自定义工具。MCP 按需目录使用相同的加载资格判断，省略已加载、旧禁用列表中的工具及代理未获授权的工具。两部分都要求本次请求携带 `ToolLoad`。成功加载后，定义从下一次请求起可调用，本次响应中的调用会被拒绝。是否声称可加载取决于本次请求是否真的有可调用的 `ToolLoad`：两个开关都关或按需但尚未加载时，目录说明它不可用且不列出可加载名称；有 `ToolLoad` 但没有可加载工具时如实说明；受限代理没有 `ToolLoad` 时仍只直接暴露已授权的按需工具。已删除的 Git 工具和 `smart_project_scan` 不在目录中，直接调用返回 `Unknown tool`；Git 命令仍可通过 `Bash` 在临时仓库中执行。目录每行按 `tool_summaries`、`tool_descriptions`、工具自身 `summary`、完整 `description` 的顺序取文本；只折叠空白，不截断也不加省略号。内置工具各自带一条 `summary`（缺少时 `tools::summary_tests::every_advertised_tool_carries_a_listing_summary` 失败），MCP 与自定义工具没有 summary，显示完整说明。自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests::every_transport_sends_a_dynamic_directory_of_loadable_builtins`、`tool_loading_tests::a_request_without_callable_tool_load_does_not_promise_loading`、`tool_loading_tests::an_empty_directory_is_reported_truthfully`、`tool_loading_tests::removed_git_tools_cannot_be_restored_configured_or_called`、`tool_loading_tests::the_loadable_reminder_shows_custom_text_uncut_and_the_whole_description_otherwise`、`tools::summary_tests::every_advertised_tool_carries_a_listing_summary` 与 `tools::directory_edit_regressions::git_commands_run_through_bash_after_the_native_tools_are_removed`。
 
 21. 显示：SDK `system/init` 和模型工具列表使用 `ToolLoad`。CLI 普通模式、进度行、紧凑分组以及恢复后的滚动记录显示 `ToolLoad(Read, Grep)`。长列表截断且保留右括号。64 列的紧凑模式保留 `ToolLoad(…)`，展开和折叠两种状态均可验证。回退活动行显示带名称的调用标签。浏览器工作明细和轨迹使用相同名称格式。
 
@@ -456,7 +552,8 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 - `cargo test --locked -p deepseek-code-cli --test api_failure_diagnostics`：真实 CLI 进程对本地故障服务，核对最终输出、服务端实际请求数与 SQLite 中的请求快照。
 - `cargo test --locked -p deepseek-code-core --lib builtin_chat_`：内置 Chat Completions 的发送重试与“内容前正文重试”共用一个预算，核对真实回环 HTTP 的次数、请求 ID、重试头、可取消等待、已开始内容不重放、原始帧/终端标记/未知内容边界、提供方错误脱敏、损坏配置在开请求前失败与本地请求记录。
 - `cargo test --locked -p deepseek-code-cli --test api_failure_diagnostics builtin_chat_`：真实 CLI 使用 `config.json` 中的内置 OpenCode Go，内容前断流后重连成功，覆盖只有思考或未完成工具调用的失败，并核对提供方错误回显不会进入最终输出、尝试事件/日志与 SQLite 快照。
-- `cargo test --locked -p deepseek-code-core --lib native_engine::model_http::tests::`：流式客户端的空闲读取超时按每个线上分块重置（注释、跨分块的 SSE 帧与跨分块的 UTF-8 字符），并区分“等待响应头”和“正文静默”两种超时；取消挂起的读取会关闭正文，配置为 0 时在开请求前报错。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::model_http::tests::`：流式客户端的空闲读取超时按每个线上分块重置（注释、跨分块的 SSE 帧与跨分块的 UTF-8 字符），并区分“等待响应头”和“正文静默”两种超时；取消挂起的读取会关闭正文，`request_timeout_secs = 0` 与 `pool_idle_timeout_secs = 0` 都在开请求前报错且 0 次连接；进程级共享连接池在顺序请求及并发后复用同一回环 TCP 连接，`Redirect::Default` / `Redirect::None` / `single_post` 各自保持独立策略。
+- `cargo test --locked -p deepseek-code-core --lib config::tests`：`[http].pool_idle_timeout_secs` 默认 300、显式值解析及缺省旧文件兼容。
 - `cargo test --locked -p deepseek-code-core --lib buffered_model_requests_keep_the_total_deadline`：直连 OpenAI 与直连 Anthropic 的缓冲请求仍受各自总超时约束，缓慢正文超时后只发送一次且不含 `stream:true`。
 - `cargo test --locked -p deepseek-code-cli --test api_failure_diagnostics stream_timeout_uses_idle_configuration_for_all_model_transports`：真实 CLI 在本地正值空闲配置下覆盖四种模型传输的健康流、内容后静默、只有响应头、两次 POST 恢复、内置 Responses 单次与退避取消，以及内置 Chat 的原始边界。
 - `cargo test --locked -p deepseek-code-core --lib typed_stream_body_timeout_survives_the_retry_layer`：正文读取超时、终端标记、提前 EOF、提供方超时形状的 SSE 错误与响应头前超时在共享重试层后的类型化事实（见下方第 18 条）。
@@ -493,6 +590,11 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
     - 只有 `class=transient`、`is_stream_body_timeout()` 为真、当前响应已观察到内容、`terminal_marker_observed() != Some(true)`、请求快照未记录 `[DONE]`/任意 choice 的 `finish_reason`/提供方 SSE 错误、消费端仍在，且首段真实尝试次数小于 `AttemptBudget::configured().max()` 时才重放。替换本身只有一个 POST（响应头停顿、重定向都不额外发）。替换再次失败、后续步骤超时或预算已用尽都不再重放，只提交最后一次尝试的暂存输出并走原有失败路径。
     - 开启期间该步骤的文本/思考在步骤完成时才出现（实时增量暂时缺失）；取消发生在提示之后、替换之前时不发替换 POST，发生在替换正文打开期间时不再读取、也不再发 POST，未提交的暂存输出被丢弃。
     - 第 14 轮修复（第 15 轮验证）：直连 Chat 的两种提供方错误形态（嵌套 `error` 与顶层 `{"type":"error"}`）都在正文随后真的空闲超时时否决重放；文本/思考/工具增量出现在非首个 choice 时同样算作已产生内容并允许重放（仅角色或空增量仍走 A 的内容前重试，且请求 ID 不变）。关闭（省略或显式 `false`）时快照键集与 `stop_reason` 与第 13 轮对照完全一致：`message_trajectory.requests_json` 的 41 个键（第二个模型步骤多 `responseModel`），既没有 `replacesRequestId` 也没有 `abandonedForRecovery`，结果 `stop_reason` 为第一步的 `stop`、正文为 `Before \n\nAfter`。消费端关闭会在退避、替换开打与替换读取三个阶段立即返回 `interrupted`，不再等待计时器或空闲超时。
+20. 进程级流式连接复用（`[http].pool_idle_timeout_secs`，默认 `300` 秒）：
+    - 所有生产流式模型请求共享 `model_http` 中的三个进程级连接池（`Redirect::Default`、`Redirect::None`、`single_post`），每池每 host 最多保留 32 条空闲连接；不再按请求新建流式客户端。
+    - 同一回环 keep-alive 服务器上连续两次流式 POST 只触发 1 次 TCP `accept`；4 个并发请求结束后再发顺序请求复用已有空闲连接、不新增 `accept`。
+    - `Redirect::Default` 与 `Redirect::None` 保持隔离，`single_post` 既不跟随重定向也不触发内部重试；`pool_idle_timeout_secs = 0` 在发起任何请求前报配置错误且产生 0 次连接。
+    - 手工/本机 mock 验证：默认配置下同一服务地址跨轮次连续发送两条消息只建立 1 条连接；`pool_idle_timeout_secs = 1` 等待超过 1 秒后触发新 `accept`；取消正在输出的流后，下一条消息不复用被取消的连接。
 
 同一目录的 `desktop/fixture.py` 配合真实 Desktop 窗口核对错误卡片上的阶段、次数与脱敏结果。
 
@@ -538,13 +640,13 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 
 ### N. 技能目录发现与优先级
 
-模型可见的技能列表、`Skill` 工具和斜杠列表共用 `skills::discovery::discover(data_dir, workspace)`。阅读顺序（后者覆盖前者）是：内置工作流（`bundled.rs`）、`CLAUDE_CONFIG_DIR`（未设置时为 `~/.claude`）、`<数据目录>/skills`、`<工作区>/.claude`。同一名称只列一次；项目覆盖用户，数据目录覆盖 Claude 兼容用户目录。`<数据目录>/skills/bundled` 和 `mcp` 仍会列出（斜杠列表原本就显示它们），但不会覆盖已发现的内置或 Claude 用户同名技能；`<数据目录>/skills/<名称>` 的直接用户技能仍按“用户覆盖内置”处理。发现过程只读，不创建 `<数据目录>/skills`，不跟随符号链接。
+模型可见的技能列表、`Skill` 工具和斜杠列表共用 `skills::discovery::discover(data_dir, workspace)`。阅读顺序（后者覆盖前者）是：内置工作流（`bundled.rs`）、`<数据目录>/skills/bundled`、`<数据目录>/skills`、`<工作区>/.claude`、`<工作区>/.agents`。同一名称只列一次；项目覆盖数据目录，项目内 `.agents` 覆盖 `.claude`。`CLAUDE_CONFIG_DIR`、`~/.claude` 和 `~/.claude/skills` 不再读取，个人技能应放在数据目录。`<数据目录>/skills/bundled` 和 `mcp` 仍会列出（斜杠列表原本就显示它们），但不会覆盖已发现的内置或项目同名技能；`<数据目录>/skills/<名称>` 的直接用户技能仍按“项目覆盖用户、用户覆盖内置”处理。发现过程只读，不创建 `<数据目录>/skills`，不跟随符号链接。
 
 数据目录技能的名称沿用 round 01 之前的斜杠命令规则：取 frontmatter `name`（缺省时为技能所在目录名）转小写、空白折叠为 `-`，其他标点保留。因此 `My Skill` 仍是 `/my-skill`，`R&D (team)'s check` 仍是 `/r&d-(team)'s-check`；多层集合也只使用技能自身名称，不加集合前缀。两个数据目录技能归一化后同名时，两者都改用按 `SKILL.md` 路径计算的稳定 `skill_<hash>`（只有哈希碰撞时才按排序后的路径追加 `-2`、`-3`），不会按文件系统顺序只保留其中一个。`~/.claude`、项目与插件技能的名称规则不变。
 
-1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认 `CLAUDE_CONFIG_DIR` 指向空目录时，首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认 `ensure_installed` 不再写出 `skill-creator` 占位，内置 `skill-creator` 只在模型列表和斜杠列表中各出现一次，五个 legacy builtins 仍按原样可见。
-2. 真实终端：用空的 `CLAUDE_CONFIG_DIR` 和独立数据目录，把 `skills/<名称>/SKILL.md` 只放在数据目录，运行 `dcl --data-dir <目录> --print "/<名称> 参数"`。确认斜杠命令展开、`dcl skills list` 显示该技能；再让模型自行调用 `Skill`，确认工具名与斜杠名称一致，返回的说明包含实际数据目录路径，`references/...` 等相对路径可解析。
-3. 同名覆盖：在数据目录、`CLAUDE_CONFIG_DIR` 和工作区 `.claude/skills` 放同名技能，确认列表只有一项且三处内容按“项目 > 数据目录 > CLAUDE 用户”选择；移除高层副本后依次落到下一层。
+1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_reads_agents_skills_and_prefers_them_over_claude`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认 `ensure_installed` 不再写出 `skill-creator` 占位，内置 `skill-creator` 只在模型列表和斜杠列表中各出现一次，五个 legacy builtins 仍按原样可见。
+2. 真实终端：用独立数据目录，把 `skills/<名称>/SKILL.md` 只放在数据目录，运行 `dcl --data-dir <目录> --print "/<名称> 参数"`。确认斜杠命令展开、`dcl skills list` 显示该技能；再让模型自行调用 `Skill`，确认工具名与斜杠名称一致，返回的说明包含实际数据目录路径，`references/...` 等相对路径可解析。
+3. 同名覆盖：在数据目录、工作区 `.claude/skills` 和 `.agents/skills` 放同名技能，确认列表只有一项并按 `.agents` > `.claude` > 数据目录选择；移除高层副本后依次落到下一层。
 4. 开关：`enabled: false` 不出现在列表和工具中；`disable-model-invocation: true` 不在模型列表、`Skill` 工具也不能调用，但斜杠命令仍可用；`user-invocable: false` 仍只供模型调用。
 5. 容错：在同一目录放一个格式错误的 `SKILL.md` 和一个有效技能，确认有效技能仍可用，无效文件只产生路径诊断（运行日志），不会回显文件内容；`<数据目录>/skills` 不存在时发现过程不创建它。
 6. `--data-dir` 与 `DEEPSEEK_CODE_DATA_DIR`：两者选中的非默认数据目录都生效，模型列表和工具使用同一位置，不回退到 `~/.deepseek-code` 或 `~/.claude`。
@@ -581,7 +683,7 @@ cargo test --locked -p deepseek-code-cli --test session_worker running_session_r
 ### O2. 内置 task-template
 
 1. `cargo test --locked -p deepseek-code-core --lib skills::bundled::tests::task_template_` 应运行三项测试。用共享解析器检查 YAML frontmatter，验证发现、渲染和只读内置清单，共用的 `SKILL.md` 不落盘，同名用户技能仍优先。清单和展开正文只在决定把实质性工作交给 `Agent`、队友或后台代理时推荐此技能，并明确略过普通后台 shell 命令。
-2. 内置技能默认关闭。全新数据目录的第一个请求中，`Available skills` 只应包含默认启用的 `skill-creator`（装了 CodeGraph 时再加 `codegraph`），不应包含 `task-template`。先执行 `dcl skills state task-template user`，再用空 `CLAUDE_CONFIG_DIR` 和本地模拟接口启动 `dcl`：`Available skills` 应列出一个 `task-template`，描述包含 `Agent`、队友和后台代理。模拟接口发起 `Skill` 调用后，第二个请求的工具结果应包含传入的任务参数和四段说明（问题、具体改动、验证方式、报告），并要求按 `requirement → evidence → unverified` 记录。
+2. 内置技能默认关闭。全新数据目录的第一个请求中，`Available skills` 只应包含默认启用的 `skill-creator`（装了 CodeGraph 时再加 `codegraph`），不应包含 `task-template`。先执行 `dcl skills state task-template user`，再用本地模拟接口启动 `dcl`：`Available skills` 应列出一个 `task-template`，描述包含 `Agent`、队友和后台代理。模拟接口发起 `Skill` 调用后，第二个请求的工具结果应包含传入的任务参数和四段说明（问题、具体改动、验证方式、报告），并要求按 `requirement → evidence → unverified` 记录。
 3. 在同一数据目录执行上面的启用命令后，在真实终端输入 `/task-template <任务>`，确认本地模拟接口收到展开的任务参数及同一套四段说明。
 4. `cargo test --locked -p deepseek-code-cli --test skills` 覆盖全新数据目录的 `dcl skills list` 和 `dcl skills help task-template`。即使默认关闭，`list` 仍列出该条目并把 `state` 标为 `off`，`help` 仍可读取内容；启用后 `state` 变为 `user`。Desktop 自定义技能清单走同一个 `SkillsManager`。
 5. `cargo test --locked -p deepseek-code-cli --test sdk sdk_agent_fields_reach_the_child_request -- --exact` 覆盖 SDK `initialize.agents[].skills`。OpenAI 和 Anthropic 两个本地模拟协议均接受 `task-template` 并把说明预载到子代理请求中。
@@ -597,7 +699,7 @@ cargo test --locked -p deepseek-code-cli --test session_worker running_session_r
 在有一个格式错误 `SKILL.md` 的工作区（例如 `.claude/skills/bad/SKILL.md` 的 frontmatter 不是有效 YAML）启动 `dcl`，并用本地模拟接口记录模型请求数：
 
 1. 输入 `/doctor errors`：输出列出该文件的 `skill definition:` 与 `definition skipped`，末尾说明可以用 `/doctor` 让模型协助；期间不产生新的模型请求。
-2. 输入 `/doctor skills`：输出与 `/plugins` 的 Stats 选项卡相同（每个技能的上下文开销、7 天 token、使用次数、最近使用，以及 MCP 服务的状态与开销），同样不产生模型请求。
+2. 输入 `/doctor skills`：输出与 `/skills` 的 Stats 选项卡相同（每个技能的上下文开销、7 天 token、使用次数、最近使用），同样不产生模型请求；MCP 状态与开销已移到 `/tools` 的 Mcp 标签。
 3. 输入 `/doctor skills now` 或 `/doctor prompt-audit`：仍交给 `doctor` skill 并调用模型，确认只有精确的 `/doctor skills` 和 `/doctor errors` 走本地路径。
 
 ### 第十一轮：SDK 回合内引导（mid-turn steering）
@@ -816,16 +918,17 @@ SDK 用例通过真实 CLI、本地 OpenAI mock、ToolLoad 与私有 worker 验�
 
 ## 按改动范围选择场景
 
-- `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
+- `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、A3、A4、B、E1、E2、E3
 - `terminal/live.rs`、`terminal/scrollback.rs`、`terminal/change_view.rs`、`terminal/tool_view.rs` 的显示：B、C、E1
 - `repl.rs`：C4、D1、D2、D6、D7、D8–D10（恢复提示、完成耗时与运行中状态），以及 L（手动 `/compact` 的完成输出、提交前取消与 `post-commit-manual` 的提交后取消）
 - `terminal/input.rs` 的取消通道：L 的 `cancel-manual`、`cancel-empty-manual`、`cancel-invalid-manual`、`cancel-merge-manual`、`post-commit-manual`，并在真实终端确认 `Esc` 不滞留到下一个提示、等待期间 `Ctrl+O` 仍能打开完整记录
 - `status_commands.rs`、`services/context_usage.rs`：`status_commands_tests`、`compaction_status_regressions` 与 L 的 `status-manual`（按边界与配置匹配用量、部分估算、压缩后估算、次数持久化）
 - `session_commands.rs`：L（自动压缩完成输出与次数）；模型请求压缩（`services/compaction_requests.rs`、`prepare_turn` 开头的取用）另见“模型请求压缩（CompactContext）”
-- `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
+- `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F；任务状态瞬时读失败另需手工场景：长回合运行中把该 job 的 `state.json` 改名约 200ms，回合必须继续，`stderr.log` 出现 `Task state observation deferred` 与 `recovered`；连续失败超过 5 次或 2 秒时，视图以 `Could not read the task state` 结束而 worker 继续运行（`read_job` 的 5×10ms 重试覆盖单次读，前端 `StateRetry` 覆盖更长的外部干扰）。
 - `crates/cli/tests/conpty_worker.rs`、`crates/cli/tests/fixtures/conpty-console.ps1`：见“Windows ConPTY”中的并发启动与进程树清理场景。Linux 仅检查此测试目标可以编译。
 - `memory.rs`、`display_commands.rs`、`crates/core/src/memory`：G
 - `services/customization.rs`、`prompt/`、`native_engine/tool_loop.rs`：H，以及 SDK 测试
+- `tools/python.rs`、`services/python_settings.rs`、`prompt/` 的 Python 环境行、`native_engine/model_tool_output.rs` 的 Python 渲染：P（Python 工具），以及 H（工具加载、权限与自定义）
 - `tools/context_search.rs`、`db/context_search_repo.rs`、`db/context_search_index.rs` 与 ContextSearch 的工具注册：H、L 和下文“压缩后检索当前会话（ContextSearch）”。
 - `crates/core/src/skills/discovery.rs`、`crates/core/src/native_engine/engine_core.rs` 的技能列表、`crates/core/src/native_engine/skill_tool.rs`：N
 - `crates/core/src/skills/mod.rs` 的 bundled 安装、`bundled.rs`、`bundled_resources.rs`、`bundled_manifest.rs`、`skill_creator.rs`、`skills/bundled/`：O（安装与 `ensure_installed` 的旧占位迁移见 N、O 两节）
@@ -909,7 +1012,7 @@ SDK 用例通过真实 CLI、本地 OpenAI mock、ToolLoad 与私有 worker 验�
 - `native_engine/tool_loop.rs` 的错误与请求快照路径：K、H
 - `native_engine/generation.rs`、`services/compaction.rs`、`services/compaction/`：L，以及 E5
 - `native_engine/tool_call_ids.rs`（发给模型的请求体）：E1、E6；确认只改写超长调用 ID，未提供 `tool_calls`、`content` 等字段的消息不会被补成 `null`
-- `extended_commands.rs` 的复制（`/copy`、`/copy-session-id`、鼠标选择）：在没有 `xclip`、`wl-copy` 的 tmux 中执行 `/copy-session-id`，显示 `Copied session ID to clipboard`，`tmux show-buffer` 内容为会话 ID；在有 `xclip` 的桌面终端中复制后能粘贴。再跑 E
+- `extended_commands.rs` 的复制（`/copy`、`/copy-session-id`、鼠标选择；右击复制后会取消选中并提示结果）：在没有 `xclip`、`wl-copy` 的 tmux 中执行 `/copy-session-id`，显示 `Copied session ID to clipboard`，`tmux show-buffer` 内容为会话 ID；在有 `xclip` 的桌面终端中复制后能粘贴。再跑 E
 - `skills/discovery.rs`、`native_engine/skill_tool.rs`、`native_engine/engine_core.rs` 的技能发现与模型列表、`cli/skill_commands.rs`：N
 - 其他范围：至少跑 E
 
@@ -921,7 +1024,7 @@ cargo test --locked -p deepseek-code-cli --test taskget_background --test taskge
 cargo check --locked -p deepseek-code-desktop --all-targets
 ```
 
-- 摘要缺省开启。用 `dcl config set summarize_long_command_output false`（可加全局 `--data-dir`）写入所选数据目录的 `settings.json`，CLI、SDK 和使用同一数据目录的 Desktop 共用此设置。任意来源明确设置 `false` 即关闭，其他位置的 `true` 无法覆盖。JSON 支持顶层或 `tools` 对象内的键，来源为数据目录的 `settings.json`、`config.json`、`customization.json` 及工作区的 `.claude/settings.json`、`.claude/settings.local.json`。TOML 支持 `[tools]`（或顶层）的同名键，读取数据目录的 `config/orchestration.toml` 及工作区和进程目录对应的 `config/orchestration.toml`、`src-tauri/config/orchestration.toml`、`../config/orchestration.toml`。启动时加载的 TOML 变更后可重启；`DEEPSEEK_CODE_SUMMARIZE_LONG_COMMAND_OUTPUT=false` 同样关闭。
+- 摘要缺省开启。用 `dcl config set summarize_long_command_output false`（可加全局 `--data-dir`）写入所选数据目录的 `settings.json`，CLI、SDK 和使用同一数据目录的 Desktop 共用此设置。任意来源明确设置 `false` 即关闭，其他位置的 `true` 无法覆盖。JSON 支持顶层或 `tools` 对象内的键，来源为数据目录的 `settings.json`、`config.json`、`customization.json` 及工作区的 `.claude/settings.json`、`.claude/settings.local.json`。TOML 支持 `[tools]`（或顶层）的同名键，读取数据目录的 `config/orchestration.toml` 及工作区和进程目录对应的 `config/orchestration.toml`、`../config/orchestration.toml`。启动时加载的 TOML 变更后可重启；`DEEPSEEK_CODE_SUMMARIZE_LONG_COMMAND_OUTPUT=false` 同样关闭。
 - Bash（含 PowerShell）和后台 TaskGet 快照、分页合计 stdout/stderr 的原始字节，达到 12,000 字节才附加摘要。工具截断不单独触发摘要。PTY/ConPTY 控制台任务保留原结果。用 11,999 和 12,000 字节的无效 UTF-8 输入跨过门槛，核对真实模型请求中的快照和分页。完整短输出（包括 44 字节的字面占位符）应与关闭摘要时逐字节一致。
 - 用同一后台命令的快照和页验证：`seq -f 'row-%04.0f-diagnostic' 0 599` 的 600 行在快照的 `output`、`result`、`stdout` 中有多份，合并可见区间后没有省略项。重复内容跨多个片段时按源坐标去重；字节按原始宽度，整行数只计完全不可见的行。
 - 用 `printf '%012000d' 0; kill -TERM "$$"` 验证 TaskGet 保留信号 15；直接用 `exit 143` 验证正常非零退出。前台失败状态只出现一次。完全可见的流、头尾、已显示的标记行及小于 10 秒的耗时不添加说明。
@@ -1274,6 +1377,14 @@ Windows 测试编译回归（Codex 04）：core 的 `--lib <filter>` 仍会编�
 
 需另行验证 Windows 路径、ACL/文件锁/替换行为、ConPTY、Desktop 实际运行、真实供应商与 Bedrock 二进制事件。Linux 本地 mock 和 all-targets 编译不能代替这些证据。
 
+## 文件记忆接入（2026-11-13）
+
+隔离数据目录运行 `cargo test --locked -p deepseek-code-cli --test memory_files`：两个协议的本地模型 mock 必须在实际首个及恢复请求看到 MEMORY.md 索引和中文相关正文；普通 Read/Edit/Write/ApplyPatch 完成版本化维护，其他目录写入不继承免确认；Plan Read 成功而 Edit 拒绝；无归属 SQLite 哨兵不出现在请求，旧条目数量不变。core 跑 `services::memory_files::tests`、`file_memory`、`memory_scope_grant` 和原 `memory::files::tests`。运行 `cargo test --locked -p deepseek-code-core --lib -- memory prompt`。检查首条用户消息的项目说明后紧跟 MEMORY.md，超过 200 行或 25 KiB 时有截断提示。检索只绑定发起本轮的用户输入，最多五个文件。工具结果、任务通知、同伴消息、压缩和 hook 唤醒均不得触发检索。在两个协议下保存首条消息，手工修改磁盘索引后恢复同一会话，核对首条内容逐字一致，新索引提醒出现在本轮，系统消息内没有索引或摘录。
+
+运行 `cargo test --locked -p deepseek-code-core --lib memory_admission_request_matrix`，检查用户消息入库时绑定检索结果、生成消息跳过检索、原生及文本压缩后索引只出现一次，并逐字节比较三种协议在独立进程恢复前后的请求。运行 `cargo test --locked -p deepseek-code-cli --test sdk user_frame_during_a_tool_run_reaches_the_next_model_request`，检查运行中收到的 SDK 用户帧在工具续轮携带已存的附件。
+
+
+手工终端：`dcl --data-dir <临时数据> --path <临时项目> memory files list`；用 `put <name.md> <source.md> [--version HASH]` 创建/更新、delete 必须提供版本，过时版本失败。`/memory entries` 新建、编辑器保存、取消和删除确认；另一进程改相同文件后旧面板提交应报 Conflict。`/memory legacy` 与 flat memory 命令仅管理旧归档，不能误报为当前项目文件。Home 使用 `--session`，移动会话工作区后旧能力不能继续写；Plan 不创建记忆目录或修复磁盘索引。Windows 和真实终端的未执行项须独立列为未验证。
 ### 子代理结束时停止其后台 shell 任务
 
 子代理在自己的会话（`delegation_depth > 0`，子会话 UUID）里用 `run_in_background` 启动的 Bash 任务是子会话的 managed shell；子代理结束（完成、失败或取消）时，委派 owner 按 TaskStop 的同一路径停止仍在运行的任务并等待确认：最终状态为 `cancelled` 的任务记入 `Stopped …`，自行结束（`completed`/`failed`）的任务不报告，已发出停止请求但 5 秒内未确认终态的任务记入 `Requested a stop …`，连取消请求都失败的记入 `Could not stop …`；任务库整体读不出来时记入 `Could not check the subagent's background tasks: …`，不会伪装成“没有任务”。报告/确认共用同一 5 秒预算，期间所有任务库与日志读取都在 blocking 线程池上执行，不占用运行时线程；请求阶段在每次 TaskStop 前检查预算与放弃标志，因此超时后仍在运行的旧请求任务不会再开始新的停止：最多完成它已经准入/已开始的那一次 TaskStop，该次操作的结果可能因此不在报告里，但只要请求阶段没有检查完所有任务，结果就带 `Could not check the subagent's background tasks: timed out after 5 seconds before every task was checked.` 这一行（即使请求任务在超时前自行结束并正常返回也一样）；已被恢复的子代理新建的任务不会被这次清理停止。确认只读任务记录的有效状态，不读日志，因此日志不可读不会掩盖已 `cancelled` 的状态。清理 guard 位于子任务自身的 future 内，被取消（owner 被丢弃）时只发请求不等待，不会漏掉随后才发布的任务。摘要追加到成功结果文本，也追加到失败/取消路径（含 transcript 处理与最终文本持久化失败）的 Agent 错误文本。已结束的任务保持原状态。子代理的前台 Bash 到达超时也不再被杀死，而是转入后台，随后由同一清理停止。
@@ -1619,3 +1730,46 @@ For unstamped worker submissions, run `unstamped_worker_adopts_the_authoritative
 - 用交互终端连接本机 mock，主回复报告缓存命中。确认输入框出现灰字，退出并恢复同一会话，再次出现同一条灰字且请求计数不变。按 Tab 接受后退出，再次恢复应无灰字。检查会话消息只含用户实际提交的内容和主回复。
 
 I39 第二轮：在本地 HTTP 服务上挂起上轮建议，再从同一 SDK 或另一进程提交新回合。下一回合可立即进入；返回 503 后不得重发旧前缀。Linux 单回合前台 Worker 在建议应答前应完成前台任务并释放租约。以目录内置 ID 指向自定义 Responses/Gemini 地址时，零缓存读取只发主请求。用 `cargo test --locked -p deepseek-code-cli --test sdk prompt_suggestion` 和 `cargo test --locked -p deepseek-code-core --lib suggestion::` 检查。记录目录的 Round 2 脚本另覆盖首发前等待录制锁、域名映射与跨进程切换绑定。
+
+### P Python 工具
+
+自动检查：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib tools::python::tests
+cargo test --locked -p deepseek-code-core --test python_tool
+cargo test --locked -p deepseek-code-core --lib python_settings
+cargo test --locked -p deepseek-code-core --lib permissions::patterns::tests
+cargo test --locked -p deepseek-code-core --lib python_output_consumes
+cargo test --locked -p deepseek-code-core --lib python_gets_the_sandbox_policy
+cargo test --locked -p deepseek-code-core --test advanced_tools
+cargo test --locked -p deepseek-code-cli --bin dcl python_approval
+cargo test --locked -p deepseek-code-cli --bin dcl tool_previews_are_bounded
+cargo test --locked -p deepseek-code-cli --bin dcl shell_configuration_is_shared
+```
+
+手工/真实模型检查：
+
+1. 用 `ToolLoad` 加载 `Python`，下一次请求才调用。直接调用应被拒绝；两个开关都关时目录、加载和调用都不出现。新会话提出纯 Python 片段/数值实验时，模型应先 `ToolLoad {"names":["Python"]}`，而不是用 Bash heredoc 或 `python -c`；`python -m`/带参数的脚本仍走 Bash。
+2. `print(1)` 得到 `stdout:"1\n"`、`exit_code:0`、`script_saved:false`，且没有 `script_path`。检查 `__file__` 是真实 `.py` 路径，stdin 为空时 `input()` 立即得到 EOF。
+3. `env` 中的变量在 `os.environ` 可见；`PYTHONPATH` 能导入工作区模块，工作区始终在 `sys.path` 中。非零退出码和 stderr 原样返回。
+4. `save_name:"python/script/001.py"` 写到 `<workspace>/temp/python/script/001.py`，自动建目录、可覆盖旧文件，结果含 `script_saved:true` 与绝对 `script_path`；重复执行覆盖内容。目标为符号链接时拒绝。
+5. 指定 `interpreter` 或 `conda` 时结果回显实际路径；同时传两者报错。`python.path` 可通过 `dcl config set python.path ...` 设置，`dcl config show` 可见，空值清除。
+6. 前台超时后进程被清理并返回 `timed_out:true`；后台任务返回 task id，`TaskGet` 能读到输出，`TaskStop` 能停止。后台未保存的临时脚本不会在前台清理阶段删除。
+7. 开启沙箱（Linux/macOS）后 Python 被解释器级包装，网络允许列表和主机审批与 Bash 相同；Windows 上明确报错。计划模式拒绝 Python；`Python(*)` 和裸 `Python` 放行任意代码，`Python(import *)` 只按前缀匹配。
+8. 模型预览按 `interpreter:`（仅与请求不同或有工作区虚拟环境覆盖时）→ `script:` → `Exit code:` → 小写 `stdout:`/`stderr:` 顺序显示，路径是单反斜杠，不落入 `Metadata:`。
+9. CLI 审批框显示完整代码、`env`、`cwd`、`interpreter`/`conda` 和 `save_name` 目标；不提供 Allow for Session。工具调用摘要显示 `Python(description | 首行代码或保存路径)`，不再只有描述。`/permissions allow Python(*)` 后的调用不再询问。
+
+### I42. Experience 索引与变更提醒
+
+改动范围：`crates/core/src/experience.rs`、`prompt/mod.rs` 的 `SessionReminders.experience`/`experience_for_session`/`changes_reminder`、`session_files.rs`、`engine_core.rs`、`delegation.rs`、`crates/cli/src/config.rs`、`crates/cli/src/settings_dialog.rs`。
+
+- `cargo test --locked -p deepseek-code-core --lib -- experience prompt`：
+  - `experience::tests` 验证 frontmatter 解析、64 KiB/8 KiB 上限、根与一级子目录扫描、三级目录不扫描、同名跨根去重、确定性排序、`- 相对路径 | 名称: 描述` 行格式、正文不进入索引、凭据启发式跳过，以及 `experience.enabled` 默认 true 与持久化。
+  - `prompt::tests::first_message_reminders_keep_the_stable_order` 断言首条消息提醒按 `user_instructions → standalone_frontend → project_instructions → resident_indexes → experience → loadable_tools → available_skills → environment → date → git → skills` 顺序输出（Experience 位于 MEMORY 索引之后、loadable_tools 之前；CLI 前端说明位于用户指令之后、项目指令之前；environment 位于 available_skills 之后、date 之前）；`experience_*` 断言首请求冻结、内部草稿工作区与关闭开关都冻结 `None`；`changes_reminder_reports_*` 断言新增/删除各只提醒一次。
+  - `forget_*` 与 `prune_*` 断言 `.experience.json` 和 `<session>.experience.names.json` 纳入会话删除与 30 天清理。
+- `cargo test --locked -p deepseek-code-cli --test experience`：OpenAI 与 Anthropic 各跑一遍。断言首条用户消息只有一个 `# Experience`，根与 `docs/.agents/experience/` 条目在、`docs/sub/.agents/experience/` 不在、行以相对路径开头、正文与无效文件标记不在；恢复后首条消息逐字一致；新增 `gamma` 只出现一次 `New experience:`，删除 `beta` 只出现一次 `Removed experience: beta`；关闭开关的新会话没有块，重新打开恢复。
+- `cargo test --locked -p deepseek-code-cli --test peripheral config_memory_switch`：断言 `config show` 的 `experience.enabled` 默认 true，`config set experience.enabled false|true` 可读回；`/config` 的 Experience 行读取同一设置。
+- 手工终端：在含 `.agents/experience/` 的临时工作区连本地 mock，确认首条消息顺序、`/config` 开关、恢复同一会话和压缩后只有一份块。Windows 与 Desktop WebView 未在本机验证。
+
+已知平台问题：macOS 上 `cargo check -p deepseek-code-cli --all-targets` 会在 `local_coordination_registry` 失败（`private_root` 使用 `#[cfg(unix)]`，CoordinationPaths 导入使用 `#[cfg(target_os = "linux")]`）。这是既有问题，与本次改动无关；本次用 `--bin dcl --test experience --test peripheral` 检查。

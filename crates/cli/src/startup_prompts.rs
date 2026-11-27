@@ -16,7 +16,8 @@ struct Answers {
 }
 
 fn file(data_dir: &Path) -> PathBuf {
-    data_dir.join("startup-prompts.json")
+    deepseek_code_core::data_layout::DataLayout::from_root(&data_dir)
+        .config_file("startup-prompts.json")
 }
 
 fn load(data_dir: &Path) -> Answers {
@@ -24,8 +25,11 @@ fn load(data_dir: &Path) -> Answers {
 }
 
 fn save(data_dir: &Path, answers: &Answers) -> Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    std::fs::write(file(data_dir), serde_json::to_vec_pretty(answers)?)?;
+    let path = file(data_dir);
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(answers)?)?;
     Ok(())
 }
 

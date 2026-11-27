@@ -144,10 +144,101 @@ pub(crate) fn recall_queued(
     Ok(recalled)
 }
 
+/// The producer supplies the provenance and the original human text, if any.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnOrigin<'a> {
+    User(&'a str),
+    Generated,
+    Delegation,
+    McpPrompt,
+    Scheduled,
+    Queue(&'a str, &'a Value),
+    Continuation,
+    GoalContinuation,
+    ErrorResume,
+    InitialHook,
+    HookWake,
+}
+
+impl<'a> TurnOrigin<'a> {
+    pub(crate) fn command_line(cli: &'a Cli, text: &'a str) -> Self {
+        match cli.generated_continuation {
+            Some(crate::args::Continuation::Goal) => Self::GoalContinuation,
+            Some(crate::args::Continuation::Resume) => Self::Continuation,
+            Some(crate::args::Continuation::Delegation) => Self::Delegation,
+            Some(crate::args::Continuation::McpPrompt) => Self::McpPrompt,
+            Some(crate::args::Continuation::Scheduled) => Self::Scheduled,
+            None if cli.prompt_origin
+                == deepseek_code_core::services::background_sessions::PromptOrigin::Generated =>
+            {
+                Self::Generated
+            }
+            None => Self::User(cli.original_user_input.as_deref().unwrap_or(text)),
+        }
+    }
+
+    pub(crate) fn worker_arguments(self, prompt: &str) -> Result<Vec<String>> {
+        use crate::args::Continuation;
+        use deepseek_code_core::services::background_sessions::PromptOrigin;
+        let mut options = Vec::new();
+        let provenance = match self {
+            Self::User(raw) => {
+                if raw != prompt {
+                    options.push(format!("--original-user-input={raw}"));
+                }
+                PromptOrigin::Typed
+            }
+            Self::Generated => PromptOrigin::Generated,
+            generated => {
+                let continuation = match generated {
+                    Self::GoalContinuation => Continuation::Goal,
+                    Self::Continuation => Continuation::Resume,
+                    Self::Delegation => Continuation::Delegation,
+                    Self::McpPrompt => Continuation::McpPrompt,
+                    Self::Scheduled => Continuation::Scheduled,
+                    _ => bail!("This turn is already owned by the executing session"),
+                };
+                options.push(continuation.worker_argument().into());
+                PromptOrigin::Generated
+            }
+        };
+        options.extend(provenance.arguments(prompt));
+        Ok(options)
+    }
+
+    fn admit(
+        self,
+        shard: &deepseek_code_core::db::session_store::SessionDb,
+        display: &str,
+        content: Option<&Value>,
+    ) -> Result<String> {
+        match self {
+            Self::Queue(tag, payload) => shard.admit_prompt(display, Some(payload), tag),
+            _ => shard.admit_prompt(display, content, self.tag()),
+        }
+    }
+
+    fn tag(self) -> &'a str {
+        match self {
+            Self::User(_) => "typed",
+            Self::Generated => "generated",
+            Self::Delegation => "delegation",
+            Self::McpPrompt => "mcp_prompt",
+            Self::Scheduled => "scheduled",
+            Self::Queue(tag, _) => tag,
+            Self::Continuation => "continuation",
+            Self::GoalContinuation => "goal_continuation",
+            Self::ErrorResume => "error_resume",
+            Self::InitialHook | Self::HookWake => "hook",
+        }
+    }
+}
+
 // Attempt data is published only after optional recovery has settled.
 #[derive(Default)]
-struct TurnCompletion {
-    queued: Option<deepseek_code_core::services::input_queue::QueueItem>,
+struct TurnCompletion<'a> {
+    admitted_message: Option<String>,
+    queued: Option<&'a deepseek_code_core::services::input_queue::QueueItem>,
     suggestion: Option<(
         deepseek_code_core::native_engine::suggestion::SuggestionCapture,
         deepseek_code_core::session_files::suggestion::SuggestionTurn,
@@ -161,7 +252,7 @@ struct TurnCompletion {
     requests: Vec<Value>,
 }
 
-impl TurnCompletion {
+impl TurnCompletion<'_> {
     fn remember_stdout_failure(&mut self, error: &anyhow::Error) {
         if let Some(failure) = error.downcast_ref::<crate::terminal_output::StdoutWriteFailed>() {
             self.stdout_failure.get_or_insert_with(|| failure.clone());
@@ -738,7 +829,7 @@ impl Session {
             deepseek_code_core::super_agent::role::set(&store.db, &id, role.into())?;
         }
         let workspace = store
-            .workspace(&id, &paths.data_dir.join("workspaces"))
+            .workspace(&id, &paths.data_dir.join("data/workspaces"))
             .map_err(|error| crate::session_trust::diagnose(&store.db, paths, &id, error))?;
         let permissions = runtime::default_permissions();
         permissions
@@ -774,9 +865,11 @@ impl Session {
             PermissionModeArg::DontAsk => PermissionMode::DontAsk,
             PermissionModeArg::Auto => PermissionMode::Auto,
         };
+        // A default launch must not overwrite the stored mode of a resumed
+        // session; only flags that change authority explicitly do.
         let explicit_mode = cli.permission_mode_explicit
             || cli.dangerously_skip_permissions
-            || !matches!(cli.permission_mode, PermissionModeArg::Ask);
+            || cli.full_access;
         // Clear what exited processes left behind, so a crash cannot block this resume.
         let settled = if internal_worker {
             None
@@ -828,13 +921,21 @@ impl Session {
                     &selection.model,
                 )
                 .context("Main model unavailable")?;
-            deepseek_code_core::native_engine::auto_permissions::configured(
+            let configured = deepseek_code_core::native_engine::auto_permissions::configured(
                 &crate::services::context(paths)?,
                 &deepseek_code_core::native_engine::provider_manager::ResolvedProvider {
                     provider: provider.clone(),
                     model,
                 },
-            )?;
+            );
+            if let Err(error) = configured {
+                // Auto is deterministic for known local work and only needs the
+                // classifier for unknown tools. Keep the mode usable and let
+                // those tools fall back to manual approval instead.
+                eprintln!(
+                    "Auto classifier is unavailable ({error:#}); unknown tools will require manual approval."
+                );
+            }
         }
         if active_job.is_some() {
             permissions.set_mode(selected_mode);
@@ -913,7 +1014,8 @@ impl Session {
         let selected = store.db.open_session(&id)?;
         let store = SessionStore::new(Arc::new(selected.scoped_stores()));
         binding.track_session(selected);
-        let mut manager = ProviderManager::in_memory(Vec::new(), paths.data_dir.join("providers.json"));
+        let mut manager =
+            ProviderManager::in_memory(Vec::new(), paths.layout().config_file("providers.json"));
         manager.binding = binding.clone();
 
         let providers = Arc::new(Mutex::new(manager));
@@ -959,7 +1061,8 @@ impl Session {
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
             extension_watch: Mutex::new(None),
             startup_provider,
-            has_saved_providers: paths.data_dir.join("config.json").is_file() || paths.data_dir.join("providers.json").is_file(),
+            has_saved_providers: paths.layout().config_file("config.json").is_file()
+                || paths.layout().config_file("providers.json").is_file(),
             providers,
             workspace,
             auto_route,
@@ -998,7 +1101,8 @@ impl Session {
             state.generation = self.binding.read().map_or(0, |s| s.generation);
             self.binding.install(state)?;
         }
-        self.has_saved_providers |= paths.data_dir.join("config.json").is_file() || paths.data_dir.join("providers.json").is_file();
+        self.has_saved_providers |= paths.layout().config_file("config.json").is_file()
+            || paths.layout().config_file("providers.json").is_file();
         self.startup_provider = None;
         self.auto_route = false;
         Ok(())
@@ -1374,10 +1478,9 @@ impl Session {
         config
             .classifier
             .get_or_insert(ClassifierSelection::Current);
-        config.resolve(
-            &context.paths.providers()?,
-            &self.selected_provider().await?,
-        )?;
+        // Auto remains usable without a classifier: unknown tools then fall
+        // back to manual approval. Validation happens when the classifier is
+        // actually requested, not when the mode is selected.
         Ok(config)
     }
 
@@ -1409,10 +1512,14 @@ impl Session {
         }
         let mode = deepseek_code_core::services::session_permission_mode::parse(value)?;
         if mode == PermissionMode::Auto {
-            deepseek_code_core::native_engine::auto_permissions::configured(
+            if let Err(error) = deepseek_code_core::native_engine::auto_permissions::configured(
                 &crate::services::context(&self.paths)?,
                 &self.selected_provider().await?,
-            )?;
+            ) {
+                eprintln!(
+                    "Auto classifier is unavailable ({error:#}); unknown tools will require manual approval."
+                );
+            }
         }
         anyhow::ensure!(mode != PermissionMode::BypassPermissions || self.bypass_available, "Bypass permissions mode needs a launch with --dangerously-skip-permissions or --allow-dangerously-skip-permissions");
         deepseek_code_core::services::session_permission_mode::set(
@@ -1588,11 +1695,20 @@ impl Session {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub async fn turn(
+    /// Keeps idle notifications and remote prompts from starting a turn until
+    /// the user submits explicit input. Used while another process owns the
+    /// session, so observation never auto-submits queued work.
+    pub(crate) fn hold_automatic_wake(&self) {
+        self.waiting_for_continue
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) async fn turn(
         &self,
         cli: &Cli,
         prompt: &str,
         input: &mut Option<TerminalInput>,
+        mut origin: TurnOrigin<'_>,
     ) -> Result<()> {
         use std::io::IsTerminal;
         self.apply_settings_permissions(cli)?;
@@ -1612,19 +1728,17 @@ impl Session {
         }
         // Frontends record original human input before skill expansion/worker handoff.
         // A worker receives synthesized context and must never re-label it as user intent.
-        if std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
-            .is_none()
-        {
+        if let (true, TurnOrigin::User(raw)) = (frontend, origin) {
             deepseek_code_core::services::permission_authority::record_user(
                 &self.store.db,
                 &self.id,
-                self.sdk_content.as_ref().unwrap_or(&json!(prompt)),
+                self.sdk_content.as_ref().unwrap_or(&json!(raw)),
             )?;
         }
         // Keep engine/goal futures out of the outer host stack. Debug builds on
         // Windows otherwise exhaust the process stack before a worker can run.
         if self.sdk_content.is_some() {
-            return Box::pin(self.run_turn(cli, prompt, input)).await;
+            return Box::pin(self.run_turn_origin(cli, prompt, input, origin, true)).await;
         }
         let hook_session = self.id.clone();
         let hook_interactive = input.is_some() && cli.output_format == OutputFormat::Text;
@@ -1656,7 +1770,7 @@ impl Session {
             && std::env::var("TERM").as_deref() != Ok("dumb")
             && !crate::display_commands::load(self)?.focus
         {
-            return crate::worker_frontend::turn(cli, self, prompt, input).await;
+            return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
         }
         let mut next = prompt.to_owned();
         loop {
@@ -1677,7 +1791,7 @@ impl Session {
                 }
             }
             let result = async {
-                Box::pin(self.run_turn(cli, &next, input)).await?;
+                Box::pin(self.run_turn_origin(cli, &next, input, origin, true)).await?;
                 if (input.is_none() || cli.output_format != OutputFormat::Text)
                     && std::env::var_os(
                         deepseek_code_core::services::background_sessions::CONTROL_ENV,
@@ -1700,7 +1814,10 @@ impl Session {
             }
             .await;
             match result {
-                Ok(Some(followup)) => next = followup,
+                Ok(Some(followup)) => {
+                    next = followup;
+                    origin = TurnOrigin::GoalContinuation;
+                }
                 Ok(None) => break,
                 Err(error) => {
                     let discarded = deepseek_code_core::services::goal_proposals::discard(
@@ -1743,6 +1860,7 @@ impl Session {
                                 match crate::session_commands::wait_goal_retry(self, &goal.id).await
                                 {
                                     Ok(true) => {
+                                        origin = TurnOrigin::ErrorResume;
                                         next = format!("Resume unfinished work toward the explicitly authorized goal: {}. Review existing progress first and do not repeat completed operations. Stay within existing permissions.", goal.condition);
                                         continue;
                                     }
@@ -1787,17 +1905,18 @@ impl Session {
     }
 
     pub async fn wake_hooks(&self, cli: &Cli, input: &mut Option<TerminalInput>) -> Result<()> {
-        Box::pin(self.run_turn_origin(cli, "", input, true, false, true)).await
+        Box::pin(self.run_turn_origin(cli, "", input, TurnOrigin::HookWake, true)).await
     }
 
+    #[cfg(test)]
     async fn run_turn(
         &self,
         cli: &Cli,
         prompt: &str,
         input: &mut Option<TerminalInput>,
+        origin: TurnOrigin<'_>,
     ) -> Result<()> {
-        self.run_turn_origin(cli, prompt, input, false, false, true)
-            .await
+        self.run_turn_origin(cli, prompt, input, origin, true).await
     }
 
     pub(crate) async fn turn_initial_hook(
@@ -1808,7 +1927,7 @@ impl Session {
         publish: bool,
     ) -> Result<()> {
         self.apply_settings_permissions(cli)?;
-        self.run_turn_origin(cli, prompt, input, false, true, publish)
+        self.run_turn_origin(cli, prompt, input, TurnOrigin::InitialHook, publish)
             .await
     }
 
@@ -1839,10 +1958,29 @@ impl Session {
 
     pub(crate) async fn dispatch_input(&self,cli:&Cli,item:deepseek_code_core::services::input_queue::QueueItem,input:&mut Option<TerminalInput>)->Result<()> {
         self.apply_settings_permissions(cli)?;
-        let prompt=item.content.as_str().or_else(||item.content.pointer("/0/text").and_then(Value::as_str)).unwrap_or_default().to_owned();
-        let mut completion=TurnCompletion{queued:Some(item),..Default::default()};
-        let result=self.run_and_finalize_turn(cli,&prompt,input,false,false,true,&mut completion).await;
-        match completion.stdout_failure { Some(failure)=>Err(failure.into()),None=>result }
+        // Defensive re-check: the caller normally waits for an idle session,
+        // but a race with another owner must not disappear into a raw lock
+        // error or consume the queued item.
+        if let Some(occupancy) = crate::worker_frontend::occupancy(self)? {
+            anyhow::bail!(
+                "{} The queued input was not submitted.",
+                crate::worker_frontend::occupancy_message(self, &occupancy)
+            );
+        }
+        let (prompt, _) =
+            deepseek_code_core::db::message_repo::prepare_user_message(&item.content)?;
+        let origin = TurnOrigin::Queue(&item.prompt_origin, &item.content);
+        let mut completion = TurnCompletion {
+            queued: Some(&item),
+            ..Default::default()
+        };
+        let result = self
+            .run_and_finalize_turn(cli, &prompt, input, origin, true, &mut completion)
+            .await;
+        match completion.stdout_failure {
+            Some(failure) => Err(failure.into()),
+            None => result,
+        }
     }
 
     async fn run_turn_origin(
@@ -1850,13 +1988,12 @@ impl Session {
         cli: &Cli,
         prompt: &str,
         input: &mut Option<TerminalInput>,
-        hook_wake: bool,
-        initial_hook: bool,
+        origin: TurnOrigin<'_>,
         publish: bool,
     ) -> Result<()> {
         let mut completion = TurnCompletion::default();
         let result = self
-            .run_and_finalize_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut completion)
+            .run_and_finalize_turn(cli, prompt, input, origin, publish, &mut completion)
             .await;
         match completion.stdout_failure {
             Some(failure) => Err(failure.into()),
@@ -1869,10 +2006,9 @@ impl Session {
         cli: &Cli,
         prompt: &str,
         input: &mut Option<TerminalInput>,
-        hook_wake: bool,
-        initial_hook: bool,
+        origin: TurnOrigin<'_>,
         publish: bool,
-        completion: &mut TurnCompletion,
+        completion: &mut TurnCompletion<'_>,
     ) -> Result<()> {
         // Own the session before the turn becomes visible, and keep that
         // ownership until the turn is persisted. The engine only borrows a clone
@@ -1884,7 +2020,21 @@ impl Session {
         // before any turn record, queued input or model request.
         let turn_lease = match self.store.db.executor_history(&self.id)?.execution_lease() {
             Ok(lease) => lease.map(std::sync::Arc::new),
-            Err(error) => return Err(error).context("This session is already executing in another process; observe or stop that turn first"),
+            Err(error) => {
+                // The raw OS lock error is diagnostic only. Report the owner in
+                // the same actionable terms the REPL uses for an occupied
+                // session, and never echo `lock acquisition failed` to the user.
+                tracing::warn!("Session execution lease not acquired for {}: {error:#}", self.id);
+                let message = match crate::worker_frontend::occupancy(self) {
+                    Ok(Some(occupancy)) => {
+                        crate::worker_frontend::occupancy_message(self, &occupancy)
+                    }
+                    _ => "A turn is still running in another process; observe it or wait for it to finish.".to_string(),
+                };
+                return Err(anyhow::anyhow!(
+                    "{message} The current prompt was not submitted."
+                ));
+            }
         };
         let mut turn = match &completion.queued {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
@@ -1892,9 +2042,9 @@ impl Session {
         };
         let mut recovery_requests = Vec::new();
         let mut result = async {
-            let first = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, completion, turn_lease.clone()).await;
+            let first = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
             match first {
-                Err(error) if completion.stdout_failure.is_none() && !hook_wake && !initial_hook && crate::session_commands::is_context_overflow(&error) => {
+                Err(error) if completion.stdout_failure.is_none() && !matches!(origin, TurnOrigin::HookWake | TurnOrigin::InitialHook) && crate::session_commands::is_context_overflow(&error) => {
                     recovery_requests.extend(completion.requests.iter().cloned());
                     if let Err(log_error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &json!({
                         "type":"request_turn_attempt_end", "turnId":turn.record().turn_id,
@@ -1904,8 +2054,8 @@ impl Session {
                         crate::compaction::notice(&format!("Could not save request attempt log: {log_error}"));
                     }
                     // Recovery errors must reach the same finalization as requests.
-                    match crate::session_commands::reactive_compact(self, prompt, &mut turn).await {
-                        Ok(false) => {
+                    match crate::session_commands::reactive_compact(self, completion.admitted_message.as_deref(), &mut turn).await {
+                        Ok(None) => {
                             recovery_requests.clear();
                             Err(error)
                         }
@@ -1917,13 +2067,13 @@ impl Session {
                             }
                             Err(recovery_error)
                         }
-                        Ok(true) => {
+                        Ok(Some(admitted)) => {
                             let previous = completion.sdk_result.take();
-                            *completion = TurnCompletion::default();
+                            *completion = TurnCompletion { admitted_message: Some(admitted), queued: completion.queued.take(), ..Default::default() };
                             // Retrying after compaction stays inside this turn and
                             // keeps its ownership; a failure here would mean the
                             // lease was lost, so it must not be ignored.
-                            let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, completion, turn_lease.clone()).await;
+                            let result = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
                             completion.sdk_result = Some(merge_attempt_results(previous, completion.sdk_result.take()));
                             result
                         }
@@ -2027,15 +2177,19 @@ impl Session {
         cli: &Cli,
         prompt: &str,
         input: &mut Option<TerminalInput>,
-        hook_wake: bool,
-        initial_hook: bool,
+        origin: TurnOrigin<'_>,
         publish: bool,
         turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
-        completion: &mut TurnCompletion,
+        completion: &mut TurnCompletion<'_>,
         execution_lease: Option<
             std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>,
         >,
     ) -> Result<()> {
+        let hook_wake = origin == TurnOrigin::HookWake;
+        let content = match origin {
+            TurnOrigin::Queue(_, content) => Some(content),
+            _ => self.sdk_content.as_ref(),
+        };
         let transcript = turn.history();
         // Captures the signal count synchronously, before any await. A Ctrl-C
         // delivered while an event is being handled is therefore still seen by
@@ -2059,6 +2213,7 @@ impl Session {
         let turn_goal =
             deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
         if let Err(error) = crate::ide_commands::restore(self).await {
+            crate::terminal::release_handoff();
             eprintln!("IDE connection unavailable: {error:#}");
             self.ide.disconnect().await;
         }
@@ -2081,17 +2236,29 @@ impl Session {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;
         }
-        crate::session_commands::prepare_turn(self, self.context_window().await, execution_lease.clone()).await?;
+        if completion.admitted_message.is_none() {
+            crate::session_commands::prepare_turn(
+                self,
+                self.context_window().await,
+                execution_lease.clone(),
+            )
+            .await?;
+        }
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
         // Read the history and its compaction boundary in one store view, so the
         // request reports the context it actually sends.
-        let (mut history, context_boundary) = self
-            .store
-            .model_history_with_boundary(&self.id, &self.selected_provider().await?.provider.api_format)?;
-        crate::session_commands::microcompact(self, &mut history, self.context_window().await)?;
-        if !hook_wake && completion.queued.is_none() {
-            history.push(json!({"role":"user","content":self.sdk_content.as_ref().cloned().unwrap_or(json!(prompt))}));
+        let (mut history, context_boundary) = self.store.model_history_with_boundary(
+            &self.id,
+            &self.selected_provider().await?.provider.api_format,
+        )?;
+        if deepseek_code_core::services::compaction::microcompact(
+            &self.selected_session()?,
+            context_boundary.as_deref(),
+            &mut history,
+            self.context_window().await,
+        )? {
+            crate::compaction::notice("Cleared older tool results to save context.");
         }
         let mut system = match &self.sdk_overrides.system_prompt {
             Some(prompt) => prompt.clone(),
@@ -2120,19 +2287,20 @@ impl Session {
         let mut checkpoint = if hook_wake || completion.queued.is_some() {
             None
         } else {
-            let user_message_id = if initial_hook {
-                self.store.append_hook_user(&self.id, prompt)
-            } else {
-                match &self.sdk_content {
-                    Some(content) => self.store.append_user_content(&self.id, prompt, content),
-                    None => self.store.append(&self.id, "user", prompt),
+            let user_message_id = match &completion.admitted_message {
+                Some(id) => id,
+                None => {
+                    let id = origin
+                        .admit(&self.selected_session()?, prompt, content)
+                        .context("Persisting CLI user message")?;
+                    history.push(json!({"role":"user","origin":origin.tag(),"id":id,"content":content.cloned().unwrap_or(json!(prompt))}));
+                    completion.admitted_message.insert(id)
                 }
-            }
-            .context("Persisting CLI user message")?;
+            };
             match deepseek_code_core::services::checkpoints::capture(
                 &self.paths.data_dir,
                 &self.id,
-                &user_message_id,
+                user_message_id,
                 cwd,
             ) {
                 Ok(capture) => Some(capture),
@@ -2140,6 +2308,7 @@ impl Session {
                     // Outside Git there are no checkpoints by design; say nothing.
                     let not_git = format!("{error:#}").contains("requires a Git worktree");
                     if input.is_some() && !not_git {
+                        crate::terminal::release_handoff();
                         eprintln!("Code checkpoint unavailable: {error:#}");
                     }
                     None
@@ -2247,7 +2416,47 @@ impl Session {
             .suggestion
             .as_ref()
             .map(|(capture, _)| capture.clone());
-        let request = Box::pin(async {
+        let initial_model_label = if interactive_display {
+            Some(crate::session_commands::model_label(self).await)
+        } else {
+            None
+        };
+        let mut progress = crate::terminal::live::TurnDisplay::new_with_initial(
+            interactive_display,
+            self.permission_mode(),
+            &self.paths.layout().config_file("keybindings.json"),
+            self.store
+                .history(&self.id)?
+                .iter()
+                .filter(|row| row["role"] == "user")
+                .filter_map(|row| row["content"].as_str().map(str::to_owned))
+                .filter(|text| !crate::background_commands::is_notification(text))
+                .collect(),
+            Some(&self.paths.data_dir),
+            initial_model_label,
+            Some(prompt.to_owned()),
+        )?
+        .with_workspace(&self.workspace);
+        progress.restore_numbers(self)?;
+        progress.set_session_context(&self.paths.data_dir, self.selected_session()?);
+        if progress.is_live() {
+            progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
+            progress.set_todos(crate::background_commands::todo_items(
+                &self.paths,
+                &self.id,
+            ));
+        }
+        let mut hook_progress = deepseek_code_core::services::hook_progress::subscribe(&self.id);
+        progress.hook_snapshot(hook_progress.snapshot());
+        let mut side_request: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
+        > = None;
+        // Messages typed during this turn that the model has not read yet.
+        let mut pending_inputs = Vec::<String>::new();
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut remote_interrupts = self.remote_interrupts();
+        let mut request = Box::pin(async {
             if hook_wake {
                 match execution_lease {
                     Some(lease) => {
@@ -2266,51 +2475,152 @@ impl Session {
         let worker_cancel =
             deepseek_code_core::services::background_sessions::wait_for_cancellation();
         tokio::pin!(worker_cancel);
-        let mut events = tokio::select! {
-            biased;
-            _ = self.sdk_cancelled() => {
-                self.engine.cancel_turn(&self.id).await;
-                bail!("Interrupted by SDK host");
-            },
-            _ = &mut worker_cancel => bail!("Background task cancelled before model request"),
-            result = crate::hook_progress::during(&self.id, interactive_display, request) => result?,
-            _ = interrupt.interrupted() => {
-                // The engine may have spawned its executor before the request
-                // future completed; cancel it so the turn and its owned tools
-                // are cleaned up instead of left running.
-                self.engine.cancel_turn(&self.id).await;
-                bail!("Interrupted before model request");
-            },
+        let finish_early =
+            |progress: &mut crate::terminal::live::TurnDisplay,
+             input: &mut Option<TerminalInput>,
+             message: &str| {
+                for action in progress.finish(Some(message)) {
+                    match action {
+                        crate::terminal::live::Action::Draft(draft) => {
+                            if let Some(reader) = input.as_ref() {
+                                reader.restore_draft(draft);
+                            }
+                        }
+                        crate::terminal::live::Action::Submit(queued)
+                        | crate::terminal::live::Action::Queue(queued) => {
+                            if let Some(reader) = input.as_mut() {
+                                reader.queue_prompt(queued);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+        let mut events = loop {
+            tokio::select! {
+                biased;
+                _ = self.sdk_cancelled() => {
+                    self.engine.cancel_turn(&self.id).await;
+                    finish_early(&mut progress, input, "Interrupted by SDK host");
+                    bail!("Interrupted by SDK host");
+                },
+                _ = &mut worker_cancel => {
+                    finish_early(&mut progress, input, "Background task cancelled before model request");
+                    bail!("Background task cancelled before model request");
+                },
+                _ = remote_interrupts.next() => {
+                    self.engine.cancel_turn(&self.id).await;
+                    finish_early(&mut progress, input, "Interrupted by Remote Control");
+                    bail!("Interrupted by Remote Control");
+                },
+                _ = interrupt.interrupted() => {
+                    // The engine may have spawned its executor before the request
+                    // future completed; cancel it so the turn and its owned tools
+                    // are cleaned up instead of left running.
+                    self.engine.cancel_turn(&self.id).await;
+                    finish_early(&mut progress, input, "Interrupted before model request");
+                    bail!("Interrupted before model request");
+                },
+                hooks = hook_progress.changed() => {
+                    progress.hook_snapshot(hooks);
+                },
+                result = &mut request => match result {
+                    Ok(events) => break events,
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        finish_early(&mut progress, input, &message);
+                        return Err(error);
+                    }
+                },
+                _ = refresh.tick() => {
+                    progress.tick();
+                },
+                action = progress.action() => {
+                    if action.is_none() && crate::signals::terminating() {
+                        self.engine.cancel_turn(&self.id).await;
+                        finish_early(&mut progress, input, "Interrupted before model request");
+                        bail!("Interrupted before model request");
+                    }
+                    match action.context("Live terminal input closed")? {
+                        crate::terminal::live::Action::CyclePermission => {
+                            match self.cycle_permission_mode().await {
+                                Ok(mode) => progress.set_permission_mode(mode),
+                                Err(error) => progress.notice(&format!("Permission mode: {error:#}")),
+                            }
+                        },
+                        crate::terminal::live::Action::Cancel => {
+                            self.engine.cancel_turn(&self.id).await;
+                            finish_early(&mut progress, input, "Interrupted before model request");
+                            bail!("Interrupted before model request");
+                        },
+                        crate::terminal::live::Action::GoalDecision { .. } => {
+                            progress.notice("Goal proposals require the attached session frontend.");
+                        },
+                        crate::terminal::live::Action::Detach => {
+                            progress.notice("This turn is not owned by a background worker.");
+                        },
+                        crate::terminal::live::Action::Queue(prompt) => {
+                            pending_inputs.push(prompt.clone());
+                            if let Some(reader) = input.as_mut() { reader.queue_prompt(prompt); }
+                        },
+                        crate::terminal::live::Action::Submit(prompt) => {
+                            if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? {
+                                progress.notice(&message);
+                                progress.set_model_label(&crate::session_commands::model_label(self).await);
+                            } else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await {
+                                if !matches!(prompt.trim(), "/effort +" | "/effort -") || !message.starts_with("Reasoning effort:") {
+                                    progress.inspection(&prompt, &message);
+                                }
+                                progress.set_model_label(&crate::session_commands::model_label(self).await);
+                            } else if queues_mid_turn(&prompt) {
+                                crate::images::share(&self.id, &prompt);
+                                self.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::User, &prompt)?;
+                                pending_inputs.push(prompt);
+                                progress.queued(pending_inputs.clone());
+                            } else {
+                                if let Some(notice) = crate::session_commands::queued_notice(&prompt) {
+                                    progress.notice(&notice);
+                                }
+                                if let Some(reader) = input.as_mut() { reader.queue_prompt(prompt); }
+                            }
+                        },
+                        crate::terminal::live::Action::BackgroundShell | crate::terminal::live::Action::SendNow => {
+                            deepseek_code_core::tools::background_shell::request_background(&self.paths.data_dir, &self.id)?;
+                        },
+                        crate::terminal::live::Action::EditQueued => {
+                            let taken = recall_queued(self, input, &pending_inputs)?;
+                            pending_inputs.clear();
+                            progress.queued(Vec::new());
+                            if !taken.is_empty() { progress.set_draft(&taken.join("\n")); }
+                        },
+                        crate::terminal::live::Action::Draft(draft) => {
+                            if let Some(reader) = input.as_ref() { reader.restore_draft(draft); }
+                        },
+                        crate::terminal::live::Action::SideQuestion(question) => {
+                            if side_request.is_some() {
+                                progress.notice("A side question is already running; wait for its answer before sending another.");
+                            } else {
+                                side_request = Some(Box::pin(async move {
+                                    crate::background_commands::side_question(self, &question).await
+                                }));
+                            }
+                        },
+                    }
+                },
+                answer = async {
+                    match side_request.as_mut() {
+                        Some(request) => request.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    side_request = None;
+                    match answer {
+                        Ok(answer) => progress.notice(&format!("Side answer:\n{answer}")),
+                        Err(error) => progress.notice(&format!("Side question failed: {error:#}")),
+                    }
+                },
+            }
         };
-        let mut progress = crate::terminal::live::TurnDisplay::new(
-            interactive_display,
-            self.permission_mode(),
-            &self.paths.data_dir.join("keybindings.json"),
-            self.store
-                .history(&self.id)?
-                .iter()
-                .filter(|row| row["role"] == "user")
-                .filter_map(|row| row["content"].as_str().map(str::to_owned))
-                .filter(|text| !crate::background_commands::is_notification(text))
-                .collect(),
-        )?
-        .with_workspace(&self.workspace);
-        progress.restore_numbers(self)?;
-        progress.set_session_context(&self.paths.data_dir, self.selected_session()?);
-        if progress.is_live() {
-            progress.set_model_label(&crate::session_commands::model_label(self).await);
-            progress.set_pinned_prompt(prompt);
-            progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
-            progress.set_todos(crate::background_commands::todo_items(
-                &self.paths,
-                &self.id,
-            ));
-        }
-        let mut hook_progress = deepseek_code_core::services::hook_progress::subscribe(&self.id);
-        progress.hook_snapshot(hook_progress.snapshot());
-        let mut side_request: Option<
-            std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
-        > = None;
         let mut text = String::new();
         // Set when a tool runs, so text from the next model round starts on its own paragraph.
         let mut separate_text = false;
@@ -2337,8 +2647,6 @@ impl Session {
             String,
             Vec<deepseek_code_core::services::input_queue::DeliveredInput>,
         >::new();
-        // Messages typed during this turn that the model has not read yet.
-        let mut pending_inputs = Vec::<String>::new();
         // The mode chosen with a plan, applied once the engine has approved it.
         let mut plan_mode_after: Option<(String, &'static str)> = None;
         let mut sdk_messages = if cli.output_format == OutputFormat::StreamJson {
@@ -2357,9 +2665,6 @@ impl Session {
                 || input.is_none()
                 || cli.output_format != OutputFormat::Text;
         let mut live_transcript = BackgroundTranscript::default();
-        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut remote_interrupts = self.remote_interrupts();
         let turn_result: Result<()> = async {
             loop {
                 let event = tokio::select! {
@@ -2406,7 +2711,7 @@ impl Session {
                                     // As in the reference CLI the model reads it after its next
                                     // tool results, or as the next prompt.
                                     crate::images::share(&self.id, &prompt);
-                                    self.selected_session()?.enqueue_cli_prompt(&prompt)?;
+                                    self.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::User, &prompt)?;
                                     pending_inputs.push(prompt);
                                     progress.queued(pending_inputs.clone());
                                 }
@@ -2486,7 +2791,10 @@ impl Session {
                         else { progress.thinking(); }
                     },
                     EngineEvent::MessageStart { .. } => progress.set_activity("Composing"),
-                    EngineEvent::ContextReset { session_id, boundary_id, assistant_id: reserved } if session_id == self.id => {
+                    EngineEvent::CompactionNotice(message) => {
+                        progress.notice(&message);
+                    },
+                    EngineEvent::ContextReset { session_id, boundary_id, assistant_id: reserved, reason } if session_id == self.id => {
                         transcript.save_segment(&assistant_id, SegmentUpdate {
                             placement: SegmentPlacement::Before(&boundary_id), text: Some(&text), thinking: Some(&thinking_text),
                             tools: &tools, origins: Some(&live_transcript.origins), inputs: Some(&queued_inputs_by_tool),
@@ -2495,8 +2803,15 @@ impl Session {
                         assistant_id = turn.resume_reset_segment(reserved)?;
                         text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
                         if background_transcript { live_transcript = BackgroundTranscript::default(); separate_text = false; }
-                        observed_plan_boundary = Some(boundary_id);
-                        progress.notice("Planning context cleared. The approved plan starts a fresh context in this session; prior messages remain archived.");
+                        match reason {
+                            deepseek_code_core::native_engine::tool_loop::ContextResetReason::PlanApproval => {
+                                observed_plan_boundary = Some(boundary_id);
+                                progress.notice("Planning context cleared. The approved plan starts a fresh context in this session; prior messages remain archived.");
+                            }
+                            deepseek_code_core::native_engine::tool_loop::ContextResetReason::AutoCompact { notice } => {
+                                progress.notice(&notice);
+                            }
+                        }
                     },
                     EngineEvent::AgentProgress { session_id, address, agent_type, status, tool_name } => progress.agent_progress(address, &session_id, &agent_type, &status, tool_name.as_deref()),
                     EngineEvent::Usage(value) => { progress.reported_usage(&value); },
@@ -2690,7 +3005,7 @@ impl Session {
                                         progress.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
                                     }
                                     if let Some(note) = &decision.note {
-                                        self.selected_session()?.enqueue_cli_prompt(note)?;
+                                        self.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::User, note)?;
                                     }
                                     self.engine.resume_with_answer(&request_id, decision.engine).await?;
                                     plan_mode_after = decision.mode.map(|mode| (tool_use_id.clone(), mode));
@@ -2862,6 +3177,7 @@ impl Session {
                         session_id,
                         boundary_id,
                         assistant_id: reserved,
+                        reason,
                     } if session_id == self.id => {
                         transcript.save_segment(&assistant_id, SegmentUpdate {
                             placement: SegmentPlacement::Before(&boundary_id), text: Some(&text), thinking: Some(&thinking_text),
@@ -2875,7 +3191,12 @@ impl Session {
                         snapshots.clear();
                         live_transcript = BackgroundTranscript::default();
                         separate_text = false;
-                        observed_plan_boundary = Some(boundary_id);
+                        if matches!(
+                            reason,
+                            deepseek_code_core::native_engine::tool_loop::ContextResetReason::PlanApproval
+                        ) {
+                            observed_plan_boundary = Some(boundary_id);
+                        }
                     }
                     EngineEvent::RequestSnapshot(snapshot) => {
                         request_usage.observe(&snapshot);
@@ -3235,7 +3556,7 @@ async fn turn_answer(
     }
     progress.clear();
     let reader = input.as_mut().context(
-        "User input required in non-interactive mode; resume this session interactively",
+        "No interactive user is attached; state your assumption and continue or stop before an irreversible action",
     )?;
     eprintln!("\n{question}");
     read_answer(reader).await
@@ -3746,8 +4067,22 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
         EngineEvent::ContextReset {
             session_id,
             boundary_id,
+            reason,
             ..
-        } => json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id}),
+        } => {
+            let kind = match reason {
+                deepseek_code_core::native_engine::tool_loop::ContextResetReason::PlanApproval => {
+                    "plan_approval"
+                }
+                deepseek_code_core::native_engine::tool_loop::ContextResetReason::AutoCompact {
+                    ..
+                } => "auto_compact",
+            };
+            json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id,"reason":kind})
+        }
+        EngineEvent::CompactionNotice(message) => {
+            json!({"type":"compaction_notice","message":message})
+        }
         EngineEvent::Text(delta) => json!({"type":"text","delta":delta}),
         EngineEvent::QueuedInput(input) => {
             json!({"type":"queued_input","text":input.text,"content":input.content,"origin":input.origin})
@@ -3908,7 +4243,7 @@ mod event_tests {
         assert!(default.allow_dangerously_skip_permissions && !default.full_access);
         assert!(matches!(
             default.permission_mode,
-            crate::args::PermissionModeArg::Ask
+            crate::args::PermissionModeArg::Auto
         ));
         assert_eq!(
             next_mode("plan", default.allow_dangerously_skip_permissions),
@@ -4014,7 +4349,9 @@ mod event_tests {
             .unwrap();
         assert_eq!(resumed.permission_mode(), "plan");
         resumed.set_permission_mode("dontAsk").await.unwrap();
-        assert!(resumed.set_permission_mode("auto").await.is_err());
+        resumed.set_permission_mode("auto").await.unwrap();
+        assert_eq!(resumed.permission_mode(), "auto");
+        resumed.set_permission_mode("dontAsk").await.unwrap();
         assert_eq!(resumed.permission_mode(), "dont-ask");
         resumed.close().await.unwrap();
         let restored = Session::open(&cli, &paths, selection(), Some(&saved))
@@ -4050,7 +4387,7 @@ mod event_tests {
         let safe_resume = Session::open(&cli, &paths, selection(), Some(&saved))
             .await
             .unwrap();
-        assert_eq!(safe_resume.permission_mode(), "ask");
+        assert_eq!(safe_resume.permission_mode(), "auto");
         safe_resume.close().await.unwrap();
     }
 
@@ -4134,8 +4471,8 @@ mod event_tests {
         let agent = session.sdk_agent_model("b::m[1m]").await.unwrap();
         let target = session.store.create(dir.path(), "m", "b").unwrap();
         let rotated = provider("b", 3, "rotated-key");
-        std::fs::write(
-            paths.data_dir.join("providers.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("providers.json"),
             serde_json::to_vec(&[a.clone(), rotated.clone()]).unwrap(),
         )
         .unwrap();
@@ -4151,8 +4488,8 @@ mod event_tests {
         assert_eq!(bound.model.context_window, Some(1_000_000));
         let another = session.store.create(dir.path(), "m", "b").unwrap();
         let rotated_again = provider("b", 4, "new-saved-key");
-        std::fs::write(
-            paths.data_dir.join("providers.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("providers.json"),
             serde_json::to_vec(&[&a, &rotated_again]).unwrap(),
         )
         .unwrap();
@@ -4306,7 +4643,12 @@ mod event_tests {
             blocked
                 .as_mut()
                 .unwrap()
-                .run_turn(&cli_first, "first task", &mut None)
+                .run_turn(
+                    &cli_first,
+                    "first task",
+                    &mut None,
+                    super::TurnOrigin::User("first task"),
+                )
                 .await
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -4332,14 +4674,25 @@ mod event_tests {
                 .unwrap()
         };
         let turns_before = turn_count();
+        assert!(
+            crate::observe::execution_lease_active(&second).unwrap(),
+            "the observer must see the lease held by the running turn"
+        );
         let error = second
-            .run_turn(&cli, "second task", &mut None)
+            .run_turn(
+                &cli,
+                "second task",
+                &mut None,
+                super::TurnOrigin::User("second task"),
+            )
             .await
             .expect_err("a concurrent top-level turn must be rejected");
+        let text = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("already executing"),
-            "unexpected rejection: {error:#}"
+            text.contains("already executing") || text.contains("still running in another process"),
+            "unexpected rejection: {text}"
         );
+        assert!(!text.contains("lock acquisition failed"), "{text}");
         assert_eq!(
             gate.streams.load(Ordering::SeqCst),
             1,
@@ -4407,7 +4760,12 @@ mod event_tests {
         let id = session.id.clone();
         for index in 0..6 {
             session
-                .run_turn(&cli, &format!("task {index}"), &mut None)
+                .run_turn(
+                    &cli,
+                    &format!("task {index}"),
+                    &mut None,
+                    super::TurnOrigin::User(&format!("task {index}")),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("turn {index} failed: {error:#}"));
             // The lease is released by the completed turn itself, so the next
@@ -4485,7 +4843,7 @@ mod event_tests {
         for prompt in ["first SDK turn", "second SDK turn"] {
             tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                session.run_turn(&cli, prompt, &mut None),
+                session.run_turn(&cli, prompt, &mut None, super::TurnOrigin::User(prompt)),
             )
             .await
             .unwrap()
@@ -4592,8 +4950,8 @@ mod event_tests {
         );
         let paths = RuntimePaths::new(dir.join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             r#"{"localCoordination":{"enabled":true,"registry":true}}"#,
         )
         .unwrap();
@@ -4773,8 +5131,8 @@ mod event_tests {
 
     #[cfg(target_os = "linux")]
     fn lc_set_enabled(paths: &RuntimePaths, enabled: bool) {
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             format!(r#"{{"localCoordination":{{"enabled":{enabled},"registry":true}}}}"#),
         )
         .unwrap();
@@ -4845,7 +5203,7 @@ mod event_tests {
         session.lifecycle_owned = true;
         let entered = dir.path().join("hook-entered");
         let release = dir.path().join("hook-release");
-        std::fs::write(paths.data_dir.join("settings.json"), json!({
+        deepseek_code_core::data_layout::write_config_file(paths.layout().config_file("settings.json"), json!({
             "localCoordination":{"enabled":true,"registry":true},
             "hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":format!(
                 "touch '{}' && while [ ! -e '{}' ]; do sleep 0.02; done",entered.display(),release.display())}]}]}
@@ -5006,8 +5364,8 @@ mod event_tests {
             std::fs::create_dir_all(workspace).unwrap();
         }
         let marker = dir.path().join("hook-runs");
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             serde_json::json!({
                 "localCoordination": {"enabled": true, "registry": true},
                 "hooks": {"SessionStart": [{"hooks": [{
@@ -5194,6 +5552,39 @@ mod compaction_cancellation_tests {
             );
         }
     }
+
+    #[test]
+    fn context_reset_and_compaction_notice_serialize_distinct_reasons() {
+        use deepseek_code_core::native_engine::tool_loop::{ContextResetReason, EngineEvent};
+        let plan = super::event_json(&EngineEvent::ContextReset {
+            session_id: "s1".into(),
+            boundary_id: "b1".into(),
+            assistant_id: Some("a2".into()),
+            reason: ContextResetReason::PlanApproval,
+        })
+        .unwrap();
+        assert_eq!(plan["type"], "context_reset");
+        assert_eq!(plan["reason"], "plan_approval");
+
+        let auto = super::event_json(&EngineEvent::ContextReset {
+            session_id: "s1".into(),
+            boundary_id: "b2".into(),
+            assistant_id: Some("a3".into()),
+            reason: ContextResetReason::AutoCompact {
+                notice: "Compacted in 1s".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(auto["type"], "context_reset");
+        assert_eq!(auto["reason"], "auto_compact");
+
+        let notice = super::event_json(&EngineEvent::CompactionNotice(
+            "Auto-compacting conversation…".into(),
+        ))
+        .unwrap();
+        assert_eq!(notice["type"], "compaction_notice");
+        assert_eq!(notice["message"], "Auto-compacting conversation…");
+    }
 }
 
 #[cfg(test)]
@@ -5303,5 +5694,10 @@ mod request_usage_tests {
 #[cfg(test)]
 #[path = "session_binding_tests.rs"]
 mod binding_tests;
+#[cfg(test)]
 #[path = "startup_contention_tests.rs"]
 mod startup_contention_tests;
+
+#[cfg(test)]
+#[path = "session_origin_tests.rs"]
+mod origin_tests;

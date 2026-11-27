@@ -11,7 +11,7 @@ fn entry(
     launched: bool,
 ) -> Result<std::path::PathBuf> {
     let job = Uuid::new_v4().to_string();
-    let dir = root.join("background-tasks").join(&job);
+    let dir = root.join("tasks/background").join(&job);
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("state.json"),json!({"id":job,"session_id":owner,"parent_session_id":owner,
         "launched":launched,"title":"fixture","status":"completed","started_ms":1,"heartbeat_ms":1,"finished_ms":2}).to_string())?;

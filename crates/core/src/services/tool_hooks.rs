@@ -265,6 +265,7 @@ fn default_timeout() -> u64 {
 pub struct HookRunner {
     pub(crate) transcript_history: Option<crate::db::session_store::ExecutorHistory>,
     recording_db: Option<std::sync::Arc<dyn crate::db::session_store::HookSessions>>,
+    data_dir: PathBuf,
     workspace: PathBuf,
     once_directory: PathBuf,
     hooks: Vec<ActiveHook>,
@@ -297,7 +298,7 @@ impl HookRunner {
         mut configs: Vec<(PathBuf, Value)>,
     ) -> Result<Self> {
         let sources = [
-            data_dir.join("settings.json"),
+            crate::data_layout::DataLayout::from_root(&data_dir).config_file("settings.json"),
             workspace.join(".claude/settings.json"),
             workspace.join(".claude/settings.local.json"),
         ];
@@ -471,8 +472,9 @@ impl HookRunner {
             hooks.clear();
         }
         Ok(Self {
+            data_dir: data_dir.to_path_buf(),
             workspace: workspace.to_path_buf(),
-            once_directory: data_dir.join("hook-once"),
+            once_directory: crate::data_layout::DataLayout::from_root(data_dir).hook_once(),
             hooks,
             disabled,
             force_sync: false,
@@ -564,10 +566,7 @@ impl HookRunner {
                 super::file_changed::stop(session_id).await;
             }
             if reset {
-                super::session_environment::clear_cwd(
-                    self.once_directory.parent().unwrap_or(&self.workspace),
-                    session_id,
-                )?;
+                super::session_environment::clear_cwd(&self.data_dir, session_id)?;
             }
             let outcome = self.run_inner(event, session_id, payload).await;
             if reset && !self.disabled {
@@ -588,7 +587,7 @@ impl HookRunner {
         cache: &std::sync::OnceLock<PathBuf>,
     ) -> Value {
         let path = cache.get_or_init(|| {
-            let root = self.once_directory.parent().unwrap_or(&self.workspace);
+            let root = self.data_dir.as_path();
             let fallback = if self.transcript_history.is_none() { self.recording_db.as_ref().and_then(|db| db.clone().hook_history(session).ok().flatten()) } else { None };
             let history = self.transcript_history.as_ref().or(fallback.as_ref());
             match super::lifecycle_events::snapshot(root,session,history) {
@@ -596,7 +595,9 @@ impl HookRunner {
                 Err(error) => {
                     // An unavailable split snapshot must never expose an older incarnation's file.
                     let path = if history.is_none() && root.join("global.db").exists() {
-                        root.join("hook-transcripts").join(format!("unavailable-{}",uuid::Uuid::new_v4()))
+                        crate::data_layout::DataLayout::from_root(root)
+                            .hook_transcripts()
+                            .join(format!("unavailable-{}",uuid::Uuid::new_v4()))
                     } else {
                         super::lifecycle_events::snapshot_path(root, session, history)
                     };
@@ -1560,7 +1561,11 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(workspace.join(".claude")).unwrap();
         let config = r#"{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"echo check"}]}]}}"#;
-        std::fs::write(data.join("settings.json"), config).unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
+            config,
+        )
+        .unwrap();
         std::fs::write(workspace.join(".claude/settings.json"), config).unwrap();
         let runner = HookRunner::load(&data, &workspace).unwrap();
         assert_eq!(runner.list().len(), 2);
@@ -1643,7 +1648,11 @@ mod tests {
             let data = data.clone();
             let workspace = root.path().to_path_buf();
             async move {
-                std::fs::write(data.join("settings.json"), hooks(condition).to_string()).unwrap();
+                crate::data_layout::write_config_file(
+                    crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
+                    hooks(condition).to_string(),
+                )
+                .unwrap();
                 let runner = HookRunner::load(&data, &workspace).unwrap();
                 runner
                     .run(

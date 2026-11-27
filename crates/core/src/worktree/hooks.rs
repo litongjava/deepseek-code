@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(task["status"], "running");
         assert!(!paths
             .data_dir
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(id)
             .join("cancel")
@@ -451,14 +451,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .workspace(&session, &paths.data_dir.join("workspaces"))
+                .workspace(&session, &paths.data_dir.join("data/workspaces"))
                 .unwrap(),
             path
         );
         let fork = store.fork(&session).unwrap();
         assert_eq!(
             store
-                .workspace(&fork, &paths.data_dir.join("workspaces"))
+                .workspace(&fork, &paths.data_dir.join("data/workspaces"))
                 .unwrap(),
             path
         );
@@ -495,7 +495,7 @@ mod tests {
             assert!(!path.exists());
             assert_eq!(
                 store
-                    .workspace(&clean, &paths.data_dir.join("workspaces"))
+                    .workspace(&clean, &paths.data_dir.join("data/workspaces"))
                     .unwrap()
                     .canonicalize()
                     .unwrap(),

@@ -435,8 +435,8 @@ async fn single_turn_worker_releases_foreground_before_suggestion_finishes() {
     std::fs::create_dir(&workspace).unwrap();
     std::fs::create_dir(&data).unwrap();
     terminal_fixture::write_provider(&data, &endpoint.url);
-    std::fs::write(
-        data.join("startup-prompts.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/startup-prompts.json"),
         json!({"trusted_folders":[workspace]}).to_string(),
     )
     .unwrap();

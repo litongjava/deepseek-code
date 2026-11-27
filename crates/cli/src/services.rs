@@ -81,9 +81,11 @@ pub async fn team(context: &ServiceContext, action: &TeamCommands) -> Result<()>
         }
         TeamCommands::Serve { bind, tokens_env } => {
             let tokens = serde_json::from_str(&context.credentials.get(tokens_env)?)?;
-            let router =
-                TeamServer::new(context.paths.data_dir.join("team-server.sqlite3"), tokens)?
-                    .router();
+            let router = TeamServer::new(
+                context.paths.data_dir.join("data/team-server.sqlite3"),
+                tokens,
+            )?
+            .router();
             let listener = tokio::net::TcpListener::bind(bind).await?;
             println!(
                 "{}",

@@ -96,10 +96,11 @@ pub(super) fn is_mcp_header(line: &Line) -> bool {
 
 pub(super) fn is_shell_header(line: &Line) -> bool {
     line.0.first().is_some_and(|span| span.text == "● ")
-        && line
-            .0
-            .iter()
-            .any(|span| span.text.starts_with("Bash(") || span.text.starts_with("PowerShell("))
+        && line.0.iter().any(|span| {
+            span.text.starts_with("Bash(")
+                || span.text.starts_with("PowerShell(")
+                || span.text.starts_with("Python(")
+        })
 }
 
 pub(super) const TOOL_LOAD_PREFIX: &str = "ToolLoad(";
@@ -316,7 +317,7 @@ pub fn plain_terminal_text(text: &str) -> String {
 }
 
 pub(super) fn background_shell_id(name: &str, output: &str, failed: bool) -> Option<String> {
-    if failed || !matches!(name, "Bash" | "PowerShell") { return None; }
+    if failed || !matches!(name, "Bash" | "PowerShell" | "Python") { return None; }
     let value: Value = serde_json::from_str(output).ok()?;
     if value["status"] != "running" && value["backgrounded"] != true { return None; }
     let id = value["task_id"].as_str()?;
@@ -495,7 +496,7 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
             }
         }
     }
-    if name == "Bash" && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
+    if matches!(name, "Bash" | "Python") && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
         value["task_id"].is_string() && value["status"] == "running"
     }) {
         return (vec!["Running in background (click to show output · /tasks to view)".into()], 0);
@@ -547,6 +548,26 @@ fn todo_lines(input: &Value, failed: bool) -> Option<Vec<Line>> {
     Some(lines)
 }
 
+/// A foreground shell reports its directory on first call, change, reset, or
+/// after resume/compaction; the transcript shows the final path component.
+fn reported_cwd(name: &str, output: &str) -> Option<String> {
+    if !matches!(name, "Bash" | "PowerShell") {
+        return None;
+    }
+    let body = output.strip_prefix("Error: ").unwrap_or(output);
+    let value: Value = serde_json::from_str(body).ok()?;
+    let cwd = value["cwd"].as_str()?.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+    let name = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(cwd);
+    Some(printable(name))
+}
+
 /// `● Tool(args) · 0.4s` followed by a short result.
 pub fn finished(
     name: &str,
@@ -564,6 +585,9 @@ pub fn finished(
     let _ = elapsed;
     let (shown, hidden) = summary(name, output, failed);
     let mut lines = vec![change_view::tool_call(&result_label(name, input, output, workspace), "", failed)];
+    if let Some(cwd) = reported_cwd(name, output) {
+        lines.push(change_view::muted(&format!("  cwd: {cwd}")));
+    }
     for (index, line) in shown.iter().enumerate() {
         lines.push(change_view::tool_output(line, index == 0, failed));
     }
@@ -588,6 +612,9 @@ pub fn expanded(
         _ => result_label(name, input, output, workspace),
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
+    if let Some(cwd) = reported_cwd(name, output) {
+        lines.push(change_view::muted(&format!("  cwd: {cwd}")));
+    }
     let diff = change_view::details(name, output, failed);
     let text = diff.unwrap_or_else(|| named_result_text(name, output));
     let rows: Vec<&str> = text.lines().collect();
@@ -725,7 +752,7 @@ fn file_name(path: &str) -> String {
 /// A rule that allows this call again, when one can be written safely.
 fn session_rule(name: &str, input: &Value) -> Option<String> {
     let rule = match (name, input["command"].as_str()) {
-        ("Bash" | "PowerShell", _) => return None,
+        ("Bash" | "PowerShell" | "Python", _) => return None,
         // Each ApplyPatch call lists its own paths; do not create a blanket rule.
         ("ApplyPatch", _) => return None,
         // As in the reference CLI: don't ask again for this host.
@@ -842,6 +869,56 @@ pub fn approval(
                     lines.push(rule);
                     lines.push(change_view::body("This command requires approval"));
                 }
+                ("Python", _) => {
+                    let width = crate::terminal::size().0.saturating_sub(1).max(20) as usize;
+                    let rule = change_view::muted(&"\u{254c}".repeat(width));
+                    lines.push(change_view::heading("Python code"));
+                    if let Some(description) = input["description"].as_str() {
+                        lines.push(change_view::muted(&printable(description)));
+                    }
+                    lines.push(rule.clone());
+                    for line in input["code"].as_str().unwrap_or_default().lines() {
+                        lines.push(change_view::body(&printable(line)));
+                    }
+                    lines.push(rule);
+                    if let Some(conda) = input["conda"].as_str() {
+                        lines.push(change_view::muted(&format!("  Conda environment: {}", printable(conda))));
+                    } else if let Some(interpreter) = input["interpreter"].as_str() {
+                        lines.push(change_view::muted(&format!("  Interpreter: {}", printable(interpreter))));
+                    }
+                    if let Some(cwd) = input["cwd"].as_str() {
+                        lines.push(change_view::muted(&format!("  Working directory: {}", printable(cwd))));
+                    }
+                    if let Some(env) = input["env"].as_object().filter(|env| !env.is_empty()) {
+                        lines.push(change_view::muted("  Environment:"));
+                        for (key, value) in env {
+                            lines.push(change_view::body(&format!(
+                                "    {}={}",
+                                printable(key),
+                                printable(value.as_str().unwrap_or_default())
+                            )));
+                        }
+                    }
+                    if let Some(save_name) = input["save_name"].as_str() {
+                        let resolved = workspace.map(|workspace| {
+                            save_name
+                                .split(['/', '\\'])
+                                .filter(|part| !part.is_empty())
+                                .fold(workspace.join("temp"), |path, part| path.join(part))
+                        });
+                        let target = resolved
+                            .as_ref()
+                            .map(|target| target.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("<workspace>/temp/{save_name}"));
+                        let overwrite = resolved.as_ref().is_some_and(|target| target.exists());
+                        lines.push(change_view::muted(&format!(
+                            "  Save script: {}{}",
+                            printable(&target),
+                            if overwrite { " (overwrites the existing file)" } else { "" }
+                        )));
+                    }
+                    lines.push(change_view::body("This code requires approval"));
+                }
                 _ => {
                     lines.push(change_view::heading(&label(name, input, workspace)));
                     let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
@@ -858,6 +935,8 @@ pub fn approval(
                 "Do you want to allow DeepSeek Code to fetch this content?".to_owned()
             } else if name == "SandboxNetwork" {
                 "Do you want to allow this connection?".to_owned()
+            } else if name == "Python" {
+                "Do you want to run this Python code?".to_owned()
             } else {
                 "Do you want to proceed?".to_owned()
             }
@@ -1044,6 +1123,24 @@ mod tests {
     }
 
     #[test]
+    fn bash_changed_directory_is_shown_under_the_header() {
+        let output = json!({
+            "exit_code": 0,
+            "cwd": "/Users/ping/code/project/project-harness/deepseek-code-data-layout",
+            "stdout": "",
+            "stderr": ""
+        })
+        .to_string();
+        let input = json!({"command": "cd sub"});
+        let lines = text(&finished("Bash", &input, &output, false, None, None));
+        assert_eq!(lines[0], "\u{25cf} Bash(cd sub)");
+        assert_eq!(lines[1], "  cwd: deepseek-code-data-layout");
+        let full = text(&expanded("Bash", &input, &output, false, None));
+        assert_eq!(full[0], "\u{25cf} Bash(cd sub)");
+        assert_eq!(full[1], "  cwd: deepseek-code-data-layout");
+    }
+
+    #[test]
     fn ansi_output_is_clean_in_both_views() {
         let output = json!({
             "exit_code": 2,
@@ -1139,6 +1236,79 @@ mod tests {
         assert_eq!(auto_write.decide("3").grant, Some(Remember::EditsSession));
         assert_eq!(auto_write.decide("4").grant, Some(Remember::Auto));
         assert!(!auto_write.decide("5").allowed);
+    }
+
+    #[test]
+    fn python_approval_shows_code_environment_and_save_target() {
+        let workspace = tempfile::tempdir().unwrap();
+        let input = json!({
+            "code": "import os\nprint(os.getcwd())",
+            "description": "Inspect cwd",
+            "env": {"DCL_TEST": "visible"},
+            "interpreter": "/opt/python",
+            "cwd": "src",
+            "save_name": "python/script/001.py"
+        });
+        let menu = approval("Python", &input, Some(workspace.path()), false);
+        let text = menu.text();
+        assert!(text.starts_with("Python code\nInspect cwd\n\u{254c}"), "{text}");
+        assert!(text.contains("\nimport os\nprint(os.getcwd())\n\u{254c}"), "{text}");
+        assert!(text.contains("Interpreter: /opt/python"), "{text}");
+        assert!(text.contains("Working directory: src"), "{text}");
+        assert!(text.contains("Environment:"), "{text}");
+        assert!(text.contains("DCL_TEST=visible"), "{text}");
+        let target = workspace
+            .path()
+            .join("temp")
+            .join("python")
+            .join("script")
+            .join("001.py");
+        assert!(text.contains(&format!("Save script: {}", target.display())), "{text}");
+        assert!(text.ends_with("This code requires approval\nDo you want to run this Python code?\n  1. Yes\n  2. No\n(1/y yes, 2/n no)"), "{text}");
+        assert_eq!(menu.remember, None);
+        assert_eq!(
+            label(
+                "Python",
+                &json!({"description":"Inspect cwd", "code":"import os\nprint(1)"}),
+                None
+            ),
+            "Python(Inspect cwd | import os)"
+        );
+        assert_eq!(
+            label(
+                "Python",
+                &json!({"code":"print(1)", "save_name":"python/001.py"}),
+                None
+            ),
+            "Python(python/001.py)"
+        );
+    }
+
+    #[test]
+    fn python_result_renders_stdout_without_script_metadata() {
+        let output = json!({
+            "success": true,
+            "exit_code": 0,
+            "stdout": "hello\n",
+            "stderr": "",
+            "interpreter": "/usr/bin/python3",
+            "script_saved": true,
+            "script_path": "/repo/temp/python/001.py"
+        })
+        .to_string();
+        let lines = text(&finished(
+            "Python",
+            &json!({"code": "print('hello')", "description": "Greet"}),
+            &output,
+            false,
+            None,
+            None,
+        ));
+        let rendered = lines.join("\n");
+        assert!(rendered.starts_with("● Python(Greet | print('hello'))"), "{rendered}");
+        assert!(rendered.contains("hello"), "{rendered}");
+        assert!(!rendered.contains("script_path"), "{rendered}");
+        assert!(!rendered.contains("/usr/bin/python3"), "{rendered}");
     }
 
     #[test]

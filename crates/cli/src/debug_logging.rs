@@ -89,6 +89,9 @@ pub fn configure_terminal(path: PathBuf) -> anyhow::Result<()> {
 
 pub fn configure(path: Option<PathBuf>) -> anyhow::Result<()> {
     let file = if let Some(path) = &path {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut options = std::fs::OpenOptions::new();
         #[cfg(unix)]
         {

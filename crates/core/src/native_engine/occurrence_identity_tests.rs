@@ -34,8 +34,8 @@ async fn run_fixture(anthropic: bool, responses: Vec<Vec<Value>>) -> (Vec<Observ
                 .map(|event| {
                     let text = event
                         .to_string()
-                        .replace("__FIRST__", &first)
-                        .replace("__SECOND__", &second);
+                        .replace("__FIRST__", "first.txt")
+                        .replace("__SECOND__", "second.txt");
                     serde_json::from_str::<Value>(&text).unwrap()
                 })
                 .collect::<Vec<_>>()
@@ -107,9 +107,9 @@ async fn run_fixture(anthropic: bool, responses: Vec<Vec<Value>>) -> (Vec<Observ
     server.abort();
     for row in &mut dones {
         if let Some(path) = row.input["file_path"].as_str() {
-            if path == first {
+            if path == first || path.ends_with("first.txt") {
                 row.input["file_path"] = json!("first");
-            } else if path == second {
+            } else if path == second || path.ends_with("second.txt") {
                 row.input["file_path"] = json!("second");
             }
         }

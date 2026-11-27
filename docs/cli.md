@@ -69,7 +69,7 @@ dcl skills execute <skill-id> '任务说明'
 
 当前项目的 `CLAUDE.md` 和 `AGENTS.md` 会加入 CLI 请求。模型参数和环境密钥仅在内存生效。`config show` 隐去凭据；`config set api_key` 与 Desktop 的 provider 配置一样会保存密钥到本地配置，优先使用环境变量。Tauri 的登录 token 和系统安全存储仍由 Desktop 管理，CLI 不尝试读取或降级存储这些 token。
 
-REPL 支持 `/help`、`/status`、`/history`、`/tools`、`/exit`；Ctrl+C 取消当前任务，EOF 退出。普通输出只在 stdout 写模型文本，日志和交互提示写 stderr。`json` 返回最终对象；`stream-json` 每行一个事件，以 `type=result` 结束。执行失败返回非零退出码。
+REPL 支持 `/help`、`/status`、`/history`、`/skills`、`/plugins`、`/tools`、`/exit`；`/skills`、`/plugins`、`/tools` 在终端里打开整页面板（Skills/Plugins 为 Installed、Errors、Stats；Tools 为 Built-in、Skills、Mcp、Plugin），非终端下分别输出技能 JSON、插件统计和工具文本清单。Ctrl+C 取消当前任务，EOF 退出。普通输出只在 stdout 写模型文本，日志和交互提示写 stderr。`json` 返回最终对象；`stream-json` 每行一个事件，以 `type=result` 结束。执行失败返回非零退出码。
 
 ## 长命令输出
 

@@ -7,14 +7,12 @@
 use crate::session::Session;
 use deepseek_code_core::db::session_store::{SessionAccess,SessionRepository};
 use anyhow::Result;
-use deepseek_code_core::{
-    db::{message_repo, turn_repo},
-    services::session_messages,
-};
+use deepseek_code_core::db::{message_repo, turn_repo};
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -48,6 +46,9 @@ struct Cursor {
 #[derive(Default)]
 pub struct Observer {
     announced: bool,
+    /// The REPL already printed its occupancy banner for this session. The
+    /// first active poll renders published progress without a second notice.
+    preannounced: bool,
     session: Option<String>,
     turn: Option<String>,
     segments: BTreeMap<String, Cursor>,
@@ -91,6 +92,21 @@ fn running_notice_for(turn: Option<&turn_repo::TurnRecord>) -> String {
 }
 
 impl Observer {
+    /// The caller already printed a truthful occupancy banner for this
+    /// session; the first active poll must not repeat the running notice.
+    pub fn preannounce(&mut self, session: &Session) -> Result<()> {
+        self.preannounce_at(&session.store.db, &session.id)
+    }
+
+    fn preannounce_at(&mut self, db: &impl SessionAccess, session_id: &str) -> Result<()> {
+        let selected = db.select_session(session_id)?;
+        // The banner starts a fresh view: progress published before it is
+        // shown once after it, not replayed from an older cursor set.
+        self.reset(Some(selected.observation_identity().into()));
+        self.preannounced = true;
+        Ok(())
+    }
+
     pub fn poll(&mut self, session: &Session) -> Result<(State, Vec<String>)> {
         self.poll_at(&session.paths.data_dir, &session.store.db, &session.id)
     }
@@ -115,7 +131,9 @@ impl Observer {
             if !self.announced {
                 self.announced = true;
                 self.turn = turn.as_ref().map(|record| record.turn_id.clone());
-                lines.push(running_notice_for(turn.as_ref()));
+                if !self.preannounced {
+                    lines.push(running_notice_for(turn.as_ref()));
+                }
             }
             if let Some(turn) = turn {
                 if self.turn.as_deref() != Some(turn.turn_id.as_str()) {
@@ -157,6 +175,7 @@ impl Observer {
             finished_notice(turn.as_ref())
         };
         self.announced = false;
+        self.preannounced = false;
         self.turn = None;
         self.segments.clear();
         self.idle_since = None;
@@ -166,6 +185,7 @@ impl Observer {
 
     fn reset(&mut self, session: Option<String>) {
         self.announced = false;
+        self.preannounced = false;
         self.session = session;
         self.turn = None;
         self.segments.clear();
@@ -482,6 +502,50 @@ mod tests {
         let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
         assert_eq!(state, State::Idle);
         assert!(lines.is_empty(), "a finished observation is not repeated");
+    }
+
+    #[test]
+    fn a_caller_banner_suppresses_the_first_running_notice() {
+        let (temp, db, session_id) = fixture();
+        let root = temp.path();
+        let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
+        let message = timer.ensure_segment().unwrap();
+        write_text(&db, &session_id, &message, "visible progress\n");
+        let mut observer = Observer::default();
+        // The REPL printed observation_banner before the owner's lease was
+        // visible. It must not settle that empty view as a finished turn.
+        observer.preannounce_at(&db, &session_id).unwrap();
+        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        assert_eq!(state, State::Idle);
+        assert!(lines.is_empty(), "{lines:?}");
+
+        let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
+        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        assert_eq!(state, State::Running);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("still running in another process")),
+            "the caller's banner was repeated: {lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("visible progress")));
+        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        assert!(lines.is_empty(), "{lines:?}");
+
+        // Completion still reports the measured turn exactly once.
+        drop(lease);
+        timer.finish(turn_repo::TurnStatus::Completed).unwrap();
+        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        assert_eq!(state, State::Finished);
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Observed turn finished")));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("still running in another process")),
+            "{lines:?}"
+        );
     }
 
     #[test]

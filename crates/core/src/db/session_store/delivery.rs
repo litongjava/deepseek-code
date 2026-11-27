@@ -18,7 +18,7 @@ impl Stores {
     pub(super) fn put_payload(&self, value: &Value) -> Result<String> {
         let bytes = serde_json::to_vec(value)?;
         let hash = digest(&bytes);
-        let dir = self.root.path.join("global-blobs");
+        let dir = self.layout().global_blobs();
         fs::create_dir_all(&dir)?;
         layout::sync_dir(&self.root.path)?;
         let dest = dir.join(&hash);
@@ -40,7 +40,7 @@ impl Stores {
             hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
             "Invalid payload reference"
         );
-        let bytes = fs::read(self.root.path.join("global-blobs").join(hash))?;
+        let bytes = fs::read(self.layout().global_blobs().join(hash))?;
         ensure!(digest(&bytes) == hash, "Delivery payload digest mismatch");
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -75,8 +75,9 @@ pub struct Admission {
     payload: String,
     mode: String,
     delivery: String,
+    prompt_origin: String,
 }
-const QUEUE_COLUMNS: &str = "id,revision,state,request_id,payload,mode,delivery_id";
+const QUEUE_COLUMNS: &str = "id,revision,state,request_id,payload,mode,delivery_id,prompt_origin";
 
 impl Admission {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -88,6 +89,7 @@ impl Admission {
             payload: row.get(4)?,
             mode: row.get(5)?,
             delivery: row.get(6)?,
+            prompt_origin: row.get(7)?,
         })
     }
     fn resolve(self, session: &SessionDb) -> Result<input_queue::QueueItem> {
@@ -95,6 +97,7 @@ impl Admission {
             id: self.id,
             revision: self.revision,
             request_id: self.request,
+            prompt_origin: self.prompt_origin,
             session_id: session.id.clone(),
             content: session.stores.payload(&self.payload)?,
             mode: serde_json::from_value(Value::String(self.mode))?,
@@ -123,12 +126,15 @@ impl super::SessionRepository<'_> {
         request: &str,
         content: Value,
         mode: QueueMode,
+        origin: input_queue::QueueOrigin,
     ) -> Result<input_queue::QueueItem> {
         match &self.0 {
             super::owned::Backend::Shared(db, id) => {
-                input_queue::shared_enqueue(db, id, request, content, mode)
+                input_queue::shared_enqueue(db, id, request, content, mode, origin)
             }
-            super::owned::Backend::Admitted(s) => s.enqueue(request, &content, mode)?.resolve(s),
+            super::owned::Backend::Admitted(s) => {
+                s.enqueue(request, &content, mode, origin)?.resolve(s)
+            }
         }
     }
     pub(crate) fn list_inputs(&self) -> Result<Vec<input_queue::QueueItem>> {
@@ -204,21 +210,34 @@ impl super::SessionRepository<'_> {
     }
 }
 impl SessionDb {
-    pub fn enqueue(&self, request: &str, content: &Value, mode: QueueMode) -> Result<Admission> {
-        if request.starts_with("internal-cli:") {return Err(QueueError::InvalidContent.into());}
-        self.enqueue_content(request,content,mode,false)
+    pub fn enqueue(
+        &self,
+        request: &str,
+        content: &Value,
+        mode: QueueMode,
+        origin: input_queue::QueueOrigin,
+    ) -> Result<Admission> {
+        if request.starts_with("internal-cli:") {
+            return Err(QueueError::InvalidContent.into());
+        }
+        self.enqueue_content(request, content, mode, origin)
     }
 
-    pub fn enqueue_cli_prompt(&self, text:&str) -> Result<()> {
-        let content = input_queue::content_with_images(self.stores.data_dir(), self.id(),text).map(Value::Array).unwrap_or_else(||Value::String(text.into()));
-        let request=format!("internal-cli:prompt:{}",uuid::Uuid::new_v4());
-        self.enqueue_content(&request,&content,QueueMode::Steer,false)?;
-        Ok(())
-    }
-
-    pub fn enqueue_cli_notification(&self, text:&str) -> Result<()> {
-        let request=format!("internal-cli:notice:{}",uuid::Uuid::new_v4());
-        self.enqueue_content(&request,&Value::String(text.into()),QueueMode::Steer,true)?;
+    pub fn enqueue_cli_input(&self, origin: input_queue::QueueOrigin, text: &str) -> Result<()> {
+        let (kind, content) = match origin {
+            input_queue::QueueOrigin::User => {
+                let content =
+                    input_queue::content_with_images(self.stores.data_dir(), self.id(), text)
+                        .map(Value::Array)
+                        .unwrap_or_else(|| Value::String(text.into()));
+                ("prompt", content)
+            }
+            input_queue::QueueOrigin::TaskNotification | input_queue::QueueOrigin::Scheduled => {
+                ("notice", Value::String(text.into()))
+            }
+        };
+        let request = format!("internal-cli:{kind}:{}", uuid::Uuid::new_v4());
+        self.enqueue_content(&request, &content, QueueMode::Steer, origin)?;
         Ok(())
     }
 
@@ -248,7 +267,13 @@ impl SessionDb {
         })
     }
 
-    fn enqueue_content(&self,request:&str,content:&Value,mode:QueueMode,notification:bool)->Result<Admission>{
+    fn enqueue_content(
+        &self,
+        request: &str,
+        content: &Value,
+        mode: QueueMode,
+        origin: input_queue::QueueOrigin,
+    ) -> Result<Admission> {
         if request.trim().is_empty() {
             return Err(QueueError::InvalidContent.into());
         }
@@ -272,26 +297,27 @@ impl SessionDb {
         let original = digest(format!("{mode}/{hash}").as_bytes());
         self.stores.global().write("enqueue", &self.id, false, |c| {
             authorize_queue(c, &self.id)?;
-            if let Some((id, prior)) = c
-                .query_row("SELECT id,admission_digest FROM session_input_queue WHERE session_id=?1 AND request_id=?2", [&self.id, request], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            if let Some((id, prior, prior_origin)) = c
+                .query_row("SELECT id,admission_digest,prompt_origin FROM session_input_queue WHERE session_id=?1 AND request_id=?2", [&self.id, request], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
                 })
                 .optional()?
             {
-                if prior != original {
+                if prior != original || (prior_origin != "legacy_queue" && prior_origin != origin.tag()) {
                     return Err(QueueError::Conflict.into());
                 }
                 return admission(c, id, &self.id);
             }
             c.execute(
-                "INSERT INTO session_input_queue(session_id,request_id,admission_digest,payload,mode,delivery_id) VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO session_input_queue(session_id,request_id,admission_digest,payload,mode,delivery_id,prompt_origin) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![
                     self.id,
                     request,
                     original,
                     hash,
                     mode,
-                    if notification { format!("notice-{}", self.new_message_id()) } else { self.new_message_id() }
+                    if origin == input_queue::QueueOrigin::TaskNotification { format!("notice-{}", self.new_message_id()) } else { self.new_message_id() },
+                    origin.tag()
                 ],
             )?;
             admission(c, c.last_insert_rowid(), &self.id)
@@ -596,6 +622,7 @@ impl SessionDb {
             _lease: lease,
             _consumer: consumer,
             live_handoffs: Default::default(),
+            deferred_steer: false,
         })
     }
 
@@ -658,6 +685,7 @@ pub struct DeliveryOwner {
     _lease: std::sync::Arc<ExecutionLease>,
     _consumer: ExecutionLease,
     live_handoffs: std::collections::HashMap<String,String>,
+    deferred_steer: bool,
 }
 #[derive(Debug, PartialEq)]
 pub struct Handoff {
@@ -666,6 +694,7 @@ pub struct Handoff {
 }
 struct Claim {
     origin: String,
+    prompt_origin: String,
     id: String,
     hash: String,
     target: Option<String>,
@@ -674,6 +703,16 @@ struct Claim {
     steer: bool,
 }
 pub(crate) const TURN_POLL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Bound each writer acquisition for live queue delivery. Resolving memory,
+/// hashing files and flushing a committed WAL can each outlast a poll interval.
+fn write_wait(until: std::time::Instant, live_input: bool) -> std::time::Duration {
+    if live_input {
+        TURN_POLL_WAIT
+    } else {
+        until.saturating_duration_since(std::time::Instant::now())
+    }
+}
 
 impl DeliveryOwner {
     #[cfg(test)]
@@ -776,7 +815,7 @@ impl DeliveryOwner {
                 })?;
             }
         }
-        let claim = s.stores.global().write_with_deadline("claim queue", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
+        let claim = s.stores.global().write_with_deadline("claim queue", &s.id, true, write_wait(until, live), |c| {
             let Some((id, state)) = pending(c)? else {
                 return Ok(None);
             };
@@ -791,9 +830,10 @@ impl DeliveryOwner {
                 authorize_queue(c, &s.id)?;
                 c.execute("UPDATE session_input_queue SET state='claimed',revision=revision+1,target=?2 WHERE id=?1", params![id, tool])?;
             }
-            Ok(Some(c.query_row("SELECT delivery_id,payload,target,revision,request_id FROM session_input_queue WHERE id=?1", [id], |r| {
+            Ok(Some(c.query_row("SELECT delivery_id,payload,target,revision,request_id,prompt_origin FROM session_input_queue WHERE id=?1", [id], |r| {
                 let request: String = r.get(4)?;
-                let origin = if request.starts_with("internal-cli:notice:") {
+                let prompt_origin: String = r.get(5)?;
+                let origin = if prompt_origin == "task_notification" {
                     "task_notification".into()
                 } else if request.starts_with("internal-cli:prompt:") {
                     "user".into()
@@ -802,6 +842,7 @@ impl DeliveryOwner {
                 };
                 Ok(Claim {
                     origin,
+                    prompt_origin,
                     id: r.get(0)?,
                     hash: r.get(1)?,
                     target: r.get(2)?,
@@ -864,7 +905,8 @@ impl DeliveryOwner {
                 .query_map([&s.id], |r| {
                     Ok((
                         Claim {
-                            origin:"peer".into(),
+                            origin: "peer".into(),
+                            prompt_origin: "peer".into(),
                             id: r.get(0)?,
                             hash: r.get(1)?,
                             target: None,
@@ -923,15 +965,23 @@ impl DeliveryOwner {
         }
         Ok(None)
     }
-    /// Model-boundary polling shares a single contention budget across the batch.
+    pub(crate) fn has_deferred_steer(&self) -> bool {
+        self.deferred_steer
+    }
+
+    /// A batch contains at most eight items. Peers share a discovery deadline,
+    /// while live queue entries each get a bounded wait at the next writer.
     /// An ack-only retry injects content only if this same live owner committed it.
     pub(crate) fn poll_turn(&mut self, peers: bool, limit: usize) -> Result<Vec<DeliveredInput>> {
         use crate::db::message_repo;
         let until = std::time::Instant::now() + TURN_POLL_WAIT;
+        if !peers {
+            self.deferred_steer = false;
+        }
         let mut remaining = 128 * 1024;
         let mut inputs = Vec::new();
         for _ in 0..limit.min(8) {
-            if std::time::Instant::now() >= until {
+            if peers && std::time::Instant::now() >= until {
                 break;
             }
             let next = if peers {
@@ -942,10 +992,18 @@ impl DeliveryOwner {
             let handoff = match next {
                 Ok(Some(value)) => value,
                 Ok(None) => break,
-                Err(error) if crate::db::is_contention(&error) => break,
+                Err(error) if crate::db::is_contention(&error) => {
+                    if !peers {
+                        self.deferred_steer = true;
+                    }
+                    tracing::debug!(session=%self.session.id, %error, "Deferred turn delivery");
+                    break;
+                }
                 Err(error) => return Err(error),
             };
-            let Some(origin) = self.live_handoffs.remove(&handoff.id) else { continue; };
+            let Some(origin) = self.live_handoffs.get(&handoff.id).cloned() else {
+                continue;
+            };
             let input = self.session.connection_under_lock(
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 |c| {
@@ -970,10 +1028,12 @@ impl DeliveryOwner {
                         text: row.content,
                         content,
                         origin,
+                        prompt_origin: super::message_origin(c, &handoff.id)?,
                         message_id: Some(handoff.id.clone()),
                     }))
                 },
             )?;
+            self.live_handoffs.remove(&handoff.id);
             if let Some(input) = input {
                 remaining = remaining.saturating_sub(input.text.len());
                 inputs.push(input);
@@ -1001,6 +1061,7 @@ impl DeliveryOwner {
     }
     fn complete(&mut self, claim: Claim, until: std::time::Instant, live: bool) -> Result<Handoff> {
         let s = &self.session;
+        let live_input = live && claim.sender.is_none();
         s.stores.step(Phase::DeliveryClaimed)?;
         let fresh = if self.has_receipt(&claim)? {
             false
@@ -1014,7 +1075,11 @@ impl DeliveryOwner {
             } else {
                 None
             };
-            let delivered = s.write_locked_with_deadline("deliver input", until.saturating_duration_since(std::time::Instant::now()), |tx| {
+            let typed = claim.prompt_origin == "typed";
+            let memory = typed
+                .then(|| crate::services::memory_files::prompt::Admission::session(s))
+                .transpose()?;
+            let delivered = s.write_locked_with_deadline("deliver input", write_wait(until, live_input), |tx| {
                 ensure!(claim.sender.is_none() || !tx.3.retiring_here,"Provider switch pending; inbox retained");
                 if let Some(tool) = &claim.target {
                     let exists: bool = tx.0.query_row(
@@ -1046,26 +1111,27 @@ impl DeliveryOwner {
                         tx.0, &claim.id, &s.id, "user", &quoted, None,
                         &chrono::Utc::now().to_rfc3339(), false, tx.next_order()?,
                     )?;
+                    tx.set_prompt_origin(&claim.id, "peer")?;
                     tx.2.set(true);
                 } else if let Some(tool) = &claim.target {
                     let mut inputs = input_queue::load_delivered(tx.0, tool)?;
                     inputs.push(DeliveredInput {
-                        message_id: None,
+                        message_id: Some(claim.id.clone()),
                         text: payload.as_str().map(str::to_owned).unwrap_or_else(|| payload.to_string()),
                         content: if let Some(raw)=payload.as_str().filter(|v|crate::native_engine::tool_loop::monitor_notification(v)) {
                             crate::native_engine::tool_loop::project_for_model("Monitor",raw,Some(s.stores.data_dir()),&s.id).map_or_else(||payload.clone(),|v|serde_json::Value::String(v.text))
                         }else{payload.clone()},
                         origin: if claim.id.starts_with("notice-") {"task_notification"}else{"user"}.into(),
+                        prompt_origin: Some(claim.prompt_origin.clone()),
                     });
                     input_queue::save_delivered(tx.0, tool, &inputs)?;
-                    if !claim.id.starts_with("notice-") {
+                    if let Some(memory) = &memory {
+                        memory.admit(tx.0, &claim.id)?;
+                        super::history::mark_input_pending(tx.0,&claim.id)?;
                         crate::services::permission_authority::record_conn(tx.0,&s.id,crate::services::permission_authority::Source::User,&payload)?;
                     }
                 } else {
-                    if claim.id.starts_with("notice-") {
-                        crate::db::message_repo::save_user_message(tx.0,&claim.id,&s.id,&payload,&chrono::Utc::now().to_rfc3339(),tx.next_order()?)?;
-                        tx.2.set(true);
-                    } else { tx.append_user(&claim.id, &payload)?; }
+                    tx.append_user(&claim.id, &payload, &claim.prompt_origin, memory.as_ref())?;
                     // The running loop consumes in-turn steers directly.
                     tx.0.execute(
                         "INSERT INTO delivery_generations(delivery_id)
@@ -1078,7 +1144,7 @@ impl DeliveryOwner {
             if !delivered {
                 s.stores
                     .global()
-                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
+                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, write_wait(until, live_input), |c| {
                         ensure!(
                             c.execute("UPDATE session_input_queue SET state='cancelled', revision=revision+1 WHERE session_id=?1 AND delivery_id=?2 AND revision=?3 AND state='claimed'", params![s.id, claim.id, claim.revision])? == 1,
                             "Stale tool claim"
@@ -1095,14 +1161,26 @@ impl DeliveryOwner {
             }
             true
         };
+        if !fresh && !live && claim.steer && claim.target.is_none() && claim.sender.is_none() {
+            s.write_locked_with_deadline(
+                "recover interrupted steer",
+                write_wait(until, false),
+                |tx| {
+                    tx.0.execute(
+                        "INSERT OR IGNORE INTO delivery_generations(delivery_id)
+                    SELECT ?1 WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1)
+                    AND NOT EXISTS(SELECT 1 FROM execution_turns WHERE status='running')",
+                        [&claim.id],
+                    )?;
+                    Ok(())
+                },
+            )?;
+        }
         // Routine writes use NORMAL. Before making the cross-file handoff
         // durable in G, flush the committed receipt (also on ack-only replay).
         // A pinned reader can postpone the checkpoint; the G claim stays live.
         s.connection_under_lock(rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE, |c| {
-            let _wait = crate::db::BusyTimeoutGuard::within(
-                c,
-                until.saturating_duration_since(std::time::Instant::now()),
-            )?;
+            let _wait = crate::db::BusyTimeoutGuard::within(c, write_wait(until, live_input))?;
             let busy: i64 = c.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| r.get(0))?;
             if busy != 0 {
                 return Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
@@ -1116,7 +1194,7 @@ impl DeliveryOwner {
         s.stores.step(Phase::DeliveryCommitted)?;
         s.stores
             .global()
-            .write_with_deadline("acknowledge delivery", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
+            .write_with_deadline("acknowledge delivery", &s.id, true, write_wait(until, live_input), |c| {
                 let changed = if claim.sender.is_some() {
                     c.execute("UPDATE session_inbox SET state='context_committed',blocked_reason=NULL,committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND recipient=?2 AND state='claimed' AND generation=?3", params![claim.id, s.id, claim.revision])?
                 } else {
@@ -1142,7 +1220,8 @@ mod turn_delivery_tests {
     fn busy_ack_defers_a_live_steer_without_losing_or_repeating_its_content() -> Result<()> {
         let root = tempfile::tempdir()?;
         let stores = Stores::open(root.path())?;
-        let hold = AtomicBool::new(true);
+        let pending_fault = std::sync::Arc::new(AtomicBool::new(true));
+        let hold = pending_fault.clone();
         let stores = stores.with_fault_hook(move |phase| {
             if phase == Phase::DeliveryCommitted && hold.swap(false, Ordering::SeqCst) {
                 return Err(rusqlite::Error::SqliteFailure(
@@ -1151,19 +1230,86 @@ mod turn_delivery_tests {
                 )
                 .into());
             }
+            if phase == Phase::DeliveryCommitted {
+                // The receipt is durable even when flushing it took the whole
+                // polling interval. A free directory writer must still ack it.
+                std::thread::sleep(TURN_POLL_WAIT + std::time::Duration::from_millis(10));
+            }
             Ok(())
         });
         let session = stores.create("live-consumer", Default::default())?;
         let mut owner = session.delivery_owner()?;
         session.write(|w| w.start_turn())?;
-        session.enqueue("req", &serde_json::json!("update"), QueueMode::Steer)?;
-        assert!(owner.poll_turn(false, 8)?.is_empty());
+        session.enqueue(
+            "req",
+            &serde_json::json!("update"),
+            QueueMode::Steer,
+            input_queue::QueueOrigin::User,
+        )?;
+        let deadline = std::time::Instant::now() + super::super::WRITE_DEADLINE;
+        while pending_fault.load(Ordering::SeqCst) {
+            assert!(owner.poll_turn(false, 8)?.is_empty());
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "The live receipt did not reach the injected acknowledgement fault"
+            );
+        }
+        assert_eq!(
+            owner.live_handoffs.len(),
+            1,
+            "The owner must retain its committed receipt"
+        );
         let inputs = owner.poll_turn(false, 8)?;
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].content, "update");
         assert!(owner.poll_turn(false, 8)?.is_empty());
         assert_eq!(session.read(|r| r.messages())?.len(), 1);
         assert!(owner.begin_generation()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn stranded_steer_schedules_one_generation_after_owner_failure() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let fail_once = AtomicBool::new(true);
+        let stores = Stores::open(root.path())?.with_fault_hook(move |phase| {
+            if phase == Phase::DeliveryCommitted && fail_once.swap(false, Ordering::SeqCst) {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    None,
+                )
+                .into());
+            }
+            Ok(())
+        });
+        let session = stores.create("interrupted-consumer", Default::default())?;
+        let mut owner = session.delivery_owner()?;
+        let turn = session.write(|w| w.start_turn())?;
+        session.enqueue(
+            "req",
+            &serde_json::json!("update"),
+            QueueMode::Steer,
+            input_queue::QueueOrigin::User,
+        )?;
+        let deadline = std::time::Instant::now() + super::super::WRITE_DEADLINE;
+        while owner.live_handoffs.is_empty() {
+            assert!(owner.poll_turn(false, 8)?.is_empty());
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "receipt never committed"
+            );
+        }
+        drop(owner);
+        session.write(|w| w.finish_turn(&turn, crate::db::turn_repo::TurnStatus::Failed, 0))?;
+        let mut recovery = session.delivery_owner()?;
+        let handoff = recovery.next_queue(QueueMode::Steer, None)?.unwrap();
+        let (delivery, next) = recovery
+            .begin_generation()?
+            .expect("stranded steer needs a generation");
+        assert_eq!(delivery, handoff.id);
+        session.write(|w| w.finish_turn(&next, crate::db::turn_repo::TurnStatus::Completed, 1))?;
+        assert!(recovery.begin_generation()?.is_none());
+        assert_eq!(session.read(|r| r.messages())?.len(), 1);
         Ok(())
     }
 }

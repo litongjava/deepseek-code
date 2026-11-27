@@ -316,8 +316,8 @@ async fn model_pty_worker_resize_resume_timeout_paging_stop_and_records() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(
-        h.data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        h.data.join("config/settings.json"),
         json!({"shell":{"bashPath":wrapper}}).to_string(),
     )
     .unwrap();
@@ -528,7 +528,7 @@ async fn model_pty_worker_resize_resume_timeout_paging_stop_and_records() {
     let terminal: Value = serde_json::from_str(
         &std::fs::read_to_string(
             h.data
-                .join("shell-tasks")
+                .join("tasks/shell")
                 .join(&h.host.session_id)
                 .join(&task)
                 .join("terminal-state.json"),
@@ -630,7 +630,7 @@ async fn model_pty_eof_is_not_a_close_and_normal_exit_is_real() {
     let pid = launched["terminal_pid"].as_u64().unwrap() as u32;
     let identity_path = h
         .data
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(&h.host.session_id)
         .join(task)
         .join("session.json");
@@ -695,8 +695,8 @@ async fn model_pty_denials_and_invalid_launches_have_no_effects() {
     std::fs::write(&broken, "#!/no/such/interpreter\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(
-        h.data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        h.data.join("config/settings.json"),
         json!({"shell":{"bashPath":broken}}).to_string(),
     )
     .unwrap();
@@ -717,7 +717,7 @@ async fn model_pty_denials_and_invalid_launches_have_no_effects() {
     let failed_task = failed_start["task_id"].as_str().unwrap();
     let state_path = h
         .data
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(&h.host.session_id)
         .join(failed_task);
     let session_identity: Value =
@@ -745,7 +745,7 @@ async fn model_pty_denials_and_invalid_launches_have_no_effects() {
     for task in tasks {
         let dir = h
             .data
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&h.host.session_id)
             .join(task["id"].as_str().unwrap());
         if let Ok(text) = std::fs::read_to_string(dir.join("terminal.json")) {
@@ -761,7 +761,7 @@ async fn model_pty_denials_and_invalid_launches_have_no_effects() {
 #[tokio::test]
 async fn model_pty_initialization_failure_leaves_no_running_task_or_child() {
     let mut h = Harness::new().await;
-    std::fs::write(h.data.join("shell-tasks"), b"not a directory").unwrap();
+    std::fs::write(h.data.join("tasks/shell"), b"not a directory").unwrap();
     h.turn(
         "bypass",
         vec![load(), bash("init-failure", "touch INIT_MARKER")],
@@ -806,7 +806,7 @@ async fn model_pty_sandbox_and_explicit_deny_reject_before_start() {
         );
         assert!(result.get("task_id").is_none(), "{result}");
         assert!(!h.workspace.join("FORBIDDEN_MARKER").exists());
-        assert!(!h.data.join("shell-tasks").exists());
+        assert!(!h.data.join("tasks/shell").exists());
         h.shutdown().await;
     }
 }

@@ -19,12 +19,9 @@ fn search_indexes_rollback_with_content_and_cursors_bind_to_the_incarnation() ->
     let a = stores.create(A, Default::default())?;
     let b = stores.create("b", Default::default())?;
     let big = format!("{}needle old", "x".repeat(130_000));
-    let (before, boundary, after) = a.write(|w| {
-        let first = w.append("user", &big)?;
-        let boundary = w.approve_plan("needle hidden boundary")?;
-        let after = w.append("assistant", "needle new")?;
-        Ok((first, boundary, after))
-    })?;
+    let before = a.write(|w| w.append("user", &big))?;
+    let boundary = a.approve_plan("needle hidden boundary")?;
+    let after = a.write(|w| w.append("assistant", "needle new"))?;
     let search = |s: &SessionDb, q: Value| -> Result<Value> {
         Ok(serde_json::from_str(&s.context_search(q)?)?)
     };
@@ -51,7 +48,7 @@ fn search_indexes_rollback_with_content_and_cursors_bind_to_the_incarnation() ->
         search(&a, json!({"query":"needle","range":"after"}))?["matches"][0]["message_id"],
         after
     );
-    let db = Connection::open(root.path().join("sessions").join(A).join("session.db"))?;
+    let db = Connection::open(root.path().join("data/sessions").join(A).join("session.db"))?;
     let chunks = || {
         db.query_row(
             "SELECT count(*) FROM context_search_chunks WHERE id=?1",
@@ -77,6 +74,7 @@ fn search_indexes_rollback_with_content_and_cursors_bind_to_the_incarnation() ->
         .as_array()
         .unwrap()
         .is_empty());
+    drop(db);
     a.delete()?;
     assert!(stores
         .create(A, Default::default())?
@@ -223,7 +221,7 @@ fn interrupted_compaction_resumes_checkpoint_and_commits_one_boundary() -> Resul
     let provider = deepseek_code_core::native_engine::provider_manager::ProviderManager::in_memory(
         vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"checkpoint-fixture",
         "api_format":"openai","enabled":true,"models":[{"id":"m","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]}))?],
-        root.path().join("providers.json")).resolve_selected("p","m").unwrap();
+        root.path().join("config/providers.json")).resolve_selected("p","m").unwrap();
     let key = CheckpointKey::new(&provider, "configuration", "system", "fragment", 1024);
     let other = CheckpointKey::new(&provider, "configuration", "system", "changed", 1024);
     {
@@ -296,9 +294,9 @@ fn typed_state_and_file_read_evidence_survive_resume_with_session_isolation() ->
         a.write(|w| {
             w.set_goal("finish work")?;
             w.save_goal_proposals(&ProposalState::default(), &proposals)?;
-            w.set_agent_mode(PermissionMode::PlanMode)?;
-            w.approve_plan("approved work")
+            w.set_agent_mode(PermissionMode::PlanMode)
         })?;
+        a.approve_plan("approved work")?;
         let b = s.create("other", Default::default())?;
         assert!(b.check_file_write(&file).is_err());
         assert!(b.read(|r| r.goal())?.is_none());
@@ -318,7 +316,7 @@ fn typed_state_and_file_read_evidence_survive_resume_with_session_isolation() ->
     );
     assert_eq!(a.read(|r| r.agent_mode())?, Some(PermissionMode::PlanMode));
     assert!(a.read(|r| r.approved_plan_boundary())?.is_some());
-    let boundary = a.write(|w| w.approve_plan("revised approval"))?;
+    let boundary = a.approve_plan("revised approval")?;
     assert!(a
         .write(|w| w.save_goal_proposals(&ProposalState::default(), &ProposalState::default()))
         .is_err());
@@ -376,7 +374,7 @@ fn upgrading_a_populated_p2_root_backfills_chunks_and_usage() -> Result<()> {
         })?;
         a.incarnation().to_owned()
     };
-    let path = root.path().join("sessions").join(A).join("session.db");
+    let path = root.path().join("data/sessions").join(A).join("session.db");
     {
         let c = Connection::open(&path)?;
         c.execute_batch("BEGIN IMMEDIATE")?;
@@ -537,14 +535,15 @@ fn large_private_sidecar(stores: &Stores) -> Result<SessionDb> {
         A,
         CreateOptions {
             first_message: Some(FirstMessage {
+                origin: "typed".into(),
                 text: "private".into(),
                 typed: Some(json!([{"type":"image","data":"a".repeat(8 << 20)}])),
             }),
             ..Default::default()
         },
     )?;
+    a.approve_plan("boundary")?;
     a.write(|w| {
-        w.approve_plan("boundary")?;
         w.append("assistant", "public needle")
     })?;
     Ok(a)
@@ -579,7 +578,7 @@ fn fix_search_checkout_obeys_the_filtered_read_budget() -> Result<()> {
     );
     // A valid external repair invalidates admission once. Further checkouts of
     // that same edited file must still obey the query budget.
-    let db = Connection::open(root.path().join("sessions").join(A).join("session.db"))?;
+    let db = Connection::open(root.path().join("data/sessions").join(A).join("session.db"))?;
     db.execute(
         "UPDATE message_user_content SET content_json=content_json",
         [],
@@ -672,7 +671,12 @@ fn fix_plan_origin_survives_reentry_and_resume() -> Result<()> {
         })?;
         s.open_session(id)?
             .write(|w| w.set_agent_mode(PermissionMode::PlanMode))?;
-        let c = Connection::open(root.path().join("sessions").join(id).join("session.db"))?;
+        let c = Connection::open(
+            root.path()
+                .join("data/sessions")
+                .join(id)
+                .join("session.db"),
+        )?;
         let value: String = c.query_row(
             "SELECT value FROM peripheral_settings WHERE key=?1",
             [format!("plan.return-bypass.{id}")],
@@ -716,7 +720,10 @@ fn fix_same_size_and_timestamp_restore_requires_another_read() -> Result<()> {
     );
     let a = s.open_session(A)?;
     std::fs::write(&path, b"later")?;
-    std::fs::File::open(&path)?.set_modified(modified)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)?
+        .set_modified(modified)?;
     assert!(a.check_file_write(&path).is_err());
     assert_eq!(a.read_tracked_file(&path)?, b"later");
     a.check_file_write(&path)
@@ -866,6 +873,7 @@ fn typed_session_settings_resume_in_their_own_shard() -> Result<()> {
                 &Microcompact {
                     boundary: "m".into(),
                     through: 11,
+                    cleared_results: 0,
                 },
             )?;
             w.set_setting(CHILD_PROGRESS, &progress)?;
@@ -934,16 +942,17 @@ fn shard_replacement_with_the_same_incarnation_requires_verification() -> Result
         A,
         CreateOptions {
             first_message: Some(FirstMessage {
+                origin: "typed".into(),
                 text: "first".into(),
                 typed: Some(json!(["test"])),
             }),
             ..Default::default()
         },
     )?;
-    let dir = root.path().join("sessions").join(A);
+    let dir = root.path().join("data/sessions").join(A);
     let path = dir.join("session.db");
     session.read(|r| r.initial_message())?;
-    let key = std::fs::File::open(root.path().join("session-locks").join(A))?;
+    let key = std::fs::File::open(root.path().join("state/locks/session").join(A))?;
     key.lock()?;
     let replacement = dir.join("replacement.db");
     {
@@ -984,7 +993,7 @@ fn upgrading_p3_stamps_requires_rereading_and_binds_pending_requests() -> Result
             Ok(target)
         })?
     };
-    let db = root.path().join("sessions").join(A).join("session.db");
+    let db = root.path().join("data/sessions").join(A).join("session.db");
     {
         let c = Connection::open(&db)?;
         c.execute_batch("BEGIN IMMEDIATE")?;

@@ -39,6 +39,7 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 base64 = "0.22"
 sha2 = "0.10"
+unicode-normalization = "0.1"
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
 ring = "0.17"
@@ -48,6 +49,7 @@ diffy = "0.4"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 prometheus = "0.13"
 serde_yaml = "0.9"
+unsafe-libyaml = "0.2"
 scraper = "0.24"
 
 tempfile = "3"

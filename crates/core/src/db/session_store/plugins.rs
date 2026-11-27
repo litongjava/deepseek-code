@@ -54,7 +54,9 @@ impl Payloads for DbManager {
         Ok(serde_json::from_str(reference)?)
     }
     fn backup(&self, root: &Path) -> Result<PathBuf> {
-        let dir = root.join("backups");
+        let dir = crate::data_layout::DataLayout::from_root(&root).backups();
+        std::fs::create_dir_all(&dir)?;
+        let dir = dir.canonicalize()?;
         std::fs::create_dir_all(&dir)?;
         let file = dir.join(format!("plugins-{}.sqlite3", uuid::Uuid::new_v4()));
         self.directory_read(|c| {

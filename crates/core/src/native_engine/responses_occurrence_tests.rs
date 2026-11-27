@@ -94,9 +94,9 @@ async fn run_responses(
                 .map(|event| {
                     let text = event
                         .to_string()
-                        .replace("__FIRST__", &first)
-                        .replace("__SECOND__", &second)
-                        .replace("__MISSING__", &format!("{first}.missing"));
+                        .replace("__FIRST__", "first.txt")
+                        .replace("__SECOND__", "second.txt")
+                        .replace("__MISSING__", "first.txt.missing");
                     serde_json::from_str::<Value>(&text).unwrap()
                 })
                 .collect::<Vec<_>>()
@@ -174,9 +174,9 @@ async fn run_responses(
     server.abort();
     for done in &mut dones {
         if let Some(path) = done.input["file_path"].as_str() {
-            if path == first {
+            if path == first || path.ends_with("first.txt") {
                 done.input["file_path"] = json!("first");
-            } else if path == second {
+            } else if path == second || path.ends_with("second.txt") {
                 done.input["file_path"] = json!("second");
             }
         }

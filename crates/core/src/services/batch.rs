@@ -681,9 +681,10 @@ fn supervise(root: &Path, dir: &Path, batch: &mut Batch) -> Result<()> {
                     "--output-format".into(),
                     "stream-json".into(),
                     "--print".into(),
-                    "--".into(),
-                    prompt(batch, index),
                 ]);
+                arguments.extend(
+                    background_sessions::PromptOrigin::Generated.arguments(&prompt(batch, index)),
+                );
                 let job = background_sessions::spawn(
                     root,
                     &launch.executable,

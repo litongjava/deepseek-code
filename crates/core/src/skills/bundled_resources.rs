@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn installed_resources_are_served_from_disk_and_edits_are_honored() {
         let (_temp, bundled) = installed();
-        let directory = bundled.join("dataviz");
+        let directory = bundled.join("dataviz").canonicalize().unwrap();
         let resources = Resources::default();
         let workspace = tempfile::tempdir().unwrap();
         let prompt = resources
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn skill_creator_bundle_is_installed_and_served() {
         let (_temp, bundled) = installed();
-        let directory = bundled.join("skill-creator");
+        let directory = bundled.join("skill-creator").canonicalize().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let resources = Resources::default();
         let prompt = resources
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn python_scripts_create_and_validate_skills_without_site_packages() {
         let (_temp, bundled) = installed();
-        let directory = bundled.join("skill-creator");
+        let directory = bundled.join("skill-creator").canonicalize().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let resources = Resources::default();
         resources
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn served_resources_stay_inside_the_installed_directory_and_keep_arguments_literal() {
         let (_temp, bundled) = installed();
-        let directory = bundled.join("dataviz");
+        let directory = bundled.join("dataviz").canonicalize().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let resources = Resources::default();
         let prompt = resources
@@ -474,7 +474,7 @@ mod tests {
             ("pdf", "scripts/fill_fillable_fields.py"),
             ("webapp-testing", "scripts/with_server.py"),
         ] {
-            let directory = bundled.join(name);
+            let directory = bundled.join(name).canonicalize().unwrap();
             let prompt = resources
                 .prepare(name, "", workspace.path(), &directory)
                 .unwrap();

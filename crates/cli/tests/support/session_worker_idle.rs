@@ -137,8 +137,8 @@ impl Fixture {
         let context = session_messages::context(&temp.path().join("data")).unwrap();
         tool_loading::enable(&context.paths.data_dir, &["Agent", "SendMessage"]);
         if let Some(settings) = settings {
-            std::fs::write(
-                context.paths.data_dir.join("settings.json"),
+            deepseek_code_core::data_layout::write_config_file(
+                context.paths.data_dir.join("config/settings.json"),
                 settings.to_string(),
             )
             .unwrap();

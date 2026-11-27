@@ -3,8 +3,7 @@
 //! A Reviewer may inspect the current task's Coder session tree and the task's
 //! own artifacts. Authorization is checked from the durable task record at call
 //! time; a session ID supplied by the model never widens its own scope.
-use crate::db::{conversation_repo, message_repo};
-use crate::services::{feedback, subagents};
+use crate::services::feedback;
 use crate::super_agent::isolation::{SnapshotKind, SnapshotManifest};
 use crate::super_agent::model::{
     NonGitSubmission, ReportKind, ReviewStage, TaskRecord, TaskReviewReport,
@@ -15,7 +14,7 @@ use crate::tools::ToolDefinition;
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_LIMIT: usize = 20;
@@ -38,6 +37,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }
         }
         ToolDefinition {
+            summary: None,
             name: description.into(),
             input_schema: json!({
                 "type":"object",
@@ -50,6 +50,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     };
     vec![
         ToolDefinition {
+            summary: None,
             name: "SessionMetadata".into(),
             description: "Read metadata for a Coder session in this task's session tree. Returns no transcript.".into(),
             input_schema: json!({
@@ -62,6 +63,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         page("SessionMessages", json!({}), &["session_id"]),
         page("SessionEvents", json!({"type":{"type":"string"}}), &["session_id"]),
         ToolDefinition {
+            summary: None,
             name: "SessionChildren".into(),
             description: "List the current and previous Coder sessions plus recorded child sessions descending from them.".into(),
             input_schema: json!({
@@ -72,6 +74,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            summary: None,
             name: "ArtifactRead".into(),
             description: "Read one report body or one stored artifact of the current task (maximum 64 KiB). Paths and cross-task artifacts are rejected.".into(),
             input_schema: json!({
@@ -367,7 +370,7 @@ fn artifact_read(store: &TaskStore, task: &TaskRecord, input: &Value) -> Result<
     let name = artifact_name(artifact_id)?;
     let directory = store
         .data_dir()
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&task.task_id)
         .join("artifacts");
     let path = directory.join(name);
@@ -671,7 +674,7 @@ fn same_submission_content(left: &SnapshotManifest, right: &SnapshotManifest) ->
 
 fn submission_scope(data_dir: &Path, task_id: &str) -> PathBuf {
     data_dir
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(task_id)
         .join("submissions")
 }

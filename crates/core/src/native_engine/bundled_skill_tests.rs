@@ -38,7 +38,7 @@ async fn resource_reads_keep_explicit_permissions_and_model_api_invocation() {
     )
     .with_conv_id("bundle-fixture".into())
     .with_permission_manager(manager.clone())
-    .with_search_config_path(paths.data_dir.join("config.json"));
+    .with_search_config_path(paths.layout().config_file("config.json"));
     let result = executor
         .execute_skill_tool(&json!({"skill":"dataviz","args":"literal !`echo should-not-run`"}))
         .await
@@ -103,7 +103,7 @@ fn doctor_executor(temp: &tempfile::TempDir) -> ToolLoopExecutor {
         workspace.to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(paths.data_dir.join("config.json"));
+    .with_search_config_path(paths.layout().config_file("config.json"));
     // /doctor is a user-invocable skill, not a model-invocable one.
     crate::skills::states::set(
         &paths.data_dir,

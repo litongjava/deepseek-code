@@ -56,8 +56,8 @@ async fn fixture(
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider: Provider = serde_json::from_value(json!({"id":"p","name":"p","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"m","name":"m","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
-    std::fs::write(
-        paths.data_dir.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/providers.json"),
         serde_json::to_vec(&vec![provider.clone()]).unwrap(),
     )
     .unwrap();
@@ -204,4 +204,54 @@ async fn incomplete_generation_preserves_sources_and_reports_failure() {
     );
     assert!(lifecycle::status(&context).unwrap()[0].error.is_some());
     server.abort();
+}
+
+#[tokio::test]
+async fn file_memory_activation_pauses_dream_before_request_and_before_commit() {
+    struct Server(tokio::task::JoinHandle<()>);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let (dir, context, generator, f, server) = fixture("stop", 1).await;
+    let _server = Server(server);
+    deepseek_code_core::services::memory_files::FileMemory::workspace(&context, dir.path())
+        .unwrap();
+    let report = dream::run(&context, &generator, false).await.unwrap();
+    assert_eq!(report.consolidated, 0);
+    assert!(report.skipped.unwrap().contains("paused"));
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        dream::client(&context)
+            .stats()
+            .await
+            .unwrap()
+            .total_memories,
+        1
+    );
+
+    let (dir, context, generator, f, server) = fixture("stop", 0).await;
+    let _server = Server(server);
+    let clone = context.clone();
+    let task = tokio::spawn(async move { dream::run(&clone, &generator, false).await });
+    wait_calls(&f).await;
+    deepseek_code_core::services::memory_files::FileMemory::workspace(&context, dir.path())
+        .unwrap();
+    f.release.add_permits(1);
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.consolidated, 0);
+    assert!(report.skipped.unwrap().contains("paused"));
+    assert_eq!(
+        dream::client(&context)
+            .stats()
+            .await
+            .unwrap()
+            .total_memories,
+        1
+    );
+    assert_eq!(
+        dream::client(&context).dream_status().await.unwrap().runs,
+        0
+    );
 }

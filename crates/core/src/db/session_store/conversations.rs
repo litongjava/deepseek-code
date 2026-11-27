@@ -21,12 +21,17 @@ fn validate_chat(c: &rusqlite::Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn first_chat_options(model: &str, content: Option<&Value>) -> Result<CreateOptions> {
+pub(super) fn first_chat_options(
+    model: &str,
+    content: Option<&Value>,
+    origin: &str,
+) -> Result<CreateOptions> {
     let first_message = content
         .filter(|v| v.as_str() != Some(""))
         .map(|v| -> Result<_> {
             let (text, normalized) = messages::prepare_user_message(v)?;
             Ok(super::FirstMessage {
+                origin: origin.to_owned(),
                 text,
                 typed: normalized.is_array().then_some(normalized),
             })
@@ -46,7 +51,13 @@ impl Stores {
             validate_chat(&tx, id)
         })
     }
-    pub fn admit_chat_message(&self, id: &str, model: &str, content: Option<&Value>) -> Result<()> {
+    pub fn admit_chat_message(
+        &self,
+        id: &str,
+        model: &str,
+        content: Option<&Value>,
+        origin: &str,
+    ) -> Result<()> {
         let content = content.filter(|v| v.as_str() != Some(""));
         let row = self.global().read_directory_row(id, |c| {
             let tx = c.unchecked_transaction()?;
@@ -58,11 +69,11 @@ impl Stores {
                 let shard = self.open_listed(&entry)?;
                 if let Some(content) = content {
                     let message = shard.new_message_id();
-                    shard.write(|w| w.append_user(&message, content))?;
+                    shard.admit_user(&message, content, origin)?;
                 }
             }
             None => {
-                self.create(id, first_chat_options(model, content)?)?;
+                self.create(id, first_chat_options(model, content, origin)?)?;
             }
         }
         Ok(())
@@ -161,7 +172,13 @@ impl crate::db::DbManager {
             validate_chat(&tx, id)
         })?
     }
-    pub fn admit_chat_message(&self, id: &str, model: &str, content: Option<&Value>) -> Result<()> {
+    pub fn admit_chat_message(
+        &self,
+        id: &str,
+        model: &str,
+        content: Option<&Value>,
+        origin: &str,
+    ) -> Result<()> {
         self.with_conn(|c|crate::db::write_tx(c,"admit chat user message",super::WRITE_DEADLINE,|tx|{
             validate_chat(tx,id)?;
             let now=chrono::Utc::now().to_rfc3339();
@@ -170,7 +187,9 @@ impl crate::db::DbManager {
             }
             if let Some(content)=content.filter(|v|v.as_str()!=Some("")) {
                 let order=tx.query_row("SELECT coalesce(max(sort_order),-1)+1 FROM messages WHERE conversation_id=?1",[id],|r|r.get(0))?;
-                messages::save_user_message(tx,&uuid::Uuid::new_v4().to_string(),id,content,&now,order)?;
+                let message = uuid::Uuid::new_v4().to_string();
+                messages::save_user_message(tx,&message,id,content,&now,order)?;
+                super::state::set_local(tx,&format!("message-origin:{message}"),&serde_json::json!({"promptOrigin":origin}).to_string())?;
             }
             tx.execute("UPDATE conversations SET message_count=(SELECT count(*) FROM messages WHERE conversation_id=?1),updated_at=?2 WHERE id=?1",[id,&now])?;
             Ok(())

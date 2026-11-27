@@ -9,8 +9,8 @@ fn configure(data: &Path, workspace: &Path, events: &[&str]) {
     for event in events {
         hooks[*event] = json!([{"hooks":[{"type":"command","command":format!("node \"{}\"",script.display()),"once":true}]}]);
     }
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         json!({"hooks":hooks}).to_string(),
     )
     .unwrap();

@@ -12,7 +12,7 @@ pub(super) struct InvalidFormat(pub(super) String);
 
 pub(super) const GLOBAL: i32 = 0x4443_4c47; // DCLG
 pub(super) const SESSION: i32 = 0x4443_4c53; // DCLS
-pub(super) const GLOBAL_VERSION: i32 = 16;
+pub(super) const GLOBAL_VERSION: i32 = 17;
 pub(super) const SESSION_VERSION: i32 = 14;
 
 pub(super) fn canonical_uuid(id: &str) -> bool {
@@ -347,6 +347,11 @@ pub(super) fn upgrade(path: &Path, kind: i32) -> Result<()> {
                 tx.execute_batch(include_str!("global_v13.sql"))?;
                 tx.execute_batch(include_str!("global_v14.sql"))?;
                 tx.execute_batch(include_str!("global_v16.sql"))?;
+                if version < 17 && !tx.prepare(
+                    "SELECT 1 FROM pragma_table_info('session_input_queue') WHERE name='prompt_origin'"
+                )?.exists([])? {
+                    tx.execute_batch(include_str!("global_v17.sql"))?;
+                }
                 if version < 15 {
                     tx.execute_batch(include_str!("global_v15.sql"))?;
                 }
@@ -474,6 +479,9 @@ fn verify_tables(conn: &Connection, kind: i32, expected: i32, journal_mode: &str
             ("tool_queued_inputs", "tool_call_id inputs_json"),
         ]
     };
+    if kind == GLOBAL && expected >= 17 {
+        conn.prepare("SELECT prompt_origin FROM session_input_queue LIMIT 0")?;
+    }
     if kind == GLOBAL && expected >= 3 {
         conn.prepare("SELECT sender_incarnation FROM session_inbox LIMIT 0")?;
     }
@@ -781,6 +789,7 @@ pub(super) fn initialize(
         tx.execute_batch(include_str!("global_v13.sql"))?;
         tx.execute_batch(include_str!("global_v14.sql"))?;
         tx.execute_batch(include_str!("global_v16.sql"))?;
+        tx.execute_batch(include_str!("global_v17.sql"))?;
     }
     populate(&tx)?;
     if kind == SESSION {
@@ -809,14 +818,19 @@ pub(super) fn checkpoint(path: &Path, kind: i32) -> Result<()> {
 }
 
 pub(super) fn open_root(root: &Path) -> Result<(String, bool)> {
-    let path = root.join("global.db");
-    let stage = root.join(".global-staging");
-    let locks = root.join("session-locks");
+    let layout = crate::data_layout::DataLayout::from_root(&root);
+    let path = layout.global_db();
+    let stage = layout.staging();
+    let locks = layout.lock_path("session");
     let marker = locks.join(".initialized");
+    let sessions = layout.sessions();
     if !path.try_exists()? || stage.try_exists()? {
         // This lock lives outside the removable namespace. Established v1 roots
         // do not need it unless finishing their own interrupted bootstrap.
-        let bootstrap = root.join(".session-bootstrap");
+        let bootstrap = layout.bootstrap();
+        if let Some(parent) = bootstrap.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let may_start = !path.try_exists()? && !marker.try_exists()?;
         let guard = File::options()
             .read(true)
@@ -846,9 +860,10 @@ pub(super) fn open_root(root: &Path) -> Result<(String, bool)> {
                 }
             } else {
                 ensure!(
-                    !locks.try_exists()? && !root.join("sessions/.staging").try_exists()?,
+                    !locks.try_exists()? && !sessions.join(".staging").try_exists()?,
                     "Missing global database for existing session layout"
                 );
+                fs::create_dir_all(stage.parent().unwrap())?;
                 fs::create_dir(&stage)?;
                 sync_dir(root)?;
             }
@@ -862,14 +877,10 @@ pub(super) fn open_root(root: &Path) -> Result<(String, bool)> {
                     .sync_all()?;
             }
             sync_dir(&locks)?;
-            for name in [
-                "sessions/.staging",
-                "sessions/.trash",
-                "sessions/.quarantine",
-            ] {
-                fs::create_dir_all(root.join(name))?;
+            for name in [".staging", ".trash", ".quarantine"] {
+                fs::create_dir_all(sessions.join(name))?;
             }
-            sync_dir(&root.join("sessions"))?;
+            sync_dir(&sessions)?;
             let staged = stage.join("global.db");
             let uuid = Uuid::new_v4().to_string();
             initialize(&staged, GLOBAL, |tx| {

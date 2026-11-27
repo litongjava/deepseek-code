@@ -17,12 +17,25 @@ pub struct Setting<T> {
     value: PhantomData<fn() -> T>,
 }
 impl<T> Setting<T> {
-    pub(super) const fn new(name: &'static str) -> Self {
+    pub(crate) const fn new(name: &'static str) -> Self {
         Self {
             name: Cow::Borrowed(name),
             legacy: None,
             value: PhantomData,
         }
+    }
+    pub(crate) fn memory_receipt(key: String) -> Self {
+        Self {
+            name: Cow::Owned(format!("memory.{key}")),
+            legacy: None,
+            value: PhantomData,
+        }
+    }
+    pub(crate) fn write(&self, c: &rusqlite::Connection, value: &T) -> Result<()>
+    where
+        T: Serialize,
+    {
+        state::set_local(c, &self.name, &serde_json::to_string(value)?)
     }
     fn workspace(name: &str, workspace: &Path) -> Self {
         use sha2::{Digest, Sha256};
@@ -37,7 +50,7 @@ impl<T> Setting<T> {
             value: PhantomData,
         }
     }
-    fn read(&self, c: &rusqlite::Connection) -> Result<Option<T>>
+    pub(crate) fn read(&self, c: &rusqlite::Connection) -> Result<Option<T>>
     where
         T: DeserializeOwned,
     {
@@ -57,7 +70,7 @@ impl SessionWrite<'_> {
         key.read(self.0)
     }
     pub fn set_setting<T: Serialize>(&self, key: Setting<T>, value: &T) -> Result<()> {
-        state::set_local(self.0, &key.name, &serde_json::to_string(value)?)
+        key.write(self.0, value)
     }
     pub fn clear_setting<T>(&self, key: Setting<T>) -> Result<()> {
         self.0.execute(
@@ -105,6 +118,12 @@ pub struct CliGoal {
     pub last_check: Option<String>,
 }
 
+/// Compacts at 80% of the window by default, leaving a fifth for the next
+/// response and for summarization, e.g. 160k of a 200k window.
+pub fn default_autocompact_tokens(window: u64) -> Option<u64> {
+    Some(window * 4 / 5).filter(|tokens| *tokens > 0)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -112,6 +131,20 @@ pub struct Preferences {
     pub autocompact_percent: Option<CompactPercent>,
     pub autocompact_off: bool,
     pub goal: Option<CliGoal>,
+}
+
+impl Preferences {
+    /// Estimated history tokens at which the conversation is automatically compacted.
+    pub fn autocompact_tokens(&self, window: u64) -> Option<u64> {
+        if window == 0 {
+            return None;
+        }
+        match self.autocompact_percent {
+            Some(percent) => Some(window * u64::from(u8::from(percent)) / 100),
+            None if self.autocompact_off => None,
+            None => default_autocompact_tokens(window),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,7 +183,19 @@ pub struct Editor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Microcompact {
     pub through: usize,
+    #[serde(default)]
+    pub cleared_results: usize,
     pub boundary: String,
+}
+
+impl Microcompact {
+    pub fn for_boundary(boundary: impl Into<String>) -> Self {
+        Self {
+            through: 0,
+            cleared_results: 0,
+            boundary: boundary.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,3 +254,8 @@ pub fn accepted_configuration(workspace: &Path) -> Setting<Vec<Option<String>>> 
 pub fn rejected_configuration(workspace: &Path) -> Setting<(Vec<Option<String>>, String)> {
     Setting::workspace("lifecycle-config.rejected", workspace)
 }
+
+pub(crate) const MEMORY_AGENT: Setting<String> = Setting::new("memory.agent-definition");
+pub(crate) const MEMORY_SCOPE: Setting<(Option<String>, String)> = Setting::new("memory.scope");
+pub(crate) const MEMORY_OWNER: Setting<(Option<String>, String)> =
+    Setting::new("memory.private-owner");

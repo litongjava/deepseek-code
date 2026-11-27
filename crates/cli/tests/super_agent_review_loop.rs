@@ -1477,7 +1477,7 @@ fn proc_state(pid: u32) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn wait_for_republished_state(data: &Path, job_id: &str) {
     let path = data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(job_id)
         .join("state.json");
     for _ in 0..400 {
@@ -1532,6 +1532,21 @@ fn proc_start_ticks(_: u32) -> Option<String> {
     None
 }
 
+#[cfg(not(target_os = "linux"))]
+fn wait_for_republished_state(_: &Path, _: &str) {
+    panic!("the republished-state scenario is Linux-only");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_damaged_job_terminal(_: &Path, _: &str) -> String {
+    panic!("the damaged-job scenario is Linux-only");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_instance_stopped(_: u32, _: &str) -> bool {
+    panic!("the process-identity scenario is Linux-only");
+}
+
 /// A process the completion-gate cleanup must never touch.
 struct Sentinel(std::process::Child);
 
@@ -1570,7 +1585,7 @@ impl FrozenSupervisor {
 /// started no replacement without trusting the discovery list (which ignores
 /// damaged or missing state).
 fn job_directory_ids(data: &Path) -> Vec<String> {
-    let mut ids: Vec<String> = std::fs::read_dir(data.join("background-tasks"))
+    let mut ids: Vec<String> = std::fs::read_dir(data.join("tasks/background"))
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok())
@@ -1716,8 +1731,8 @@ async fn run_review_loop_with(
         axum::serve(listener, app).await.unwrap();
     });
 
-    std::fs::write(
-        fixture.data.join("config.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        fixture.data.join("config/config.json"),
         serde_json::to_vec(&json!({
             "providers":[{
                 "id":"fixture","name":"Fixture","provider_type":"openai","api_key":"fixture-key",
@@ -3674,7 +3689,7 @@ async fn run_review_loop_with(
                                 }),
                                 "both current final-delivery reports must be durable: {durable_reports:#?}"
                             );
-                            let job_dir = fixture.data.join("background-tasks").join(&job_id);
+                            let job_dir = fixture.data.join("tasks/background").join(&job_id);
                             let launch_bytes = std::fs::read(job_dir.join("launch.json")).unwrap();
                             // Reports prove submission, not exit. A tick with
                             // both reports and a live child only waits.
@@ -4646,7 +4661,7 @@ mod two_repository_cli {
             }
             Self::record_evidence(&store, &task, &repos);
             let workspace = data
-                .join("super-agent")
+                .join("tasks/super-agent")
                 .join(&task.task_id)
                 .join("workspace");
             std::fs::create_dir_all(&workspace).unwrap();
@@ -4970,8 +4985,8 @@ mod two_repository_cli {
             tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            std::fs::write(
-                self.data.join("config.json"),
+            deepseek_code_core::data_layout::write_config_file(
+                self.data.join("config/config.json"),
                 serde_json::to_vec(&json!({
                     "providers":[{
                         "id":"fixture","name":"Fixture","provider_type":"openai","api_key":"fixture-key",

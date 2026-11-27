@@ -338,6 +338,7 @@ mod tests {
             session_id: session.clone(),
             boundary_id: "boundary".into(),
             assistant_id: None,
+            reason: crate::native_engine::tool_loop::ContextResetReason::PlanApproval,
         })
         .unwrap();
         tx.try_send(EngineEvent::Thinking("after thinking".into()))

@@ -1074,8 +1074,8 @@ mod tests {
     fn spec() -> TaskSpec {
         TaskSpec {
             title: "Fix login".into(),
-            workspace: PathBuf::from("/workspace"),
-            targets: vec!["/workspace/code".into()],
+            workspace: PathBuf::from(crate::super_agent::TEST_WORKSPACE),
+            targets: vec![format!("{}/code", crate::super_agent::TEST_WORKSPACE)],
             goal: "Show accurate errors".into(),
             requirements: vec!["Distinguish credential and service errors".into()],
             acceptance_criteria: vec![AcceptanceCriterion {

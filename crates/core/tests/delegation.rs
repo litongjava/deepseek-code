@@ -90,7 +90,7 @@ async fn run_case(cancel: bool, team: bool) {
     let provider: Provider = serde_json::from_value(json!({"id":"local","name":"Local","base_url":format!("http://{addr}"),"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"max_tokens":1000,"supports_vision":false,"supports_web_search":false}]})).unwrap();
     let manager = Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
         vec![provider],
-        dir.path().join("providers.json"),
+        dir.path().join("config/providers.json"),
     )));
     let permissions = runtime::default_permissions();
     permissions.set_mode(deepseek_code_core::permissions::PermissionMode::BypassPermissions);

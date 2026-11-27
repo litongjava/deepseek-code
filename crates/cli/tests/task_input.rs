@@ -319,8 +319,8 @@ async fn cli_pipe_shell_takes_utf8_input_across_two_turns() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -458,8 +458,8 @@ async fn cli_task_input_is_refused_in_plan_mode() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -549,8 +549,8 @@ async fn cli_graceful_shutdown_stops_the_pipe_shell_and_its_descendant() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -631,7 +631,11 @@ fn hook_journal(path: &std::path::Path) -> Vec<Value> {
 fn write_hooks(workspace: &std::path::Path, settings: &Value) {
     let directory = workspace.join(".claude");
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("settings.json"), settings.to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        directory.join("config/settings.json"),
+        settings.to_string(),
+    )
+    .unwrap();
 }
 
 #[derive(Debug)]
@@ -762,8 +766,8 @@ async fn cli_task_input_records_each_call_and_fires_tool_hooks() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -1012,8 +1016,8 @@ async fn cli_task_input_pre_hook_denial_writes_no_stdin_bytes() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();

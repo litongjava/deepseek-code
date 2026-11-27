@@ -1,6 +1,6 @@
 //! The provider selected by a frontend can differ from the persistent host's
 //! startup environment. Capture provider environment inputs per admission, including removals.
-use crate::binding_store::{self, Observed, Write};
+use crate::binding_store::{Observed, Write};
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::native_engine::provider_manager::ResolvedProvider;
 use deepseek_code_core::services::session_worker::{self, Request};

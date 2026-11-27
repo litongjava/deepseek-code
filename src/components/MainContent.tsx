@@ -1,4 +1,4 @@
-import { contentBlocks, hasUnavailableImages, replaceUserText, type UserContent } from '../utils/userContent';
+import { contentBlocks, hasUnavailableImages, readImageDataUrl, replaceUserText, type UserContent } from '../utils/userContent';
 import { useComposerDrop } from '../features/chat/useComposerDrop';
 import PlanApprovalController from '../features/chat/PlanApprovalController';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
@@ -1296,12 +1296,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     if (hasImages) {
       // Multi-content block message with images
       const contentBlocks: any[] = await Promise.all(imageFiles.map(async f => {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(new Error(`无法读取图片：${f.fileName}`));
-          reader.readAsDataURL(f.file);
-        });
+        const { url: dataUrl } = await readImageDataUrl(f.file, `无法读取图片：${f.fileName}`);
         return { type: 'image_url' as const, image_url: { url: dataUrl } };
       }));
       if (userMessageText.trim()) {
@@ -2444,7 +2439,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
       )}
 
-      {toolPermissionDialog && !permissionApproval && <ToolPermissionPrompt key={toolPermissionDialog.request_id} request={toolPermissionDialog} onCancel={async () => {
+      {toolPermissionDialog && !permissionApproval && <ToolPermissionPrompt key={toolPermissionDialog.request_id} request={toolPermissionDialog} workspace={(() => { const project = projectList.find(project => project.id === (activeId ? currentProjectId : pendingProjectId)); return project?.workspace_path || project?.path; })()} onCancel={async () => {
         const current = toolPermissionDialog;
         if (!await handleStop()) throw new Error('Turn cancellation could not be confirmed');
         setToolPermissionDialog(pending => pending?.request_id === current.request_id ? null : pending);

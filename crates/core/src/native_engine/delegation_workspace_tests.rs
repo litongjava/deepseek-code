@@ -17,9 +17,22 @@ async fn desktop_child_preserves_mode_and_reads_parent_private_files() {
         )
         .unwrap();
         let parent = uuid::Uuid::new_v4().to_string();
-        context.db.create(&parent, crate::db::session_store::CreateOptions { model: Some("fixture".into()), provider: Some("fixture".into()), workspace_mode: Some(mode.into()), ..Default::default() }).unwrap();
-        let private_root = context.paths.data_dir.join("workspaces");
-        let cwd = context.db.engine_workspace(&private_root, &parent, None)
+        context
+            .db
+            .create(
+                &parent,
+                crate::db::session_store::CreateOptions {
+                    model: Some("fixture".into()),
+                    provider: Some("fixture".into()),
+                    workspace_mode: Some(mode.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let private_root = context.paths.data_dir.join("data/workspaces");
+        let cwd = context
+            .db
+            .engine_workspace(&private_root, &parent, None)
             .unwrap()
             .0;
         std::fs::write(cwd.join("parent-notes.txt"), "PARENT_PRIVATE_CONTENT").unwrap();
@@ -48,7 +61,7 @@ async fn desktop_child_preserves_mode_and_reads_parent_private_files() {
             ReasoningMode::Standard,
         )
         .with_conv_id(parent.clone())
-        .with_search_config_path(context.paths.data_dir.join("settings.json"));
+        .with_search_config_path(context.paths.layout().config_file("settings.json"));
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             executor.execute_delegated(
@@ -102,10 +115,8 @@ fn private_bindings_reject_cycles_mode_changes_and_runtime_directory_mismatch() 
     .unwrap();
     let parent = uuid::Uuid::new_v4().to_string();
     context.db.create(&parent, Default::default()).unwrap();
-    let root = context.paths.data_dir.join("workspaces");
-    let cwd = context.db.engine_workspace(&root, &parent, None)
-        .unwrap()
-        .0;
+    let root = context.paths.data_dir.join("data/workspaces");
+    let cwd = context.db.engine_workspace(&root, &parent, None).unwrap().0;
     let store = SessionStore::new(context.db.clone());
     assert!(store
         .derive_owned_child(&parent, &root, temp.path())
@@ -136,10 +147,8 @@ fn existing_directory_retains_private_files_after_owner_and_child_deletion() {
         db.create(&parent, Default::default()).unwrap();
     }
     let db = paths.open_database().unwrap();
-    let root = paths.data_dir.join("workspaces");
-    let cwd = db.engine_workspace(&root, &parent, None)
-        .unwrap()
-        .0;
+    let root = paths.data_dir.join("data/workspaces");
+    let cwd = db.engine_workspace(&root, &parent, None).unwrap().0;
     std::fs::write(cwd.join("keep.txt"), "keep").unwrap();
     let child = SessionStore::new(db.clone())
         .derive_owned_child(&parent, &root, &cwd)

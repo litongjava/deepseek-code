@@ -84,9 +84,18 @@ async fn settings(session: &Session) -> Result<Value> {
     let workspace = &session.workspace;
     let mut sources = Vec::new();
     for (source, path) in [
-        ("userSettings", session.paths.data_dir.join("settings.json")),
-        ("projectSettings", workspace.join(".claude").join("settings.json")),
-        ("localSettings", workspace.join(".claude").join("settings.local.json")),
+        (
+            "userSettings",
+            session.paths.layout().config_file("settings.json"),
+        ),
+        (
+            "projectSettings",
+            workspace.join(".claude").join("settings.json"),
+        ),
+        (
+            "localSettings",
+            workspace.join(".claude").join("settings.local.json"),
+        ),
     ] {
         sources.push((source, read_object(&path)?));
     }

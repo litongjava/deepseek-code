@@ -4,7 +4,12 @@ pub fn text<'a>(english: &'a str, chinese: &'a str) -> &'a str {
     let chinese_selected = CHINESE.get_or_init(|| {
         let language = crate::runtime::resolve_default_data_dir()
             .ok()
-            .and_then(|root| std::fs::read(root.join("config.json")).ok())
+            .and_then(|root| {
+                std::fs::read(
+                    crate::data_layout::DataLayout::from_root(&root).config_file("config.json"),
+                )
+                .ok()
+            })
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| value["language"].as_str().map(str::to_owned));
         select(language.as_deref(), &system_language(), "en", "zh") == "zh"

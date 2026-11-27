@@ -160,7 +160,7 @@ async fn fixture(mode: u8) -> Fixture {
         store.db.clone(),
         Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
             vec![provider],
-            paths.data_dir.join("providers.json"),
+            paths.data_dir.join("config/providers.json"),
         ))),
         permissions,
         Arc::new(FileCache::new()),
@@ -179,8 +179,8 @@ async fn running_responses_turn_uses_native_compaction_before_local_truncation()
         server,
         ..
     } = fixture(3).await;
-    std::fs::write(
-        dir.path().join("data/settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        dir.path().join("data/config/settings.json"),
         r#"{"requestRecording":{"enabled":true}}"#,
     )
     .unwrap();
@@ -205,7 +205,10 @@ async fn running_responses_turn_uses_native_compaction_before_local_truncation()
         &requests[1]["input"].as_array().unwrap()[..3],
         window().as_array().unwrap()
     );
-    let records = dir.path().join("data/request-records").join(&id);
+    let records = dir
+        .path()
+        .join("data/diagnostics/request-records")
+        .join(&id);
     let compact: Value =
         serde_json::from_slice(&std::fs::read(records.join("compaction-0001.json")).unwrap())
             .unwrap();

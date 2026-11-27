@@ -331,7 +331,7 @@ process.stdin.on('end',()=>{
  },20);
 });
 "#).unwrap();
-        std::fs::write(root.join("settings.json"),json!({"hooks":{"PreToolUse":[{"matcher":"^Read$","hooks":[{"type":"command","command":"node hook.cjs","async":true,"once":true,"if":"Read","timeout":timeout,"statusMessage":"Background fixture"}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),json!({"hooks":{"PreToolUse":[{"matcher":"^Read$","hooks":[{"type":"command","command":"node hook.cjs","async":true,"once":true,"if":"Read","timeout":timeout,"statusMessage":"Background fixture"}]}]}}).to_string()).unwrap();
         HookRunner::load(root, root).unwrap()
     }
 
@@ -385,7 +385,7 @@ process.stdin.on('end',()=>{
 
     fn rewake_fixture(root: &Path, timeout: u64) -> HookRunner {
         fixture(root, timeout);
-        let path = root.join("settings.json");
+        let path = crate::data_layout::DataLayout::from_root(&root).config_file("settings.json");
         let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let hook = &mut config["hooks"]["PreToolUse"][0]["hooks"][0];
         hook.as_object_mut().unwrap().remove("async");

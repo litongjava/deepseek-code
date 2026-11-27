@@ -147,8 +147,8 @@ impl Project {
         std::fs::create_dir_all(data.join("config")).unwrap();
         std::fs::create_dir_all(workspace.join("config")).unwrap();
         std::fs::write(workspace.join("fixture.txt"), "fixture contents\n").unwrap();
-        std::fs::write(
-            data.join("providers.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            data.join("config/providers.json"),
             json!([{
                 "id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture-only",
                 "api_format":"openai","enabled":true,
@@ -160,9 +160,9 @@ impl Project {
         )
         .unwrap();
         // Keep retries out of the timing assertions; these fixtures never fail.
-        std::fs::write(
+        deepseek_code_core::data_layout::write_config_file(
             workspace.join("config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml")
+            include_str!("../../../config/orchestration.toml")
                 .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
         )
         .unwrap();
@@ -520,8 +520,8 @@ async fn ownership_survives_a_delayed_post_compact_hook() {
     // Reactive compaction needs earlier conversation to compact.
     store.append(&id, "user", "seed task").unwrap();
     store.append(&id, "assistant", "seed answer").unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         json!({
             "promptSuggestionEnabled": false,
             "hooks": {"PostCompact": [{"hooks": [{
@@ -544,8 +544,8 @@ async fn ownership_survives_a_delayed_post_compact_hook() {
         .route("/v1/chat/completions", post(respond))
         .with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         json!([{
             "id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture-only",
             "api_format":"openai","enabled":true,
@@ -669,13 +669,16 @@ async fn observing_a_dead_owner_keeps_queued_notifications_pending() {
     let _ = child.wait().await;
 
     // A finished background task left a notification for this session.
-    project.db.open_session(&id).unwrap().enqueue_cli_notification(
-        "<task-notification>background build finished</task-notification>",
-    )
-    .unwrap();
-    let pending = |project: &Project, id: &str| {
-        project.db.pending_input(id, |_| true).unwrap()
-    };
+    project
+        .db
+        .open_session(&id)
+        .unwrap()
+        .enqueue_cli_input(
+            deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+            "<task-notification>background build finished</task-notification>",
+        )
+        .unwrap();
+    let pending = |project: &Project, id: &str| project.db.pending_input(id, |_| true).unwrap();
     assert!(pending(&project, &id));
 
     let requests_before = mock.count();

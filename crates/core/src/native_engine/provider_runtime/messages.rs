@@ -61,7 +61,7 @@ pub(in crate::native_engine) fn request(
         .into_iter()
         .filter(|m| m.role != "system")
         .collect::<Vec<_>>();
-    let mut input = conversation_input(api, messages)?;
+    let mut input = conversation_input(api, messages, &provider.provider.id, &provider.model.id)?;
     let effort = provider.model.effort.as_deref();
     if api == "bedrock-converse-stream" {
         return bedrock(provider, input, &system, tools, max_tokens);
@@ -201,6 +201,8 @@ fn bedrock(
 pub(in crate::native_engine) fn conversation_input(
     api: &str,
     messages: Vec<OpenAIMessage>,
+    provider_id: &str,
+    model_id: &str,
 ) -> Result<Vec<Value>> {
     if api == "bedrock-converse-stream" {
         return bedrock_input(messages);
@@ -228,8 +230,26 @@ pub(in crate::native_engine) fn conversation_input(
             if let Some(native) = &message.provider_content {
                 if native["api"] == api {
                     if let Some(items) = native["items"].as_array() {
+                        // Opaque state is only valid for the account and model that issued it;
+                        // a session may switch either between turns. Unknown issuers are foreign.
+                        let issued_here = native["provider"].as_str() == Some(provider_id)
+                            && native["model"].as_str() == Some(model_id);
+                        let mut items = if native["compaction"] == true || issued_here {
+                            items.clone()
+                        } else {
+                            foreign_items(api, items)
+                        };
                         if api == "openai-responses" {
-                            input.extend(items.clone());
+                            if let Some(thinking) = message.reasoning_content.as_deref().filter(|text| !text.trim().is_empty()) {
+                                if !has_reasoning_text(&items) {
+                                    if let Some(slot) = items.iter_mut().find(|item| item["type"] == "reasoning") {
+                                        slot["summary"] = json!([{"type": "summary_text", "text": thinking}]);
+                                    } else {
+                                        items.insert(0, reasoning_item(thinking));
+                                    }
+                                }
+                            }
+                            input.extend(items);
                             if native["compaction"] == true { compact_prefix = input.len(); }
                         } else if api == "google-generative-ai" {
                             input.push(json!({"role":"model","parts":items}));
@@ -258,6 +278,11 @@ pub(in crate::native_engine) fn conversation_input(
             continue;
         }
         let mut content = parts(&message.content, api, message.role == "assistant")?;
+        if api == "openai-responses" && message.role == "assistant" {
+            if let Some(thinking) = message.reasoning_content.as_deref().filter(|text| !text.trim().is_empty()) {
+                input.push(reasoning_item(thinking));
+            }
+        }
         if let Some(calls) = &message.tool_calls {
             for call in calls {
                 if api == "openai-responses" {
@@ -291,6 +316,83 @@ pub(in crate::native_engine) fn conversation_input(
         input.extend(tail);
     }
     Ok(input)
+}
+
+/// Plain thinking is replayed as a readable summary item, never as opaque state.
+fn reasoning_item(text: &str) -> Value {
+    json!({"type": "reasoning", "id": format!("rs_{}", uuid::Uuid::new_v4()), "summary": [{"type": "summary_text", "text": text}]})
+}
+
+fn has_reasoning_text(items: &[Value]) -> bool {
+    items.iter().any(|item| {
+        item["type"] == "reasoning"
+            && ["summary", "content"].iter().any(|key| {
+                item[*key].as_array().is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part["text"].as_str().is_some_and(|text| !text.trim().is_empty()))
+                })
+            })
+    })
+}
+
+/// Keeps readable summaries but drops opaque state issued by another account or model.
+fn foreign_items(api: &str, items: &[Value]) -> Vec<Value> {
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items {
+        match api {
+            "openai-responses" => {
+                if item["type"] == "reasoning" {
+                    let mut item = item.clone();
+                    if let Some(object) = item.as_object_mut() {
+                        object.remove("encrypted_content");
+                    }
+                    if reasoning_text(&item) {
+                        kept.push(item);
+                    }
+                    continue;
+                }
+                kept.push(item.clone());
+            }
+            "anthropic-messages" => {
+                if matches!(
+                    item["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                ) {
+                    continue;
+                }
+                kept.push(item.clone());
+            }
+            "google-generative-ai" => {
+                if item["thought"] == true {
+                    continue;
+                }
+                let mut item = item.clone();
+                if let Some(object) = item.as_object_mut() {
+                    object.remove("thoughtSignature");
+                }
+                kept.push(item);
+            }
+            "bedrock-converse-stream" => {
+                if item.get("reasoningContent").is_some() {
+                    continue;
+                }
+                kept.push(item.clone());
+            }
+            _ => kept.push(item.clone()),
+        }
+    }
+    kept
+}
+
+fn reasoning_text(item: &Value) -> bool {
+    ["summary", "content"].iter().any(|key| {
+        item[*key].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part["text"].as_str().is_some_and(|text| !text.trim().is_empty()))
+        })
+    })
 }
 
 fn bedrock_input(messages: Vec<OpenAIMessage>) -> Result<Vec<Value>> {

@@ -456,13 +456,13 @@ async fn harness(scenario: Scenario) -> Harness {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         json!({"hooks":{
             "PreToolUse":[{"matcher":"GitHub","hooks":[{"type":"command","shell":"sh","command":"cat >> github-hooks.jsonl"}]}],
             "PostToolUse":[{"matcher":"GitHub","hooks":[{"type":"command","shell":"sh","command":"cat >> github-hooks.jsonl"}]}]

@@ -73,7 +73,7 @@ impl TaskDatabase for Stores {
             fence.locks.push(self.namespace()?);
         }
         for (key, (id, incarnation)) in members {
-            let path = self.root.path.join("session-locks").join(&key);
+            let path = self.root.layout().lock_path("session").join(&key);
             let lock = std::fs::File::options()
                 .read(true)
                 .write(true)

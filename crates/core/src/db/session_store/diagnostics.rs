@@ -8,6 +8,13 @@ pub struct DirectoryHealth {
 }
 
 pub fn inspect_directory(root: &Path) -> Result<Option<DirectoryHealth>> {
+    // Stores canonicalize their root, so a symlinked parent (for example
+    // /var on macOS) would otherwise fail SQLite's NOFOLLOW open below.
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let path = root.join("global.db");
     match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),

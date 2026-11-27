@@ -98,11 +98,7 @@ impl SessionDb {
         self.check_directory()?;
         self.stores.global().read(|c| {
             let snapshot = c.unchecked_transaction()?;
-            workspace(
-                &snapshot,
-                &self.stores.root.path.join("workspaces"),
-                &self.id,
-            )
+            workspace(&snapshot, &self.stores.layout().workspaces(), &self.id)
         })
     }
     pub fn copy_preferences_to(&self, destination: &SessionDb) -> Result<()> {
@@ -157,7 +153,7 @@ impl SessionDb {
                 )?;
                 ensure!(!native, "Partial text summaries cannot include an opaque Responses boundary; select messages after it or branch before it");
             }
-            let (messages, boundary) = crate::runtime::replay_rows(r.0, self.id(), selected, format, |_| Ok(None))?;
+            let (messages, boundary) = crate::runtime::replay_rows(r.0, self.id(), selected, format, |_| Ok(None), true)?;
             Ok(PreparedPart {
                 boundary,
                 incarnation: self.incarnation().into(),
@@ -231,7 +227,7 @@ impl SessionDb {
                 } else {
                     crate::native_engine::workspace::resolve_workspace(
                         c,
-                        &s.root.path.join("workspaces"),
+                        &s.layout().workspaces(),
                         &self.id,
                         None,
                     )?;
@@ -279,6 +275,7 @@ struct Copier<'a> {
     src: &'a Connection,
     dst: &'a Connection,
     id: &'a str,
+    session_dir: PathBuf,
     keep_unresolved_origins: bool,
 }
 impl Copier<'_> {
@@ -400,6 +397,25 @@ impl Copier<'_> {
             if let Ok(i) = idx("conversation_id") {
                 values[i] = Value::Text(self.id.into())
             }
+            if table == "tool_queued_inputs" {
+                let i = idx("inputs_json")?;
+                let mut inputs: Vec<crate::services::input_queue::DeliveredInput> =
+                    serde_json::from_str(&row.get::<_, String>(i)?)?;
+                for input in &mut inputs {
+                    if let Some(old) = &input.message_id {
+                        let new = self.assign("message", old)?;
+                        crate::services::memory_files::prompt::copy_message(
+                            self.src,
+                            self.dst,
+                            old,
+                            &new,
+                            &self.session_dir,
+                        )?;
+                        input.message_id = Some(new);
+                    }
+                }
+                values[i] = Value::Text(serde_json::to_string(&inputs)?);
+            }
             if table == "model_requests" {
                 let i = idx("response_blocks_json")?;
                 let mut blocks: Json = serde_json::from_str(&row.get::<_, String>(i)?)?;
@@ -440,6 +456,7 @@ impl Copier<'_> {
         if matches!(boundary, Branch::Clear | Branch::Child) {
             return Ok(());
         }
+        crate::services::memory_files::prompt::copy_prefix(self.src, self.dst, &self.session_dir)?;
         let limit = match boundary {
             Branch::Through { message, index } => {
                 let by_id = message
@@ -459,7 +476,8 @@ impl Copier<'_> {
         let mut count = 0;
         let mut rows = q.query([])?;
         while let Some(row) = rows.next()? {
-            let id = self.assign("message", &row.get::<_, String>(0)?)?;
+            let old_id: String = row.get(0)?;
+            let id = self.assign("message", &old_id)?;
             insert.execute(params![
                 id,
                 self.id,
@@ -472,6 +490,15 @@ impl Copier<'_> {
                 row.get::<_, Value>(7)?,
                 row.get::<_, Value>(8)?
             ])?;
+            if row.get::<_, String>(1)? == "user" {
+                crate::services::memory_files::prompt::copy_message(
+                    self.src,
+                    self.dst,
+                    &old_id,
+                    &id,
+                    &self.session_dir,
+                )?;
+            }
             count += 1;
             if limit == Some(count - 1) {
                 break;
@@ -611,6 +638,7 @@ pub(super) fn copy_snapshot(
     id: &str,
     boundary: Branch<'_>,
     configuration: Option<&NewSessionConfiguration>,
+    memory: &crate::services::memory_files::prompt::Admission,
     copy_preferences: bool,
 ) -> Result<()> {
     let path = source
@@ -668,6 +696,11 @@ pub(super) fn copy_snapshot(
         src: &tx,
         dst,
         id,
+        session_dir: source
+            .stores
+            .sessions()
+            .join(storage_key(id)?)
+            .join("memory"),
         keep_unresolved_origins: matches!(boundary, Branch::Full | Branch::AgentFork { .. }),
     }
     .run(boundary)?;
@@ -675,8 +708,41 @@ pub(super) fn copy_snapshot(
         if part==crate::services::compaction::Part::UpTo {
             dst.execute("UPDATE messages SET sort_order=sort_order+1 WHERE sort_order>=?1",[order])?;
         }
-        let heading=if boundary {"Conversation summary — earlier transcript retained in session history"}else{"Summary of the later conversation — full transcript retained in session history"};
-        message_repo::insert_message(dst,&crate::db::transcript::MessageIds::for_shard(dst)?.issue(),id,"user",&format!("[{heading}]\n{text}"),None,&chrono::Utc::now().to_rfc3339(),boundary,order)?;
+        let heading = if boundary {
+            "Conversation summary — earlier transcript retained in session history"
+        } else {
+            "Summary of the later conversation — full transcript retained in session history"
+        };
+        let content = format!("[{heading}]\n{text}");
+        if boundary {
+            use super::super::boundary;
+            boundary::create(
+                dst,
+                id,
+                order,
+                &content,
+                boundary::Kind::Compaction,
+                boundary::Storage::Shard(memory),
+            )?;
+        } else {
+            super::super::boundary::freeze_retained_prefix(dst, memory)?;
+            let message = crate::db::transcript::MessageIds::for_shard(dst)?.issue();
+            message_repo::insert_message(
+                dst,
+                &message,
+                id,
+                "user",
+                &content,
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+                false,
+                order,
+            )?;
+            dst.execute(
+                "INSERT INTO message_metadata VALUES(?1,?2)",
+                [&message, r#"{"promptOrigin":"summary"}"#],
+            )?;
+        }
     }
     super::super::history::advance(dst)
 }

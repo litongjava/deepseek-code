@@ -6,7 +6,9 @@ pub mod api_endpoints;
 pub mod command_output;
 mod deepseek_search;
 pub mod ui_language;
+mod web_fetch;
 pub use deepseek_search::DeepSeekSearchConfig;
+pub use web_fetch::WebFetchConfig;
 
 use anyhow::Result;
 use once_cell::sync::OnceCell;
@@ -61,8 +63,6 @@ pub struct ComputerUseConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemoryConfig {
-    #[serde(default = "default_memex_url")]
-    pub memex_backend_url: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -77,6 +77,8 @@ pub struct BridgeConfig {
 pub struct HttpConfig {
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    #[serde(default = "default_pool_idle_timeout_secs")]
+    pub pool_idle_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     #[serde(default = "default_retry_base_backoff_ms")]
@@ -114,10 +116,10 @@ fn default_max_output_bytes() -> usize { 100 * 1024 }
 fn default_bash_timeout_secs() -> u64 { 120 }
 fn default_display_width() -> u32 { 1920 }
 fn default_display_height() -> u32 { 1080 }
-fn default_memex_url() -> String { "http://127.0.0.1:8765".to_string() }
 fn default_true() -> bool { true }
 fn default_bridge_port() -> u16 { 30085 }
 fn default_request_timeout_secs() -> u64 { 300 }
+fn default_pool_idle_timeout_secs() -> u64 { 300 }
 fn default_max_retries() -> u32 { 7 }
 fn default_retry_base_backoff_ms() -> u64 { 2000 }
 fn default_log_level() -> String { "info".to_string() }
@@ -138,7 +140,6 @@ impl Default for OrchestrationConfig {
                 computer_use: ComputerUseConfig::default(),
             },
             memory: MemoryConfig {
-                memex_backend_url: default_memex_url(),
                 enabled: true,
             },
             bridge: BridgeConfig {
@@ -146,6 +147,7 @@ impl Default for OrchestrationConfig {
             },
             http: HttpConfig {
                 request_timeout_secs: default_request_timeout_secs(),
+                pool_idle_timeout_secs: default_pool_idle_timeout_secs(),
                 max_retries: default_max_retries(),
                 retry_base_backoff_ms: default_retry_base_backoff_ms(),
                 post_content_timeout_recovery: false,
@@ -176,7 +178,6 @@ impl OrchestrationConfig {
         // Try several candidate paths
         let candidates = [
             "config/orchestration.toml",
-            "src-tauri/config/orchestration.toml",
             "../config/orchestration.toml",
         ];
         for path in &candidates {
@@ -218,10 +219,10 @@ impl OrchestrationConfig {
     pub fn max_retries() -> u32 { Self::get().http.max_retries }
     pub fn retry_base_backoff_ms() -> u64 { Self::get().http.retry_base_backoff_ms }
     pub fn request_timeout_secs() -> u64 { Self::get().http.request_timeout_secs }
+    pub fn pool_idle_timeout_secs() -> u64 { Self::get().http.pool_idle_timeout_secs }
     /// Read once per turn; a stalled post-content step is replayed only when set.
     pub fn post_content_timeout_recovery() -> bool { Self::get().http.post_content_timeout_recovery }
     pub fn bridge_port() -> u16 { Self::get().bridge.port }
-    pub fn memex_backend_url() -> &'static str { &Self::get().memory.memex_backend_url }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +267,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub deepseek_search: DeepSeekSearchConfig,
     #[serde(default)]
+    pub web_fetch: WebFetchConfig,
+    #[serde(default)]
     pub default_provider_id: Option<String>,
     #[serde(default)]
     pub theme: Option<String>,
@@ -278,6 +281,7 @@ impl Default for AppConfig {
         Self {
             providers: Vec::new(),
             deepseek_search: DeepSeekSearchConfig::default(),
+            web_fetch: WebFetchConfig::default(),
             default_provider_id: None,
             theme: None,
             language: None,
@@ -292,7 +296,8 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new(config_dir: PathBuf) -> Self {
-        let config_path = config_dir.join("config.json");
+        let config_path =
+            crate::data_layout::DataLayout::new(config_dir).config_file("config.json");
         let config = if config_path.exists() {
             std::fs::read_to_string(&config_path)
                 .ok()
@@ -410,9 +415,17 @@ mod tests {
             desktop.get_config().default_provider_id.as_deref(),
             Some("shared")
         );
-        std::fs::write(root.path().join("cli.json"), r#"{"model":"shared::model"}"#).unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("cli.json"),
+            r#"{"model":"shared::model"}"#,
+        )
+        .unwrap();
         assert_eq!(desktop.saved_cli_model().as_deref(), Some("shared::model"));
-        std::fs::write(root.path().join("config.json"), "invalid").unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+            "invalid",
+        )
+        .unwrap();
         assert!(desktop.reload().is_err());
         assert_eq!(desktop.get_config().default_provider_id.as_deref(), Some("shared"));
     }
@@ -471,7 +484,6 @@ mod tests {
         assert_eq!(config.tools.computer_use.display_height, 1080);
 
         // MemoryConfig
-        assert_eq!(config.memory.memex_backend_url, "http://127.0.0.1:8765");
         assert!(config.memory.enabled);
 
         // BridgeConfig
@@ -479,6 +491,7 @@ mod tests {
 
         // HttpConfig
         assert_eq!(config.http.request_timeout_secs, 300);
+        assert_eq!(config.http.pool_idle_timeout_secs, 300);
         assert_eq!(config.http.max_retries, 7);
         assert_eq!(config.http.retry_base_backoff_ms, 2000);
 
@@ -488,6 +501,38 @@ mod tests {
 
         // TelemetryConfig
         assert!(config.telemetry.otlp_endpoint.is_empty());
+    }
+
+    #[test]
+    fn pool_idle_timeout_defaults_to_300_and_parses_explicit_values() {
+        assert_eq!(OrchestrationConfig::default().http.pool_idle_timeout_secs, 300);
+        let document = |http: &str| {
+            format!(
+                "[tool_loop]\n[tools]\n[memory]\n[bridge]\n[http]\n{http}[logging]\n[telemetry]\n"
+            )
+        };
+        // An older valid file without the key keeps the 300-second default.
+        let older: OrchestrationConfig = toml::from_str(&document("")).unwrap();
+        assert_eq!(older.http.pool_idle_timeout_secs, 300);
+
+        // Older file with only existing [http] keys still loads cleanly.
+        let legacy: OrchestrationConfig = toml::from_str(&document(
+            "request_timeout_secs = 120\nmax_retries = 5\nretry_base_backoff_ms = 1000\n",
+        ))
+        .unwrap();
+        assert_eq!(legacy.http.pool_idle_timeout_secs, 300);
+
+        // Explicit positive value is respected.
+        let explicit: OrchestrationConfig =
+            toml::from_str(&document("pool_idle_timeout_secs = 600\n")).unwrap();
+        assert_eq!(explicit.http.pool_idle_timeout_secs, 600);
+    }
+
+    #[test]
+    fn old_memory_backend_url_still_loads() {
+        let document = "[tool_loop]\n[tools]\n[memory]\nmemex_backend_url = \"http://127.0.0.1:8765\"\nenabled = false\n[bridge]\n[http]\n[logging]\n[telemetry]\n";
+        let config: OrchestrationConfig = toml::from_str(document).unwrap();
+        assert!(!config.memory.enabled);
     }
 
     #[test]
@@ -501,6 +546,7 @@ mod tests {
     fn test_app_config_default() {
         let config = AppConfig::default();
         assert!(config.providers.is_empty());
+        assert_eq!(config.web_fetch, WebFetchConfig::default());
         assert!(config.default_provider_id.is_none());
         assert!(config.theme.is_none());
         assert!(config.language.is_none());
@@ -519,7 +565,6 @@ mod tests {
                 assert_eq!(config.tool_loop.max_tool_iterations, None);
                 assert_eq!(config.tools.max_output_bytes, 102_400);
                 assert_eq!(config.bridge.port, 30085);
-                assert_eq!(config.memory.memex_backend_url, "http://127.0.0.1:8765");
             }
             Err(e) => {
                 let msg = e.to_string();

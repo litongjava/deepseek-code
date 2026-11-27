@@ -42,7 +42,6 @@ pub fn builtins() -> Vec<Definition> {
             "Bash",
             "WebFetch",
             "WebSearch",
-            "memory_search",
         ]
         .into_iter()
         .map(String::from)
@@ -62,7 +61,6 @@ pub fn builtins() -> Vec<Definition> {
                     "Grep",
                     "WebFetch",
                     "WebSearch",
-                    "memory_search",
                     "AskUserQuestion",
                 ]
                 .into_iter()
@@ -182,7 +180,6 @@ pub fn for_session(db:&impl SessionAccess,session:&str)->Result<Option<Definitio
     db.select_session(session)?.bound_agent()
 }
 
-const MODELS_FILE: &str = "agent-models.json";
 const MODELS_TEMP_FILE: &str = "agent-models.json.tmp";
 
 /// On-disk shape: `{"agents": {"<canonical id>": "<model id>"}}`.
@@ -195,7 +192,7 @@ struct AgentModelsFile {
 /// Default model per agent type, keyed by canonical id. Missing, unreadable or
 /// invalid files mean that every agent uses its parent's model.
 pub fn load_models(data_dir: &Path) -> BTreeMap<String, String> {
-    let path = data_dir.join(MODELS_FILE);
+    let path = crate::data_layout::DataLayout::from_root(data_dir).agent_models();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
@@ -234,10 +231,11 @@ pub fn set_model(data_dir: &Path, agent: &str, model: Option<&str>) -> Result<()
             models.remove(agent);
         }
     }
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("Creating {}", data_dir.display()))?;
-    let path = data_dir.join(MODELS_FILE);
-    let temp = data_dir.join(MODELS_TEMP_FILE);
+    let layout = crate::data_layout::DataLayout::from_root(data_dir);
+    std::fs::create_dir_all(layout.config_root())
+        .with_context(|| format!("Creating {}", layout.config_root().display()))?;
+    let path = layout.agent_models();
+    let temp = layout.config_file(MODELS_TEMP_FILE);
     let mut text = serde_json::to_string_pretty(&AgentModelsFile { agents: models })?;
     text.push('\n');
     std::fs::write(&temp, text).with_context(|| format!("Writing {}", temp.display()))?;
@@ -344,8 +342,10 @@ mod tests {
             "{error}"
         );
         // Even a hand-written entry cannot give a fork its own model.
+        let layout = crate::data_layout::DataLayout::from_root(dir.path());
+        std::fs::create_dir_all(layout.config_root()).unwrap();
         std::fs::write(
-            dir.path().join(MODELS_FILE),
+            layout.agent_models(),
             r#"{"agents":{"fork":"cheap-model"}}"#,
         )
         .unwrap();
@@ -357,7 +357,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_models(dir.path()).is_empty());
         assert!(default_model(dir.path(), "explore").is_none());
-        std::fs::write(dir.path().join(MODELS_FILE), "not json").unwrap();
+        let layout = crate::data_layout::DataLayout::from_root(dir.path());
+        std::fs::create_dir_all(layout.config_root()).unwrap();
+        std::fs::write(layout.agent_models(), "not json").unwrap();
         assert!(load_models(dir.path()).is_empty());
         assert!(default_model(dir.path(), "explore").is_none());
     }

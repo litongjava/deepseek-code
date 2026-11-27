@@ -12,8 +12,8 @@ fn params() -> Value {
 }
 fn fixture(hooks: Value, answer: Value) -> (tempfile::TempDir, RequestContext, Arc<AtomicUsize>) {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
         json!({"hooks":hooks}).to_string(),
     )
     .unwrap();
@@ -264,7 +264,7 @@ fn terminal_input_and_async_configuration_are_explicit() {
     )
     .unwrap();
     for option in ["async", "asyncRewake"] {
-        std::fs::write(root.path().join("settings.json"),json!({"hooks":{"Elicitation":[{"hooks":[{"type":"command","command":"echo ignored",option:true}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),json!({"hooks":{"Elicitation":[{"hooks":[{"type":"command","command":"echo ignored",option:true}]}]}}).to_string()).unwrap();
         assert!(HookRunner::load_with_plugins(&service, root.path()).is_err());
     }
 }

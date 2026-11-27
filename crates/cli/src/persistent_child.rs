@@ -145,7 +145,7 @@ async fn execute(
     sessions: Arc<tokio::sync::Mutex<Option<Session>>>,
     mode_target: ModeTarget,
 ) -> Result<()> {
-    let dir = worker.root.join("background-tasks").join(id);
+    let dir = worker.root.join("tasks/background").join(id);
     service::set_event_sink(Some(dir.join("output.jsonl")));
     std::env::set_var(jobs::CONTROL_ENV, &dir);
     let current = sessions.lock().await;

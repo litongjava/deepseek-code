@@ -147,8 +147,6 @@ pub struct AnthropicClient {
     /// Background generation has no use for reasoning unless the model asks for it.
     plain_text: bool,
     client: Client,
-    /// Built once and reused by every stream send; a stream is idle-bounded.
-    stream_client: std::sync::OnceLock<Client>,
     /// Test injection also covers the streaming transport.
     stream_override: Option<Client>,
     response_schema: Option<Value>,
@@ -165,7 +163,6 @@ impl AnthropicClient {
             .unwrap_or_else(|_| Client::new());
         Self {
             client,
-            stream_client: std::sync::OnceLock::new(),
             stream_override: None,
             request_options: Default::default(),
             response_schema: None,
@@ -175,21 +172,12 @@ impl AnthropicClient {
     }
 
     /// The streaming transport keeps no total deadline; each read is bounded by
-    /// the configured idle timeout instead.
+    /// the configured idle timeout instead, and shares the process-wide pool.
     pub(super) fn streaming_client(&self) -> Result<Client> {
         if let Some(client) = &self.stream_override {
             return Ok(client.clone());
         }
-        if let Some(client) = self.stream_client.get() {
-            return Ok(client.clone());
-        }
-        let client = super::model_http::streaming_client(super::model_http::Redirect::None)?;
-        let _ = self.stream_client.set(client);
-        Ok(self
-            .stream_client
-            .get()
-            .expect("the streaming client was just set")
-            .clone())
+        super::model_http::streaming_client(super::model_http::Redirect::None)
     }
 
     pub fn with_request_options(mut self, options: super::request_options::RequestOptions) -> Self {

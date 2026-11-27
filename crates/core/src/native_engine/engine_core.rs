@@ -549,6 +549,7 @@ impl QueryEngine {
             model,
             system,
             instructions,
+            None,
             super::request_options::RequestOptions::from_db(
                 &self.db_manager,
                 Some(session),
@@ -565,6 +566,7 @@ impl QueryEngine {
         model: &str,
         system: &str,
         instructions: &str,
+        before: Option<&str>,
         options: super::request_options::RequestOptions,
     ) -> Result<crate::services::compaction::GeneratedSummary> {
         let provider = self
@@ -575,9 +577,10 @@ impl QueryEngine {
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
         let shard = self.db_manager.open_session(session)?;
         let (mut history, boundary) =
-            shard.read(|r| r.model_history(&provider.provider.api_format))?;
+            shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
         if crate::services::compaction::native::supports(&provider) {
+            history.retain(|row| row["origin"] != "memory_change");
             let mut options = options;
             options.compaction_metrics = Some(super::compaction_metrics::MetricsStore(shard));
             return crate::services::compaction::native::generate(
@@ -600,10 +603,7 @@ impl QueryEngine {
                 .repository()
                 .preference(MICROCOMPACT)?
                 .filter(|state| state.boundary == boundary)
-                .unwrap_or(Microcompact {
-                    through: 0,
-                    boundary: boundary.into(),
-                });
+                .unwrap_or_else(|| Microcompact::for_boundary(boundary));
             crate::services::compaction::microcompact::replay(
                 &mut history,
                 &mut state,
@@ -708,6 +708,7 @@ impl QueryEngine {
         };
         turn.executor.restore_request_context().await?;
         let mut durable = turn.executor.prepare_main_history()?;
+        durable.retain(|row| row["origin"] != "memory_change");
         // The saved Responses prefix is already carried in the typed window.
         if window.is_some() {
             durable.remove(0);
@@ -836,14 +837,10 @@ impl QueryEngine {
             skill.content.context("Skill has no content")?
         };
         // Kept after the user's message for the rest of the session.
-        let root = self
-            .provider_manager
-            .lock()
-            .await
-            .config_path()
-            .parent()
-            .context("Missing runtime directory")?
-            .to_path_buf();
+        let root =
+            crate::data_layout::data_root_of(self.provider_manager.lock().await.config_path())
+                .context("Missing runtime directory")?
+                .to_path_buf();
         let (session, messages) = (request.conversation_id.clone(), request.messages.clone());
         tokio::task::spawn_blocking(move || {
             crate::services::turn_context::attach_to_last(&root, &session, &messages, vec![content])
@@ -1005,7 +1002,7 @@ impl QueryEngine {
         let replay = matches!(purpose, TurnPurpose::Summary);
         let hook_wake = matches!(purpose, TurnPurpose::HookWake);
         let applied_compaction = if replay {
-            request.context_boundary.is_some()
+            request.context_boundary.clone()
         } else {
             crate::services::compaction::apply_persisted_boundary(
                 &selected,
@@ -1028,14 +1025,10 @@ impl QueryEngine {
                 )
             });
         let conv_id = request.conversation_id.clone();
-        let plugin_root = self
-            .provider_manager
-            .lock()
-            .await
-            .config_path()
-            .parent()
-            .context("Missing runtime directory")?
-            .to_path_buf();
+        let plugin_root =
+            crate::data_layout::data_root_of(self.provider_manager.lock().await.config_path())
+                .context("Missing runtime directory")?
+                .to_path_buf();
         let plugin_context = crate::services::ServiceContext {
             paths: crate::runtime::RuntimePaths::new(plugin_root)?,
             db: Arc::new(selected.scoped_stores()),
@@ -1102,11 +1095,19 @@ impl QueryEngine {
             .await?;
         }
         let customization = crate::services::customization::load(&plugin_context.paths.data_dir)?;
+        let memory_enabled = match crate::services::memory_files::config(&plugin_context) {
+            Ok(config) => config.enabled,
+            Err(error) => {
+                tracing::warn!(module = "Prompt", error = %error, "Memory setting unavailable; keeping memory guidance");
+                true
+            }
+        };
         let standalone_frontend = request.standalone_frontend;
         request.system_prompt = Some(crate::prompt::compose_customized(
             request.system_prompt.as_deref(),
             prompt_profile,
             &customization.system_prompt,
+            memory_enabled,
         ));
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
@@ -1125,28 +1126,13 @@ impl QueryEngine {
         let environment_root = plugin_context.paths.data_dir.clone();
         let environment_session = conv_id.clone();
         let environment_workspace = workspace.clone();
-        let environment_project = project.as_ref().map(|project| {
-            (
-                project.name.clone(),
-                project
-                    .folders
-                    .iter()
-                    .map(|folder| folder.path.clone())
-                    .collect::<Vec<_>>(),
-            )
-        });
+        let environment_project = project.clone();
         let (environment, frozen_date) = tokio::task::spawn_blocking(move || {
-            let project = environment_project
-                .as_ref()
-                .map(|(name, folders)| (name.as_str(), folders.as_slice()));
-            (
-                crate::prompt::environment_for_session(
-                    &environment_root,
-                    &environment_session,
-                    Some(&environment_workspace),
-                    project,
-                ),
-                crate::prompt::date_for_session(&environment_root, &environment_session),
+            crate::prompt::session_environment(
+                &environment_root,
+                &environment_session,
+                &environment_workspace,
+                environment_project.as_ref(),
             )
         })
         .await?;
@@ -1236,7 +1222,7 @@ impl QueryEngine {
         }
         let model_skills: Vec<_> = discovered_skills
             .values()
-            .filter(|skill| skill.model_invocable())
+            .filter(|skill| skill.model_invocable() && !skill.always_inline)
             .collect();
         let available_skills = model_skills
             .iter()
@@ -1257,6 +1243,10 @@ impl QueryEngine {
             .iter()
             .map(|skill| crate::prompt::catalog_revision(&skill.name, skill))
             .collect::<Result<Vec<_>>>()?;
+        // Skills in `SkillState::Always` have their full body injected into the
+        // first user message, so the model has their complete instructions on
+        // turn 1 without spending a turn calling `Skill`.
+        let inline_blocks = crate::prompt::inline_skill_blocks(&discovered_skills);
         // The set of tools ToolLoad can offer and the model-invocable skills
         // are frozen into the first user message. A later discovery only adds a
         // change reminder to the latest message, never an edit to that prefix.
@@ -1303,6 +1293,8 @@ impl QueryEngine {
                 compaction_requests,
                 true,
                 true,
+                self.permission_host_available
+                    .load(std::sync::atomic::Ordering::Relaxed),
             );
             let catalog = customization.described(catalog);
             crate::native_engine::tool_loop::loadable_tool_lists(
@@ -1322,11 +1314,17 @@ impl QueryEngine {
             .collect::<Vec<_>>();
         let first_message_root = plugin_context.paths.data_dir.clone();
         let first_message_session = conv_id.clone();
+        let experience_enabled = crate::experience::enabled(&plugin_context);
+        let experience_workspace = (!crate::experience::is_internal_workspace(
+            &workspace,
+            &self.workspaces_dir,
+        ))
+        .then(|| workspace.clone());
         let has_user_message = request
             .messages
             .iter()
             .any(|message| message.get("role").and_then(Value::as_str) == Some("user"));
-        let (loadable_tools, available_skills_listing, set_changes, mcp_changes) =
+        let (loadable_tools, available_skills_listing, inline_skills, experience, set_changes, mcp_changes) =
             tokio::task::spawn_blocking(move || {
                 let loadable_tools = crate::prompt::loadable_tools_for_session(
                     &first_message_root,
@@ -1339,6 +1337,29 @@ impl QueryEngine {
                     &first_message_session,
                     &available_skills,
                 );
+                let inline_skills = crate::prompt::inline_skills_for_session(
+                    &first_message_root,
+                    &first_message_session,
+                    &inline_blocks,
+                );
+                // One scan per turn feeds both the frozen block and the change
+                // reminder; the frozen file wins once the session has started.
+                let scanned = experience_workspace
+                    .as_deref()
+                    .map(crate::experience::scan)
+                    .unwrap_or_default();
+                let experience = crate::prompt::experience_for_session(
+                    &first_message_root,
+                    &first_message_session,
+                    experience_workspace.as_deref(),
+                    experience_enabled,
+                    &scanned.entries,
+                );
+                let experience_names = scanned
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect::<Vec<_>>();
                 let changes = (has_user_message && !replay)
                     .then(|| {
                         let (now, gone) = if tool_load_available {
@@ -1363,13 +1384,44 @@ impl QueryEngine {
                         );
                         let updated = revisions.iter().filter_map(|r| r.split_once(' '))
                             .map(|(_, name)| name.to_owned()).filter(|name| !new_skills.contains(name)).collect();
-                        crate::prompt::changes_reminder(now, gone, new_skills, removed_skills, updated)
+                        let (new_experience, removed_experience) =
+                            if experience_enabled && experience_workspace.is_some() {
+                                let (new, removed) = crate::prompt::set_changes(
+                                    &first_message_root,
+                                    &first_message_session,
+                                    crate::session_files::SET_CHANGE_EXPERIENCE,
+                                    &experience_names,
+                                );
+                                let rendered = new
+                                    .into_iter()
+                                    .map(|name| {
+                                        scanned
+                                            .entries
+                                            .iter()
+                                            .find(|entry| entry.name == name)
+                                            .map(crate::experience::index_line)
+                                            .unwrap_or(name)
+                                    })
+                                    .collect();
+                                (rendered, removed)
+                            } else {
+                                (Vec::new(), Vec::new())
+                            };
+                        crate::prompt::changes_reminder(
+                            now,
+                            gone,
+                            new_skills,
+                            removed_skills,
+                            updated,
+                            new_experience,
+                            removed_experience,
+                        )
                     })
                     .flatten();
                 let mcp_changes = (has_user_message && !replay).then(|| {
                     crate::prompt::mcp_changes_reminder(&first_message_root, &first_message_session, &mcp_revisions)
                 }).flatten();
-                (loadable_tools, available_skills, changes, mcp_changes)
+                (loadable_tools, available_skills, inline_skills, experience, changes, mcp_changes)
             })
             .await?;
         for reminder in set_changes.into_iter().chain(mcp_changes) {
@@ -1472,7 +1524,7 @@ impl QueryEngine {
                 )
             })
             .flatten();
-        let turn_context = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<()> {
             for (block, skill) in turn_blocks {
                 if let Some(entry) =
                     crate::services::turn_context::for_last(&turn_messages, vec![block])
@@ -1491,31 +1543,47 @@ impl QueryEngine {
                     crate::services::turn_context::save(&turn_root, &turn_session, &entry)?;
                 }
             }
-            crate::services::turn_context::load(&turn_root, &turn_session)
+            Ok(())
         })
         .await??;
         // The first user message opens with the stable session context; skills
         // whose message a compaction removed follow, as in the reference CLI.
         let (user_instructions, project_instructions) =
             crate::project_instructions::reminder_parts(&instructions);
-        let context_reminders = crate::prompt::first_message_reminders(
-            crate::prompt::SessionReminders {
-                user_instructions,
-                environment: Some(environment),
-                project_instructions,
-                standalone_frontend,
-                loadable_tools,
-                available_skills: available_skills_listing,
-                date: Some(frozen_date),
-                git: git_snapshot
-                    .as_deref()
-                    .map(crate::services::git_snapshot::reminder),
-                skills: crate::services::turn_context::invoked_skills_reminder(
-                    &turn_context,
-                    &request.messages,
-                ),
-            },
-        );
+        let memory_session = selected.clone();
+        let memory_context = plugin_context.clone();
+        let (file_memory, resident_indexes, turn_context) = {
+            use crate::services::memory_files::{self, FileMemory};
+            let memory = memory_files::config(&memory_context)?
+                .enabled
+                .then(|| FileMemory::session(&memory_context, memory_session.id()))
+                .transpose()?;
+            let (index, turns) = crate::services::turn_context::replay(
+                &memory_session,
+                applied_compaction.as_deref(),
+                &request.messages,
+            )?;
+            (memory, index, turns)
+        };
+        let context_reminders = crate::prompt::SessionReminders {
+            user_instructions,
+            environment: Some(environment),
+            project_instructions,
+            resident_indexes,
+            experience,
+            standalone_frontend,
+            loadable_tools,
+            available_skills: available_skills_listing,
+            inline_skills,
+            date: Some(frozen_date),
+            git: git_snapshot
+                .as_deref()
+                .map(crate::services::git_snapshot::reminder),
+            skills: crate::services::turn_context::invoked_skills_reminder(
+                &turn_context,
+                &request.messages,
+            ),
+        };
         let allowed_directories = project
             .as_ref()
             .map(|project| {
@@ -1678,23 +1746,17 @@ impl QueryEngine {
             }
         }
 
-        let search_config_path = self
-            .provider_manager
-            .lock()
-            .await
-            .config_path()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("config.json");
+        let search_config_path = {
+            let manager = self.provider_manager.lock().await;
+            let root = crate::data_layout::data_root_of(manager.config_path())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            crate::data_layout::DataLayout::from_root(root).config_file("config.json")
+        };
         // Super Agent identity is durable, so a resumed session keeps its role
         // and a task member keeps its member tools. A stale call is rejected at
         // execution even when the schema no longer offers it.
         let super_agent_role = crate::super_agent::role::load(&selected, &conv_id)?;
-        let data_dir = self
-            .workspaces_dir
-            .parent()
-            .unwrap_or(&self.workspaces_dir)
-            .to_path_buf();
+        let data_dir = plugin_context.paths.data_dir.clone();
         let system_prompt = if super_agent_role.is_router() {
             Some(crate::super_agent::prompt::append_router(
                 request.system_prompt.as_deref().unwrap_or_default(),
@@ -1742,19 +1804,12 @@ impl QueryEngine {
         .with_hooks(hooks)
         .with_goal_state(self.db_manager.clone())
         .with_context_boundary(request.context_boundary)
-        .with_applied_compaction(applied_compaction)
+        .with_applied_compaction(applied_compaction.is_some())
         .with_allowed_tools(agent.as_ref().and_then(|d| d.tools.clone()))
         .with_read_only_shell(agent.as_ref().is_some_and(|d| d.read_only_shell))
         .with_prompt_profile(prompt_profile)
-        .with_context_reminders(context_reminders)
+        .with_session_reminders(context_reminders)
         .with_turn_context(turn_context)
-        .with_memex(crate::memory::MemExClient::with_path(
-            self.workspaces_dir
-                .parent()
-                .unwrap_or(&self.workspaces_dir)
-                .join("memory.sqlite3"),
-            None,
-        ))
         .with_bundled_resources(self.bundled_resources.clone())
         .with_search_config_path(search_config_path)
         .with_conv_id(conv_id.clone())
@@ -1791,6 +1846,9 @@ impl QueryEngine {
             workspace_path.clone(),
         )));
 
+        if let Some(memory) = file_memory {
+            executor = executor.with_file_memory(memory);
+        }
         let selector = model.split_once("::").map_or(model.as_str(), |(_, id)| id);
         if super::provider_manager::one_million_context_base(selector)
             == Some(executor.model_selector.as_str())
@@ -2576,7 +2634,12 @@ pub type NativeEngine = QueryEngine;
 
 /// One model-facing line of the available-skills list. Whitespace in the free
 /// text collapses to single spaces so a multi-line description stays one line.
-fn skill_listing_line(name: &str, description: &str, context: Option<&str>, name_only: bool) -> String {
+pub(super) fn skill_listing_line(
+    name: &str,
+    description: &str,
+    context: Option<&str>,
+    name_only: bool,
+) -> String {
     let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut line = if name_only {
         format!("- {name}")

@@ -9,7 +9,6 @@ use axum::{
 };
 use deepseek_code_core::{
     db::session_store::Stores,
-    native_engine::engine_core::ChatRequest,
     services::input_queue::{self as queue, QueueError, QueueMode},
 };
 use serde::Deserialize;
@@ -175,6 +174,7 @@ async fn enqueue(
             &input.request_id,
             content,
             input.mode,
+            queue::QueueOrigin::User,
         )
     });
     match result {

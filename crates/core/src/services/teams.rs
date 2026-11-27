@@ -131,7 +131,7 @@ pub fn agent_id(name: &str, team: &str) -> String {
 }
 
 pub fn team_dir(root: &Path, name: &str) -> PathBuf {
-    root.join("teams").join(sanitize_name(name))
+    root.join("data/teams").join(sanitize_name(name))
 }
 
 pub fn team_path(root: &Path, name: &str) -> PathBuf {
@@ -139,7 +139,7 @@ pub fn team_path(root: &Path, name: &str) -> PathBuf {
 }
 
 fn global_lock(root: &Path) -> Result<std::fs::File> {
-    let directory = root.join("teams");
+    let directory = root.join("data/teams");
     std::fs::create_dir_all(&directory)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -217,7 +217,7 @@ pub fn read_recovered(root: &Path, name: &str) -> Result<Option<TeamFile>> {
 
 /// Scans for the team this session leads, recovering stale members first.
 pub fn led_by(root: &Path, session: &str) -> Result<Option<TeamFile>> {
-    let directory = root.join("teams");
+    let directory = root.join("data/teams");
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -479,7 +479,7 @@ pub fn member(root: &Path, team_name: &str, name: &str) -> Result<Option<TeamMem
 
 /// Resolves the team a session belongs to, whether as leader or member.
 pub fn team_for_session(root: &Path, session: &str) -> Result<Option<TeamFile>> {
-    let directory = root.join("teams");
+    let directory = root.join("data/teams");
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

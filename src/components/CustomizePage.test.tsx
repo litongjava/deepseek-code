@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.mocked(api.getSkills).mockResolvedValue({ skills: [skill] });
   vi.mocked(api.getSkillDetail).mockResolvedValue(skill);
   vi.mocked(customizationApi.load).mockResolvedValue({
-    customization: { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [], tool_loading: {} },
+    customization: { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, tool_summaries: {}, custom_tools: [], tool_loading: {} },
     default_system_prompt: 'BUILT IN',
     builtin_tools: [{ name: 'Write', description: 'Writes files', core: false, default_enabled: false, default_on_demand: true, enabled: false, on_demand: true }],
   } as never);

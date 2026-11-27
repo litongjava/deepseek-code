@@ -16,7 +16,7 @@ async fn default_task_snapshot() -> Result<()> {
     let child = db.create(&cid, Default::default())?;
     child.write(|w| w.append("assistant", "committed report"))?;
     let job = Uuid::new_v4().to_string();
-    let dir = root.path().join("background-tasks").join(&job);
+    let dir = root.path().join("tasks/background").join(&job);
     fs::create_dir_all(&dir)?;
     fs::write(
         dir.join("state.json"),
@@ -32,7 +32,7 @@ async fn default_task_snapshot() -> Result<()> {
         dir.join("session-owners.json"),
         json!({"parent":parent.incarnation(),"execution":child.incarnation()}).to_string(),
     )?;
-    let key = fs::File::open(root.path().join("session-locks").join(&cid))?;
+    let key = fs::File::open(root.path().join("state/locks/session").join(&cid))?;
     key.lock()?;
     let unlock = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(1400));

@@ -292,7 +292,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .extend(policy.as_object().unwrap().clone());
-        std::fs::write(root.join("settings.json"), settings.to_string()).unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
+            settings.to_string(),
+        )
+        .unwrap();
         HookRunner::load(root, root).unwrap()
     }
 
@@ -458,8 +462,9 @@ mod tests {
             hook.as_object_mut()
                 .unwrap()
                 .extend(extra.as_object().unwrap().clone());
-            std::fs::write(
-                root.path().join("settings.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(&root.path())
+                    .config_file("settings.json"),
                 json!({"hooks":{"PreToolUse":[{"hooks":[hook]}]}}).to_string(),
             )
             .unwrap();
@@ -468,13 +473,13 @@ mod tests {
                 "{extra}"
             );
         }
-        std::fs::write(root.path().join("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo ok","once":true}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo ok","once":true}]}]}}).to_string()).unwrap();
         let runner = HookRunner::load(root.path(), root.path()).unwrap();
         assert_eq!(
             serde_json::to_value(&runner.list()[0]).unwrap(),
             json!({
                 "event":"PreToolUse","matcher":"","command":"echo ok","timeout":60,
-                "once":true,"source":root.path().join("settings.json"),"shell":null
+                "once":true,"source":crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),"shell":null
             })
         );
     }
@@ -577,7 +582,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let script = "const fs=require('fs');let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{fs.writeFileSync('command-input.json',s);process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'ask'}}));});";
         std::fs::write(root.path().join("hook.cjs"), script).unwrap();
-        std::fs::write(root.path().join("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"http","url":url},{"type":"command","command":"node hook.cjs"}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"http","url":url},{"type":"command","command":"node hook.cjs"}]}]}}).to_string()).unwrap();
         let output = run(
             &HookRunner::load(root.path(), root.path()).unwrap(),
             "ask-priority",

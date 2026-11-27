@@ -230,7 +230,10 @@ mod tests {
                 config.deepseek_search.model = "saved-model".into();
             })
             .unwrap();
-        let before = std::fs::read(dir.path().join("config.json")).unwrap();
+        let before = std::fs::read(
+            crate::data_layout::DataLayout::from_root(&dir.path()).config_file("config.json"),
+        )
+        .unwrap();
         let manager = Arc::new(Mutex::new(Some(config)));
         let (tx, mut rx) = mpsc::channel::<(HeaderMap, Value)>(2);
         let mock_manager = manager.clone();
@@ -270,7 +273,10 @@ mod tests {
             assert!(!result.to_string().contains(expected_key));
         }
         assert_eq!(
-            std::fs::read(dir.path().join("config.json")).unwrap(),
+            std::fs::read(
+                crate::data_layout::DataLayout::from_root(&dir.path()).config_file("config.json")
+            )
+            .unwrap(),
             before
         );
         let guard = manager.lock().await;
@@ -290,7 +296,12 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         // The message follows the UI language; both name the settings page.
         let message = error["error"].as_str().unwrap();
-        assert!(message.contains("联网搜索") || message.contains("Web Search"), "{message}");
-        assert!(!dir.path().join("config.json").exists());
+        assert!(
+            message.contains("联网搜索") || message.contains("Web Search"),
+            "{message}"
+        );
+        assert!(!crate::data_layout::DataLayout::from_root(&dir.path())
+            .config_file("config.json")
+            .exists());
     }
 }

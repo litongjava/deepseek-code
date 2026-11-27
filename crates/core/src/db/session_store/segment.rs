@@ -267,7 +267,7 @@ mod reset_tests {
         let shard = Stores::open(root.path())?.create("plan-turn", Default::default())?;
         let mut turn = TurnTimer::in_session(shard.clone())?;
         let previous = turn.ensure_segment()?;
-        let boundary = shard.write(|w| w.plan_marker("approved"))?;
+        let boundary = shard.approve_plan("approved")?;
         let history = turn.history();
         let next = history.rollover_segment(&previous, &boundary)?;
         // The transport can finish before the host reads the reset event.
