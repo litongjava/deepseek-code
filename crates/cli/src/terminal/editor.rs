@@ -2297,11 +2297,21 @@ impl PromptEditor {
             history_view.set_pinned(&pinned.text, width);
             if crate::terminal::scrollback::compact() && !history_view.active() {
                 command_overlay.clear_to(&mut crate::terminal_output::stderr_locked())?;
-                history_view.refresh(&[], &above.presentation(), width);
+                history_view.refresh(
+                    &[],
+                    &above.presentation(),
+                    width,
+                    (rows as usize).saturating_sub(lines.len()),
+                );
                 history_view.show_compact((rows as usize).saturating_sub(lines.len()))?;
             }
             if history_view.active() {
-                history_view.refresh(&[], &above.presentation(), width);
+                history_view.refresh(
+                    &[],
+                    &above.presentation(),
+                    width,
+                    (rows as usize).saturating_sub(lines.len()),
+                );
                 let color = std::env::var_os("NO_COLOR").is_none();
                 let composer: Vec<String> = lines
                     .iter()
@@ -2519,6 +2529,7 @@ impl PromptEditor {
                             &[],
                             &above.presentation(),
                             columns.saturating_sub(1) as usize,
+                            (new_rows as usize).saturating_sub(lines.len()),
                         );
                         screen.reflow();
                     } else {
@@ -2618,7 +2629,7 @@ impl PromptEditor {
                             && (mouse.row == 0 || mouse.row as usize >= page.saturating_sub(1)))
                     {
                         if !selection.document() {
-                            history_view.refresh(&[], &above.presentation(), width);
+                            history_view.refresh(&[], &above.presentation(), width, page);
                             if let Some(top) = selection.promote(
                                 history_view.document_rows(),
                                 page,
@@ -2648,7 +2659,7 @@ impl PromptEditor {
                     ) {
                         selection.clear()?;
                         pinned.expanded = false;
-                        history_view.refresh(&[], &above.presentation(), width);
+                        history_view.refresh(&[], &above.presentation(), width, page);
                         history_view.wheel(
                             mouse.kind == MouseEventKind::ScrollUp,
                             (rows as usize).saturating_sub(lines.len()),
@@ -2684,7 +2695,7 @@ impl PromptEditor {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if (click.row as usize) < history_view.header_rows(page) {
                                     let row = above.expand_prompt(&pinned.text, width);
-                                    history_view.refresh(&[], &above.presentation(), width);
+                                    history_view.refresh(&[], &above.presentation(), width, page);
                                     history_view.open_at(row)?;
                                     continue;
                                 }
@@ -2730,14 +2741,14 @@ impl PromptEditor {
                     {
                         pinned.expanded = false;
                         let row = above.expand_prompt(&pinned.text, width);
-                        history_view.refresh(&[], &above.presentation(), width);
+                        history_view.refresh(&[], &above.presentation(), width, page);
                         history_view.open_at(row)?;
                         continue;
                     }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                         if let Some(id) = above.prompt_at(transcript_bottom, mouse.row) {
                             let row = above.expand_prompt_id(id, width);
-                            history_view.refresh(&[], &above.presentation(), width);
+                            history_view.refresh(&[], &above.presentation(), width, page);
                             history_view.open_at(row)?;
                             continue;
                         }
@@ -2852,7 +2863,12 @@ impl PromptEditor {
                     if !panel_scroll
                         && crate::terminal::transcript_pager::HistoryView::is_navigation(key)
                     {
-                        history_view.refresh(&[], &above.presentation(), width);
+                        history_view.refresh(
+                            &[],
+                            &above.presentation(),
+                            width,
+                            (rows as usize).saturating_sub(lines.len()),
+                        );
                         history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
                     }

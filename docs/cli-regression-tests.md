@@ -212,6 +212,7 @@ cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --noc
 4. `--resume` 后，修改行的显示和点击效果与上面相同。
 5. 思考内容 `Thought ... (click to expand)` 和较长的用户消息也能展开、收起。
 6. `Ctrl+O` 的详细记录不受影响，也不出现点击提示。
+7. `cargo test --locked -p deepseek-code-cli --bin dcl running_status_tests -- --nocapture --test-threads=1`：本地模拟一段 11 行思考，然后分别启动 1、2、3 个调用，最后一个为 Bash。对比第 2 秒和第 3 秒（出现 Ctrl+B 提示）的渲染行；80×15 的两个调用和 80×24 的三个调用都应各有一个 `⎿  Running…`，紧跟自己的编号标题，不能挂在 `Thought for …` 下。缩到 12 行时只能隐藏整个调用；逆序完成后，相应状态消失，结果只显示一次。
 
 ### C2. 紧凑工具组与复制不跳动
 
