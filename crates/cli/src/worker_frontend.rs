@@ -130,6 +130,24 @@ fn task_state_retry_tolerates_brief_failures_and_gives_up_after_the_window() {
     assert!(retry.recovered(start).is_none());
 }
 
+/// Only the identity of a queued input crosses IPC. Its durable payload and
+/// revision are checked in the worker before it claims the item.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) enum WorkerInput {
+    Queued { request_id: String, revision: i64 },
+    InitialHook { publish: bool },
+    HookWake,
+}
+
+pub(crate) const INPUT_KEY: &str = "DEEPSEEK_CODE_WORKER_INPUT";
+
+pub(crate) async fn internal_turn(cli: &Cli, session: &Session, prompt: &str, input: &mut Option<TerminalInput>, kind: WorkerInput) -> Result<()> {
+    if let Some(kickoff) = single_turn(cli, session, prompt, input, crate::session::TurnOrigin::Generated, Some(kind)).await? {
+        turn(cli, session, &kickoff, input, crate::session::TurnOrigin::GoalContinuation).await?;
+    }
+    Ok(())
+}
+
 pub async fn turn(
     cli: &Cli,
     session: &Session,
@@ -139,7 +157,7 @@ pub async fn turn(
 ) -> Result<()> {
     let mut next = prompt.to_owned();
     while !crate::signals::terminating() {
-        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input, origin)).await? else {
+        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input, origin, None)).await? else {
             return Ok(());
         };
         next = kickoff;
@@ -242,6 +260,7 @@ async fn single_turn(
     prompt: &str,
     input: &mut Option<TerminalInput>,
     origin: crate::session::TurnOrigin<'_>,
+    kind: Option<WorkerInput>,
 ) -> Result<Option<String>> {
     let root = &session.paths.data_dir;
     if let Some(job) = settle_session(session)? {
@@ -267,7 +286,7 @@ async fn single_turn(
         .collect();
     let model_label = crate::session_commands::model_label(session).await;
     let mut display = TurnDisplay::new_with_initial(
-        true,
+        !crate::display_commands::load(session)?.focus,
         session.permission_mode(),
         &deepseek_code_core::data_layout::DataLayout::from_root(&root)
             .config_file("keybindings.json"),
@@ -318,6 +337,9 @@ async fn single_turn(
             "DEEPSEEK_CODE_WORKER_AUTO_ROUTE".to_owned(),
             session.auto_route.to_string(),
         )];
+        if let Some(kind) = kind {
+            environment.push((INPUT_KEY.into(), serde_json::to_string(&kind)?));
+        }
         if session_worker::call(&worker, &Request::Ping)
             .await?
             .generation_supported
@@ -374,7 +396,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
     )?;
     let model_label = crate::session_commands::model_label(session).await;
     let mut display = TurnDisplay::new_with_initial(
-        true,
+        !crate::display_commands::load(session)?.focus,
         session.permission_mode(),
         &session.paths.layout().config_file("keybindings.json"),
         Vec::new(),
@@ -697,7 +719,7 @@ async fn observe(
                         if let Some(index) = queued_inputs.iter().position(|queued| queued == text) { queued_inputs.remove(index); }
                     }
                     if event["type"] == "result" {
-                        if let Some(text)=result_text(&event,streamed) {display.before_text(text);}
+                        if let Some(text)=result_text(&event,streamed) {render_text(display, text);}
                         streamed = false;
                     }
                     render(display, &event);
@@ -1172,6 +1194,15 @@ fn resource_alert_renders_a_system_resource_warning_notice() {
     );
 }
 
+fn render_text(display: &mut TurnDisplay, text: &str) {
+    display.before_text(text);
+    if !display.is_live() {
+        use std::io::Write;
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
+}
+
 fn render(display: &mut TurnDisplay, event: &Value) {
     let text = |name: &str| event[name].as_str().unwrap_or("");
     match text("type") {
@@ -1184,7 +1215,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
             }
         }
         "request_attempt" => { if let Some(message) = event["message"].as_str() { display.notice(message); } },
-        "text" => display.before_text(text("delta")),
+        "text" => render_text(display, text("delta")),
         "queued_input" => display.queued_delivered(text("text")),
         "thinking" => {
             display.record_thinking(text("delta"));

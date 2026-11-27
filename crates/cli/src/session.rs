@@ -2229,17 +2229,7 @@ impl Session {
         };
         crate::session_commands::migrate_goal(self)?;
         deepseek_code_core::services::session_goals::begin_input(&self.store.db, &self.id)?;
-        if !crate::terminal::screen_reader()
-            && input.is_some()
-            && cli.output_format == OutputFormat::Text
-            && !cli.print
-            && !cli.print_short
-            && std::io::stdin().is_terminal()
-            && std::io::stdout().is_terminal()
-            && std::io::stderr().is_terminal()
-            && std::env::var("TERM").as_deref() != Ok("dumb")
-            && !crate::display_commands::load(self)?.focus
-        {
+        if self.worker_frontend {
             return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
         }
         let mut next = prompt.to_owned();
@@ -2376,6 +2366,9 @@ impl Session {
 
     pub async fn wake_hooks(&self, cli: &Cli, input: &mut Option<TerminalInput>) -> Result<()> {
         self.ensure_writable_workspace("hook wakes")?;
+        if self.worker_frontend {
+            return crate::worker_frontend::internal_turn(cli, self, "Async hook feedback", input, crate::worker_frontend::WorkerInput::HookWake).await;
+        }
         Box::pin(self.run_turn_origin(cli, "", input, TurnOrigin::HookWake, true)).await
     }
 
@@ -2399,6 +2392,9 @@ impl Session {
     ) -> Result<()> {
         self.ensure_writable_workspace("the initial hook turn")?;
         self.apply_settings_permissions(cli)?;
+        if self.worker_frontend {
+            return crate::worker_frontend::internal_turn(cli, self, prompt, input, crate::worker_frontend::WorkerInput::InitialHook { publish }).await;
+        }
         self.run_turn_origin(cli, prompt, input, TurnOrigin::InitialHook, publish)
             .await
     }
@@ -2439,6 +2435,14 @@ impl Session {
                 crate::worker_frontend::occupancy_message(self, &occupancy)
             );
         }
+        if self.worker_frontend {
+            let (prompt, _) = deepseek_code_core::db::message_repo::prepare_user_message(&item.content)?;
+            return crate::worker_frontend::internal_turn(cli, self, &prompt, input, crate::worker_frontend::WorkerInput::Queued { request_id: item.request_id, revision: item.revision }).await;
+        }
+        self.execute_queued(cli, item, input).await
+    }
+
+    pub(crate) async fn execute_queued(&self, cli: &Cli, item: deepseek_code_core::services::input_queue::QueueItem, input: &mut Option<TerminalInput>) -> Result<()> {
         let (prompt, _) =
             deepseek_code_core::db::message_repo::prepare_user_message(&item.content)?;
         let origin = TurnOrigin::Queue(&item.prompt_origin, &item.content);

@@ -454,7 +454,12 @@ async fn execute(
         std::env::remove_var(name);
     }
     let stamped = environment.iter().any(|(name, _)| name == crate::worker_binding::SNAPSHOT_ENV);
+    let mut input_kind = None;
     for (name, value) in environment {
+        if name == crate::worker_frontend::INPUT_KEY {
+            input_kind = Some(serde_json::from_str(&value)?);
+            continue;
+        }
         if name == crate::worker_binding::SNAPSHOT_ENV {
             continue;
         }
@@ -568,14 +573,18 @@ async fn execute(
             && session.permissions.get_mode()
                 == deepseek_code_core::permissions::PermissionMode::BypassPermissions,
     );
-    let result = session
-        .turn(
-            &cli,
-            &prompt,
-            &mut None,
-            crate::session::TurnOrigin::command_line(&cli, &prompt),
-        )
-        .await;
+    use crate::worker_frontend::WorkerInput;
+    let result = match input_kind {
+        Some(WorkerInput::HookWake) => session.wake_hooks(&cli, &mut None).await,
+        Some(WorkerInput::InitialHook { publish }) => session.turn_initial_hook(&cli, prompt, &mut None, publish).await,
+        Some(WorkerInput::Queued { request_id, revision }) => {
+            let item = session.store.db.next_desktop_input(&session.id)?
+                .filter(|item| item.request_id == request_id && item.revision == revision)
+                .context("Queued input changed before admission")?;
+            session.execute_queued(&cli, item, &mut None).await
+        }
+        None => session.turn(&cli, prompt, &mut None, crate::session::TurnOrigin::command_line(&cli, prompt)).await,
+    };
     session.idle_launch = Some((identity, Arc::new(cli)));
     session
         .engine
