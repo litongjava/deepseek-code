@@ -1,5 +1,6 @@
 //! Watch only extension inputs. Callbacks never touch a running server or turn;
 //! discovery and reconciliation read the authoritative files at the boundary.
+use crate::data_layout::DataLayout;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     path::{Path, PathBuf},
@@ -33,17 +34,20 @@ impl ExtensionWatch {
     }
 
     fn register(&mut self) {
+        let layout = DataLayout::from_root(&self.data);
         let claude = self.workspace.join(".claude");
         let roots = [
-            self.data.join("skills"),
+            layout.skills(),
             claude.join("skills"),
             claude.join("commands"),
         ];
-        let skill_paths = [roots.to_vec(), vec![self.data.join("skill-states.json")]].concat();
-        let mcp = [
-            self.data.join("mcp-servers.json"),
-            self.data.join("mcp-states.json"),
-        ];
+        let config = layout.config_root();
+        let skill_paths = [
+            roots.to_vec(),
+            vec![layout.config_file("skill-states.json")],
+        ]
+        .concat();
+        let mcp = [layout.root_file("mcp-servers.json"), layout.mcp_states()];
         let parent = claude.clone();
         let pending = self.pending.clone();
         let callback = move |event: notify::Result<Event>| {
@@ -67,7 +71,7 @@ impl ExtensionWatch {
         // A missing directory or an exhausted OS watcher budget must not prevent
         // a turn. Its authoritative boundary read is also the polling fallback.
         if let Ok(mut watcher) = notify::recommended_watcher(callback) {
-            for path in [&self.data, &self.workspace, &claude] {
+            for path in [&self.data, &self.workspace, &claude, &config] {
                 let _ = watcher.watch(path, RecursiveMode::NonRecursive);
             }
             for path in roots {

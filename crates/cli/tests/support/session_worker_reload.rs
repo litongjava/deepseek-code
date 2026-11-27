@@ -209,6 +209,7 @@ async fn running_session_reloads_extensions_on_the_next_request() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    std::fs::create_dir_all(paths.layout().config_root()).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
     let mcp = paths.data_dir.join("mcp-servers.json");
@@ -262,7 +263,7 @@ async fn running_session_reloads_extensions_on_the_next_request() {
             }
             3 => {
                 std::fs::write(
-                    paths.data_dir.join("mcp-states.json"),
+                    paths.layout().mcp_states(),
                     r#"{"servers":{"live":"on-demand"}}"#,
                 )
                 .unwrap();
@@ -270,7 +271,7 @@ async fn running_session_reloads_extensions_on_the_next_request() {
             4 => {
                 configure("replacement schema", false);
                 std::fs::write(
-                    paths.data_dir.join("skill-states.json"),
+                    paths.layout().config_file("skill-states.json"),
                     r#"{"skills":{"live-skill":"off"}}"#,
                 )
                 .unwrap();
