@@ -36,6 +36,7 @@ pub(super) fn tag_command(command: &mut tokio::process::Command) -> String {
     format!("{INSTANCE_ENV}={token}")
 }
 
+#[derive(Debug)]
 struct Stat {
     state: u8,
     parent: i32,
@@ -43,8 +44,23 @@ struct Stat {
     birth: u64,
 }
 
-fn stat(pid: i32) -> Option<Stat> {
-    let bytes = fs::read(format!("/proc/{pid}/stat")).ok()?;
+fn proc_file(pid: i32, file: &str) -> io::Result<Vec<u8>> {
+    fs::read(format!("/proc/{pid}/{file}")).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::from_raw_os_error(libc::ESRCH)
+        } else {
+            error
+        }
+    })
+}
+
+fn stat(pid: i32) -> io::Result<Stat> {
+    let bytes = proc_file(pid, "stat")?;
+    parse_stat(&bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid /proc stat"))
+}
+
+fn parse_stat(bytes: &[u8]) -> Option<Stat> {
     // comm is arbitrary bytes and can contain spaces and parentheses.
     let close = bytes.iter().rposition(|&b| b == b')')?;
     let mut fields = std::str::from_utf8(&bytes[close + 1..])
@@ -80,8 +96,10 @@ struct Members(HashMap<i32, u64>);
 
 impl Members {
     fn refresh(&mut self) {
-        self.0
-            .retain(|&pid, born| stat(pid).is_some_and(|s| s.birth == *born));
+        self.0.retain(|&pid, born| match stat(pid) {
+            Ok(s) => s.birth == *born,
+            Err(e) => e.raw_os_error() != Some(libc::ESRCH),
+        });
         let mut pending: Vec<_> = self.0.keys().copied().collect();
         let mut visited = HashSet::new();
         while let Some(pid) = pending.pop() {
@@ -89,11 +107,11 @@ impl Members {
                 continue;
             }
             let Ok(ids) = children(pid) else { continue };
-            if !stat(pid).is_some_and(|s| self.0.get(&pid) == Some(&s.birth)) {
+            if !stat(pid).is_ok_and(|s| self.0.get(&pid) == Some(&s.birth)) {
                 continue;
             }
             for child in ids {
-                if let Some(s) = stat(child) {
+                if let Ok(s) = stat(child) {
                     if s.parent == pid && s.state != b'Z' {
                         self.0.insert(child, s.birth);
                         pending.push(child);
@@ -116,7 +134,7 @@ impl Members {
             if !fs::metadata(&path).is_ok_and(|m| m.uid() == uid) {
                 continue;
             }
-            let Some(s) = stat(pid) else { continue };
+            let Ok(s) = stat(pid) else { continue };
             if scope.launcher() == Some(s.group) {
                 group_members.push((pid, s.birth));
             }
@@ -150,71 +168,110 @@ impl Members {
         Ok(found_token)
     }
 
-    fn signal(
+    fn signal_member(
         &self,
-        launcher: Option<i32>,
+        scope: &Scope<'_>,
+        pid: i32,
+        birth: u64,
         signal: i32,
         termed: &mut HashSet<(i32, u64)>,
+        signals: &dyn Signals,
     ) -> io::Result<bool> {
-        let mut stopped = true;
-        for (&pid, &birth) in &self.0 {
-            // Open first, then check birth. PID reuse during or after the scan
-            // cannot redirect a pidfd signal to a different process.
-            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
-            let fd = if raw >= 0 {
-                Some(unsafe { OwnedFd::from_raw_fd(raw) })
-            } else {
-                let err = io::Error::last_os_error();
-                match err.raw_os_error() {
-                    Some(libc::ESRCH) => continue,
-                    Some(libc::ENOSYS) => None, // kernels before pidfd_open
-                    _ => return Err(err),
-                }
-            };
-            let Some(s) = stat(pid).filter(|s| s.birth == birth) else {
-                continue;
-            };
-            if s.state == b'Z' {
-                if Some(pid) == launcher {
-                    stopped = false; // tokio's Child owns this wait
-                } else if s.parent == std::process::id() as i32 {
-                    if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } == 0 {
-                        stopped = false;
-                    }
-                } else if self.0.contains_key(&s.parent) {
-                    stopped = false; // still waiting for adoption
-                }
-                continue;
-            }
-            stopped = false;
-            if signal == libc::SIGTERM && termed.contains(&(pid, birth)) {
-                continue;
-            }
-            let result = unsafe {
-                if let Some(fd) = fd {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        fd.as_raw_fd(),
-                        signal,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0,
-                    ) as i32
-                } else {
-                    libc::kill(pid, signal)
-                }
-            };
-            if result < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(err);
-                }
-            } else if signal == libc::SIGTERM {
-                termed.insert((pid, birth));
-            }
+        // A pidfd pins the candidate while we verify its original start time.
+        let fd = signals.open(pid);
+        let s = stat(pid)?;
+        if s.birth != birth {
+            return Ok(true);
         }
-        Ok(stopped)
+        if s.state == b'Z' {
+            if Some(pid) == scope.launcher() {
+                return Ok(false); // tokio's Child owns this wait
+            }
+            if s.parent == std::process::id() as i32 {
+                let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+                if waited < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ECHILD) {
+                        return Err(error);
+                    }
+                }
+                return Ok(waited != 0);
+            }
+            return Ok(!self.0.contains_key(&s.parent)); // might still await adoption
+        }
+        if signal == libc::SIGTERM && termed.contains(&(pid, birth)) {
+            return Ok(false);
+        }
+        if let Err(error) = fd.and_then(|fd| signals.send(&fd, signal)) {
+            if !fallback_allowed(&error) {
+                return Err(error);
+            }
+            let env = proc_file(pid, "environ")?;
+            if !env.split(|&b| b == 0).any(|entry| scope.matches(entry)) {
+                // Known descendants may have cleared their token. Retain them
+                // as unresolved rather than sending a numeric signal blindly.
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("pidfd: {error}, cannot verify MCP environment token for PID {pid}"),
+                ));
+            }
+            if stat(pid)?.birth != birth {
+                return Ok(true);
+            }
+            signals.kill(pid, signal)?;
+        }
+        if signal == libc::SIGTERM {
+            termed.insert((pid, birth));
+        }
+        Ok(false)
     }
 }
+
+fn fallback_allowed(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EPERM | libc::ENOSYS | libc::EINVAL)
+    )
+}
+
+trait Signals {
+    fn open(&self, pid: i32) -> io::Result<OwnedFd> {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    fn send(&self, fd: &OwnedFd, signal: i32) -> io::Result<()> {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn kill(&self, pid: i32, signal: i32) -> io::Result<()> {
+        if unsafe { libc::kill(pid, signal) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct Kernel;
+impl Signals for Kernel {}
 
 enum Scope<'a> {
     Instance { entry: &'a str, launcher: i32 },
@@ -249,7 +306,7 @@ fn drain(members: &mut Members, scope: Scope<'_>, mut reap: impl FnMut() -> io::
                 // The dedicated supervisor also owns untagged adopted children,
                 // including the engine if supervision returned on an error.
                 for pid in children(std::process::id() as i32)? {
-                    if let Some(s) = stat(pid) {
+                    if let Ok(s) = stat(pid) {
                         members.0.insert(pid, s.birth);
                     }
                 }
@@ -259,7 +316,14 @@ fn drain(members: &mut Members, scope: Scope<'_>, mut reap: impl FnMut() -> io::
             } else {
                 libc::SIGKILL
             };
-            let stopped = members.signal(scope.launcher(), signal, &mut termed)?;
+            let mut stopped = true;
+            for (&pid, &birth) in &members.0 {
+                match members.signal_member(&scope, pid, birth, signal, &mut termed, &Kernel) {
+                    Ok(done) => stopped &= done,
+                    Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+                    Err(e) => return Err(e),
+                }
+            }
             Ok(reap()? && stopped && !found_token)
         })();
         let empty = result.unwrap_or_else(|error| {
@@ -286,7 +350,7 @@ pub(super) struct Tracker {
 impl Tracker {
     pub(super) fn new(pid: i32, token: String) -> Self {
         let mut initial = Members::default();
-        if let Some(s) = stat(pid) {
+        if let Ok(s) = stat(pid) {
             initial.0.insert(pid, s.birth);
         }
         let members = Arc::new(Mutex::new(initial));
@@ -350,6 +414,79 @@ mod tests {
     use super::*;
     use crate::mcp::process::ServerProcess;
 
+    struct Denied {
+        deny_open: bool,
+        errno: i32,
+        kills: std::cell::Cell<usize>,
+    }
+
+    impl Signals for Denied {
+        fn open(&self, _: i32) -> io::Result<OwnedFd> {
+            if self.deny_open {
+                Err(io::Error::from_raw_os_error(self.errno))
+            } else {
+                // send() is injected too, so this path works on pre-pidfd kernels.
+                Ok(fs::File::open("/dev/null")?.into())
+            }
+        }
+
+        fn send(&self, _: &OwnedFd, _: i32) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(self.errno))
+        }
+
+        fn kill(&self, pid: i32, signal: i32) -> io::Result<()> {
+            self.kills.set(self.kills.get() + 1);
+            Kernel.kill(pid, signal)
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_pidfd_open_or_send_falls_back_to_identity_checked_kill() {
+        use std::os::unix::process::ExitStatusExt;
+        for errno in [libc::EPERM, libc::ENOSYS, libc::EINVAL] {
+            for deny_open in [true, false] {
+                let mut cmd = tokio::process::Command::new("/bin/sleep");
+                let mut server = ServerProcess::spawn(cmd.arg("60")).unwrap();
+                let pid = server.tree.launcher;
+                let birth = stat(pid).unwrap().birth;
+                let scope = Scope::Instance {
+                    entry: &server.tree.token,
+                    launcher: pid,
+                };
+                let denied = Denied {
+                    deny_open,
+                    errno,
+                    kills: 0.into(),
+                };
+                let members = Members::default();
+                let mut termed = HashSet::new();
+                let foreign = Scope::Instance {
+                    entry: "wrong-token",
+                    launcher: pid,
+                };
+                assert!(members
+                    .signal_member(&foreign, pid, birth, libc::SIGTERM, &mut termed, &denied)
+                    .is_err());
+                assert!(members
+                    .signal_member(&scope, pid, birth + 1, libc::SIGTERM, &mut termed, &denied)
+                    .unwrap());
+                assert_eq!(denied.kills.get(), 0);
+                assert!(!members
+                    .signal_member(&scope, pid, birth, libc::SIGTERM, &mut termed, &denied)
+                    .unwrap());
+                tokio::time::timeout(Duration::from_secs(2), server.child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(denied.kills.get(), 1);
+                assert_eq!(
+                    server.child.try_wait().unwrap().unwrap().signal(),
+                    Some(libc::SIGTERM)
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn token_stop_reaches_a_peer_spares_a_near_match_and_escalates_after_term() {
         use std::os::unix::process::ExitStatusExt;
@@ -391,7 +528,10 @@ mod tests {
             server.child.try_wait().unwrap().unwrap().signal(),
             Some(libc::SIGKILL)
         );
-        assert!(stat(peer.id() as i32).is_none());
+        assert_eq!(
+            stat(peer.id() as i32).err().unwrap().raw_os_error(),
+            Some(libc::ESRCH)
+        );
         assert!(unrelated.try_wait().unwrap().is_none());
         unrelated.kill().unwrap();
         unrelated.wait().unwrap();
@@ -425,8 +565,8 @@ mod tests {
         .expect("monitor did not record the new session");
         fs::write(tmp.path().join("release"), "").unwrap();
         assert!(server.child.wait().await.unwrap().success());
-        assert!(stat(pid).is_some_and(|s| s.state != b'Z' && s.parent != server.tree.launcher));
+        assert!(stat(pid).is_ok_and(|s| s.state != b'Z' && s.parent != server.tree.launcher));
         drop(server);
-        assert!(stat(pid).is_none_or(|s| s.state == b'Z'));
+        assert!(stat(pid).ok().is_none_or(|s| s.state == b'Z'));
     }
 }
