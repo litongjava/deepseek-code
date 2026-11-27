@@ -283,6 +283,41 @@ pub fn process_exited(pid: u32) -> bool {
     recovery::exited(pid)
 }
 
+/// A dead host may have lost its lease while its supervisor is still
+/// draining the process group. Only the supervisor's completion is a handoff.
+pub async fn live_mcp_worker(root: &Path, session: &str) -> Result<Option<Worker>> {
+    let Some(worker) = current(root, session)? else {
+        return Ok(None);
+    };
+    if worker.status != "running" {
+        return Ok(None);
+    }
+    let Some(pid) = worker.child_pid else {
+        return Ok(None);
+    };
+    let mut dead = process_exited(pid);
+    #[cfg(target_os = "linux")]
+    {
+        dead |= fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, fields)| fields.starts_with(" Z "))
+        });
+    }
+    if !dead {
+        return Ok(Some(worker));
+    }
+    let dir = directory(&worker);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while read_worker(&dir)?.status != "stopped" {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("Previous MCP worker is still cleaning up")??;
+    Ok(None)
+}
+
 pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
     let pointer = match fs::read(base.join("current.json")) {
@@ -1094,35 +1129,60 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     // unable to notice that the owner is gone if the record is later damaged.
     worker.supervisor_pid = Some(std::process::id());
     jobs::save(&dir.join("worker.json"), worker)?;
-    let child = command.spawn()?;
-    struct Owner(std::process::Child);
+    // Orphaned grandchildren must be reaped before another MCP owner starts.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    struct Owner(
+        std::process::Child,
+        #[cfg(windows)] crate::terminal::TerminalJob,
+    );
     impl Drop for Owner {
         fn drop(&mut self) {
-            if self.0.try_wait().ok().flatten().is_none() {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    let _ = Command::new("taskkill.exe")
-                        .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
-                        .creation_flags(0x08000000)
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-                #[cfg(unix)]
-                {
-                    let _ = Command::new("kill")
-                        .args(["-TERM", "--", &format!("-{}", self.0.id())])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
+            #[cfg(windows)]
+            while let Err(error) = self.1.terminate_and_wait() {
+                tracing::error!(%error, "Waiting for worker job cleanup");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            #[cfg(unix)]
+            {
+                let group = -(self.0.id() as i32);
+                // The group survives its leader. Keep the supervisor lifetime
+                // lock until there are no descendants left to run or reap.
+                loop {
+                    if unsafe { libc::kill(group, libc::SIGKILL) } == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    {
+                        break;
+                    }
+                    while unsafe { libc::waitpid(group, std::ptr::null_mut(), libc::WNOHANG) } > 0 {
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
-            let _ = self.0.kill();
             let _ = self.0.wait();
         }
     }
-    let mut child = Owner(child);
+    let child = command.spawn()?;
+    #[cfg(windows)]
+    let job = {
+        use std::os::windows::io::AsRawHandle;
+        match crate::terminal::TerminalJob::assign(child.as_raw_handle()) {
+            Ok(job) => job,
+            Err(error) => {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    };
+    let mut child = Owner(
+        child,
+        #[cfg(windows)]
+        job,
+    );
     worker.child_pid = Some(child.0.id());
     worker.status = "running".into();
     let mut cancelling: Option<(String, std::time::Instant)> = None;

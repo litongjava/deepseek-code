@@ -120,7 +120,7 @@ impl Drop for ManagedSession {
 }
 
 #[cfg(windows)]
-struct TerminalJob(windows::Win32::Foundation::HANDLE);
+pub(crate) struct TerminalJob(windows::Win32::Foundation::HANDLE);
 #[cfg(windows)]
 unsafe impl Send for TerminalJob {}
 #[cfg(windows)]
@@ -129,6 +129,14 @@ unsafe impl Sync for TerminalJob {}
 #[cfg(windows)]
 impl TerminalJob {
     fn new(child: &dyn Child) -> Result<Self> {
+        Self::assign(
+            child
+                .as_raw_handle()
+                .ok_or_else(|| anyhow::anyhow!("Missing terminal process handle"))?,
+        )
+    }
+
+    pub(crate) fn assign(handle: std::os::windows::io::RawHandle) -> Result<Self> {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::JobObjects::*;
         unsafe {
@@ -141,9 +149,6 @@ impl TerminalJob {
                 &limits as *const _ as *const _,
                 std::mem::size_of_val(&limits) as u32,
             )?;
-            let handle = child
-                .as_raw_handle()
-                .ok_or_else(|| anyhow::anyhow!("Missing terminal process handle"))?;
             AssignProcessToJobObject(job.0, HANDLE(handle))?;
             Ok(job)
         }
@@ -152,6 +157,28 @@ impl TerminalJob {
     fn terminate(&self) -> Result<()> {
         unsafe {
             windows::Win32::System::JobObjects::TerminateJobObject(self.0, 1)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn terminate_and_wait(&self) -> Result<()> {
+        use windows::Win32::System::JobObjects::*;
+        self.terminate()?;
+        unsafe {
+            loop {
+                let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    &mut accounting as *mut _ as _,
+                    std::mem::size_of_val(&accounting) as u32,
+                    None,
+                )?;
+                if accounting.ActiveProcesses == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         Ok(())
     }

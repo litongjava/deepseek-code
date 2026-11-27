@@ -153,6 +153,17 @@ pub async fn run_from_env() -> Result<bool> {
         .and_then(|value| value.parse::<u32>().ok());
     std::env::remove_var(service::SUPERVISOR_PID_ENV);
     let _lifetime = service::host_lifetime_lock(&dir)?;
+    // On Windows the supervisor assigns the engine to a kill-on-close job
+    // before publishing its PID. No descendant may spawn outside that job.
+    #[cfg(windows)]
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service::read_worker(&dir)?.child_pid != Some(std::process::id()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("Supervisor did not publish the assigned worker job")??;
     let worker = service::read_worker(&dir)?;
     let selected = if worker.root.join("global.db").try_exists()? {
         Some(

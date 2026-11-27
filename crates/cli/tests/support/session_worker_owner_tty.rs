@@ -228,3 +228,141 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
     worker::shutdown(&paths.data_dir, &session).await.unwrap();
     provider.abort();
 }
+
+struct OwnerFixture {
+    temp: tempfile::TempDir,
+    paths: RuntimePaths,
+    session: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    provider: tokio::task::JoinHandle<()>,
+}
+
+impl OwnerFixture {
+    async fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("work");
+        fs::create_dir(&workspace).unwrap();
+        let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+        let session = SessionStore::new(paths.open_database().unwrap())
+            .create(&workspace, "fixture-model", "fixture")
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        linux_terminal::write_provider(
+            &paths.data_dir,
+            &format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let app = Router::new()
+            .route("/v1/chat/completions", post(respond))
+            .with_state((requests.clone(), workspace.join("unused")));
+        let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        deepseek_code_core::data_layout::write_config_file(
+            paths.data_dir.join("config/startup-prompts.json"),
+            json!({"trusted_folders":[workspace]}).to_string(),
+        )
+        .unwrap();
+        let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
+        fs::write(paths.data_dir.join("mcp-servers.json"), json!({"mcpServers":{"w":{
+            "command":"node","args":[stub,temp.path().join("children.jsonl"),"w","survive-eof"],"enabled":true
+        }}}).to_string()).unwrap();
+        Self {
+            temp,
+            paths,
+            session,
+            requests,
+            provider,
+        }
+    }
+
+    async fn terminal(&self) -> Terminal {
+        let mut command = Terminal::command(
+            portable_pty::CommandBuilder::new(test_cli_executable()),
+            &self.temp.path().join("work"),
+            &self.paths.data_dir,
+            &self.temp.path().join("coord"),
+            true,
+            false,
+        );
+        command.args(["--resume", &self.session]);
+        let mut tty = Terminal::spawn(command);
+        tty.wait_output(PROMPT, true).await;
+        tty
+    }
+
+    fn starts(&self) -> Vec<(u32, u32)> {
+        starts(&self.temp.path().join("children.jsonl"), "w")
+    }
+
+    fn worker(&self) -> worker::Worker {
+        worker::current(&self.paths.data_dir, &self.session)
+            .unwrap()
+            .unwrap()
+    }
+}
+
+impl Drop for OwnerFixture {
+    fn drop(&mut self) {
+        self.provider.abort();
+        // Also clean up a surviving child if a regression assertion panics.
+        if let Ok(log) = fs::read_to_string(self.temp.path().join("children.jsonl")) {
+            for row in log
+                .lines()
+                .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            {
+                if let Some(pid) = row["pid"].as_u64() {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn crash_takeover(in_flight: bool) {
+    let fixture = OwnerFixture::new().await;
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "start worker", b"worker result").await;
+    let host = fixture.worker();
+    let engine = host.child_pid.unwrap() as i32;
+    let supervisor = host.supervisor_pid.unwrap() as i32;
+    let old = fixture.starts()[0].0;
+    if in_flight {
+        repl(&mut tty, "/focus on", b"focus updated").await;
+        assert_eq!(unsafe { libc::kill(engine, libc::SIGSTOP) }, 0);
+        tty.submit("handoff in flight", false).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(unsafe { libc::kill(supervisor, libc::SIGSTOP) }, 0);
+    assert_eq!(unsafe { libc::kill(engine, libc::SIGKILL) }, 0);
+    // Force the frontend to observe death before the supervisor gets a timeslice.
+    let resume = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(unsafe { libc::kill(supervisor, libc::SIGCONT) }, 0);
+    });
+    if in_flight {
+        tty.wait_output(b"\x1b[?2004h", true).await;
+        tty.wait_output(PROMPT, true).await;
+    }
+    repl(&mut tty, "/mcp state w", b"w  user").await;
+    resume.await.unwrap();
+    let children = fixture.starts();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[1].1, tty.pid());
+    assert!(worker::process_exited(old));
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+    for (pid, _) in children {
+        assert!(worker::process_exited(pid));
+    }
+}
+
+#[tokio::test]
+async fn idle_worker_death_drains_children_before_takeover() {
+    crash_takeover(false).await;
+}
+
+#[tokio::test]
+async fn lost_handoff_reply_drains_children_before_takeover() {
+    crash_takeover(true).await;
+}

@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const readline = require("node:readline");
 const [log, id] = process.argv.slice(2);
+if (process.argv[4] === "survive-eof") setInterval(() => {}, 60000);
 const history = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
 const overlap = history.some(row => {
   if (row.id !== id) return false;

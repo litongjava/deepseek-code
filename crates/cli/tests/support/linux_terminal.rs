@@ -244,6 +244,21 @@ impl Terminal {
         self.process.pid as u32
     }
 
+    pub(crate) async fn wait_success(&mut self) {
+        tokio::time::timeout(EXIT_TIMEOUT, async {
+            loop {
+                if let Some((status, _)) = self.process.try_reap() {
+                    assert!(status.success(), "{status}");
+                    return;
+                }
+                self.pump(true);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal did not exit");
+    }
+
     pub(crate) async fn expect_exit(&mut self, trigger: Trigger) {
         let before = self.process.cpu_before_exit();
         let started = Instant::now();

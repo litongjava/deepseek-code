@@ -47,12 +47,8 @@ pub(crate) enum McpOwner {
 }
 
 impl Session {
-    fn running_mcp_worker(&self) -> Result<Option<worker::Worker>> {
-        Ok(
-            worker::current(&self.paths.data_dir, &self.id)?.filter(|host| {
-                host.status == "running" && !host.child_pid.is_some_and(worker::process_exited)
-            }),
-        )
+    async fn running_mcp_worker(&self) -> Result<Option<worker::Worker>> {
+        worker::live_mcp_worker(&self.paths.data_dir, &self.id).await
     }
 
     /// An explicit target hands off a turn. A command passes None to retain
@@ -63,7 +59,7 @@ impl Session {
         target: impl Into<Option<McpOwner>>,
     ) -> Result<tokio::sync::MutexGuard<'_, McpOwner>> {
         let mut owner = self.mcp_owner.lock().await;
-        self.discover_mcp_owner(&mut owner)?;
+        self.discover_mcp_owner(&mut owner).await?;
         let target = target.into().unwrap_or_else(|| match *owner {
             McpOwner::None => McpOwner::Frontend,
             current => current,
@@ -79,7 +75,7 @@ impl Session {
         match *owner {
             McpOwner::Frontend => release_local(&self.mcp, &self.mcp_lease, owner).await?,
             McpOwner::Worker => {
-                if let Some(host) = self.running_mcp_worker()? {
+                if let Some(host) = self.running_mcp_worker().await? {
                     let reply = worker::call(&host, &Request::Mcp(McpOp::StopAll)).await?;
                     match reply.mcp.context("Missing StopAll reply")? {
                         McpResult::Stopped => {}
@@ -131,10 +127,10 @@ impl Session {
         Ok(())
     }
 
-    fn discover_mcp_owner(&self, owner: &mut McpOwner) -> Result<()> {
+    async fn discover_mcp_owner(&self, owner: &mut McpOwner) -> Result<()> {
         if *owner == McpOwner::None
             && self.observe_mcp_worker
-            && self.running_mcp_worker()?.is_some()
+            && self.running_mcp_worker().await?.is_some()
         {
             *owner = McpOwner::Worker;
         }
@@ -160,7 +156,7 @@ impl Session {
         }
         let mut owner = self.set_mcp_owner(None).await?;
         if *owner == McpOwner::Worker {
-            if let Some(host) = self.running_mcp_worker()? {
+            if let Some(host) = self.running_mcp_worker().await? {
                 match worker::call(&host, &Request::Mcp(op.clone()))
                     .await?
                     .mcp
