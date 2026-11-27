@@ -192,7 +192,7 @@ pub async fn run_from_env() -> Result<bool> {
     let mut coordination_active = false;
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
     let receipts = service::McpReceipts::default();
-    let mcp_target = WorkerMcp::new(RuntimePaths::new(worker.root.clone())?, worker.workspace.clone(), worker.session_id.clone(), worker.endpoint.clone());
+    let mcp_target = WorkerMcp::new(RuntimePaths::new(worker.root.clone())?, worker.workspace.clone(), worker.endpoint.clone());
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
     let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
     let active = Arc::new(AtomicBool::new(false));

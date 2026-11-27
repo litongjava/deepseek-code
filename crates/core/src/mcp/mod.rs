@@ -13,7 +13,6 @@ pub mod control;
 pub mod elicitation;
 pub mod extension_watch;
 mod reload;
-pub use reload::invalidate_snapshots;
 pub mod presentation;
 pub mod states;
 pub mod tool_executor;

@@ -4601,43 +4601,6 @@ impl ToolLoopExecutor {
             let (tools, read_only) = discover_mcp_tools(registry).await?;
             self.mcp_tools = tools;
             self.mcp_read_only_tools = read_only;
-            self.snapshot_mcp_tools()?;
-        }
-        Ok(())
-    }
-
-    /// Freeze each MCP tool definition the first time this session sees it, so
-    /// a reconnecting server cannot rewrite a resident definition mid-session.
-    fn snapshot_mcp_tools(&mut self) -> Result<()> {
-        let (Some(root), Some(session)) = (
-            self.search_config_path
-                .as_deref()
-                .and_then(crate::data_layout::data_root_of),
-            self.conv_id.as_deref(),
-        ) else {
-            return Ok(());
-        };
-        let path = crate::session_files::mcp_snapshot_file(root, session);
-        let mut saved: std::collections::BTreeMap<String, crate::tools::ToolDefinition> =
-            std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or_default();
-        let mut changed = false;
-        for tool in &mut self.mcp_tools {
-            if let Some(snapshot) = saved.get(&tool.name) {
-                tool.description = snapshot.description.clone();
-                tool.input_schema = snapshot.input_schema.clone();
-            } else {
-                saved.insert(tool.name.clone(), tool.clone());
-                changed = true;
-            }
-        }
-        if changed {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, serde_json::to_vec_pretty(&saved)?)?;
         }
         Ok(())
     }

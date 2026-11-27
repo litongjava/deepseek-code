@@ -35,7 +35,7 @@ impl Session {
             };
         }
         self.ensure_mcp().await?;
-        local_operation(&self.paths, &self.workspace, &self.id, &self.mcp, op).await
+        local_operation(&self.paths, &self.workspace, &self.mcp, op).await
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
@@ -69,27 +69,24 @@ async fn initialize(manager: &McpServerManager, ready: &OnceCell<()>) -> Result<
         .await?;
     Ok(())
 }
-async fn reconcile(manager: &McpServerManager, paths: &RuntimePaths, session: &str) -> Result<()> {
+async fn reconcile(manager: &McpServerManager) {
     match manager.reconcile_config().await {
         Ok(changes) => {
-            deepseek_code_core::mcp::invalidate_snapshots(&paths.data_dir, session, &changes)?;
             for (id, action) in changes {
                 crate::compaction::notice(&format!("MCP: {id} {action}"));
             }
         }
         Err(err) => crate::compaction::notice(&format!("MCP reload: {err:#}")),
     }
-    Ok(())
 }
 
 pub(crate) async fn local_operation(
     paths: &RuntimePaths,
     workspace: &Path,
-    session: &str,
     manager: &McpServerManager,
     op: McpOp,
 ) -> Result<McpResult> {
-    reconcile(manager, paths, session).await?;
+    reconcile(manager).await;
     if matches!(op, McpOp::ReloadPlugins | McpOp::SetPluginEnabled { .. }) {
         let context = crate::services::context(paths)?;
         let notices = if let McpOp::SetPluginEnabled { id, enabled } = op {
@@ -98,7 +95,7 @@ pub(crate) async fn local_operation(
         } else {
             deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?
         };
-        reconcile(manager, paths, session).await?;
+        reconcile(manager).await;
         reload_plugin_metadata(paths, workspace)?;
         return Ok(McpResult::Reloaded { notices });
     }
@@ -121,16 +118,10 @@ pub(crate) struct WorkerMcp {
     pub(super) gate: Arc<Mutex<()>>,
     paths: RuntimePaths,
     workspace: PathBuf,
-    session: String,
 }
 
 impl WorkerMcp {
-    pub(crate) fn new(
-        paths: RuntimePaths,
-        workspace: PathBuf,
-        session: String,
-        endpoint: String,
-    ) -> Self {
+    pub(crate) fn new(paths: RuntimePaths, workspace: PathBuf, endpoint: String) -> Self {
         Self {
             manager: Arc::new(
                 McpServerManager::new(paths.data_dir.join("mcp-servers.json"))
@@ -140,11 +131,12 @@ impl WorkerMcp {
             gate: Arc::default(),
             paths,
             workspace,
-            session,
         }
     }
 
-    pub(crate) fn runtime_status(&self) -> deepseek_code_core::services::runtime_status::RuntimeSource {
+    pub(crate) fn runtime_status(
+        &self,
+    ) -> deepseek_code_core::services::runtime_status::RuntimeSource {
         deepseek_code_core::services::runtime_status::RuntimeSource {
             mcp: self.manager.clone(),
             mcp_ready: self.ready.clone(),
@@ -160,14 +152,7 @@ impl WorkerMcp {
 
     async fn call(&self, op: McpOp) -> Result<McpResult> {
         initialize(&self.manager, &self.ready).await?;
-        local_operation(
-            &self.paths,
-            &self.workspace,
-            &self.session,
-            &self.manager,
-            op,
-        )
-        .await
+        local_operation(&self.paths, &self.workspace, &self.manager, op).await
     }
 }
 impl WorkerMcp {

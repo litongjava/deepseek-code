@@ -1,6 +1,6 @@
-use super::{tool_executor::qualified_tool_name, McpServerManager};
+use super::McpServerManager;
 use anyhow::Result;
-use std::{collections::BTreeSet, io::ErrorKind, path::Path};
+use std::{collections::BTreeSet, io::ErrorKind};
 
 impl McpServerManager {
     /// Apply the latest complete config at a turn boundary. The persistence CAS
@@ -83,36 +83,4 @@ impl McpServerManager {
         *self.applied.lock().unwrap() = bytes;
         Ok(notices)
     }
-}
-
-/// A configured server replacement can intentionally change the definition of
-/// a tool with the same name. Preserve frozen definitions for all other servers.
-pub fn invalidate_snapshots(
-    root: &Path,
-    session: &str,
-    changes: &[(String, String)],
-) -> Result<()> {
-    if changes.is_empty() {
-        return Ok(());
-    }
-    let path = crate::session_files::mcp_snapshot_file(root, session);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut saved: std::collections::BTreeMap<String, crate::tools::ToolDefinition> =
-        serde_json::from_slice(&bytes)?;
-    let prefixes: Vec<_> = changes
-        .iter()
-        .map(|(id, _)| qualified_tool_name(id, ""))
-        .collect();
-    let before = saved.len();
-    saved.retain(|name, _| !prefixes.iter().any(|p| name.starts_with(p)));
-    if before != saved.len() {
-        let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-        serde_json::to_writer_pretty(&mut file, &saved)?;
-        file.persist(path)?;
-    }
-    Ok(())
 }

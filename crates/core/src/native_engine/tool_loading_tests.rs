@@ -1144,29 +1144,6 @@ fn resident_tool_order_is_stable_across_builds() {
 }
 
 #[test]
-fn mcp_descriptions_are_snapshotted_per_session() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut session = executor(temp.path());
-    session.mcp_tools = vec![mcp_tool("mcp__gh__echo", "Original description")];
-    session.snapshot_mcp_tools().unwrap();
-
-    session.mcp_tools = vec![mcp_tool("mcp__gh__echo", "Reconnected description")];
-    session.snapshot_mcp_tools().unwrap();
-    assert_eq!(
-        session.mcp_tools[0].description, "Original description",
-        "a reconnect cannot change a resident definition mid-session"
-    );
-
-    let mut fresh = executor(temp.path()).with_conv_id("a-new-session".into());
-    fresh.mcp_tools = vec![mcp_tool("mcp__gh__echo", "Reconnected description")];
-    fresh.snapshot_mcp_tools().unwrap();
-    assert_eq!(
-        fresh.mcp_tools[0].description, "Reconnected description",
-        "a new session snapshots the current definition"
-    );
-}
-
-#[test]
 fn on_demand_mcp_tools_are_listed_with_builtins_first() {
     let temp = tempfile::tempdir().unwrap();
     let mut executor = executor(temp.path());
