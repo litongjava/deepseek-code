@@ -281,60 +281,13 @@ pub async fn run_from_env() -> Result<bool> {
                             response.edit_session = Some(manager.is_some_and(|manager| manager.edit_session_allowed(&worker.session_id)));
                             let _ = service::reply(stream, &response).await;
                         },
-                        Request::McpOutcome { id } => {
-                            let _ = service::reply(stream, &receipts.query(id)).await;
-                        }
-                        Request::Mcp(_) | Request::McpTracked { .. } => {
-                            let (id, op) = match request {
-                                Request::Mcp(op) => (None, op),
-                                Request::McpTracked { id, operation } => {
-                                    if !operation.needs_receipt() {
-                                        let _ = service::reply(stream, &Reply::error("Unexpected tracked operation")).await;
-                                        continue;
-                                    }
-                                    if let Some(reply) = receipts.admit(id) {
-                                        let _ = service::reply(stream, &reply).await;
-                                        continue;
-                                    }
-                                    (Some(id), operation)
-                                }
-                                _ => unreachable!(),
-                            };
-                            let receipts = receipts.clone();
+                        Request::Mcp(_) | Request::McpTracked { .. } | Request::McpOutcome { .. } => {
                             let target = mcp_target.lock().unwrap().clone();
-                            // The supervisor can publish completion just before the
-                            // host drops admission. MCP may already use the manager.
                             let current = current_turn.lock().unwrap().clone();
                             let busy = admission_state(active.load(Ordering::Acquire), current.as_deref(),
                                 |id| jobs::get(&worker.root, id).is_ok_and(|job| job.finished_ms.is_some())) == Admission::Busy;
-                            let admission = target.as_ref().and_then(|target| target.try_admit());
-                            tokio::spawn(async move {
-                                use service::{McpOp, McpResult};
-                                let result = if busy {
-                                    Ok(McpResult::Busy)
-                                } else if let Some(target) = target {
-                                    match admission {
-                                        Some(guard) => target.call(guard, op).await,
-                                        None => Ok(McpResult::Busy),
-                                    }
-                                } else if matches!(op, McpOp::StopAll) {
-                                    Ok(McpResult::Stopped)
-                                } else {
-                                    Ok(McpResult::Unavailable)
-                                };
-                                let response = if let Some(id) = id {
-                                    receipts.finish(id, result)
-                                } else { match result {
-                                    Ok(mcp) => {
-                                        let mut reply = Reply::ok(None);
-                                        reply.mcp = Some(mcp);
-                                        reply
-                                    }
-                                    Err(error) => Reply::error(error),
-                                }};
-                                let _ = service::reply(stream, &response).await;
-                            });
-                        },
+                            crate::session::WorkerMcp::dispatch(target, request, stream, &receipts, busy, None);
+                        }
                         Request::RuntimeStatus => {
                             let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
                                 mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),

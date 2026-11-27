@@ -626,3 +626,33 @@ async fn malformed_hot_edit_keeps_provider_tools_across_both_handoffs() {
     tty.submit("/exit", false).await;
     tty.wait_success().await;
 }
+
+#[tokio::test]
+async fn idle_frontend_yields_before_first_turn_and_after_focus() {
+    let fixture = OwnerFixture::new().await;
+    let mut first = fixture.terminal().await;
+    let mut second = fixture.terminal().await;
+    repl(&mut first, "/mcp state w", b"w  user").await;
+    repl(&mut second, "/mcp state w", b"w  user").await;
+    assert_eq!(fixture.starts().len(), 1);
+    repl(&mut second, "first worker transfer", b"worker result").await;
+    let engine = fixture.worker().child_pid.unwrap();
+    repl(&mut first, "/focus on", b"focus updated").await;
+    repl(&mut first, "focused local turn", b"worker result").await;
+    repl(&mut second, "/mcp state w", b"w  user").await;
+    assert_eq!(fixture.starts().last().unwrap().1, first.pid());
+    repl(&mut second, "/focus off", b"focus updated").await;
+    repl(&mut second, "second worker transfer", b"worker result").await;
+    repl(&mut first, "/mcp state w", b"w  user").await;
+    let children = fixture.starts();
+    assert_eq!(
+        children.iter().map(|p| p.1).collect::<Vec<_>>(),
+        [first.pid(), engine, first.pid(), engine]
+    );
+    assert!(children[..3]
+        .iter()
+        .all(|(pid, _)| worker::process_exited(*pid)));
+    second.submit("/exit", false).await;
+    second.wait_success().await;
+    assert!(worker::process_exited(children[3].0));
+}

@@ -465,18 +465,22 @@ fn secure_pipe(
 
 impl Listener {
     pub fn bind(worker: &Worker) -> Result<Self> {
+        Self::bind_endpoint(&worker.endpoint)
+    }
+
+    pub fn bind_endpoint(endpoint: &str) -> Result<Self> {
         #[cfg(windows)]
         {
-            let pipe = secure_pipe(&worker.endpoint, true)?;
+            let pipe = secure_pipe(endpoint, true)?;
             Ok(Self {
-                name: worker.endpoint.clone(),
+                name: endpoint.to_owned(),
                 pipe,
             })
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let path = PathBuf::from(&worker.endpoint);
+            let path = PathBuf::from(endpoint);
             let socket = tokio::net::UnixListener::bind(&path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
             Ok(Self { socket, path })
@@ -502,18 +506,16 @@ impl Drop for Listener {
     }
 }
 
-async fn connect(worker: &Worker) -> Result<LocalStream> {
+async fn connect(endpoint: &str) -> Result<LocalStream> {
     #[cfg(windows)]
     {
         Ok(Box::new(
-            tokio::net::windows::named_pipe::ClientOptions::new().open(&worker.endpoint)?,
+            tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint)?,
         ))
     }
     #[cfg(unix)]
     {
-        Ok(Box::new(
-            tokio::net::UnixStream::connect(&worker.endpoint).await?,
-        ))
+        Ok(Box::new(tokio::net::UnixStream::connect(endpoint).await?))
     }
 }
 pub async fn read_request(stream: LocalStream) -> Result<(LocalStream, Request)> {
@@ -557,7 +559,7 @@ pub async fn call(worker: &Worker, request: &Request) -> Result<Reply> {
     if let Request::Mcp(op) = request {
         return McpClient::default().call(worker, op).await;
     }
-    exchange(worker, request, Duration::from_secs(5))
+    exchange(&worker.endpoint, request, Duration::from_secs(5))
         .await?
         .checked()
 }
@@ -573,9 +575,9 @@ impl Reply {
     }
 }
 
-async fn exchange(worker: &Worker, request: &Request, timeout: Duration) -> Result<Reply> {
+async fn exchange(endpoint: &str, request: &Request, timeout: Duration) -> Result<Reply> {
     tokio::time::timeout(timeout, async {
-        let mut stream = connect(worker).await?;
+        let mut stream = connect(endpoint).await?;
         let mut bytes = serde_json::to_vec(request)?;
         ensure!(bytes.len() < MAX_FRAME, "Worker request exceeds 16 MiB");
         bytes.push(b'\n');
@@ -598,6 +600,11 @@ const SUN_PATH_LIMIT: usize = 104;
 #[cfg(windows)]
 fn worker_endpoint(id: &str) -> Result<String> {
     Ok(format!(r"\\.\pipe\deepseek-code-session-{id}"))
+}
+
+/// Use the same private local transport for the lifetime of an interactive owner.
+pub fn frontend_endpoint(id: uuid::Uuid) -> Result<String> {
+    worker_endpoint(&id.to_string())
 }
 
 /// macOS keeps `TMPDIR` in a long per-user directory, which leaves no room for

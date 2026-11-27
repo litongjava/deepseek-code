@@ -81,15 +81,19 @@ pub struct McpClient {
 
 impl McpClient {
     pub async fn call(&mut self, host: &Worker, op: &McpOp) -> Result<Reply> {
+        self.call_endpoint(&host.endpoint, op).await
+    }
+
+    pub async fn call_endpoint(&mut self, endpoint: &str, op: &McpOp) -> Result<Reply> {
         let key = serde_json::to_vec(op)?;
         if let Some((generation, id, prior)) = &self.pending {
-            if generation == &host.id {
-                let reply = resolve(host, *id).await?;
+            if generation == endpoint {
+                let reply = resolve(endpoint, *id).await?;
                 if matches!(reply.mcp, Some(McpResult::MissingReceipt)) {
                     // A lost frame or an expired receipt. Fence a retry on an
                     // idle manager before applying the desired state again.
                     let probe = exchange(
-                        host,
+                        endpoint,
                         &Request::Mcp(McpOp::ProbeOwner),
                         Duration::from_secs(5),
                     )
@@ -107,19 +111,19 @@ impl McpClient {
             self.pending = None;
         }
         if !op.needs_receipt() {
-            return exchange(host, &Request::Mcp(op.clone()), Duration::from_secs(5))
+            return exchange(endpoint, &Request::Mcp(op.clone()), Duration::from_secs(5))
                 .await?
                 .checked();
         }
         let id = Uuid::new_v4();
-        self.pending = Some((host.id.clone(), id, key));
+        self.pending = Some((endpoint.to_owned(), id, key));
         let request = Request::McpTracked {
             id,
             operation: op.clone(),
         };
-        let reply = match exchange(host, &request, Duration::from_secs(30)).await {
+        let reply = match exchange(endpoint, &request, Duration::from_secs(30)).await {
             Ok(reply) => reply,
-            Err(_) => resolve(host, id).await?,
+            Err(_) => resolve(endpoint, id).await?,
         };
         ensure!(
             !matches!(
@@ -127,17 +131,22 @@ impl McpClient {
                 Some(McpResult::MissingReceipt | McpResult::Pending)
             ),
             "MCP operation outcome unknown for worker {} ({id})",
-            host.id
+            endpoint
         );
         self.pending = None;
         reply.checked()
     }
 }
 
-async fn resolve(host: &Worker, id: Uuid) -> Result<Reply> {
+async fn resolve(endpoint: &str, id: Uuid) -> Result<Reply> {
     let poll = async {
         loop {
-            let reply = exchange(host, &Request::McpOutcome { id }, Duration::from_secs(5)).await?;
+            let reply = exchange(
+                endpoint,
+                &Request::McpOutcome { id },
+                Duration::from_secs(5),
+            )
+            .await?;
             if !matches!(reply.mcp, Some(McpResult::Pending)) {
                 return Ok::<_, anyhow::Error>(reply);
             }
@@ -151,7 +160,7 @@ async fn resolve(host: &Worker, id: Uuid) -> Result<Reply> {
         .with_context(|| {
             format!(
                 "MCP operation outcome unknown for worker {} ({id})",
-                host.id
+                endpoint
             )
         })
 }

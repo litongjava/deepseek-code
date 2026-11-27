@@ -189,7 +189,9 @@ pub struct Session {
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
     mcp_owner: Arc<Mutex<McpOwner>>,
     mcp_client: Mutex<deepseek_code_core::services::session_worker::McpClient>,
-    mcp_lease: Arc<std::sync::Mutex<Option<deepseek_code_core::fs::OwnedFileLock>>>,
+    mcp_endpoint: std::sync::Mutex<Option<mcp_owner::FrontendEndpoint>>,
+    mcp_local_turn: Arc<Mutex<()>>,
+    mcp_lease: Arc<std::sync::Mutex<Option<mcp_owner::OwnerLease>>>,
     pub(crate) observe_mcp_worker: bool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
@@ -1292,6 +1294,8 @@ impl Session {
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
             mcp_owner: Arc::new(Mutex::new(McpOwner::None)),
             mcp_client: Default::default(),
+            mcp_endpoint: Default::default(),
+            mcp_local_turn: Default::default(),
             mcp_lease: Arc::default(),
             observe_mcp_worker: false,
             extension_watch: Mutex::new(None),
@@ -2515,6 +2519,9 @@ impl Session {
                 ));
             }
         };
+        // A peer may ask an idle interactive owner to yield. Keep its
+        // admission closed through the entire local turn, including teardown.
+        let _mcp_turn = self.mcp_local_turn.lock().await;
         drop(self.set_mcp_owner(McpOwner::Frontend).await?);
         let mut turn = match &completion.queued {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
