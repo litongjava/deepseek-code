@@ -68,6 +68,14 @@ pub struct Worker {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
+    ReloadPlugins,
+    Reconnect { server: String },
+    Add { config: crate::mcp::McpServerConfig },
+    Remove { server: String },
+    ImportLegacy { source: PathBuf, preview: bool },
+    Hosts,
+    Restart { server: String, host: Option<String> },
+    List,
     StopAll,
     State {
         server: Option<String>,
@@ -86,6 +94,9 @@ pub enum McpOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpResult {
+    Reloaded { notices: Vec<(String, String)> },
+    Json { value: serde_json::Value },
+    Message { text: String },
     Stopped,
     State {
         /// The `NAME  STATE` line `state_command` produced.

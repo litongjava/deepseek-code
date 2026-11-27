@@ -27,21 +27,6 @@ fn state(server: &McpServerStatus) -> String {
     }
 }
 
-/// Turn a server off, as this menu's Disable action does.
-pub(crate) async fn disable(session: &Session, server: &McpServerStatus) -> Result<()> {
-    session.mcp.set_server_enabled(&server.id, false).await?;
-    if server.running {
-        session.mcp.stop_server(&server.id).await?;
-    }
-    Ok(())
-}
-
-/// Turn a server on and start it, as this menu's Enable action does.
-pub(crate) async fn enable(session: &Session, server: &McpServerStatus) -> Result<()> {
-    session.mcp.set_server_enabled(&server.id, true).await?;
-    session.mcp.start_server(&server.id).await
-}
-
 /// A bundled preset nobody has turned on or changed; the reference CLI has
 /// no presets, so these stay out of the list.
 pub(crate) fn untouched_preset(server: &McpServerStatus) -> bool {
@@ -178,34 +163,9 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
             }
         }
         "Reconnect" => {
-            let stored = deepseek_code_core::mcp::states::load(&session.paths.data_dir);
-            let current =
-                deepseek_code_core::mcp::states::shown(&stored, &server.id, true);
-            let target = if current == deepseek_code_core::mcp::states::McpState::Off {
-                deepseek_code_core::mcp::states::McpState::User
-            } else {
-                current
-            };
-            let restart = async {
-                session
-                    .mcp_call(McpOp::State {
-                        server: Some(server.id.clone()),
-                        state: Some("off".into()),
-                    })
-                    .await?;
-                session
-                    .mcp_call(McpOp::State {
-                        server: Some(server.id.clone()),
-                        state: Some(target.label().into()),
-                    })
-                    .await
-            }
-            .await;
-            match restart {
-                Ok(McpResult::State { failure: Some(failure), .. }) => {
-                    eprintln!("Failed to reconnect to {}: {failure}", server.name)
-                }
-                Ok(_) => eprintln!("Reconnected to {}.", server.name),
+            match session.mcp_call(McpOp::Reconnect { server: server.id.clone() }).await {
+                Ok(McpResult::Message { .. }) => eprintln!("Reconnected to {}.", server.name),
+                Ok(_) => anyhow::bail!("Unexpected MCP reconnect reply"),
                 Err(error) => eprintln!("Failed to reconnect to {}: {error:#}", server.name),
             }
         }

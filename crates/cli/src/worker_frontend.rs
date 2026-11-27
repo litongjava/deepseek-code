@@ -316,6 +316,7 @@ async fn single_turn(
             jobs::WORKER_GENERATION_ENV.into(),
             format!("{}:{}", session.id, session.binding_state().generation),
         ));
+        session.set_mcp_owner(crate::session::McpOwner::Worker).await?;
         jobs::spawn_foreground(
             root,
             &executable,
@@ -361,6 +362,7 @@ async fn single_turn(
         let state = session.binding.read().context("Missing session binding")?;
         environment.push((crate::worker_binding::SNAPSHOT_ENV.into(), serde_json::to_string(state.as_ref())?));
         let id = uuid::Uuid::new_v4().to_string();
+        session.set_mcp_owner(crate::session::McpOwner::Worker).await?;
         let response = session_worker::call(
             &worker,
             &Request::Submit {

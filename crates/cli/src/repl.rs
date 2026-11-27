@@ -806,31 +806,8 @@ pub async fn handle(
             let Some(crate::args::Commands::Mcp { action }) = parsed.command else {
                 unreachable!()
             };
-            if let crate::args::McpCommands::State {
-                server: target,
-                state,
-            } = &action
-            {
-                // The worker that runs this session's turns owns the servers;
-                // the frontend must not reconcile or start a second manager.
-                use deepseek_code_core::services::session_worker::{McpOp, McpResult};
-                let result = session
-                    .mcp_call(McpOp::State {
-                        server: target.clone(),
-                        state: state.clone(),
-                    })
-                    .await?;
-                let McpResult::State { text, failure } = result else {
-                    anyhow::bail!("Session worker returned an unexpected MCP result");
-                };
-                if let Some(failure) = failure {
-                    command_eprintln!("{text}; it failed to start: {failure}");
-                } else {
-                    command_println!("{text}");
-                }
-            } else {
-                crate::mcp(paths, &action).await?;
-            }
+            let op = crate::mcp_commands::operation(&action)?;
+            crate::mcp_commands::display(session.mcp_call(op).await?)?;
         }
         "/end" | "/cancel" => {
             command_eprintln!("No unfinished prompt. Use /multiline to compose one.")

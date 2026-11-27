@@ -54,6 +54,7 @@ mod legacy_api_config;
 mod local_coordination;
 mod lsp_commands;
 mod magic_docs;
+mod mcp_commands;
 mod mcp_menu;
 mod mcp_prompts;
 mod mcp_states;
@@ -118,12 +119,12 @@ mod workflows_view;
 use anyhow::{bail, ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
 use deepseek_code_core::{
-    mcp::{McpServerConfig, McpServerManager},
+    mcp::McpServerManager,
     runtime::{RuntimePaths, SessionStore},
     skills::SkillsManager,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     io::{self, IsTerminal, Read, Write},
     path::PathBuf,
 };
@@ -1178,7 +1179,9 @@ async fn run(cli: &mut Cli) -> Result<()> {
     };
     // The interactive REPL delegates its turns to a session worker, whose
     // manager owns the MCP children. A direct print/SDK launch owns its own.
-    session.mark_worker_frontend(!single && !sdk_stream);
+    if !single && !sdk_stream {
+        session.observe_mcp_worker = true;
+    }
     if normal_frontend && resumed.is_some() && session.startup_provider.is_none() {
         // After observation or a rejected selection, raw startup options have no authority.
         cli.discard_binding_options();
@@ -2230,105 +2233,13 @@ async fn run(cli: &mut Cli) -> Result<()> {
 async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir)?;
     let manager = McpServerManager::new(paths.data_dir.join("mcp-servers.json"));
-    if let McpCommands::ImportLegacy { source, preview } = action {
-        return services::print(&manager.import_legacy(source, *preview).await?);
+    let op = mcp_commands::operation(action)?;
+    if !matches!(op, deepseek_code_core::services::session_worker::McpOp::ImportLegacy { .. }) {
+        manager.initialize().await?;
     }
-    manager.initialize().await?;
-    match action {
-        McpCommands::ImportLegacy { .. } => unreachable!(),
-        McpCommands::Hosts => services::print(&deepseek_code_core::mcp::control::hosts(
-            &services::context(paths)?,
-        )?)?,
-        McpCommands::Restart { name, host } => {
-            let owner = deepseek_code_core::mcp::control::restart(
-                &services::context(paths)?,
-                name,
-                host.as_deref(),
-            )
-            .await?;
-            services::print(&serde_json::json!({"restarted":name,"host":owner}))?;
-        }
-        McpCommands::List => {
-            let mut value = serde_json::to_value(manager.list_servers().await)?;
-            config::redact(&mut value);
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
-        McpCommands::State { server, state } => {
-            let text =
-                mcp_states::state_command(paths, &manager, server.as_deref(), state.as_deref())
-                    .await?;
-            println!("{text}");
-        }
-        McpCommands::Add {
-            transport,
-            headers,
-            name,
-            command,
-            args,
-        } => {
-            let transport = transport.as_deref().map(|t| match t {
-                "streamable-http" => "http",
-                "websocket" => "ws",
-                other => other,
-            });
-            ensure!(
-                matches!(transport, None | Some("stdio" | "http" | "sse" | "ws")),
-                "--transport must be stdio, http, sse or ws"
-            );
-            let remote = matches!(transport, Some("http" | "sse" | "ws"));
-            ensure!(
-                !remote || args.is_empty(),
-                "Remote MCP servers take a URL, not command arguments"
-            );
-            ensure!(
-                remote || headers.is_empty(),
-                "--header applies to http, sse and ws servers"
-            );
-            let headers = headers
-                .iter()
-                .map(|header| {
-                    header
-                        .split_once(':')
-                        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
-                        .filter(|(key, _)| !key.is_empty())
-                        .with_context(|| {
-                            format!("Header must look like \"Name: value\", not {header}")
-                        })
-                })
-                .collect::<Result<HashMap<_, _>>>()?;
-            ensure!(
-                manager.get_server(name).await.is_none(),
-                "MCP server already exists"
-            );
-            manager
-                .add_server(McpServerConfig {
-                    id: name.clone(),
-                    name: name.clone(),
-                    command: if remote {
-                        String::new()
-                    } else {
-                        command.clone()
-                    },
-                    args: args.clone(),
-                    env: HashMap::new(),
-                    cwd: None,
-                    enabled: true,
-                    transport: transport.filter(|_| remote).map(str::to_owned),
-                    url: remote.then(|| command.clone()),
-                    headers,
-                })
-                .await?;
-            eprintln!("Added {name}");
-        }
-        McpCommands::Remove { name } => {
-            if manager.get_server(name).await.is_none() {
-                bail!("MCP server not found");
-            }
-            manager.remove_server(name).await?;
-            eprintln!("Removed {name}");
-        }
-    }
-    manager.shutdown_all().await
+    let result = mcp_commands::execute(paths, &manager, op, false).await;
+    manager.shutdown_all().await?;
+    mcp_commands::display(result?)
 }
 
 /// How long a non-terminal stdin may stay silent before it is treated as empty.

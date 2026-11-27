@@ -554,9 +554,8 @@ pub(crate) fn space_mcp_state(current: McpState) -> McpState {
 
 /// Apply a state to the live session, starting or stopping the server.
 async fn set_mcp_state(
-    _paths: &RuntimePaths,
     session: &Session,
-    server: &deepseek_code_core::mcp::McpServerStatus,
+    id: &str,
     state: McpState,
 ) -> Result<()> {
     use deepseek_code_core::services::session_worker::{McpOp, McpResult};
@@ -564,7 +563,7 @@ async fn set_mcp_state(
     // otherwise the panel would start a second child for the same server.
     match session
         .mcp_call(McpOp::State {
-            server: Some(server.id.clone()),
+            server: Some(id.to_owned()),
             state: Some(state.label().to_owned()),
         })
         .await?
@@ -793,7 +792,7 @@ fn mcp_entries(model: &Model, show_disabled: bool) -> Vec<(Entry, Target)> {
                     title: mcp_title(server),
                     detail: String::new(),
                 },
-                Target::Mcp(server.name.clone()),
+                Target::Mcp(server.id.clone()),
             ));
         }
     }
@@ -813,7 +812,7 @@ fn mcp_entries(model: &Model, show_disabled: bool) -> Vec<(Entry, Target)> {
                         ),
                         detail: String::new(),
                     },
-                    Target::Mcp(server.name.clone()),
+                    Target::Mcp(server.id.clone()),
                 ));
             }
         }
@@ -1374,33 +1373,24 @@ pub(crate) async fn run(
                 changed = true;
                 model = load(paths, session, scope).await?;
             }
-            Target::Mcp(name) => {
-                let Some(row) = model.mcp.iter().find(|server| server.name == name) else {
+            Target::Mcp(id) => {
+                let Some(row) = model.mcp.iter().find(|server| server.id == id) else {
                     continue;
                 };
-                let (id, current) = (row.id.clone(), row.state);
-                let Some(server) = session
-                    .mcp
-                    .list_servers()
-                    .await
-                    .into_iter()
-                    .find(|server| server.id == id)
-                else {
-                    continue;
-                };
+                let (name, current) = (row.name.clone(), row.state);
                 match key {
                     Some(Key::Space) => {
-                        set_mcp_state(paths, session, &server, space_mcp_state(current)).await?;
+                        set_mcp_state(session, &id, space_mcp_state(current)).await?;
                     }
                     None => {
                         let choice = pick_mcp_state(&name, current)?;
                         frame.reflow();
                         match choice {
                             Some(McpStateChoice::State(state)) => {
-                                set_mcp_state(paths, session, &server, state).await?
+                                set_mcp_state(session, &id, state).await?
                             }
                             Some(McpStateChoice::Details) => {
-                                if let Some(row) = model.mcp.iter().find(|server| server.name == name) {
+                                if let Some(row) = model.mcp.iter().find(|server| server.id == id) {
                                     mcp_details(row, Utc::now())?;
                                 }
                                 frame.reflow();

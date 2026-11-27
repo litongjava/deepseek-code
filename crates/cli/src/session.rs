@@ -188,9 +188,7 @@ pub struct Session {
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
     mcp_owner: Mutex<McpOwner>,
-    /// This process is the interactive REPL frontend whose turns run in a
-    /// session worker, so that worker owns the only MCP server manager.
-    worker_frontend: std::sync::atomic::AtomicBool,
+    pub(crate) observe_mcp_worker: bool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
     pub(crate) startup_provider: Option<crate::config::StartupProvider>,
@@ -813,137 +811,17 @@ impl Session {
     }
 
     pub async fn reload_plugins(&self) -> Result<()> {
-        let context = crate::services::context(&self.paths)?;
-        if self.mcp_ready.get().is_some() {
-            for (id, status) in
-                deepseek_code_core::services::plugins::sync_mcp(&context, &self.mcp).await?
-            {
-                crate::compaction::notice(&format!("MCP: {id} {status}"));
-            }
-        }
-        deepseek_code_core::tools::configure_lsp_servers(
-            &self.workspace.to_string_lossy(),
-            deepseek_code_core::services::plugins::all_language_servers(&context)?,
-        )?;
-        Ok(())
-    }
-
-    pub(crate) async fn reconcile_mcp(&self) -> Result<()> {
-        match self.mcp.reconcile_config().await {
-            Ok(changes) => {
-                deepseek_code_core::mcp::invalidate_snapshots(&self.paths.data_dir, &self.id, &changes)?;
-                for (id, action) in changes {
-                    crate::compaction::notice(&format!("MCP: {id} {action}"));
-                }
-            }
-            Err(err) => crate::compaction::notice(&format!("MCP reload: {err:#}")),
+        let McpResult::Reloaded { notices } = self.mcp_call(McpOp::ReloadPlugins).await? else {
+            bail!("Unexpected MCP plugin reload reply");
+        };
+        for (id, action) in notices {
+            crate::compaction::notice(&format!("MCP: {id} {action}"));
         }
         Ok(())
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
         self.set_mcp_owner(McpOwner::Frontend).await
-    }
-
-    /// Whether this process must leave MCP server ownership to its worker.
-    fn worker_frontend_owns_mcp(&self) -> bool {
-        self.worker_frontend.load(std::sync::atomic::Ordering::Relaxed)
-            && self.coordination_mode
-                == crate::local_coordination::RegistrationMode::Automatic
-    }
-
-    /// Record whether interactive turns in this process run in a session worker.
-    pub(crate) fn mark_worker_frontend(&self, enabled: bool) {
-        self.worker_frontend
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// One MCP command. A worker-backed session sends it to the worker that
-    /// already owns the servers; every other session reconciles and runs it on
-    /// its own manager. Before the first worker turn there is no owner process,
-    /// so the frontend applies configuration without starting children.
-    pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
-        if matches!(op, McpOp::StopAll) {
-            self.set_mcp_owner(McpOwner::None).await?;
-            return Ok(McpResult::Stopped);
-        }
-        if self.worker_frontend_owns_mcp() {
-            if let Some(worker) = deepseek_code_core::services::session_worker::current(
-                &self.paths.data_dir,
-                &self.id,
-            )? {
-                if worker.status != "stopped"
-                    && !worker
-                        .child_pid
-                        .is_some_and(deepseek_code_core::services::session_worker::process_exited)
-                {
-                    let reply = deepseek_code_core::services::session_worker::call(
-                        &worker,
-                        &deepseek_code_core::services::session_worker::Request::Mcp(op),
-                    )
-                    .await?;
-                    return reply
-                        .mcp
-                        .context("Session worker returned no MCP result");
-                }
-            }
-            self.ensure_mcp().await?;
-            return self.mcp_op_local(op, false).await;
-        }
-        self.ensure_mcp().await?;
-        self.reconcile_mcp().await?;
-        self.mcp_op_local(op, true).await
-    }
-
-    /// Run one MCP operation on this process's manager. `start_servers` is
-    /// false only for a worker-backed frontend that does not own any children.
-    async fn mcp_op_local(&self, op: McpOp, start_servers: bool) -> Result<McpResult> {
-        match op {
-            McpOp::StopAll => unreachable!("handled by the ownership transition"),
-            McpOp::State { server, state } => {
-                let text = crate::mcp_states::state_command(
-                    &self.paths,
-                    &self.mcp,
-                    server.as_deref(),
-                    state.as_deref(),
-                )
-                .await?;
-                let mut failure = None;
-                if start_servers {
-                    if let Some(label) = state.as_deref() {
-                        let update: deepseek_code_core::mcp::states::McpState = label.parse()?;
-                        let query = server.as_deref().unwrap_or_default();
-                        let servers = self.mcp.list_servers().await;
-                        let found = servers
-                            .iter()
-                            .find(|server| server.id == query)
-                            .or_else(|| servers.iter().find(|server| server.name == query));
-                        if let Some(server) = found {
-                            if update == deepseek_code_core::mcp::states::McpState::Off {
-                                crate::mcp_menu::disable(self, server).await?;
-                            } else if let Err(error) = crate::mcp_menu::enable(self, server).await {
-                                failure = Some(format!("{error:#}"));
-                            }
-                        }
-                    }
-                }
-                Ok(McpResult::State { text, failure })
-            }
-            McpOp::ListServers => Ok(McpResult::Servers {
-                servers: self.mcp.list_servers().await,
-                tools: self.mcp.get_all_tools().await,
-            }),
-            McpOp::ListPrompts => Ok(McpResult::Prompts {
-                prompts: self.mcp.get_all_prompts().await,
-            }),
-            McpOp::GetPrompt {
-                server,
-                name,
-                arguments,
-            } => Ok(McpResult::Prompt {
-                text: self.mcp.get_prompt(&server, &name, arguments).await?,
-            }),
-        }
     }
 
     pub async fn context_window(&self) -> Option<u32> {
@@ -1403,7 +1281,7 @@ impl Session {
             mcp,
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
             mcp_owner: Mutex::new(McpOwner::None),
-            worker_frontend: std::sync::atomic::AtomicBool::new(false),
+            observe_mcp_worker: false,
             extension_watch: Mutex::new(None),
             startup_provider,
             has_saved_providers: paths.layout().config_file("config.json").is_file()
@@ -1589,6 +1467,7 @@ impl Session {
         let next_store = SessionStore::new(Arc::new(next.scoped_stores()));
         target.track_session(next);
         target.install(state)?;
+        self.detach_mcp_owner().await?;
         self.end_hooks("clear").await;
         self.binding = target.initialized()?;
         self.real_providers = Some(self.binding_state().providers.clone());
@@ -1730,6 +1609,7 @@ impl Session {
                 return Err(error.context("Resume did not apply; current session retained"));
             }
         };
+        if self.id != id { self.detach_mcp_owner().await?; }
         {
             let mut manager = self.providers.lock().await;
             manager.binding = (*target).clone();
@@ -1831,6 +1711,7 @@ impl Session {
                 return Err(error.context("Resume did not apply; current session retained"));
             }
         };
+        if self.id != id { self.detach_mcp_owner().await?; }
         self.providers.lock().await.binding = (*target).clone();
         self.binding = target;
         self.workspace = path.clone();
@@ -2353,10 +2234,9 @@ impl Session {
             && std::env::var("TERM").as_deref() != Ok("dumb")
             && !crate::display_commands::load(self)?.focus
         {
-            self.mark_worker_frontend(true);
             return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
         }
-        self.mark_worker_frontend(false);
+        self.set_mcp_owner(McpOwner::Frontend).await?;
         let mut next = prompt.to_owned();
         loop {
             let goal =
@@ -2805,7 +2685,6 @@ impl Session {
             eprintln!("IDE connection unavailable: {error:#}");
             self.ide.disconnect().await;
         }
-        self.sdk_cancellable(self.ensure_mcp()).await?;
         {
             use deepseek_code_core::mcp::extension_watch::ExtensionWatch;
             let mut guard = self.extension_watch.lock().await;
@@ -2817,9 +2696,7 @@ impl Session {
                 crate::compaction::notice("Skills reloaded");
             }
         }
-        self.reconcile_mcp().await?;
         self.sdk_cancellable(self.reload_plugins()).await?;
-        self.reconcile_mcp().await?;
         if cli.output_format == OutputFormat::StreamJson {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;

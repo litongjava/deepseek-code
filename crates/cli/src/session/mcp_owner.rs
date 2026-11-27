@@ -22,6 +22,7 @@ impl Session {
 
     pub(crate) async fn set_mcp_owner(&self, target: McpOwner) -> Result<()> {
         let mut owner = self.mcp_owner.lock().await;
+        self.discover_mcp_owner(&mut owner)?;
         self.transition_mcp_owner(&mut owner, target).await
     }
 
@@ -69,4 +70,87 @@ impl Session {
         }
         Ok(())
     }
+}
+
+impl Session {
+    fn discover_mcp_owner(&self, owner: &mut McpOwner) -> Result<()> {
+        if *owner == McpOwner::None
+            && self.observe_mcp_worker
+            && self.running_mcp_worker()?.is_some()
+        {
+            *owner = McpOwner::Worker;
+        }
+        Ok(())
+    }
+
+    // Leaving a conversation releases only this process's manager. A resident
+    // worker can continue its admitted work after the frontend detaches.
+    pub(super) async fn detach_mcp_owner(&self) -> Result<()> {
+        let mut owner = self.mcp_owner.lock().await;
+        if *owner == McpOwner::Frontend {
+            self.transition_mcp_owner(&mut owner, McpOwner::None)
+                .await?;
+        }
+        *owner = McpOwner::None;
+        Ok(())
+    }
+
+    pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
+        let mut owner = self.mcp_owner.lock().await;
+        if matches!(op, McpOp::StopAll) {
+            self.transition_mcp_owner(&mut owner, McpOwner::None)
+                .await?;
+            return Ok(McpResult::Stopped);
+        }
+        self.discover_mcp_owner(&mut owner)?;
+        if *owner == McpOwner::Worker {
+            if let Some(host) = self.running_mcp_worker()? {
+                return worker::call(&host, &Request::Mcp(op))
+                    .await?
+                    .mcp
+                    .context("Missing MCP reply");
+            }
+        }
+        self.transition_mcp_owner(&mut owner, McpOwner::Frontend)
+            .await?;
+        local_operation(&self.paths, &self.workspace, &self.id, &self.mcp, op).await
+    }
+}
+
+async fn reconcile(
+    manager: &deepseek_code_core::mcp::McpServerManager,
+    paths: &deepseek_code_core::runtime::RuntimePaths,
+    session: &str,
+) -> Result<()> {
+    match manager.reconcile_config().await {
+        Ok(changes) => {
+            deepseek_code_core::mcp::invalidate_snapshots(&paths.data_dir, session, &changes)?;
+            for (id, action) in changes {
+                crate::compaction::notice(&format!("MCP: {id} {action}"));
+            }
+        }
+        Err(err) => crate::compaction::notice(&format!("MCP reload: {err:#}")),
+    }
+    Ok(())
+}
+
+pub(crate) async fn local_operation(
+    paths: &deepseek_code_core::runtime::RuntimePaths,
+    workspace: &std::path::Path,
+    session: &str,
+    manager: &deepseek_code_core::mcp::McpServerManager,
+    op: McpOp,
+) -> Result<McpResult> {
+    reconcile(manager, paths, session).await?;
+    if matches!(op, McpOp::ReloadPlugins) {
+        let context = crate::services::context(paths)?;
+        let notices = deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?;
+        reconcile(manager, paths, session).await?;
+        deepseek_code_core::tools::configure_lsp_servers(
+            &workspace.to_string_lossy(),
+            deepseek_code_core::services::plugins::all_language_servers(&context)?,
+        )?;
+        return Ok(McpResult::Reloaded { notices });
+    }
+    crate::mcp_commands::execute(paths, manager, op, true).await
 }

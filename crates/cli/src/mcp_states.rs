@@ -9,7 +9,7 @@ use deepseek_code_core::runtime::RuntimePaths;
 use std::collections::BTreeMap;
 
 /// The configured server named by `query`, by id first and display name second.
-fn find<'a>(servers: &'a [McpServerStatus], query: &str) -> Option<&'a McpServerStatus> {
+pub(crate) fn find<'a>(servers: &'a [McpServerStatus], query: &str) -> Option<&'a McpServerStatus> {
     servers
         .iter()
         .find(|server| server.id == query)
