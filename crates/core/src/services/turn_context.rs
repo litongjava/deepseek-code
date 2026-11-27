@@ -64,7 +64,8 @@ pub fn locate(messages: &[Value]) -> Vec<Option<(String, usize)>> {
 }
 
 fn file(root: &Path, session: &str) -> PathBuf {
-    root.join("turn-context").join(format!("{session}.jsonl"))
+    root.join("tasks/turn-context")
+        .join(format!("{session}.jsonl"))
 }
 
 pub fn load(root: &Path, session: &str) -> Result<Vec<Entry>> {
@@ -78,6 +79,28 @@ pub fn load(root: &Path, session: &str) -> Result<Vec<Entry>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).with_context(|| format!("Parsing {}", path.display())))
         .collect()
+}
+
+/// Reconstruct the context attached to the selected durable window.
+pub(crate) fn replay(
+    shard: &crate::db::session_store::SessionDb,
+    boundary: Option<&str>,
+    messages: &[Value],
+) -> Result<(Vec<String>, Vec<Entry>)> {
+    shard.read(|r| replay_at(shard, r, boundary, messages))
+}
+
+pub(crate) fn replay_at(
+    shard: &crate::db::session_store::SessionDb,
+    r: &crate::db::session_store::SessionRead<'_>,
+    boundary: Option<&str>,
+    messages: &[Value],
+) -> Result<(Vec<String>, Vec<Entry>)> {
+    let mut saved = load(shard.scoped_stores().data_dir(), shard.id())?;
+    let (index, receipts) =
+        crate::services::memory_files::prompt::replay_at(r, boundary, messages)?;
+    saved.extend(receipts);
+    Ok((index, saved))
 }
 
 /// An entry placing `blocks` after the last user message of `messages`.
@@ -116,10 +139,16 @@ fn is_recall_block(block: &str) -> bool {
 pub fn resolve(entries: &[Entry], messages: &[Value]) -> Vec<Vec<String>> {
     locate(messages)
         .into_iter()
-        .map(|slot| match slot {
+        .zip(messages)
+        .map(|(slot, message)| match slot {
             Some((key, occurrence)) => entries
                 .iter()
-                .filter(|entry| entry.key == key && entry.occurrence == occurrence)
+                .filter(|entry| {
+                    if let Some(id) = entry.key.strip_prefix("message:") {
+                        return message["id"].as_str() == Some(id);
+                    }
+                    entry.key == key && entry.occurrence == occurrence
+                })
                 .flat_map(|entry| entry.blocks.iter().cloned())
                 .filter(|block| !is_recall_block(block))
                 .collect(),

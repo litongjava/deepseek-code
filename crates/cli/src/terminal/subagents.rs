@@ -444,14 +444,14 @@ mod tests {
         let mut editor = super::super::input::editor::PromptEditor::default();
         editor.set_subagents(context, parent);
         editor.set_agent_rows(Box::new(|| {
-            vec![crate::background_commands::Agent {
+            (1, vec![crate::background_commands::Agent {
                 address: crate::background_commands::HistoryAddress {session: "fixture-background".into(), store: String::new(), incarnation: String::new()},
                 agent_type: "general".into(),
                 description: "RUNNING_BACKGROUND_SENTINEL".into(),
                 started_ms: chrono::Utc::now().timestamp_millis() as u64,
                 output_tokens: 0,
                 tokens_estimated: false,
-            }]
+            }])
         }));
         editor.readline("IDLE_SENTINEL ❯ ").unwrap();
         super::super::title::background(false);

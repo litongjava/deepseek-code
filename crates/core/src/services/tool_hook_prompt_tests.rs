@@ -56,8 +56,8 @@ fn runner(root: &Path, provider: ResolvedProvider, extra: Value) -> HookRunner {
     hook.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
-    std::fs::write(
-        root.join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
         json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[hook]}]}}).to_string(),
     )
     .unwrap();
@@ -212,7 +212,7 @@ async fn builtin_retries_and_slow_responses_share_hook_deadline() {
         // A transient failure can retry within one evaluation.
         fixture.transient_failures.store(1, Ordering::Relaxed);
         let out = run(&runner, "retry-success").await;
-        assert!(out.warnings.is_empty() && !out.allow_permission);
+        assert!(out.warnings.is_empty() && !out.allow_permission, "{out:?}");
         assert_eq!(fixture.state.requests.lock().unwrap().len(), 2);
         // Retry-After exceeds the hook deadline; the retry sleep must be cancelled.
         *fixture.state.reply.lock().unwrap() = (429, "{}".into());
@@ -372,8 +372,8 @@ fn configuration_events_options_models_and_argument_contract() {
         "Unknown",
     ] {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             json!({"hooks":{event:[{"hooks":[{"type":"prompt","prompt":"check"}]}]}}).to_string(),
         )
         .unwrap();
@@ -396,8 +396,8 @@ fn configuration_events_options_models_and_argument_contract() {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             json!({"hooks":{"PreToolUse":[{"hooks":[value]}]}}).to_string(),
         )
         .unwrap();
@@ -445,7 +445,7 @@ async fn prompt_command_and_sdk_keep_deny_and_ask_priority() {
     let (url, state, server) = fixture().await;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("hook.cjs"), "process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:process.argv[2]}}));").unwrap();
-    std::fs::write(root.path().join("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node hook.cjs allow"},{"type":"command","command":"node hook.cjs ask"},{"type":"prompt","prompt":"check"}]}]}}).to_string()).unwrap();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node hook.cjs allow"},{"type":"command","command":"node hook.cjs ask"},{"type":"prompt","prompt":"check"}]}]}}).to_string()).unwrap();
     let provider = provider(&url, "openai");
     let runner = HookRunner::load(root.path(), root.path())
         .unwrap()
@@ -493,8 +493,8 @@ async fn permission_request_waits_for_prompt_guard_before_callback_approval() {
     *state.reply.lock().unwrap() = (200, "{\"ok\":false,\"reason\":\"guard denied\"}".into());
     state.delay.store(100, Ordering::Relaxed);
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
         json!({"hooks":{"PermissionRequest":[{"hooks":[{"type":"prompt","prompt":"check"}]}]}})
             .to_string(),
     )

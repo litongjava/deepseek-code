@@ -27,6 +27,7 @@ fn user() -> OpenAIMessage {
 }
 fn tools() -> Vec<crate::tools::ToolDefinition> {
     vec![crate::tools::ToolDefinition {
+        summary: None,
         name: "Read".into(),
         description: "CONTEXT_PRIVATE_TOOL".into(),
         input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),

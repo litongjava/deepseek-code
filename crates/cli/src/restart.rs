@@ -20,7 +20,8 @@ fn workspace_args(arguments: &mut Vec<OsString>, data_dir: &Path, workspace: Opt
 }
 
 pub fn fresh(cli: &Cli, data_dir: &Path, workspace: &Path) -> Launch {
-    let mut arguments = cli.launch_options(&["path", "data_dir", "coordination_dir"]);
+    let mut arguments =
+        cli.launch_options(&["path", "data_dir", "coordination_dir", "prompt_origin"]);
     // Only an explicit -C constrains a resumed session to the launch directory.
     workspace_args(
         &mut arguments,
@@ -28,7 +29,13 @@ pub fn fresh(cli: &Cli, data_dir: &Path, workspace: &Path) -> Launch {
         cli.path.as_ref().map(|_| workspace),
     );
     if let Some(prompt) = &cli.prompt {
-        arguments.extend(["--".into(), prompt.into()]);
+        use deepseek_code_core::services::background_sessions::PromptOrigin;
+        let origin = if cli.generated_continuation.is_some() {
+            PromptOrigin::Generated
+        } else {
+            cli.prompt_origin
+        };
+        arguments.extend(origin.arguments(prompt).map(OsString::from));
     }
     Launch {
         arguments,

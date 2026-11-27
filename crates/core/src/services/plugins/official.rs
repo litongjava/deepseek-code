@@ -410,7 +410,7 @@ mod tests {
         let skill = &commands["mixed:check"];
         assert!(skill
             .path
-            .starts_with(context.paths.data_dir.join("plugins/cache")));
+            .starts_with(context.paths.layout().plugins_cache()));
         assert!(!skill.content.contains("${CLAUDE_PLUGIN_ROOT}"));
         assert!(skill.render("target", "id").unwrap().contains("target"));
         let servers = language_servers(&context).unwrap();

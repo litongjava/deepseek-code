@@ -128,7 +128,11 @@ fn write_customization(data: &std::path::Path) {
         "TaskCreate":switch(),"TaskGet":switch(),"TaskUpdate":switch(),"TaskList":switch(),
         "Agent":switch(),"Workflow":switch(),"DeepSeekCode":switch()
     }});
-    std::fs::write(data.join("customization.json"), customization.to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/customization.json"),
+        customization.to_string(),
+    )
+    .unwrap();
 }
 
 struct CliFixture {
@@ -146,8 +150,8 @@ async fn start_cli_fixture(
     let fixture = Fixture::new(data.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -635,7 +639,7 @@ async fn workflow_task_get_returns_real_output_times_out_and_stops_without_cance
     );
     let task_directory = fixture
         .data
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(&session)
         .join(task_id);
     assert!(
@@ -661,7 +665,7 @@ async fn workflow_task_get_returns_real_output_times_out_and_stops_without_cance
     assert_eq!(cancelled["retrieval_status"], "success", "{cancelled}");
     let long_directory = fixture
         .data
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(&session)
         .join(long_id);
     assert!(
@@ -687,7 +691,11 @@ async fn workflow_task_get_returns_real_output_times_out_and_stops_without_cance
 
     // The real Workflow runner persisted the run it announced.
     let run_id = started["run_id"].as_str().unwrap();
-    let run_dir = fixture.data.join("workflows").join(&session).join(run_id);
+    let run_dir = fixture
+        .data
+        .join("tasks/workflows")
+        .join(&session)
+        .join(run_id);
     let status: Value =
         serde_json::from_slice(&std::fs::read(run_dir.join("status.json")).unwrap()).unwrap();
     assert_eq!(status["status"], "completed", "{status}");
@@ -816,7 +824,7 @@ async fn background_agent_task_get_reports_real_child_progress_report_and_comple
         "TaskGet did not return the child's report: {completed}"
     );
 
-    let job_directory = fixture.data.join("background-tasks").join(job_id);
+    let job_directory = fixture.data.join("tasks/background").join(job_id);
     assert!(
         !job_directory.join("cancel").exists(),
         "the TaskGet timeout cancelled the background agent"
@@ -927,7 +935,7 @@ impl Drop for GateRelease {
             .0
             .parent()
             .expect("the gate lives directly in the data directory");
-        if let Ok(entries) = std::fs::read_dir(data.join("background-tasks")) {
+        if let Ok(entries) = std::fs::read_dir(data.join("tasks/background")) {
             for entry in entries.flatten() {
                 let _ = std::fs::write(entry.path().join("cancel"), b"1");
             }
@@ -1014,7 +1022,7 @@ fn child_request_summary(requests: &[Value]) -> String {
 /// the text the pages are expected to observe. This observes actual state; it
 /// is not an elapsed-time guess that can flake under load.
 async fn wait_for_running_progress(data: &std::path::Path, job_id: &str) -> Result<(), String> {
-    let directory = data.join("background-tasks").join(job_id);
+    let directory = data.join("tasks/background").join(job_id);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let status = std::fs::read_to_string(directory.join("state.json"))
@@ -1190,7 +1198,7 @@ async fn background_agent_task_get_pages_while_a_prior_assistant_turn_exists() {
     // Completion still returns the child's final report.
     let completed = state.slot("paged_completed");
     if completed["status"] != "completed" {
-        let directory = fixture.data.join("background-tasks").join(job_id);
+        let directory = fixture.data.join("tasks/background").join(job_id);
         let job_state = std::fs::read_to_string(directory.join("state.json")).unwrap_or_default();
         let stderr = std::fs::read_to_string(directory.join("stderr.log")).unwrap_or_default();
         let stream = std::fs::read_to_string(directory.join("output.jsonl")).unwrap_or_default();
@@ -1263,7 +1271,7 @@ async fn background_agent_task_get_pages_while_a_prior_assistant_turn_exists() {
     let raw = std::fs::read_to_string(
         fixture
             .data
-            .join("background-tasks")
+            .join("tasks/background")
             .join(job_id)
             .join("output.jsonl"),
     )

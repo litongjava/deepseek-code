@@ -324,14 +324,14 @@ mod tests {
         let releaser =
             test_support::release_after(release, holder, std::time::Duration::from_secs(6));
         let private = store
-            .workspace(&id, &paths.data_dir.join("workspaces"))
+            .workspace(&id, &paths.data_dir.join("data/workspaces"))
             .unwrap();
         releaser.join().unwrap();
         assert_eq!(
             private,
             paths
                 .data_dir
-                .join("workspaces")
+                .join("data/workspaces")
                 .join(store.db.open_session(&id).unwrap().incarnation())
                 .canonicalize()
                 .unwrap()
@@ -414,9 +414,12 @@ mod tests {
             holder.join().unwrap();
         });
 
-        let workspaces = paths.data_dir.join("workspaces");
+        let workspaces = paths.data_dir.join("data/workspaces");
         let private = store.workspace(&id, &workspaces).unwrap();
-        assert!(private.starts_with(&workspaces));
+        assert!(private
+            .canonicalize()
+            .unwrap()
+            .starts_with(workspaces.canonicalize().unwrap()));
         releaser.join().unwrap();
         let resolved = store.workspace(&id, &workspaces).unwrap();
 
@@ -532,7 +535,7 @@ mod tests {
             let member = store.create(&first, "model", "provider").unwrap();
             let sibling = store.create(&first, "model", "provider").unwrap();
             Self {
-                workspaces: root.path().join("workspaces"),
+                workspaces: root.path().join("data/workspaces"),
                 _root: root,
                 first: first.canonicalize().unwrap(),
                 second: second.canonicalize().unwrap(),
@@ -610,9 +613,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(fixture.resolve(&fixture.parent), fixture.first);
-        assert_eq!(fixture.resolve(&fixture.member), fixture.first);
-        assert_eq!(fixture.resolve(&fixture.sibling), fixture.first);
+        assert_eq!(
+            fixture.resolve(&fixture.parent).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fixture.resolve(&fixture.sibling).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
 
         fixture
             .store
@@ -622,9 +634,18 @@ mod tests {
             .unwrap();
 
         // The real resolver is authoritative: only the member moved.
-        assert_eq!(fixture.resolve(&fixture.member), fixture.second);
-        assert_eq!(fixture.resolve(&fixture.parent), fixture.first);
-        assert_eq!(fixture.resolve(&fixture.sibling), fixture.first);
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.second.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fixture.resolve(&fixture.parent).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fixture.resolve(&fixture.sibling).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
         assert_eq!(fixture.project_id(&fixture.sibling), shared);
         assert_eq!(fixture.project_id(&fixture.parent), shared);
 
@@ -657,7 +678,7 @@ mod tests {
     #[test]
     fn authorized_move_drops_the_saved_shell_cwd_after_commit() {
         let fixture = RebindFixture::new();
-        let shell = fixture._root.path().join("shell-cwd");
+        let shell = fixture._root.path().join("state/shell-cwd");
         std::fs::create_dir_all(&shell).unwrap();
         std::fs::write(
             shell.join(&fixture.member),
@@ -689,13 +710,16 @@ mod tests {
             "/other/workspace",
             "another session's saved cwd must not be cleared"
         );
-        assert_eq!(fixture.resolve(&fixture.member), fixture.second);
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.second.canonicalize().unwrap()
+        );
     }
 
     #[test]
     fn a_failed_authorized_move_restores_the_saved_shell_cwd() {
         let fixture = RebindFixture::new();
-        let shell = fixture._root.path().join("shell-cwd");
+        let shell = fixture._root.path().join("state/shell-cwd");
         std::fs::create_dir_all(&shell).unwrap();
         let original = fixture.first.to_string_lossy().into_owned();
         std::fs::write(shell.join(&fixture.member), &original).unwrap();
@@ -753,15 +777,17 @@ mod tests {
         // reject the deliberately fake managed-worktree row.
         assert_eq!(fixture.project_id(&fixture.member), project);
         assert_eq!(
-            fixture.conversation(&fixture.member).1.as_deref(),
-            Some(original.as_str())
+            std::path::Path::new(fixture.conversation(&fixture.member).1.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            std::path::Path::new(&original).canonicalize().unwrap()
         );
     }
 
     #[test]
     fn a_shell_listing_failure_leaves_the_database_untouched() {
         let fixture = RebindFixture::new();
-        let shell = fixture._root.path().join("shell-cwd");
+        let shell = fixture._root.path().join("state/shell-cwd");
         // A non-directory makes the real listing fail before any mutation.
         std::fs::write(&shell, "not a directory").unwrap();
         let before = fixture.conversation(&fixture.member);
@@ -788,13 +814,16 @@ mod tests {
         );
         assert_eq!(fixture.conversation(&fixture.member), before);
         assert_eq!(std::fs::read_to_string(&shell).unwrap(), "not a directory");
-        assert_eq!(fixture.resolve(&fixture.member), fixture.first);
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
     }
 
     #[test]
     fn a_commit_cleanup_failure_keeps_the_database_move() {
         let fixture = RebindFixture::new();
-        let shell = fixture._root.path().join("shell-cwd");
+        let shell = fixture._root.path().join("state/shell-cwd");
         std::fs::create_dir_all(&shell).unwrap();
         std::fs::write(shell.join(&fixture.member), "/old/review-1").unwrap();
         std::fs::write(shell.join(&fixture.sibling), "/other/workspace").unwrap();
@@ -822,7 +851,10 @@ mod tests {
 
         // The database move stands, the active cache is not restored, and the
         // exact previous bytes remain in the reported backup.
-        assert_eq!(fixture.resolve(&fixture.member), fixture.second);
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.second.canonicalize().unwrap()
+        );
         assert!(!shell.join(&fixture.member).exists());
         let leftovers: Vec<String> = std::fs::read_dir(&shell)
             .unwrap()
@@ -938,6 +970,9 @@ mod tests {
             fixture.conversation(&fixture.member),
             (project_before, workspace_before)
         );
-        assert_eq!(fixture.resolve(&fixture.member), fixture.first);
+        assert_eq!(
+            fixture.resolve(&fixture.member).canonicalize().unwrap(),
+            fixture.first.canonicalize().unwrap()
+        );
     }
 }

@@ -87,7 +87,7 @@ pub(crate) fn lock_router(host: &Orchestrator, router: &str) -> Result<Option<Wa
         .context
         .paths
         .data_dir
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join("watchers");
     fs::create_dir_all(&directory)?;
     ensure!(

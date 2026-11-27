@@ -130,8 +130,9 @@ mod tests {
                 "while [ ! -f release ]; do sleep 0.02; done"
             };
             let command = format!("{wait}; exit {}", if mode == "failure" { 2 } else { 0 });
-            std::fs::write(
-                root.path().join("settings.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(&root.path())
+                    .config_file("settings.json"),
                 serde_json::json!({
                     "hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command,
                         "shell":if cfg!(windows) {"powershell"} else {"sh"}, "once":true,

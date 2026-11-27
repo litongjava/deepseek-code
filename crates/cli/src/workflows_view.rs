@@ -124,30 +124,47 @@ fn task_status(paths: &RuntimePaths, session: &str, task_id: &str) -> String {
 
 /// This session's runs, newest first.
 pub fn runs(paths: &RuntimePaths, session: &str) -> Vec<Run> {
-    let root = paths.data_dir.join("workflows").join(session);
-    let mut runs: Vec<Run> = std::fs::read_dir(&root).into_iter().flatten().flatten().filter_map(|entry| {
-        let dir = entry.path();
-        let meta: Value = serde_json::from_slice(&std::fs::read(dir.join("run.json")).ok()?).ok()?;
-        let ended: Option<Value> = std::fs::read(dir.join("status.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        let task_id = meta["task_id"].as_str().unwrap_or_default().to_owned();
-        let status = match &ended {
-            Some(ended) => ended["status"].as_str().unwrap_or("completed").to_owned(),
-            None => task_status(paths, session, &task_id),
-        };
-        let (phase, mut agents, logs) = progress(&dir);
-        // Agents still marked running in a run that ended were cut off.
-        if !matches!(status.as_str(), "running" | "unresponsive") {
-            for agent in agents.iter_mut().filter(|agent| agent.state == "running") { agent.state = "stopped".into(); }
-        }
-        Some(Run {
-            id: meta["run_id"].as_str().unwrap_or_default().to_owned(),
-            name: meta["name"].as_str().unwrap_or("workflow").to_owned(),
-            description: meta["description"].as_str().unwrap_or_default().to_owned(),
-            started_ms: meta["started_ms"].as_i64().unwrap_or_default(),
-            error: ended.as_ref().and_then(|ended| ended["error"].as_str().map(str::to_owned)),
-            task_id, status, phase, agents, logs, dir,
+    let root = paths.data_dir.join("tasks/workflows").join(session);
+    let mut runs: Vec<Run> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let meta: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("run.json")).ok()?).ok()?;
+            let ended: Option<Value> = std::fs::read(dir.join("status.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let task_id = meta["task_id"].as_str().unwrap_or_default().to_owned();
+            let status = match &ended {
+                Some(ended) => ended["status"].as_str().unwrap_or("completed").to_owned(),
+                None => task_status(paths, session, &task_id),
+            };
+            let (phase, mut agents, logs) = progress(&dir);
+            // Agents still marked running in a run that ended were cut off.
+            if !matches!(status.as_str(), "running" | "unresponsive") {
+                for agent in agents.iter_mut().filter(|agent| agent.state == "running") {
+                    agent.state = "stopped".into();
+                }
+            }
+            Some(Run {
+                id: meta["run_id"].as_str().unwrap_or_default().to_owned(),
+                name: meta["name"].as_str().unwrap_or("workflow").to_owned(),
+                description: meta["description"].as_str().unwrap_or_default().to_owned(),
+                started_ms: meta["started_ms"].as_i64().unwrap_or_default(),
+                error: ended
+                    .as_ref()
+                    .and_then(|ended| ended["error"].as_str().map(str::to_owned)),
+                task_id,
+                status,
+                phase,
+                agents,
+                logs,
+                dir,
+            })
         })
-    }).collect();
+    .collect();
     runs.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
     runs
 }
@@ -213,7 +230,11 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(data.path().to_path_buf()).unwrap();
         let session = uuid::Uuid::new_v4().to_string();
-        let dir = data.path().join("workflows").join(&session).join("wf_abc123def456");
+        let dir = data
+            .path()
+            .join("tasks/workflows")
+            .join(&session)
+            .join("wf_abc123def456");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("run.json"), json!({"run_id":"wf_abc123def456","task_id":"none","name":"review","description":"Review the diff","started_ms":chrono::Utc::now().timestamp_millis()}).to_string()).unwrap();
         for event in [

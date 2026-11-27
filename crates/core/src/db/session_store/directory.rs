@@ -171,15 +171,28 @@ impl Stores {
         current: &str,
         workspace: Option<&std::path::Path>,
     ) -> Result<Vec<ResumeEntry>> {
-        let workspace = workspace.map(std::fs::canonicalize).transpose()?;
-        let path = workspace.as_deref().map(|p| p.to_string_lossy());
-        let rows = self.global().list_sessions(DirectoryFilter {
-            archived: Some(false),
-            nonempty: true,
-            exclude: Some(current),
-            workspace: path.as_deref(),
-            ..Default::default()
-        })?;
+        let original = workspace.map(|p| p.to_string_lossy().into_owned());
+        let canonical = workspace
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.to_string_lossy().into_owned());
+        let query = |workspace: Option<&str>| {
+            self.global().list_sessions(DirectoryFilter {
+                archived: Some(false),
+                nonempty: true,
+                exclude: Some(current),
+                workspace,
+                ..Default::default()
+            })
+        };
+        let mut rows = query(original.as_deref())?;
+        if rows.is_empty() {
+            if let Some(canonical) = canonical
+                .as_deref()
+                .filter(|canonical| Some(*canonical) != original.as_deref())
+            {
+                rows = query(Some(canonical))?;
+            }
+        }
         Ok(rows
             .into_iter()
             .map(|row| ResumeEntry {

@@ -60,7 +60,7 @@ pub fn validate_idle<D: WorkerDirectory>(
     let workspace = context.db.parking_workspace(
         parent,
         session,
-        &context.paths.data_dir.join("workspaces"),
+        &context.paths.data_dir.join("data/workspaces"),
     )?;
     if let Some(job) = active(context, session)? {
         anyhow::bail!("Session has active task {}; use /tasks attach {} or cancel it before parking an idle session", job.id, job.id);
@@ -239,7 +239,7 @@ mod tests {
         let (_temp, context, parent, child) = fixture();
         assert!(validate_idle(&context, &parent, &child).is_ok());
         let id = uuid::Uuid::new_v4().to_string();
-        let directory = context.paths.data_dir.join("background-tasks").join(&id);
+        let directory = context.paths.data_dir.join("tasks/background").join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         let job = jobs::Job {
             id: id.clone(),

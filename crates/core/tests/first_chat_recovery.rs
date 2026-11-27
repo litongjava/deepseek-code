@@ -13,13 +13,14 @@ fn first_chat_recovery() -> Result<()> {
         Ok(())
     });
     let content = json!("first turn");
-    let result = fault.admit_chat_execution("publication", "model", Some(&content));
+    let result = fault.admit_chat_execution("publication", "model", Some(&content), "typed");
     let error = result.err().expect("first admission should fail");
     println!("First admission returned: {error:#}");
     assert_eq!(stores.conversation_detail("publication")?.1.len(), 1);
-    let (lease, sealed) = stores.admit_chat_execution("publication", "model", Some(&content))?;
+    let (lease, sealed) =
+        stores.admit_chat_execution("publication", "model", Some(&content), "typed")?;
     if !sealed {
-        stores.admit_chat_message("publication", "model", Some(&content))?;
+        stores.admit_chat_message("publication", "model", Some(&content), "typed")?;
     }
     drop(lease);
     let (_, messages) = stores.conversation_detail("publication")?;
@@ -27,7 +28,7 @@ fn first_chat_recovery() -> Result<()> {
     println!("Retry sealed_first={sealed}, messages={texts:?}");
     ensure!(messages.len() == 1 && sealed);
     let (_lease, sealed_again) =
-        stores.admit_chat_execution("publication", "model", Some(&content))?;
+        stores.admit_chat_execution("publication", "model", Some(&content), "typed")?;
     assert!(!sealed_again);
     Ok(())
 }
@@ -36,9 +37,9 @@ const RETRY: &str = "00000000-0000-4000-8000-000000000046";
 
 fn submit(stores: &Stores, prompt: &str) -> Result<bool> {
     let content = json!(prompt);
-    let (_lease, sealed) = stores.admit_chat_execution(RETRY, "model", Some(&content))?;
+    let (_lease, sealed) = stores.admit_chat_execution(RETRY, "model", Some(&content), "typed")?;
     if !sealed {
-        stores.admit_chat_message(RETRY, "model", Some(&content))?;
+        stores.admit_chat_message(RETRY, "model", Some(&content), "typed")?;
     }
     Ok(sealed)
 }
@@ -120,7 +121,10 @@ fn upgrade_discards_all_legacy_first_message_receipts() -> Result<()> {
         }
         drop(stores);
         let shard = rusqlite::Connection::open(
-            root.path().join("sessions").join(RETRY).join("session.db"),
+            root.path()
+                .join("data/sessions")
+                .join(RETRY)
+                .join("session.db"),
         )?;
         shard.execute_batch("INSERT INTO peripheral_settings SELECT 'first-chat-receipt.' || incarnation,digest FROM manifest,first_chat_receipts;
             DROP TRIGGER first_chat_text_edit; DROP TRIGGER first_chat_typed_insert;

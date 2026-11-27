@@ -10,6 +10,7 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
     }
     vec![
         super::ToolDefinition {
+            summary: Some("Create a named team led by this session".into()),
             name: "TeamCreate".into(),
             description: "Create a named team for coordinating multiple agents. Only one team may be led per session; teammates join through TeamSpawn.".into(),
             input_schema: json!({
@@ -24,11 +25,13 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
             }),
         },
         super::ToolDefinition {
+            summary: Some("Disband the team led by this session".into()),
             name: "TeamDelete".into(),
             description: "Disband the team led by this session. Fails while teammates are active; ask them to shut down first.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         },
         super::ToolDefinition {
+            summary: Some("Run named teammates concurrently and wait for all of them".into()),
             name: "TeamSpawn".into(),
             description: "Run named teammates concurrently. Each member gets an independent child session with the leader's tool permissions. Waits for every member; cancellation stops them all. Only the team leader may spawn.".into(),
             input_schema: json!({

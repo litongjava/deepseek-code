@@ -67,6 +67,7 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
         .filter(|agent| !(agent.command == "dcl" && std::env::var_os(NESTED_ENV).is_some()))
         .filter(|agent| super::lsp_servers::find_on_path(agent.command).is_some())
         .map(|agent| super::ToolDefinition {
+            summary: Some(format!("Delegate a self-contained task to {}", agent.name)),
             name: agent.tool.into(),
             description: format!(
                 "Delegate a self-contained task to {} (the `{}` CLI installed on this machine) and return its final answer. Use it for a second opinion, a review, or work the user explicitly wants {} to do. It runs non-interactively in the project directory: read-only by default, mode=edit lets it change files. It cannot ask questions, so give it the full context. Each call starts a new {} session unless session_id continues an earlier one from a previous result. Requires approval.",
@@ -115,6 +116,11 @@ fn model(input: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+// Claude and Codex accept the literal task after their option terminator.
+fn external_prompt(task: &str) -> [String; 2] {
+    ["--".into(), task.into()]
+}
+
 fn arguments(
     agent: &Agent,
     input: &Value,
@@ -141,7 +147,13 @@ fn arguments(
             if let Some(model) = model(input) {
                 args.extend(["--model".into(), model]);
             }
-            args.extend(["--".into(), prompt.into()]);
+            if agent.command == "dcl" {
+                args.extend(
+                    crate::services::background_sessions::PromptOrigin::Generated.arguments(prompt),
+                );
+            } else {
+                args.extend(external_prompt(prompt));
+            }
         }
         _ => {
             // Codex options belong to `exec` before its `resume` subcommand;
@@ -163,7 +175,7 @@ fn arguments(
                 args.push("resume".into());
                 args.push(session.clone());
             }
-            args.extend(["--".into(), prompt.into()]);
+            args.extend(external_prompt(prompt));
         }
     }
     Ok(args)
@@ -506,6 +518,22 @@ mod tests {
 
     fn codex() -> &'static Agent {
         &AGENTS[2]
+    }
+
+    #[test]
+    fn external_dcl_marks_its_directive_generated() {
+        let agent = AGENTS.iter().find(|agent| agent.command == "dcl").unwrap();
+        let args = arguments(
+            agent,
+            &serde_json::json!({}),
+            "--directive",
+            ".",
+            Path::new("out"),
+        )
+        .unwrap();
+        assert!(args.ends_with(
+            &crate::services::background_sessions::PromptOrigin::Generated.arguments("--directive")
+        ));
     }
 
     #[test]

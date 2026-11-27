@@ -2,7 +2,7 @@
 //! background tasks and recorded file checkpoints.
 use crate::session::Session;
 use anyhow::{bail, ensure, Context, Result};
-use deepseek_code_core::{db::message_repo, services::checkpoints};
+use deepseek_code_core::services::checkpoints;
 use serde_json::{json, Value};
 
 pub async fn handle(session: &mut Session, request: &Value) -> Option<Result<Value>> {

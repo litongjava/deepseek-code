@@ -105,16 +105,25 @@ impl ToolLoopExecutor {
         {
             return Some("Tool is not allowed by this agent definition".into());
         }
+        let memory_target = match self.memory_target(tool, input) {
+            Ok(target) => target,
+            Err(error) => return Some(error.to_string()),
+        };
         let manager = self.permission_manager.as_ref()?;
         let context = crate::permissions::PermissionContext {
             mcp_read_only: self.mcp_read_only_tools.contains(tool),
             tool_name: tool.into(),
-            tool_input: input.clone(),
+            tool_input: memory_target
+                .as_ref()
+                .map(|name| self.memory_permission_input(input, name))
+                .unwrap_or_else(|| input.clone()),
             conversation_id: self.conv_id.clone().unwrap_or_default(),
             user_id: None,
             workspace_path: Some(self.workspace_cwd.clone()),
         };
-        let result = if self.is_plan_document_tool(tool, input) {
+        let result = if memory_target.is_some() {
+            manager.check_memory_document_permission(&context)
+        } else if self.is_plan_document_tool(tool, input) {
             manager.check_plan_document_permission(&context)
         } else {
             let decision = manager.evaluate_permission(&context);
@@ -204,7 +213,8 @@ impl ToolLoopExecutor {
                     continue;
                 }
                 // The exact session plan document has a separate checked runtime-data scope.
-                if self.is_plan_document_tool(tool, input)
+                if self.memory_target(tool, input)?.is_some()
+                    || self.is_plan_document_tool(tool, input)
                     || self.permission_manager.as_ref().is_some_and(|manager| {
                         manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions
                             || (manager.get_mode() != crate::permissions::PermissionMode::PlanMode

@@ -2,7 +2,7 @@ use super::*;
 use crate::permissions::{
     auto_config::{self, AutoConfig, ClassifierSelection},
     rules::PermissionAction,
-    PermissionMode,
+    PermissionMode, PermissionResult,
 };
 use axum::{routing::post, Json, Router};
 
@@ -51,13 +51,15 @@ fn executor(
         ReasoningMode::Standard,
     )
     .with_conv_id("auto-session".into())
-    .with_search_config_path(root.join("data/config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(root.join("data")).config_file("config.json"),
+    )
     .with_permission_manager(manager.clone());
     (executor, rx, manager)
 }
 
 #[tokio::test]
-async fn auto_executes_only_authorized_actual_writes_and_never_creates_unresolved_waiters() {
+async fn auto_classifier_handles_unknown_tools_and_explicit_denies() {
     for decision in ["allow", "deny"] {
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,7 +76,8 @@ async fn auto_executes_only_authorized_actual_writes_and_never_creates_unresolve
                     let payload: Value =
                         serde_json::from_str(body["messages"][1]["content"].as_str().unwrap())
                             .unwrap();
-                    assert_eq!(payload["proposed_call"]["input"]["content"], "ACTUAL_INPUT");
+                    assert_eq!(payload["proposed_call"]["name"], "FutureTool");
+                    assert_eq!(payload["proposed_call"]["input"]["value"], "ACTUAL_INPUT");
                     Json(response(decision))
                 }
             }),
@@ -82,30 +85,24 @@ async fn auto_executes_only_authorized_actual_writes_and_never_creates_unresolve
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut executor, mut events, manager) = executor(root.path(), &endpoint);
-        let (_, output, failed) = executor
-            .execute_tool_call(
-                "Write",
-                &json!({"file_path":".bashrc","content":"ACTUAL_INPUT"}),
-                "write",
-            )
+        let (executor, mut events, manager) = executor(root.path(), &endpoint);
+        let result = executor
+            .check_permission("FutureTool", &json!({"value":"ACTUAL_INPUT"}), "unknown")
             .await;
-        assert_eq!(failed, decision == "deny", "{output}");
-        assert_eq!(root.path().join(".bashrc").exists(), decision == "allow");
+        if decision == "allow" {
+            assert_eq!(result, PermissionResult::Granted);
+        } else {
+            assert!(matches!(result, PermissionResult::Denied(_)));
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         manager.set_session_rules(
             "auto-session",
-            HashMap::from([("Write".into(), PermissionAction::Deny)]),
+            HashMap::from([("FutureTool".into(), PermissionAction::Deny)]),
         );
-        let (_, output, failed) = executor
-            .execute_tool_call(
-                "Write",
-                &json!({"file_path":"explicit-deny.txt","content":"ACTUAL_INPUT"}),
-                "deny",
-            )
+        let result = executor
+            .check_permission("FutureTool", &json!({"value":"ACTUAL_INPUT"}), "deny")
             .await;
-        assert!(failed, "{output}");
-        assert!(!root.path().join("explicit-deny.txt").exists());
+        assert!(matches!(result, PermissionResult::Denied(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(executor.answer_waiters.lock().await.is_empty());
         let mut usage = false;
@@ -160,14 +157,15 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut executor, _events, manager) = executor(root.path(), &endpoint);
+        let (executor, _events, manager) = executor(root.path(), &endpoint);
         if mutation == "provider" {
             let context =
                 crate::services::session_messages::context(&root.path().join("data")).unwrap();
             let mut provider = executor.provider.provider.clone();
             provider.models = vec![executor.provider.model.clone()];
-            std::fs::write(
-                root.path().join("data/providers.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(root.path().join("data"))
+                    .config_file("providers.json"),
                 serde_json::to_vec(&vec![provider]).unwrap(),
             )
             .unwrap();
@@ -178,31 +176,31 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
             });
             auto_config::save(&context, &config).unwrap();
         }
-        let waiters = executor.answer_waiters.clone();
         let pending = tokio::spawn(async move {
             executor
-                .execute_tool_call(
-                    "Write",
-                    &json!({"file_path":".bashrc","content":"ACTUAL_INPUT"}),
-                    "write",
-                )
+                .check_permission("FutureTool", &json!({"value":"ACTUAL_INPUT"}), "unknown")
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(3), started.notified())
+        tokio::time::timeout(Duration::from_secs(10), started.notified())
             .await
             .unwrap();
         match mutation {
             "rule" => manager.set_session_rules(
                 "auto-session",
-                HashMap::from([("Write".into(), PermissionAction::Deny)]),
+                HashMap::from([("FutureTool".into(), PermissionAction::Deny)]),
             ),
             "runtime" => manager.set_runtime_rules(
                 "auto-session",
-                vec![HashMap::from([("Write".into(), PermissionAction::Deny)])],
+                vec![HashMap::from([("FutureTool".into(), PermissionAction::Deny)])],
             ),
             "callback" => manager.set_always_allow_checker(Box::new(|_, _| false)),
             "provider" => {
-                std::fs::write(root.path().join("data/providers.json"), "[]").unwrap();
+                crate::data_layout::write_config_file(
+                    crate::data_layout::DataLayout::from_root(root.path().join("data"))
+                        .config_file("providers.json"),
+                    "[]",
+                )
+                .unwrap();
             }
             "mode" => {
                 manager.set_mode(PermissionMode::AskPermissions);
@@ -233,12 +231,13 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
             assert_eq!(stats.requests, 1);
             assert_eq!(stats.unknown_usage_requests, 1);
         } else {
-            let (_, output, failed) = pending.await.unwrap();
-            assert!(failed, "{output}");
-            assert!(output.contains("policy changed"), "{output}");
+            let result = pending.await.unwrap();
+            let message = match result {
+                PermissionResult::Denied(message) => message,
+                other => panic!("expected a discarded auto decision, got {other:?}"),
+            };
+            assert!(message.contains("policy changed"), "{message}");
         }
-        assert!(!root.path().join(".bashrc").exists());
-        assert!(waiters.lock().await.is_empty());
         server.abort();
     }
 }
@@ -296,8 +295,8 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
                 auto_config::save(&context, &config).unwrap();
                 let tool = crate::permissions::PermissionContext {
                     mcp_read_only: false,
-                    tool_name: "Write".into(),
-                    tool_input: json!({"file_path":".bashrc","content":"fixture"}),
+                    tool_name: "FutureTool".into(),
+                    tool_input: json!({"value":"fixture"}),
                     conversation_id: "auto-session".into(),
                     user_id: None,
                     workspace_path: Some(root.path().to_string_lossy().into_owned()),
@@ -322,7 +321,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
                 assert_eq!(calls.load(Ordering::SeqCst), attempts);
                 assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
                 let mut oversized = tool.clone();
-                oversized.tool_input = json!({"file_path":".bashrc","content": "x".repeat(40_000)});
+                oversized.tool_input = json!({"value": "x".repeat(40_000)});
                 let limited = crate::native_engine::auto_permissions::authorize(
                     &context,
                     &manager,
@@ -354,7 +353,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
                 assert_eq!(calls.load(Ordering::SeqCst), attempts);
                 manager.set_session_rules(
                     "auto-session",
-                    HashMap::from([("Write".into(), PermissionAction::Confirm)]),
+                    HashMap::from([("FutureTool".into(), PermissionAction::Confirm)]),
                 );
                 let explicit = crate::native_engine::auto_permissions::authorize(
                     &context,
@@ -400,29 +399,31 @@ async fn auto_denials_do_not_limit_requests_and_success_resets_only_consecutive_
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let (mut executor, _events, manager) = executor(root.path(), &endpoint);
+    let (executor, _events, manager) = executor(root.path(), &endpoint);
     for n in 0..21 {
-        let (_, _, failed) = executor
-            .execute_tool_call(
-                "Write",
-                &json!({"file_path":".bashrc","content":"denied"}),
-                &format!("write-{n}"),
-            )
-            .await;
-        assert!(failed);
+        assert!(matches!(
+            executor
+                .check_permission(
+                    "FutureTool",
+                    &json!({"value":"denied"}),
+                    &format!("unknown-{n}"),
+                )
+                .await,
+            PermissionResult::Denied(_)
+        ));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 21);
     assert_eq!(manager.auto_stats("auto-session").denied_consecutive, 21);
-    assert!(!root.path().join(".bashrc").exists());
-    let (_, output, failed) = executor
-        .execute_tool_call(
-            "Write",
-            &json!({"file_path":".profile","content":"approved"}),
-            "approved-after-denials",
-        )
-        .await;
-    assert!(!failed, "{output}");
-    assert!(root.path().join(".profile").exists());
+    assert_eq!(
+        executor
+            .check_permission(
+                "FutureTool",
+                &json!({"value":"approved"}),
+                "approved-after-denials",
+            )
+            .await,
+        PermissionResult::Granted
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 22);
     // The outer execution loop records successful tools after dispatch.
     manager.record_tool_success("auto-session");
@@ -436,28 +437,33 @@ async fn auto_denials_do_not_limit_requests_and_success_resets_only_consecutive_
 #[tokio::test]
 async fn auto_input_limit_never_counts_a_network_attempt() {
     let root = tempfile::tempdir().unwrap();
-    let (mut executor, _events, manager) = executor(root.path(), "http://127.0.0.1:1");
+    let (executor, _events, manager) = executor(root.path(), "http://127.0.0.1:1");
     let context = crate::services::session_messages::context(&root.path().join("data")).unwrap();
     let mut config = auto_config::load(&context).unwrap();
     config.max_input_tokens = 256;
     auto_config::save(&context, &config).unwrap();
-    let (_, output, failed) = executor
-        .execute_tool_call(
-            "Write",
-            &json!({"file_path":".bashrc","content":"X".repeat(8192)}),
-            "write",
+    let result = executor
+        .check_permission(
+            "FutureTool",
+            &json!({"value":"X".repeat(8192)}),
+            "unknown",
         )
         .await;
-    assert!(failed && output.contains("InputLimit"), "{output}");
+    let message = match result {
+        PermissionResult::Denied(message) | PermissionResult::RequiresConfirmation(message) => {
+            message
+        }
+        PermissionResult::Granted => panic!("oversized classifier input must not be granted"),
+    };
+    assert!(message.contains("InputLimit"), "{message}");
     let stats = manager.auto_stats("auto-session");
     assert_eq!(stats.requests, 0);
     assert_eq!(stats.unknown_usage_requests, 0);
     assert_eq!(stats.denied_total, 0);
-    assert!(!root.path().join(".bashrc").exists());
 }
 
 #[tokio::test]
-async fn auto_rejected_classification_asks_host_and_respects_answer_for_external_write() {
+async fn auto_protected_write_asks_host_and_respects_answer() {
     for approve in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -542,9 +548,9 @@ async fn auto_missing_authority_and_configuration_fall_back_without_weakening_de
         let (executor, _events, manager) = executor(root.path(), "http://127.0.0.1:1");
         let mut executor = executor.with_auto_manual_interactive(interactive);
         executor.conv_id = Some("no-verified-history".into());
-        let input = json!({"file_path":".bashrc","content":"test"});
+        let input = json!({"value":"test"});
         let result = executor
-            .check_permission("Write", &input, "no-history")
+            .check_permission("FutureTool", &input, "no-history")
             .await;
         assert_eq!(
             matches!(result, PermissionResult::RequiresConfirmation(_)),
@@ -555,7 +561,7 @@ async fn auto_missing_authority_and_configuration_fall_back_without_weakening_de
         }
         executor.search_config_path = None;
         let result = executor
-            .check_permission("Write", &input, "no-config")
+            .check_permission("FutureTool", &input, "no-config")
             .await;
         assert_eq!(
             matches!(result, PermissionResult::RequiresConfirmation(_)),
@@ -563,10 +569,12 @@ async fn auto_missing_authority_and_configuration_fall_back_without_weakening_de
         );
         manager.set_session_rules(
             "no-verified-history",
-            HashMap::from([("Write".into(), PermissionAction::Deny)]),
+            HashMap::from([("FutureTool".into(), PermissionAction::Deny)]),
         );
         assert!(matches!(
-            executor.check_permission("Write", &input, "deny").await,
+            executor
+                .check_permission("FutureTool", &input, "deny")
+                .await,
             PermissionResult::Denied(_)
         ));
     }

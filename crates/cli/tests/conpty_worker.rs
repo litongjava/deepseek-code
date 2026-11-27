@@ -31,6 +31,14 @@ mod windows_tests {
         );
     }
 
+    fn has_pwsh() -> bool {
+        deepseek_code_core::tools::find_shell("pwsh")
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("pwsh.exe"))
+    }
+
     #[derive(Default)]
     struct Model {
         actions: VecDeque<(String, String, Value)>,
@@ -476,6 +484,10 @@ mod windows_tests {
     }
     #[tokio::test]
     async fn model_conpty_console_write_resize_resume_timeout_stop_tree_and_records() {
+        if !has_pwsh() {
+            eprintln!("skipping: PowerShell 7 (pwsh.exe) is not installed");
+            return;
+        }
         let mut h = Harness::new_powershell().await;
         fixture(&h);
         h.turn("bypass", vec![load(), powershell_start("& .\\fixture.ps1")])
@@ -576,6 +588,10 @@ mod windows_tests {
 
     #[tokio::test]
     async fn model_conpty_eof_and_invalid_input_have_no_effect_then_normal_exit() {
+        if !has_pwsh() {
+            eprintln!("skipping: PowerShell 7 (pwsh.exe) is not installed");
+            return;
+        }
         let mut h = Harness::new_powershell().await;
         fixture(&h);
         h.turn("bypass", vec![load(), powershell_start("& .\\fixture.ps1")])
@@ -652,6 +668,10 @@ mod windows_tests {
 
     #[tokio::test]
     async fn model_conpty_owner_hard_exit_kills_gate_shell_and_descendant() {
+        if !has_pwsh() {
+            eprintln!("skipping: PowerShell 7 (pwsh.exe) is not installed");
+            return;
+        }
         let mut h = Harness::new_powershell().await;
         fixture(&h);
         h.turn("bypass", vec![load(), powershell_start("& .\\fixture.ps1")])
@@ -671,6 +691,10 @@ mod windows_tests {
 
     #[tokio::test]
     async fn model_conpty_exit_code_259_is_failed_not_permanently_running() {
+        if !has_pwsh() {
+            eprintln!("skipping: PowerShell 7 (pwsh.exe) is not installed");
+            return;
+        }
         let mut h = Harness::new_powershell().await;
         h.turn(
             "bypass",
@@ -719,7 +743,7 @@ mod windows_tests {
     #[tokio::test]
     async fn model_conpty_initialization_failure_is_terminal_without_starting_command() {
         let mut h = Harness::new().await;
-        let parent = h.data.join("shell-tasks").join(&h.host.session_id);
+        let parent = h.data.join("tasks/shell").join(&h.host.session_id);
         std::fs::create_dir_all(parent.parent().unwrap()).unwrap();
         std::fs::write(&parent, b"block directory creation").unwrap();
         h.turn(

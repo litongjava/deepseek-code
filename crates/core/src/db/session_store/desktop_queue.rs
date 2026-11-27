@@ -90,7 +90,9 @@ impl super::SessionRead<'_> {
 
 impl Stores {
     pub fn chat_execution_lease(&self, id: &str, model: &str) -> Result<ExecutionLease> {
-        Ok(self.admit_chat_execution(id, model, None)?.0)
+        Ok(self
+            .admit_chat_execution(id, model, None, "continuation")?
+            .0)
     }
 
     /// Returns whether creation already persisted the first user message.
@@ -99,18 +101,19 @@ impl Stores {
         id: &str,
         model: &str,
         first: Option<&serde_json::Value>,
+        origin: &str,
     ) -> Result<(ExecutionLease, bool)> {
         let row = self
             .global()
             .read_directory_row(id, |c| super::directory::one(c, id))?;
         let Some(row) = row else {
-            let options = super::conversations::first_chat_options(model, first)?;
+            let options = super::conversations::first_chat_options(model, first, origin)?;
             return self.create_chat_with_lease(id, options);
         };
         let session = self.open_listed(&row)?;
         let lease = session.acquire_execution()?;
         session.settle_abandoned(&lease)?;
-        let options = super::conversations::first_chat_options(model, first)?;
+        let options = super::conversations::first_chat_options(model, first, origin)?;
         let sealed_first = session.consume_sealed_first(options.first_message.as_ref())?;
         Ok((lease, sealed_first))
     }
@@ -175,6 +178,11 @@ impl DbManager {
                     &item.content,
                     &chrono::Utc::now().to_rfc3339(),
                     order,
+                )?;
+                super::state::set_local(
+                    tx,
+                    &format!("message-origin:{message}"),
+                    &serde_json::json!({"promptOrigin":item.prompt_origin}).to_string(),
                 )?;
                 tx.execute("UPDATE conversations SET message_count=(SELECT COUNT(*) FROM messages WHERE conversation_id=?1) WHERE id=?1",[id])?;
                 Ok(())

@@ -1268,6 +1268,9 @@ export function reconnectStream(
               onSystem(parsed.type, '', parsed);
             }
             if ((parsed.type === 'request_snapshot' || parsed.type === 'turn_timing') && onSystem) onSystem(parsed.type, '', parsed);
+            if (parsed.type === 'resource_alert' && onSystem) {
+              onSystem('resource_alert', parsed.summary || '', parsed);
+            }
             if (parsed.type === 'message_start' && onSystem) {
               onSystem('message_start', '', parsed);
             }
@@ -1885,6 +1888,8 @@ export async function sendMessageNative(
             } else if (event.type === 'request_snapshot') {
               flushPending();
               onSystem?.('request_snapshot', '', event);
+            } else if (event.type === 'resource_alert') {
+              onSystem?.('resource_alert', event.summary || '', event);
             } else if (event.type === 'message_start') {
               onSystem?.('message_start', '', { model: event.message?.model });
             } else if (event.type === 'message_delta') {
@@ -2376,6 +2381,10 @@ export async function sendMessage(
             continue;
           }
 
+          if (parsed.type === 'resource_alert') {
+            onSystem?.('resource_alert', parsed.summary || '', parsed);
+            continue;
+          }
           // Handle message_start with usage data
           if (parsed.type === 'context_reset') {
             flushPending();

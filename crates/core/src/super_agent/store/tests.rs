@@ -16,8 +16,8 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, TaskStore) {
 fn spec(title: &str) -> TaskSpec {
     TaskSpec {
         title: title.into(),
-        workspace: std::path::PathBuf::from("/workspace"),
-        targets: vec!["/workspace/code".into()],
+        workspace: std::path::PathBuf::from(crate::super_agent::TEST_WORKSPACE),
+        targets: vec![format!("{}/code", crate::super_agent::TEST_WORKSPACE)],
         goal: "Complete the task".into(),
         requirements: vec!["Keep behavior".into()],
         acceptance_criteria: vec![AcceptanceCriterion {
@@ -46,13 +46,15 @@ fn repo(task_id: &str) -> RepoTarget {
     RepoTarget {
         task_id: task_id.into(),
         repository_id: "repo-code".into(),
-        repo_root: "/workspace/code".into(),
-        git_common_dir: "/workspace/code/.git".into(),
-        target_path: "/workspace/code".into(),
+        repo_root: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
+        git_common_dir: format!("{}/code/.git", crate::super_agent::TEST_WORKSPACE).into(),
+        target_path: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
         target_branch: "develop".into(),
         task_branch: format!("agent/{task_id}"),
-        worktree_path: "/data/worktrees/task".into(),
-        working_path: "/data/worktrees/task".into(),
+        worktree_path: format!("{}/data/worktrees/task", crate::super_agent::TEST_WORKSPACE)
+            .into(),
+        working_path: format!("{}/data/worktrees/task", crate::super_agent::TEST_WORKSPACE)
+            .into(),
         base_commit: "base".into(),
         submitted_commit: Some("submitted".into()),
         reviewed_commit: Some("integrated".into()),
@@ -581,7 +583,7 @@ fn artifacts_are_written_atomically_and_names_cannot_escape_the_task_directory()
         .write_artifact(&task.task_id, "tests.log", b"passed\n")
         .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "passed\n");
-    assert!(path.starts_with(data.join("super-agent").join(&task.task_id)));
+    assert!(path.starts_with(data.join("tasks/super-agent").join(&task.task_id)));
     assert!(store
         .write_artifact(&task.task_id, "../escape", b"x")
         .is_err());
@@ -743,7 +745,11 @@ fn only_one_concurrent_task_can_hold_a_lock() {
         handles.push(std::thread::spawn(move || {
             let operation = format!("shared-lock-{}", task.task_id);
             store
-                .try_lock(&operation, "path:/workspace/scripts", &task.task_id)
+                .try_lock(
+                    &operation,
+                    &format!("path:{}/scripts", crate::super_agent::TEST_WORKSPACE),
+                    &task.task_id,
+                )
                 .map(|_| task.task_id)
         }));
     }
@@ -751,7 +757,11 @@ fn only_one_concurrent_task_can_hold_a_lock() {
         .into_iter()
         .map(|handle| handle.join().unwrap())
         .collect();
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
     assert_eq!(
         results
             .iter()
@@ -1061,8 +1071,8 @@ fn merge_plan(
         created_at: "2026-01-01T00:00:00Z".into(),
         repositories: vec![DeliveryTargetPlan {
             repository_id: "repo-code".into(),
-            repo_root: "/workspace/code".into(),
-            git_common_dir: "/workspace/code/.git".into(),
+            repo_root: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
+            git_common_dir: format!("{}/code/.git", crate::super_agent::TEST_WORKSPACE).into(),
             target_branch: "develop".into(),
             target_ref: "refs/heads/develop".into(),
             destination: DeliveryDestination::RefOnly,
@@ -1073,7 +1083,10 @@ fn merge_plan(
             old_oid: "base".into(),
             new_oid: "delivered-m".into(),
             review_stage: crate::super_agent::ReviewStage::FinalDelivery,
-            lock_key: "branch:/workspace/code/.git:refs/heads/develop".into(),
+            lock_key: format!(
+                "branch:{}/code/.git:refs/heads/develop",
+                crate::super_agent::TEST_WORKSPACE
+            ),
             lock_operation_id: "lock-op".into(),
             attempt: 1,
         }],
@@ -1397,7 +1410,7 @@ fn completion_rejects_an_unverified_non_git_snapshot() {
         .save_non_git_target(&NonGitTarget {
             task_id: record.task_id.clone(),
             path: data.join("scripts"),
-            snapshot_dir: data.join("super-agent").join("missing-snapshot"),
+            snapshot_dir: data.join("tasks/super-agent").join("missing-snapshot"),
             snapshot_manifest_json: "{}".into(),
             diff_ref: Some("diff-1".into()),
             status: NonGitStatus::Completed,
@@ -1466,7 +1479,7 @@ fn completion_with_a_real_pinned_non_git_target_requires_the_reviewed_bytes() {
         .create_task("router", non_git_spec(&target_dir), "create")
         .unwrap();
     let baseline = data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&task.task_id)
         .join("snapshots")
         .join("1");

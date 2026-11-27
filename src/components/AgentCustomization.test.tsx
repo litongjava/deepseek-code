@@ -9,7 +9,7 @@ import zh from '../locales/zh.json';
 
 vi.mock('../api/customization', () => ({ customizationApi: { load: vi.fn(), save: vi.fn() } }));
 
-const empty = { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [], tool_loading: {} };
+const empty = { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, tool_summaries: {}, custom_tools: [], tool_loading: {} };
 
 const builtin = (name: string, description: string, core: boolean, enabled: boolean, onDemand = true) => ({
   name, description, core, default_enabled: core, default_on_demand: true, enabled, on_demand: onDemand,

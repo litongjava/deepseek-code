@@ -51,8 +51,8 @@ impl Rule {
                 return Ok(Self { tool: tool.into(), content: Some(content.to_ascii_lowercase()) });
             }
             ensure!(
-                matches!(tool, "Bash" | "Read" | "Edit" | "Write" | "MultiEdit"),
-                "Patterns are supported for Bash, Read, Edit, Write, MultiEdit and WebFetch(domain:...) only"
+                matches!(tool, "Bash" | "Python" | "Read" | "Edit" | "Write" | "MultiEdit"),
+                "Patterns are supported for Bash, Python, Read, Edit, Write, MultiEdit and WebFetch(domain:...) only"
             );
             let mut decoded = String::new();
             let mut chars = content.chars().peekable();
@@ -67,7 +67,7 @@ impl Rule {
                     decoded.push(ch);
                 }
             }
-            if tool != "Bash" {
+            if !matches!(tool, "Bash" | "Python") {
                 glob::Pattern::new(&decoded.replace('\\', "/"))?;
                 ensure!(
                     !decoded.replace('\\', "/").split('/').any(|p| p == ".."),
@@ -136,6 +136,14 @@ impl Rule {
                 return *action != PermissionAction::Allow;
             }
             return shell_matches(pattern, command.trim());
+        }
+        if self.tool == "Python" {
+            // Code is not a shell command: a narrow prefix cannot audit it, but
+            // `Python(*)` must still match ordinary code containing parentheses.
+            let Some(code) = context.tool_input["code"].as_str() else {
+                return false;
+            };
+            return shell_matches(pattern, code.trim());
         }
         let Some(path) = context.tool_input["file_path"]
             .as_str()
@@ -455,5 +463,28 @@ mod tests {
         let context = context("Write", json!({"file_path":"link/new.txt"}), root.path());
         assert!(!rule.matches(&context, &PermissionAction::Allow));
         assert!(rule.matches(&context, &PermissionAction::Deny));
+    }
+
+    #[test]
+    fn python_rules_match_code_and_bare_python_grants_the_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let call = context(
+            "Python",
+            json!({"code":"import os; print(os.getcwd())"}),
+            root.path(),
+        );
+        let all = Rule::parse("Python(*)").unwrap();
+        assert!(all.matches(&call, &PermissionAction::Allow));
+        let bare = Rule::parse("Python").unwrap();
+        assert!(bare.matches(&call, &PermissionAction::Allow));
+        let prefix = Rule::parse("Python(import *)").unwrap();
+        assert!(prefix.matches(&call, &PermissionAction::Allow));
+        let other = Rule::parse("Python(def *)").unwrap();
+        assert!(!other.matches(&call, &PermissionAction::Allow));
+        assert!(!all.matches(
+            &context("Bash", json!({"command":"python -c 1"}), root.path()),
+            &PermissionAction::Allow
+        ));
+        assert!(Rule::parse("Python(print(1))").is_err());
     }
 }

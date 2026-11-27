@@ -202,7 +202,7 @@ pub fn insert_message(
     Ok(())
 }
 
-pub(super) fn prepare_user_message(content:&serde_json::Value)->Result<(String,serde_json::Value)> {
+pub fn prepare_user_message(content: &serde_json::Value) -> Result<(String, serde_json::Value)> {
     // Keep ordinary text (including historical empty messages) compatible.
     let normalized = if content.is_string() {
         content.clone()
@@ -361,6 +361,10 @@ pub struct ToolCallRow {
     pub is_error: bool,
     pub sort_order: i64,
 }
+
+/// A row the model loop retains to write a replay segment. It names the
+/// storage shape without reading display content.
+pub type ReplayToolRow = ToolCallRow;
 
 /// Records the note the user added when approving a stored call.
 pub fn set_tool_call_note(conn: &Connection, tool_call_id: &str, note: &str) -> Result<()> {

@@ -19,7 +19,7 @@ async fn sdk_callbacks_run_before_first_turn_and_rewrite_actual_tool_input() {
         let server = Server::start(anthropic, Mode::Approval).await;
         let data = root.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(data.join("settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo COMMAND_START_CONTEXT"}]}]}}).to_string()).unwrap();
+        deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo COMMAND_START_CONTEXT"}]}]}}).to_string()).unwrap();
         let mut client = Client::start(root.path(), &server, &["--permission-mode", "ask"]);
         initialize(
             &mut client,

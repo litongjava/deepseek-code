@@ -92,20 +92,11 @@ async fn respond(
         !tools.contains(&"TaskOutput".to_owned()),
         "TaskOutput is still advertised: {tools:?}"
     );
-    // TaskGet is deferred: absent from the default request, loaded by the
-    // ToolLoad call at step 1, and carried from step 2 on.
-    if index == 0 {
-        assert!(
-            !tools.contains(&"TaskGet".to_owned()),
-            "TaskGet must start on demand: {tools:?}"
-        );
-    }
-    if index >= 2 && !fixture.foreground {
-        assert!(
-            tools.contains(&"TaskGet".to_owned()),
-            "TaskGet missing after ToolLoad: {tools:?}"
-        );
-    }
+    // TaskGet is resident by default and available on every request.
+    assert!(
+        tools.contains(&"TaskGet".to_owned()),
+        "TaskGet must be resident by default: {tools:?}"
+    );
     let frames = match index {
         0 => tool_call_frame(
             "call-bash",
@@ -136,10 +127,10 @@ async fn respond(
             tool_call_frame("call-search", "ToolLoad", &json!({"names":["TaskGet"]}))
         }
         2 => {
-            // The model sees one text line; the TaskGet schema travels in `tools`.
+            // TaskGet is resident by default; ToolLoad confirms it is already available.
             assert_eq!(
                 last_tool_content(&body),
-                Some("Loaded TaskGet. Available from the next request."),
+                Some("Already available: TaskGet."),
                 "{body}"
             );
             let started = fixture
@@ -310,8 +301,8 @@ async fn run_shell(fixture: Fixture, opt_out: OptOut) {
     // Keep the raw historical snapshot below the automatic compaction threshold
     // so the fixture can inspect replay and then request compaction explicitly.
     let context_window = if fixture.base64 { 1_000_000 } else { 128_000 };
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         json!([{
             "id":"fixture","name":"Fixture","base_url":base,"api_key":"fixture-only",
             "api_format":"openai","enabled":true,
@@ -341,7 +332,8 @@ async fn run_shell(fixture: Fixture, opt_out: OptOut) {
             String::from_utf8_lossy(&result.stderr)
         );
         let file: Value =
-            serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(data.join("config/settings.json")).unwrap())
+                .unwrap();
         assert_eq!(file["summarize_long_command_output"], false);
         cmd.args(["--input-format", "stream-json"]);
     }
@@ -720,8 +712,8 @@ async fn paged_run(raw_size: Option<usize>) {
         .route("/v1/chat/completions", post(respond_paged))
         .with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         json!([{
             "id":"page-fixture","name":"Page Fixture","base_url":base,"api_key":"fixture-only",
             "api_format":"openai","enabled":true,

@@ -175,15 +175,19 @@ mod tests {
 
 /// Whether `/vim` is on: `"editorMode": "vim"` in `<data dir>/settings.json`.
 pub fn enabled(data_dir: &std::path::Path) -> bool {
-    std::fs::read_to_string(data_dir.join("settings.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|settings| settings["editorMode"] == "vim")
+    std::fs::read_to_string(
+        deepseek_code_core::data_layout::DataLayout::from_root(&data_dir)
+            .config_file("settings.json"),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .is_some_and(|settings| settings["editorMode"] == "vim")
 }
 
 /// Saves the editor mode, keeping every other setting.
 pub fn set_enabled(data_dir: &std::path::Path, on: bool) -> anyhow::Result<()> {
-    let path = data_dir.join("settings.json");
+    let path = deepseek_code_core::data_layout::DataLayout::from_root(&data_dir)
+        .config_file("settings.json");
     let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),

@@ -1229,9 +1229,8 @@ mod tests {
         let data_a = temp.path().join("data-a");
         let data_b = temp.path().join("data-b");
         for (dir, enabled) in [(&data_a, "false"), (&data_b, "true")] {
-            fs::create_dir_all(dir)?;
-            fs::write(
-                dir.join("settings.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(dir).config_file("settings.json"),
                 format!(r#"{{"localCoordination":{{"enabled":{enabled}}}}}"#),
             )?;
         }

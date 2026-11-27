@@ -96,9 +96,9 @@ async fn manual_and_model_invocations_read_resources_and_preserve_custom_overrid
         let data = temp.path().join(format!("data-{index}"));
         if index < 2 {
             // Built-in skills default to off; this fixture exercises dataviz.
-            std::fs::create_dir_all(&data).unwrap();
+            std::fs::create_dir_all(data.join("config")).unwrap();
             std::fs::write(
-                data.join("skill-states.json"),
+                data.join("config/skill-states.json"),
                 r#"{"skills":{"dataviz":"user"}}"#,
             )
             .unwrap();

@@ -50,12 +50,23 @@ pub enum Picked {
 }
 
 fn with_raw<T>(run: impl FnOnce(&mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<T>) -> io::Result<T> {
+    crate::terminal::release_handoff();
     let raw = terminal::is_raw_mode_enabled()?;
     if !raw {
         terminal::enable_raw_mode()?;
     }
     let mut reader = super::paste_input::Reader::new()?;
     let result = run(&mut || reader.next(std::time::Duration::from_millis(100)));
+    // A picker returns on key-down. Give the terminal time to deliver the
+    // matching key-up, then discard it: a half-arrived escape sequence read
+    // by the next picker looks like a bare Esc and closes the panel.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    for _ in 0..64 {
+        match reader.next(std::time::Duration::ZERO) {
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
     drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
@@ -82,6 +93,18 @@ impl Picker<'_> {
         with_raw(|next| self.drive_keys(keys, true, next))
     }
 
+    /// Like `run_keys_filling`, but reuses `screen` so a caller that stays on
+    /// the same frame only repaints the lines that changed. The caller must
+    /// call `Screen::reflow` after another view has drawn over the frame.
+    pub fn run_keys_filling_with(&self, keys: &[Key], screen: &mut Screen) -> io::Result<Picked> {
+        with_raw(|next| self.drive_keys_with(keys, true, screen, next, true))
+    }
+
+    /// Like `run_keys`, drawing onto the caller's `screen`.
+    pub fn run_keys_with(&self, keys: &[Key], screen: &mut Screen) -> io::Result<Picked> {
+        with_raw(|next| self.drive_keys_with(keys, false, screen, next, false))
+    }
+
     fn drive(&self, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Option<usize>> {
         Ok(match self.drive_keys(&[], false, next_event)? {
             Picked::Entry(index) => Some(index),
@@ -91,6 +114,21 @@ impl Picker<'_> {
 
     fn drive_keys(&self, keys: &[Key], fill: bool, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Picked> {
         let mut screen = Screen::default();
+        self.drive_keys_with(keys, fill, &mut screen, next_event, false)
+    }
+
+    /// `keep_frame_on_key` leaves the drawn frame in place when a caller-owned
+    /// key is returned. A caller that redraws the same screen then repaints
+    /// only the changed rows; erasing first would leave the rest blank because
+    /// the screen still remembers the old frame.
+    fn drive_keys_with(
+        &self,
+        keys: &[Key],
+        fill: bool,
+        screen: &mut Screen,
+        next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
+        keep_frame_on_key: bool,
+    ) -> io::Result<Picked> {
         let mut query = String::new();
         let mut selected = self.selected;
         loop {
@@ -120,7 +158,9 @@ impl Picker<'_> {
                 _ => None,
             };
             if let Some(extra) = extra.filter(|extra| keys.contains(extra)) {
-                screen.suspend()?;
+                if !keep_frame_on_key {
+                    screen.suspend()?;
+                }
                 return Ok(Picked::Key(extra, shown.get(selected).copied()));
             }
             match key.code {
@@ -268,18 +308,37 @@ pub fn details(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io:
     details_at(heading, rows, hint, keys, false)
 }
 
-/// Like [`details`], but opening at the top of `rows` instead of their end.
-pub fn details_from_top(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io::Result<Option<char>> {
-    details_at(heading, rows, hint, keys, true)
+/// Like [`details`], drawing onto the caller's `screen` so a shared
+/// top-anchored frame keeps every tab on row 0.
+pub fn details_from_top_with(
+    heading: &str,
+    rows: &[String],
+    hint: &str,
+    keys: &[char],
+    screen: &mut Screen,
+) -> io::Result<Option<char>> {
+    details_at_with(heading, rows, hint, keys, true, screen)
 }
 
 fn details_at(heading: &str, rows: &[String], hint: &str, keys: &[char], from_top: bool) -> io::Result<Option<char>> {
+    let mut screen = Screen::default();
+    details_at_with(heading, rows, hint, keys, from_top, &mut screen)
+}
+
+fn details_at_with(
+    heading: &str,
+    rows: &[String],
+    hint: &str,
+    keys: &[char],
+    from_top: bool,
+    screen: &mut Screen,
+) -> io::Result<Option<char>> {
     let raw = terminal::is_raw_mode_enabled()?;
     if !raw {
         terminal::enable_raw_mode()?;
     }
     let mut reader = super::paste_input::Reader::new()?;
-    let result = show_details(heading, rows, hint, keys, from_top, &mut || reader.next(std::time::Duration::from_millis(100)));
+    let result = show_details(heading, rows, hint, keys, from_top, screen, &mut || reader.next(std::time::Duration::from_millis(100)));
     drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
@@ -342,9 +401,9 @@ fn show_details(
     hint: &str,
     keys: &[char],
     from_top: bool,
+    screen: &mut Screen,
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Option<char>> {
-    let mut screen = Screen::default();
     let mut offset: Option<usize> = None;
     let result = loop {
         let (cols, height) = crate::terminal::size();
@@ -517,9 +576,32 @@ mod tests {
     fn details_close_or_return_their_keys() {
         let rows = vec!["Status:   running".to_owned()];
         let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))];
-        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut || Ok(keys.pop())).unwrap(), Some('x'));
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut Screen::default(), &mut || Ok(keys.pop())).unwrap(), Some('x'));
         let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
-        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut || Ok(keys.pop())).unwrap(), None);
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], false, &mut Screen::default(), &mut || Ok(keys.pop())).unwrap(), None);
+    }
+
+    #[test]
+    fn shared_top_anchored_screen_keeps_each_tab_at_row_zero() {
+        let entries = entries();
+        let first = Picker { heading: "Tab one", subtitle: None, entries: &entries, search: false, hint: "", selected: 0 };
+        let (lines, cursor) = first.lines(&[0, 1, 2], 0, "", 80, 24, true);
+        let mut screen = Screen::top_anchored();
+        let mut out = Vec::new();
+        screen.draw_top_anchored_to(&mut out, &lines, cursor, 3, 24).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b[1;1H"), "{output:?}");
+        assert!(!output.contains("\r\n"), "{output:?}");
+
+        // Another tab draws over the same frame: its header also lands on row 0
+        // and the taller tab's leftover rows are cleared.
+        let second = Picker { heading: "Tab two", subtitle: None, entries: &entries, search: false, hint: "", selected: 0 };
+        let (lines, cursor) = second.lines(&[0], 0, "", 80, 24, true);
+        let mut out = Vec::new();
+        screen.draw_top_anchored_to(&mut out, &lines, cursor, 3, 24).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.starts_with("\x1b[1;1H"), "{output:?}");
+        assert!(output.contains("\x1b[J"), "{output:?}");
     }
 
     #[test]

@@ -89,8 +89,9 @@ impl<D: AgentSettings> AgentCatalog for D {
     }
     fn backup_definitions(&self, root: &Path) -> Result<PathBuf> {
         if !D::SPLIT {
-            let backups = root.join("backups");
+            let backups = crate::data_layout::DataLayout::from_root(&root).backups();
             std::fs::create_dir_all(&backups)?;
+            let backups = backups.canonicalize()?;
             let path = backups.join(format!("agents-{}.sqlite3", uuid::Uuid::new_v4()));
             self.directory_read(|c| {
                 c.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
@@ -98,10 +99,11 @@ impl<D: AgentSettings> AgentCatalog for D {
             })?;
             return Ok(path);
         }
-        let directory = root
-            .join("backups")
+        let directory = crate::data_layout::DataLayout::from_root(&root)
+            .backups()
             .join(format!("agents-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory)?;
+        let directory = directory.canonicalize()?;
         let file = directory.join("global.db");
         self.directory_read(|c| {
             c.execute("VACUUM INTO ?1", [file.to_string_lossy().as_ref()])?;

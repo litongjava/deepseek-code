@@ -5,9 +5,11 @@
 //! synced) before the database exists, the schema and matching domain row are
 //! committed in one immediate transaction under `schema.lock`, and any
 //! inconsistent marker/database pair is reported instead of repaired.
+#![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(unix)]
+use super::paths;
 use super::{
-    paths,
     types::{
         is_uuid, Activity, CoordResult, CoordinationError, Lifecycle, NativePath, OwnerRecord,
         ParticipantKind, ParticipantRole, Registration,
@@ -15,10 +17,13 @@ use super::{
     CoordinationPaths,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+#[cfg(unix)]
 use std::{
     ffi::OsStr,
     fs::File,
     io::{Read, Write},
+};
+use std::{
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1982,6 +1987,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_coordination_registry_roundtrip() -> CoordResult<()> {
         let temp = tempfile::tempdir().unwrap();
@@ -2049,6 +2055,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_coordination_two_roots_isolate() -> CoordResult<()> {
         let temp = tempfile::tempdir().unwrap();
@@ -2075,6 +2082,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_coordination_two_data_dirs_share_root() -> CoordResult<()> {
         let temp = tempfile::tempdir().unwrap();
@@ -2131,6 +2139,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_coordination_redaction_and_native_paths() -> CoordResult<()> {
         use base64::{engine::general_purpose::STANDARD, Engine};
@@ -2217,6 +2226,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_coordination_unsupported_schema_and_corrupt_db() -> CoordResult<()> {
         let temp = tempfile::tempdir().unwrap();

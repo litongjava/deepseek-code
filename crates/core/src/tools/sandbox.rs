@@ -22,7 +22,7 @@ pub fn settings(data_dir: &Path, workspace: &Path) -> Value {
     let mut merged = json!({});
     let mut web_fetch_domains = Vec::new();
     for source in [
-        data_dir.join("settings.json"),
+        crate::data_layout::DataLayout::from_root(&data_dir).config_file("settings.json"),
         workspace.join(".claude/settings.json"),
         workspace.join(".claude/settings.local.json"),
     ] {
@@ -672,7 +672,7 @@ mod network_tests {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workspace.path().join(".claude")).unwrap();
-        std::fs::write(data.path().join("settings.json"), r#"{"sandbox":{"enabled":true,"network":{"allowedDomains":["github.com"]}},"permissions":{"allow":["WebFetch(domain:docs.rs)","Bash(ls)"]}}"#).unwrap();
+        crate::data_layout::write_config_file(data.path().join("config/settings.json"), r#"{"sandbox":{"enabled":true,"network":{"allowedDomains":["github.com"]}},"permissions":{"allow":["WebFetch(domain:docs.rs)","Bash(ls)"]}}"#).unwrap();
         std::fs::write(workspace.path().join(".claude/settings.json"), r#"{"sandbox":{"network":{"allowedDomains":["*.npmjs.org"],"deniedDomains":["x.npmjs.org"]}}}"#).unwrap();
         let policy = policy(
             &settings(data.path(), workspace.path()),
@@ -805,8 +805,8 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workspace.path().join(".claude")).unwrap();
-        std::fs::write(
-            data.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            data.path().join("config/settings.json"),
             r#"{"sandbox":{"enabled":true,"network":"deny"}}"#,
         )
         .unwrap();

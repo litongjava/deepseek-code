@@ -29,6 +29,7 @@ pub mod hook_callbacks;
 pub mod session_hooks;
 pub mod session_environment;
 pub mod shell_settings;
+pub mod python_settings;
 pub mod wsl;
 pub mod teams;
 pub mod lifecycle_events;
@@ -47,6 +48,7 @@ pub mod magic_docs;
 pub mod agents;
 pub mod agent_import;
 pub mod diagnostics;
+pub mod resource_monitor;
 pub mod runtime_status;
 pub mod doctor;
 pub mod feedback;
@@ -66,6 +68,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
 pub mod workspace_files;
+pub mod memory_files;
 pub mod subagents;
 
 pub trait Credentials: Send + Sync {

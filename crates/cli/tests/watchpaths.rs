@@ -12,7 +12,7 @@ async fn standalone_session_start_watchpaths_dispatches_filechanged_and_exits_cl
     let script = dir.path().join("hook.cjs");
     std::fs::write(&script, r#"const fs=require('fs'),path=require('path');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{const v=JSON.parse(s);if(v.hook_event_name==='SessionStart'){console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'SessionStart',watchPaths:[path.join(v.cwd,'dynamic.env')]}}));}else{fs.appendFileSync('events.jsonl',JSON.stringify(v)+'\n');console.log(JSON.stringify({continue:false,decision:'block',systemMessage:'file observer notice',hookSpecificOutput:{hookEventName:'FileChanged'}}));}});"#).unwrap();
     let command = format!("node \"{}\"", script.display());
-    std::fs::write(data.join("settings.json"),json!({"hooks":{
+    deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"),json!({"hooks":{
         "SessionStart":[{"hooks":[{"type":"command","command":command}]}],
         "FileChanged":[{"matcher":"^dynamic\\.env$","hooks":[{"type":"command","command":command}]}]
     }}).to_string()).unwrap();

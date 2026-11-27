@@ -29,10 +29,11 @@ pub fn enabled(cli: bool, env: Option<&str>, setting: Option<bool>, full_access:
 
 impl Policy {
     pub fn enabled_at(&self, root: &Path) -> bool {
-        let setting = fs::read(root.join("settings.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|v| v["requestRecording"]["enabled"].as_bool());
+        let setting =
+            fs::read(crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v["requestRecording"]["enabled"].as_bool());
         enabled(
             self.cli,
             std::env::var("DEEPSEEK_CODE_RECORD_REQUESTS")
@@ -65,6 +66,7 @@ pub fn valid_component(id: &str) -> bool {
 
 fn directory(path: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -306,7 +308,7 @@ impl Attempt {
         let (Some(context), Some(session)) = (&options.recording, &options.session_id) else {
             return Ok(None);
         };
-        let root = context.root.join("request-records");
+        let root = context.root.join("diagnostics/request-records");
         let lock = if options.suggestion_guard.is_some() {
             // Waiting for optional recording must yield to a new turn or timeout.
             let lock = open_root_lock(&root)?;
@@ -616,7 +618,7 @@ pub async fn send(
 /// Read-only plain-text inspection, also works after the conversation is deleted.
 pub fn list(root: &Path, session: &str) -> Result<String> {
     anyhow::ensure!(valid_component(session), "Invalid session ID");
-    let dir = root.join("request-records").join(session);
+    let dir = root.join("diagnostics/request-records").join(session);
     if !dir.is_dir() {
         return Ok(format!("No request records for session {session}. Recording may have been disabled.\nDirectory: {}\n", dir.display()));
     }
@@ -698,7 +700,7 @@ impl CompactionRecord {
             let (Some(context), Some(session)) = (&options.recording, &options.session_id) else {
                 return Ok(None);
             };
-            let root = context.root.join("request-records");
+            let root = context.root.join("diagnostics/request-records");
             let (dir, lease, lock) = acquire(&root, session, root_lock(&root)?)?;
             let sequence = next_sequence(&dir, true)?;
             let path = dir.join(format!("compaction-{sequence:04}.json"));

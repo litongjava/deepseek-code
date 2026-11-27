@@ -137,8 +137,10 @@ pub struct ComposioManager {
 
 impl ComposioManager {
     pub fn new(data_dir: PathBuf) -> Self {
-        let config_path = data_dir.join("composio_config.json");
-        let session_store_path = data_dir.join("composio_sessions.json");
+        let config_path = crate::data_layout::DataLayout::from_root(&data_dir)
+            .config_file("composio_config.json");
+        let session_store_path =
+            crate::data_layout::DataLayout::from_root(&data_dir).composio_sessions();
 
         let mut manager = Self {
             client: Client::builder()

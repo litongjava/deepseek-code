@@ -1,7 +1,6 @@
 #[cfg(test)]
 use crate::fixture_sql::FixtureSql;
 use super::{Cli, RuntimePaths, Selection, Session};
-use crate::binding_store;
 use serde_json::json;
 use std::ffi::OsString;
 
@@ -104,6 +103,7 @@ async fn rejected_relaunch_keeps_only_the_winning_token_cap() {
         &session,
         &session.id,
         "probe",
+        crate::session::TurnOrigin::User("probe"),
         &active,
     )
     .unwrap();

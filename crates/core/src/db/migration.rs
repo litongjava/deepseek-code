@@ -336,21 +336,25 @@ pub fn migrate_session_manager(db_path: &Path, conn: &Connection) -> Result<()> 
 }
 
 pub fn check_and_migrate(data_dir: &Path, conn: &Connection) -> Result<()> {
-    let migrated_marker = data_dir.join(".migrated");
+    let layout = crate::data_layout::DataLayout::from_root(&data_dir);
+    let migrated_marker = layout.migrated_marker();
     if migrated_marker.exists() {
         return Ok(());
     }
 
-    let store_path = data_dir.join("conversations");
+    let store_path = layout.legacy_data().join("conversations");
     if store_path.exists() {
         migrate_conversation_store(&store_path, conn)?;
     }
 
-    let session_db_path = data_dir.join("claude-desktop.json");
+    let session_db_path = layout.legacy_data().join("claude-desktop.json");
     if session_db_path.exists() {
         migrate_session_manager(&session_db_path, conn)?;
     }
 
+    if let Some(directory) = migrated_marker.parent() {
+        fs::create_dir_all(directory)?;
+    }
     fs::write(&migrated_marker, "")?;
 
     Ok(())

@@ -56,7 +56,7 @@ pub fn repair(
             .map(|p| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>(),
     )?;
-    std::fs::create_dir_all(data_root.join("background-tasks"))?;
+    std::fs::create_dir_all(data_root.join("tasks/background"))?;
     // The same exclusive claim used by the worker prevents a concurrent launch.
     // Idle persistent workers also own this claim and must be shut down first.
     let _claim = super::background_sessions::SessionClaim::acquire(data_root, id, &uuid::Uuid::new_v4().to_string())
@@ -148,7 +148,8 @@ pub(crate) fn repair_in(
         "UPDATE conversation_worktrees SET project_id=?1 WHERE conversation_id=?2",
         params![project_id, id],
     )?;
-    let (resolved, _) = workspace::resolve_workspace(&tx, &data_root.join("workspaces"), id, None)?;
+    let (resolved, _) =
+        workspace::resolve_workspace(&tx, &data_root.join("data/workspaces"), id, None)?;
     if let Some(managed) = managed {
         ensure!(
             resolved == managed,
@@ -300,7 +301,7 @@ mod tests {
         assert_eq!(inspect(&store.db, &id).unwrap().id, original.id);
         assert!(!paths
             .data_dir
-            .join("background-tasks")
+            .join("tasks/background")
             .join(format!("session-{id}.claim"))
             .exists());
     }
@@ -309,7 +310,7 @@ mod tests {
     fn worker_claim_blocks_repair_and_is_never_removed() {
         let (_root, paths, store, id, source) = fixture();
         distrust(&store, &id);
-        std::fs::create_dir_all(paths.data_dir.join("background-tasks")).unwrap();
+        std::fs::create_dir_all(paths.data_dir.join("tasks/background")).unwrap();
         let owner = super::super::background_sessions::SessionClaim::acquire(
             &paths.data_dir,
             &id,
@@ -322,7 +323,7 @@ mod tests {
             std::fs::read_to_string(
                 paths
                     .data_dir
-                    .join("background-tasks")
+                    .join("tasks/background")
                     .join(format!("session-{id}.claim"))
             )
             .unwrap(),
@@ -397,7 +398,7 @@ mod tests {
         assert_eq!(fixed.workspace, prepared.path);
         assert_eq!(
             store
-                .workspace(&fork, &paths.data_dir.join("workspaces"))
+                .workspace(&fork, &paths.data_dir.join("data/workspaces"))
                 .unwrap(),
             prepared.path
         );

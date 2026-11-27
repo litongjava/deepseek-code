@@ -148,9 +148,9 @@ const initialState = {
   permissionMode: (() => {
     try {
       const saved = localStorage.getItem('permission_mode');
-      if (saved == null) return 'accept_edits';
-      return ['ask_permissions', 'accept_edits', 'plan_mode', 'bypass_permissions', 'dont_ask'].includes(saved) ? saved : 'ask_permissions';
-    } catch { return 'accept_edits'; }
+      if (saved == null) return 'auto';
+      return ['ask_permissions', 'accept_edits', 'plan_mode', 'bypass_permissions', 'dont_ask', 'auto'].includes(saved) ? saved : 'auto';
+    } catch { return 'auto'; }
   })() as string,
   reasoningMode: localStorage.getItem('model_effort') || 'off',
 };

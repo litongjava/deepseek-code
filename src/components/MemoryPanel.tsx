@@ -107,7 +107,7 @@ export function MemoryPanel() {
         <details className="space-y-3 rounded-lg border border-deepseek-border p-3">
           <summary>导入 / 导出本机记忆</summary>
           <p className="text-xs text-deepseek-textSecondary">支持旧 CLI 导出的 JSON。导入前自动备份；冲突会取消整批导入。仅影响个人记忆。</p>
-          <button className={buttonClass} disabled={busy || config?.backend_url !== 'local'} onClick={() => void run(async () => {
+          <button className={buttonClass} disabled={busy} onClick={() => void run(async () => {
             const archive = await memoryApi.exportArchive();
             const url = URL.createObjectURL(new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' }));
             const link = document.createElement('a'); link.href = url; link.download = 'personal-memory.json'; link.click();
@@ -116,12 +116,12 @@ export function MemoryPanel() {
           })}>导出 JSON</button>
           <textarea aria-label="记忆导入 JSON" rows={5} className={inputClass} value={archiveText} onChange={e => { setArchiveText(e.target.value); setPreviewed(false); }} placeholder="粘贴记忆 JSON 文件内容" />
           <div className="flex gap-2">
-            <button className={buttonClass} disabled={busy || !archiveText.trim() || config?.backend_url !== 'local'} onClick={() => void run(async () => {
+            <button className={buttonClass} disabled={busy || !archiveText.trim()} onClick={() => void run(async () => {
               setPreviewed(false);
               const report = await memoryApi.importArchive(JSON.parse(archiveText), true);
               setPreviewed(true); setNotice(`预览：新增 ${report.imported} 条，跳过 ${report.skipped} 条。尚未写入。`);
             })}>预览导入</button>
-            <button className={buttonClass} disabled={busy || !previewed || config?.backend_url !== 'local'} onClick={() => void run(async () => {
+            <button className={buttonClass} disabled={busy || !previewed} onClick={() => void run(async () => {
               const report = await memoryApi.importArchive(JSON.parse(archiveText), false);
               setPreviewed(false); await refresh(query);
               setNotice(`已导入 ${report.imported} 条，跳过 ${report.skipped} 条。备份：${report.backup}`);
@@ -143,10 +143,10 @@ export function MemoryPanel() {
               <span className="flex items-center gap-1"><Clock size={12} />{new Date(item.created_at).toLocaleString()}</span>
               {item.similarity_score != null && <span>匹配度 {(item.similarity_score * 100).toFixed(0)}%</span>}
               <span>{item.metadata?.type === 'manual' ? '手动添加' : '对话记忆'}</span>
-              {config?.backend_url === 'local' && <span className="ml-auto flex gap-1">
+              <span className="ml-auto flex gap-1">
                 <button aria-label="编辑这条记忆" title="编辑" disabled={busy} onClick={() => setEditing({ id: item.id, content: item.content, importance: item.importance })} className="rounded p-1 hover:bg-deepseek-hover"><Pencil size={14} /></button>
                 <button aria-label="删除这条记忆" title="删除" disabled={busy} onClick={() => removeItem(item)} className="rounded p-1 text-red-500 hover:bg-deepseek-hover"><Trash2 size={14} /></button>
-              </span>}
+              </span>
             </div>
             {editing?.id === item.id ? <form onSubmit={e => { e.preventDefault(); void saveEdit(); }} className="space-y-3">
               <textarea aria-label="编辑记忆内容" maxLength={32000} required rows={4} value={editing.content} onChange={e => setEditing({ ...editing, content: e.target.value })} className={inputClass} />
@@ -164,9 +164,6 @@ export function MemoryPanel() {
         <div role="dialog" aria-modal="true" aria-label="长期记忆设置" className="w-full max-w-md space-y-4 rounded-xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between"><h3 className="font-semibold">长期记忆设置</h3><button aria-label="关闭设置" onClick={() => setShowConfig(false)}><X size={18} /></button></div>
           <label className="flex items-center justify-between text-sm">启用长期记忆<input type="checkbox" checked={draftConfig.enabled} onChange={e => setDraftConfig({ ...draftConfig, enabled: e.target.checked })} /></label>
-          <label className="block space-y-1 text-sm"><span>存储方式</span><select value={draftConfig.backend_url === 'local' ? 'local' : 'remote'} onChange={e => setDraftConfig({ ...draftConfig, backend_url: e.target.value === 'local' ? 'local' : 'http://127.0.0.1:8765' })} className={inputClass}><option value="local">本机存储（推荐）</option><option value="remote">MemEx HTTP 服务</option></select></label>
-          {draftConfig.backend_url !== 'local' && <label className="block space-y-1 text-sm"><span>服务地址</span><input type="url" value={draftConfig.backend_url} onChange={e => setDraftConfig({ ...draftConfig, backend_url: e.target.value })} className={inputClass} /></label>}
-          <p className="text-xs text-deepseek-textSecondary">切换存储方式不会搬迁或删除已有记忆。使用 HTTP 服务时，记忆会发送到该地址。</p>
           <label className="block space-y-1 text-sm"><span>默认检索条数（1–50）</span><input type="number" min="1" max="50" value={draftConfig.search_top_k} onChange={e => setDraftConfig({ ...draftConfig, search_top_k: Number(e.target.value) })} className={inputClass} /></label>
           <label className="block space-y-1 text-sm"><span>最低重要性（0–1）</span><input type="number" min="0" max="1" step="0.1" value={draftConfig.min_importance_threshold} onChange={e => setDraftConfig({ ...draftConfig, min_importance_threshold: Number(e.target.value) })} className={inputClass} /></label>
           {error && <p role="alert" className="text-sm text-red-500">{error}</p>}

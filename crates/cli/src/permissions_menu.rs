@@ -109,7 +109,7 @@ pub async fn run(session: &mut Session) -> Result<()> {
                 entries.push(Entry { title: format!("Classifier: {}", value["classifier"]["kind"].as_str().unwrap_or("not set")), detail: String::new() });
                 entries.push(Entry { title: format!("On classifier failure: {}", value["failure_policy"].as_str().unwrap_or("deny")), detail: String::new() });
                 let count = entries.len();
-                ("Auto mode asks a classifier model whether each call is within what you asked. Change it with /permissions auto-config.".into(), entries, vec![None; count])
+                ("Auto mode allows routine local work, asks you for hard boundaries, and uses the optional classifier only for unclassified tools. Change it with /permissions auto-config.".into(), entries, vec![None; count])
             }
             _ => {
                 let mut entries = vec![Entry { title: "Add directory\u{2026}".into(), detail: String::new() }];

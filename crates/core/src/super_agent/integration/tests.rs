@@ -8,9 +8,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn git_run(cwd: &Path, args: &[&str]) -> String {
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| crate::super_agent::test_git_text(arg))
+        .collect();
     let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+        .current_dir(crate::super_agent::test_git_path(cwd))
+        .args(&args)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
@@ -152,8 +156,8 @@ fn task_with(repos: Vec<RepoTarget>) -> TaskRecord {
         title: "Integration".into(),
         spec: TaskSpec {
             title: "Integration".into(),
-            workspace: PathBuf::from("/workspace"),
-            targets: vec!["/workspace/code".into()],
+            workspace: PathBuf::from(crate::super_agent::TEST_WORKSPACE),
+            targets: vec![format!("{}/code", crate::super_agent::TEST_WORKSPACE)],
             goal: "Merge the target".into(),
             requirements: vec!["cargo test".into()],
             acceptance_criteria: vec![],

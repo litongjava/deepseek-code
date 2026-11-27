@@ -1,7 +1,7 @@
 //! Explicitly scoped document tracking, model previews, and optimistic atomic apply.
 use super::{generation::Generator, lifecycle::Lease, ServiceContext};
 use crate::db::session_store::{
-    magic::MagicHistory, DocumentCatalog, DocumentImport, Projects, ServiceLeases,
+    magic::MagicHistory, DocumentCatalog, DocumentImport, ServiceLeases,
 };
 use crate::permissions::{PermissionContext, PermissionManager, PermissionResult};
 use anyhow::{ensure, Context, Result};

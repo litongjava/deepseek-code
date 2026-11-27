@@ -41,12 +41,22 @@ pub(in crate::native_engine) fn normalize_messages(messages: &[Value]) -> Result
                             json!({"type":"text","text":crate::runtime::attachment_text(block)?});
                     }
                     if matches!(block["type"].as_str(), Some("image" | "image_url")) {
-                        let normalized = crate::runtime::normalize_user_content(&json!([block]))?;
-                        *block = normalized[0].clone();
-                        // Display metadata belongs to saved messages, not provider protocols.
-                        if let Some(object) = block.as_object_mut() {
-                            object.remove("fileName");
-                            object.remove("size");
+                        // One unusable historical image must not fail the turn;
+                        // structured input is still validated where it enters.
+                        match crate::runtime::normalize_user_content(&json!([block])) {
+                            Ok(normalized) => {
+                                *block = normalized[0].clone();
+                                // Display metadata belongs to saved messages, not provider protocols.
+                                if let Some(object) = block.as_object_mut() {
+                                    object.remove("fileName");
+                                    object.remove("size");
+                                }
+                            }
+                            Err(error) => {
+                                *block = json!({"type":"text","text":format!(
+                                    "[Image omitted: {error}; re-read the file if the image is needed.]"
+                                )});
+                            }
                         }
                     }
                 }

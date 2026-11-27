@@ -107,7 +107,13 @@ impl View {
         true
     }
 
-    fn render(&mut self, width: usize, height: usize, color: bool) -> Vec<String> {
+    fn render(
+        &mut self,
+        width: usize,
+        height: usize,
+        color: bool,
+        footer: Option<&str>,
+    ) -> Vec<String> {
         let (sidebar, page, first) = self.layout(width, height);
         let file = &self.review.files[self.review.selected];
         let detail_width = width.saturating_sub(sidebar + 3).max(1);
@@ -156,9 +162,9 @@ impl View {
                 rows.push(format!("{label}{} | {detail}", " ".repeat(padding)));
             }
         }
-        rows.push(clip(
+        rows.push(clip(footer.unwrap_or(
             "Esc close | Up/Down/Tab files | j/k/PgUp/PgDn scroll | Drag divider",
-        ));
+        )));
         rows.truncate(height);
         rows
     }
@@ -185,13 +191,19 @@ pub(super) fn show(
     let result = (|| {
         let mut size = crate::terminal::size();
         let mut selection = super::mouse_selection::Selection::default();
+        let mut copy_feedback: Option<String> = None;
         let mut redraw = true;
         let mut rows = Vec::new();
         loop {
             let width = size.0.saturating_sub(1) as usize;
             let height = size.1 as usize;
             if redraw {
-                rows = view.render(width, height, std::env::var_os("NO_COLOR").is_none());
+                rows = view.render(
+                    width,
+                    height,
+                    std::env::var_os("NO_COLOR").is_none(),
+                    copy_feedback.as_deref(),
+                );
                 paint(&mut out, &rows, size)?;
                 redraw = false;
             }
@@ -200,19 +212,30 @@ pub(super) fn show(
             };
             match event {
                 Event::Resize(w, h) => {
+                    copy_feedback = None;
                     selection.clear()?;
                     view.dragging_divider = false;
                     size = (w, h);
                 }
                 Event::Mouse(mouse) => {
                     if view.divider(mouse, width, height) {
+                        copy_feedback = None;
                         selection.clear()?;
                         redraw = true;
                         continue;
                     }
-                    let Some(mouse) = selection.event(mouse, rows.clone())? else {
+                    let event = selection.event(mouse, rows.clone())?;
+                    copy_feedback = selection
+                        .take_copy_feedback()
+                        .map(|(characters, copied)| super::mouse_selection::copy_message(characters, copied));
+                    if copy_feedback.is_some() {
+                        redraw = true;
+                        continue;
+                    }
+                    let Some(mouse) = event else {
                         continue;
                     };
+                    copy_feedback = None;
                     let (sidebar, page, first) = view.layout(width, height);
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left)
@@ -228,6 +251,19 @@ pub(super) fn show(
                     }
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if selection.retained()
+                        && key.modifiers.is_empty()
+                        && key.code == KeyCode::Char('c')
+                    {
+                        if selection.copy_retained()? {
+                            copy_feedback = selection.take_copy_feedback().map(|(characters, copied)| {
+                                super::mouse_selection::copy_message(characters, copied)
+                            });
+                            redraw = true;
+                            continue;
+                        }
+                    }
+                    copy_feedback = None;
                     selection.clear()?;
                     let page = height.saturating_sub(3).max(1);
                     match key.code {
@@ -331,14 +367,14 @@ mod tests {
     #[test]
     fn selected_file_shows_before_and_after_on_the_right() {
         let mut view = view();
-        let rows = view.render(100, 20, false);
+        let rows = view.render(100, 20, false, None);
         assert!(rows[2].contains("> src/中文.rs"));
         assert!(rows[2].find("- old value").unwrap() > 30);
         assert!(rows[3].contains("+ new value"));
         view.select(1);
         view.top = usize::MAX;
         assert!(view
-            .render(100, 20, false)
+            .render(100, 20, false, None)
             .iter()
             .any(|row| row.contains("line 49")));
         view.select(0);
@@ -348,7 +384,7 @@ mod tests {
     #[test]
     fn unicode_and_narrow_resize_stay_within_the_viewport() {
         for width in [1, 15, 40, 80] {
-            let rows = view().render(width, 10, false);
+            let rows = view().render(width, 10, false, None);
             // Tiny terminals can only retain a clipped content column.
             if width >= 15 {
                 assert!(rows

@@ -31,7 +31,7 @@ fn legacy_mapping_preview_backup_idempotence_conflicts_and_reopen() {
         ["Read", "Grep", "ListDir"]
     );
     assert!(agents::resolve(&ctx, "OldReader").is_err());
-    assert!(!dir.path().join("backups").exists());
+    assert!(!dir.path().join("data/backups").exists());
     let report = agent_import::import(&ctx, &source, "OldReader", false).unwrap();
     assert!(report.imported && !report.skipped);
     let manifest = std::path::PathBuf::from(report.backup.unwrap());

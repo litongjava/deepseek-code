@@ -130,7 +130,7 @@ async fn first_send_raw_cli_images_reach_actual_model_requests() {
 #[tokio::test]
 async fn protocol_normalization_and_retained_compression_preserve_images() {
     for anthropic in [false, true] {
-        let (mut engine, _events) = executor("http://127.0.0.1:1", "openai", mixed_content());
+        let (engine, _events) = executor("http://127.0.0.1:1", "openai", mixed_content());
         let messages: Vec<Value> = if anthropic {
             engine
                 .build_anthropic_messages()
@@ -168,13 +168,21 @@ async fn protocol_normalization_and_retained_compression_preserve_images() {
             };
             assert_content(&content, anthropic);
         }
-        let (mut engine, _events) = executor(
+        let (engine, _events) = executor(
             "http://127.0.0.1:1",
             "openai",
             json!([{"type":"image","source":{"type":"base64","media_type":"image/png","data":"broken"}}]),
         );
-        assert!(engine.build_openai_messages().is_err());
-        assert!(engine.build_anthropic_messages().is_err());
+        // One unusable image degrades to text; it must not fail the whole turn.
+        let openai = serde_json::to_string(&engine.build_openai_messages().unwrap()).unwrap();
+        assert!(openai.contains("Image omitted"));
+        let (engine, _events) = executor(
+            "http://127.0.0.1:1",
+            "openai",
+            json!([{"type":"image","source":{"type":"base64","media_type":"image/png","data":"broken"}}]),
+        );
+        let anthropic = serde_json::to_string(&engine.build_anthropic_messages().unwrap()).unwrap();
+        assert!(anthropic.contains("Image omitted"));
     }
 }
 
@@ -205,6 +213,7 @@ async fn durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn(
         "next",
         json!("later"),
         input_queue::QueueMode::NextTurn,
+        input_queue::QueueOrigin::User,
     )
     .unwrap();
     let steer = input_queue::enqueue(
@@ -213,6 +222,7 @@ async fn durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn(
         "steer",
         json!("now"),
         input_queue::QueueMode::Steer,
+        input_queue::QueueOrigin::User,
     )
     .unwrap();
     let (mut engine, _events) = executor("http://127.0.0.1:1", "openai", json!("initial"));
@@ -220,15 +230,19 @@ async fn durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn(
     engine.turn_delivery = Arc::downgrade(&owner);
     engine.goal_db = Some(store.db.clone());
     engine.conv_id = Some(id.clone());
-    assert!(engine.deliver_queued_inputs(false).await.is_empty());
+    assert!(engine
+        .deliver_queued_inputs(false)
+        .await
+        .unwrap()
+        .is_empty());
     input_queue::set_paused(&store.db, &id, true).unwrap();
-    assert!(engine.deliver_queued_inputs(true).await.is_empty());
+    assert!(engine.deliver_queued_inputs(true).await.unwrap().is_empty());
     input_queue::set_paused(&store.db, &id, false).unwrap();
-    let delivered = engine.deliver_queued_inputs(true).await;
+    let delivered = engine.deliver_queued_inputs(true).await.unwrap();
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].content, json!("now"));
     assert_eq!(delivered[0].origin, format!("queue-input-{}", steer.id));
-    assert!(engine.deliver_queued_inputs(true).await.is_empty());
+    assert!(engine.deliver_queued_inputs(true).await.unwrap().is_empty());
     let rows = input_queue::list(&store.db, &id).unwrap();
     assert_eq!(
         rows.iter().find(|row| row.id == next.id).unwrap().state,
@@ -272,22 +286,42 @@ async fn queued_images_replay_after_file_removal_without_becoming_approval_notes
         &[temp.path().join("missing.png"), png.clone()],
     )
     .unwrap();
-    store.db.open_session(&id).unwrap().enqueue_cli_prompt("look [Image #2]").unwrap();
+    store
+        .db
+        .open_session(&id)
+        .unwrap()
+        .enqueue_cli_input(
+            crate::services::input_queue::QueueOrigin::User,
+            "look [Image #2]",
+        )
+        .unwrap();
     let notice = format!(
         "{} [Image #2] internal",
         crate::tools::background_shell::NOTIFICATION_START
     );
-    store.db.open_session(&id).unwrap().enqueue_cli_notification(&notice).unwrap();
+    store
+        .db
+        .open_session(&id)
+        .unwrap()
+        .enqueue_cli_input(
+            crate::services::input_queue::QueueOrigin::TaskNotification,
+            &notice,
+        )
+        .unwrap();
     let (mut engine, mut events) = executor("http://127.0.0.1:1", "openai", json!("initial"));
     let owner = Arc::new(std::sync::Mutex::new(store.db.open_session(&id).unwrap().delivery_owner().unwrap()));
     engine.turn_delivery = Arc::downgrade(&owner);
     engine.goal_db = Some(store.db.clone());
     engine.conv_id = Some(id.clone());
     engine.search_config_path = Some(temp.path().join("config.json"));
-    assert!(engine.deliver_queued_inputs(false).await.is_empty());
-    let inputs = engine.deliver_queued_inputs(true).await;
+    assert!(engine
+        .deliver_queued_inputs(false)
+        .await
+        .unwrap()
+        .is_empty());
+    let inputs = engine.deliver_queued_inputs(true).await.unwrap();
     assert_eq!(inputs.len(), 2);
-    assert!(engine.deliver_queued_inputs(true).await.is_empty());
+    assert!(engine.deliver_queued_inputs(true).await.unwrap().is_empty());
     match events.recv().await.unwrap() {
         EngineEvent::QueuedInput(input) => assert_eq!(input, inputs[0]),
         event => panic!("Unexpected event: {event:?}"),
@@ -340,7 +374,7 @@ async fn queued_images_replay_after_file_removal_without_becoming_approval_notes
             let history = reopened.model_history(session, &format).unwrap();
             let queued = history
                 .iter()
-                .find(|message| message["origin"] == "user")
+                .find(|message| message["origin"] == "typed")
                 .unwrap();
             assert_eq!(queued["content"], inputs[0].content);
             assert!(history

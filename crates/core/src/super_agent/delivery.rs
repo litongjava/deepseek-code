@@ -567,7 +567,14 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 fn quoted_path(path: &Path) -> String {
-    shell_quote(&path.to_string_lossy())
+    let text = path.to_string_lossy();
+    // Git for Windows rejects the extended-length prefix that canonicalization
+    // adds. The shell command must carry the drive-qualified spelling.
+    #[cfg(windows)]
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    #[cfg(not(windows))]
+    let text = text.as_ref();
+    shell_quote(text)
 }
 
 /// The exact Git command that moves the target reference to `new_oid`.

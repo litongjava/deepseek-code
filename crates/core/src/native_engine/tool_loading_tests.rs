@@ -23,7 +23,9 @@ fn executor(root: &std::path::Path) -> ToolLoopExecutor {
     )
     .with_conv_id("tool-loading-fixture".into())
     .with_permission_manager(manager)
-    .with_search_config_path(root.join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root).config_file("config.json"),
+    )
 }
 
 fn write_switches(root: &std::path::Path, tools: &[(&str, bool, bool)]) {
@@ -74,6 +76,7 @@ fn loadable_reminder(executor: &ToolLoopExecutor) -> Option<String> {
 /// server, which these tests do not start.
 fn mcp_tool(name: &str, description: &str) -> crate::tools::ToolDefinition {
     crate::tools::ToolDefinition {
+        summary: None,
         name: name.into(),
         description: description.into(),
         input_schema: json!({"type":"object"}),
@@ -85,11 +88,13 @@ fn the_request_carries_only_the_core_tools_by_default() {
     let temp = tempfile::tempdir().unwrap();
     let executor = executor(temp.path());
     let names = names(&executor);
+    let reminder = loadable_reminder(&executor).expect("on-demand tools");
     for name in [
         "Bash",
         "Read",
         "Write",
         "Edit",
+        "MultiEdit",
         "Grep",
         "Glob",
         "Skill",
@@ -97,19 +102,26 @@ fn the_request_carries_only_the_core_tools_by_default() {
         "AskUserQuestion",
         "EnterPlanMode",
         "ExitPlanMode",
+        "TaskGet",
         "TaskStop",
+        "TodoRead",
+        "TodoWrite",
+        "WebFetch",
+        "WebSearch",
     ] {
         assert!(
             names.contains(&name.to_owned()),
             "{name} missing: {names:?}"
         );
     }
+    for name in ["TodoRead", "TodoWrite"] {
+        assert!(!reminder.contains(name), "resident {name} in {reminder}");
+    }
     for name in [
         "ListDir",
-        "WebFetch",
-        "WebSearch",
+        "Monitor",
+        "NotebookEdit",
         "computer_use",
-        "memory_search",
         "ContextSearch",
         "Agent",
         "Workflow",
@@ -119,6 +131,27 @@ fn the_request_carries_only_the_core_tools_by_default() {
             "{name} stays on demand: {names:?}"
         );
     }
+}
+
+#[test]
+fn a_non_interactive_executor_is_not_offered_ask_user_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let executor = executor(temp.path()).with_permission_host(false);
+    let names = names(&executor);
+    assert!(
+        !names.contains(&"AskUserQuestion".to_owned()),
+        "the tool can only time out here: {names:?}"
+    );
+    assert!(
+        !names.contains(&"ToolLoad".to_owned())
+            || loadable_reminder(&executor)
+                .is_none_or(|reminder| !reminder.contains("AskUserQuestion")),
+        "ToolLoad must not offer the question tool: {:?}",
+        loadable_reminder(&executor)
+    );
+    let prompt = executor.request_system_prompt().unwrap();
+    assert!(prompt.contains("# Interactive user"));
+    assert!(prompt.contains("- Interactive user: no (do not call AskUserQuestion)"));
 }
 
 #[tokio::test]
@@ -136,7 +169,7 @@ async fn context_search_follows_loading_settings_and_session_scope() {
         "without session storage ContextSearch is not in the catalog"
     );
 
-    let db = RuntimePaths::new(temp.path().join("data"))
+    let db = RuntimePaths::new(temp.path().join("session-store"))
         .unwrap()
         .open_database()
         .unwrap();
@@ -363,50 +396,50 @@ fn only_a_paired_tool_load_result_restores_the_tools_of_this_session() {
     // A real ToolLoad call and its matching result.
     assert!(restore(vec![
         openai_call("c1", "ToolLoad"),
-        openai_result("c1", &loaded(&["WebSearch"]))
+        openai_result("c1", &loaded(&["Monitor"]))
     ])
-    .contains(&"WebSearch".to_owned()));
+    .contains(&"Monitor".to_owned()));
 
     // The Anthropic shape read the same way.
     let anthropic = vec![
-        json!({"role":"assistant","content":[{"type":"tool_use","id":"a1","name":"ToolLoad","input":{"names":["WebFetch"]}}]}),
-        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":loaded(&["WebFetch"]).to_string()}]}),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"a1","name":"ToolLoad","input":{"names":["ListDir"]}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":loaded(&["ListDir"]).to_string()}]}),
     ];
-    assert!(restore(anthropic).contains(&"WebFetch".to_owned()));
+    assert!(restore(anthropic).contains(&"ListDir".to_owned()));
 
     // An error result never loads, even with the right pairing.
     let errored = vec![
         json!({"role":"assistant","content":[{"type":"tool_use","id":"a2","name":"ToolLoad","input":{}}]}),
-        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a2","is_error":true,"content":loaded(&["WebSearch"]).to_string()}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a2","is_error":true,"content":loaded(&["Monitor"]).to_string()}]}),
     ];
-    assert!(!restore(errored).contains(&"WebSearch".to_owned()));
+    assert!(!restore(errored).contains(&"Monitor".to_owned()));
 
     // An orphan result, a mismatched id, another tool's result and a user's own
     // JSON each fail to grant anything.
-    assert!(!restore(vec![openai_result("c1", &loaded(&["WebSearch"]))])
-        .contains(&"WebSearch".to_owned()));
+    assert!(!restore(vec![openai_result("c1", &loaded(&["Monitor"]))])
+        .contains(&"Monitor".to_owned()));
     assert!(!restore(vec![
         openai_call("c1", "ToolLoad"),
-        openai_result("c2", &loaded(&["WebSearch"]))
+        openai_result("c2", &loaded(&["Monitor"]))
     ])
-    .contains(&"WebSearch".to_owned()));
+    .contains(&"Monitor".to_owned()));
     assert!(!restore(vec![
         openai_call("c1", "Glob"),
-        openai_result("c1", &loaded(&["WebSearch"]))
+        openai_result("c1", &loaded(&["Monitor"]))
     ])
-    .contains(&"WebSearch".to_owned()));
+    .contains(&"Monitor".to_owned()));
     assert!(!restore(vec![
-        json!({"role":"user","content":loaded(&["WebSearch"]).to_string()})
+        json!({"role":"user","content":loaded(&["Monitor"]).to_string()})
     ])
-    .contains(&"WebSearch".to_owned()));
+    .contains(&"Monitor".to_owned()));
 
     // A tool switched off after it was loaded does not come back.
-    write_switches(temp.path(), &[("WebSearch", false, false)]);
+    write_switches(temp.path(), &[("Monitor", false, false)]);
     assert!(!restore(vec![
         openai_call("c1", "ToolLoad"),
-        openai_result("c1", &loaded(&["WebSearch"]))
+        openai_result("c1", &loaded(&["Monitor"]))
     ])
-    .contains(&"WebSearch".to_owned()));
+    .contains(&"Monitor".to_owned()));
 }
 
 /// Stored history and old settings cannot resurrect a removed model tool: it is
@@ -454,7 +487,7 @@ async fn retired_task_output_is_not_advertised_searched_or_restored() {
     let temp = tempfile::tempdir().unwrap();
     let mut probe = executor(temp.path());
     let names = names(&probe);
-    assert!(!names.contains(&"TaskGet".to_owned()), "{names:?}");
+    assert!(names.contains(&"TaskGet".to_owned()), "{names:?}");
     assert!(!names.contains(&"TaskOutput".to_owned()), "{names:?}");
     assert!(crate::tools::get_tool_definitions()
         .iter()
@@ -469,14 +502,14 @@ async fn retired_task_output_is_not_advertised_searched_or_restored() {
     assert_eq!(value["loaded_tools"], json!([]), "{output}");
     assert_eq!(value["tools"], json!([]), "{output}");
 
-    // TaskGet itself is deferred, but the same search still loads it.
+    // TaskGet is resident by default, so ToolLoad reports it as already available.
     let (_, output, failed) = probe
         .execute_tool_call("ToolLoad", &json!({"names":["TaskGet"]}), "search")
         .await;
     assert!(!failed, "{output}");
     let value: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(value["loaded_tools"], json!(["TaskGet"]), "{output}");
-    assert_eq!(value["tools"].as_array().map(Vec::len), Some(1), "{output}");
+    assert_eq!(value["already_available"], json!(["TaskGet"]), "{output}");
+    assert_eq!(value["loaded_tools"], json!([]), "{output}");
 
     // A stored search result from before the consolidation cannot restore the
     // retired name either.
@@ -550,38 +583,27 @@ async fn task_get_can_be_discovered_on_demand_and_invoked() {
 }
 
 #[tokio::test]
-async fn task_get_is_deferred_and_loadable() {
+async fn task_get_is_resident_by_default() {
     let temp = tempfile::tempdir().unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     let mut executor = executor(temp.path()).with_conv_id(session.clone());
     let initial = names(&executor);
-    assert!(!initial.contains(&"TaskGet".to_owned()), "{initial:?}");
+    assert!(initial.contains(&"TaskGet".to_owned()), "{initial:?}");
     executor.exposed_tools = Some(initial.into_iter().collect());
-
-    let (_, output, failed) = executor
-        .execute_tool_call("ToolLoad", &json!({"names":["TaskGet"]}), "search")
-        .await;
-    assert!(!failed, "{output}");
-    let loaded: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(loaded["success"], true, "{output}");
-    assert_eq!(loaded["loaded_tools"], json!(["TaskGet"]), "{output}");
 
     let task = crate::tools::tasks::execute_for_session(
         "TaskCreate",
-        json!({"subject":"deferred task"}),
+        json!({"subject":"resident task"}),
         temp.path(),
         &session,
     )
     .unwrap();
-    let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
-    assert!(next.contains("TaskGet"), "{next:?}");
-    executor.exposed_tools = Some(next);
     let (_, output, failed) = executor
         .execute_tool_call("TaskGet", &json!({"id":task["id"]}), "get")
         .await;
     assert!(!failed, "{output}");
     let value: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(value["subject"], "deferred task");
+    assert_eq!(value["subject"], "resident task");
 }
 
 #[test]
@@ -736,10 +758,10 @@ fn a_restored_tool_needs_an_assistant_call_before_its_own_result() {
         executor.restore_loaded_tools();
         names(&executor)
     };
-    let loaded = || json!({"success":true,"loaded_tools":["WebSearch"],"tools":[]}).to_string();
+    let loaded = || json!({"success":true,"loaded_tools":["Monitor"],"tools":[]}).to_string();
     let call = |role: &str, id: &str| json!({"role":role,"content":[{"type":"tool_use","id":id,"name":"ToolLoad","input":{}}]});
     let result = |id: &str| json!({"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":loaded()}]});
-    let granted = |messages: Vec<Value>| restore(messages).contains(&"WebSearch".to_owned());
+    let granted = |messages: Vec<Value>| restore(messages).contains(&"Monitor".to_owned());
 
     // A tool_use on a user turn is not an assistant call.
     assert!(!granted(vec![call("user", "x1"), result("x1")]));
@@ -770,9 +792,9 @@ fn a_reused_call_id_never_grants_a_tool() {
         let mut executor = executor(temp.path());
         executor.messages = messages;
         executor.restore_loaded_tools();
-        names(&executor).contains(&"WebSearch".to_owned())
+        names(&executor).contains(&"Monitor".to_owned())
     };
-    let loaded = || json!({"success":true,"loaded_tools":["WebSearch"],"tools":[]}).to_string();
+    let loaded = || json!({"success":true,"loaded_tools":["Monitor"],"tools":[]}).to_string();
     let openai_call = |id: &str, name: &str| json!({"role":"assistant","content":"","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":"{}"}}]});
     let openai_result =
         |id: &str, text: &str| json!({"role":"tool","tool_call_id":id,"content":text});
@@ -870,7 +892,7 @@ fn an_executor_without_a_data_directory_uses_the_same_defaults() {
     for name in ["Read", "Grep", "Glob", "ToolLoad"] {
         assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
     }
-    for name in ["ListDir", "WebFetch", "computer_use"] {
+    for name in ["ListDir", "Monitor", "computer_use"] {
         assert!(!names.contains(&name.to_owned()), "{name}: {names:?}");
     }
 }
@@ -927,6 +949,45 @@ async fn tool_load_returns_the_description_override() {
 }
 
 #[test]
+fn the_loadable_reminder_shows_custom_text_uncut_and_the_whole_description_otherwise() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut customization = crate::services::customization::Customization::default();
+    let custom = format!(
+        "Run directory listings for the project and {}.\nSecond line.",
+        "keep every word ".repeat(10)
+    );
+    customization
+        .tool_summaries
+        .insert("ListDir".to_owned(), custom.clone());
+    crate::services::customization::save(temp.path(), &customization, &[]).unwrap();
+    let mut executor = executor(temp.path());
+    let reminder = loadable_reminder(&executor).unwrap();
+    let line = reminder.lines().find(|line| line.starts_with("- ListDir:")).unwrap();
+    let one_line = custom.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(line, format!("- ListDir: {one_line}"));
+    // A tool without any custom text keeps its complete description.
+    let full = format!("First sentence. {}\nSecond line.", "keep every word ".repeat(10));
+    executor.mcp_states = std::collections::BTreeMap::from([("fixture".to_owned(), McpState::OnDemand)]);
+    executor.mcp_tools = vec![crate::tools::ToolDefinition {
+        summary: None,
+        name: "mcp__fixture__long".into(),
+        description: full.clone(),
+        input_schema: json!({"type":"object"}),
+    }];
+    let reminder = loadable_reminder(&executor).unwrap();
+    let line = reminder
+        .lines()
+        .find(|line| line.starts_with("- mcp__fixture__long:"))
+        .unwrap();
+    assert_eq!(
+        line,
+        format!("- mcp__fixture__long: {}", crate::prompt::one_line(&full))
+    );
+    assert!(line.ends_with("Second line."), "{line}");
+    assert!(line.len() > 200, "the description is not cut: {line}");
+}
+
+#[test]
 fn a_legacy_entry_outside_the_catalog_still_turns_that_tool_off() {
     let temp = tempfile::tempdir().unwrap();
     let customization = crate::services::customization::Customization {
@@ -936,6 +997,7 @@ fn a_legacy_entry_outside_the_catalog_still_turns_that_tool_off() {
     crate::services::customization::save(temp.path(), &customization, &[]).unwrap();
     let mut executor = executor(temp.path());
     executor.mcp_tools = vec![crate::tools::ToolDefinition {
+        summary: None,
         name: "mcp__old__echo".into(),
         description: "old".into(),
         input_schema: json!({"type":"object"}),
@@ -947,6 +1009,7 @@ fn a_legacy_entry_outside_the_catalog_still_turns_that_tool_off() {
     assert!(violation.contains("turned off"), "{violation}");
     // An MCP tool the user did not disable keeps its existing path.
     executor.mcp_tools.push(crate::tools::ToolDefinition {
+        summary: None,
         name: "mcp__live__echo".into(),
         description: "live".into(),
         input_schema: json!({"type":"object"}),
@@ -987,7 +1050,7 @@ async fn loaded_tools_are_appended_after_the_resident_prefix_in_load_order() {
     let resident_prefix = serde_json::to_string(&resident).unwrap();
     executor.exposed_tools = Some(resident_names.iter().cloned().collect());
 
-    for (name, id) in [("WebFetch", "load-web"), ("ListDir", "load-dir")] {
+    for (name, id) in [("Monitor", "load-mon"), ("ListDir", "load-dir")] {
         let (_, output, failed) = executor
             .execute_tool_call("ToolLoad", &json!({"names":[name]}), id)
             .await;
@@ -1003,7 +1066,7 @@ async fn loaded_tools_are_appended_after_the_resident_prefix_in_load_order() {
     );
     assert_eq!(
         &after_names[resident_names.len()..],
-        ["WebFetch", "ListDir"],
+        ["Monitor", "ListDir"],
         "loaded tools follow the order they were loaded: {after_names:?}"
     );
     assert_eq!(
@@ -1047,12 +1110,12 @@ async fn loading_a_tool_keeps_a_user_tool_in_the_resident_prefix() {
     );
     executor.exposed_tools = Some(resident.iter().cloned().collect());
     let (_, output, failed) = executor
-        .execute_tool_call("ToolLoad", &json!({"names":["WebFetch"]}), "load")
+        .execute_tool_call("ToolLoad", &json!({"names":["Monitor"]}), "load")
         .await;
     assert!(!failed, "{output}");
     let after = names(&executor);
     assert_eq!(&after[..resident.len()], resident.as_slice(), "{after:?}");
-    assert_eq!(after.last().map(String::as_str), Some("WebFetch"), "{after:?}");
+    assert_eq!(after.last().map(String::as_str), Some("Monitor"), "{after:?}");
 }
 
 #[test]
@@ -1107,7 +1170,7 @@ fn mcp_descriptions_are_snapshotted_per_session() {
 fn on_demand_mcp_tools_are_listed_with_builtins_first() {
     let temp = tempfile::tempdir().unwrap();
     let mut executor = executor(temp.path());
-    let noisy = format!("{}\nA second line is never shown", "x".repeat(200));
+    let noisy = format!("{}\nA second line stays on the same line", "x".repeat(200));
     executor.mcp_tools = vec![
         mcp_tool(
             "mcp__gh__create_issue",
@@ -1138,18 +1201,16 @@ fn on_demand_mcp_tools_are_listed_with_builtins_first() {
         "{prompt}"
     );
     assert!(!prompt.contains("mcp__fs__read_file"), "{prompt}");
-    assert!(!prompt.contains("A second line"), "{prompt}");
-    // Built-ins come before the MCP block.
-    let builtin = prompt.find("- ListDir:").unwrap();
-    let mcp = prompt.find("- mcp__gh__create_issue:").unwrap();
-    assert!(builtin < mcp, "{prompt}");
+    // An MCP tool has no summary, so its whole description is listed on one line.
     let line = prompt
         .lines()
         .find(|line| line.starts_with("- mcp__gh__noisy:"))
         .expect("the second on-demand tool is listed");
-    let summary = line.trim_start_matches("- mcp__gh__noisy: ");
-    assert_eq!(summary.chars().count(), 100, "{line}");
-    assert!(summary.ends_with('…'), "{line}");
+    assert_eq!(line, format!("- mcp__gh__noisy: {} A second line stays on the same line", "x".repeat(200)), "{prompt}");
+    // Built-ins come before the MCP block.
+    let builtin = prompt.find("- ListDir:").unwrap();
+    let mcp = prompt.find("- mcp__gh__create_issue:").unwrap();
+    assert!(builtin < mcp, "{prompt}");
 
     executor.loaded_tools.insert("mcp__gh__create_issue".into());
     let request = executor.prepare_request().unwrap();
@@ -1297,10 +1358,11 @@ fn on_demand_mcp_tool_not_loaded_is_refused() {
 fn a_restricted_agent_without_discovery_still_receives_its_granted_tools() {
     let temp = tempfile::tempdir().unwrap();
     let mut executor = executor(temp.path());
-    executor.allowed_tools = Some(vec!["Read".into(), "ListDir".into()]);
+    executor.allowed_tools = Some(vec!["TodoRead".into(), "ListDir".into()]);
     let visible = names(&executor);
     assert!(visible.contains(&"ListDir".to_owned()), "{visible:?}");
-    assert!(visible.contains(&"Read".to_owned()), "{visible:?}");
+    assert!(visible.contains(&"TodoRead".to_owned()), "{visible:?}");
+    assert!(!visible.contains(&"TodoWrite".to_owned()), "{visible:?}");
 
     // With ToolLoad granted the agent keeps the normal on-demand rule.
     executor.allowed_tools = Some(vec!["Read".into(), "ListDir".into(), "ToolLoad".into()]);
@@ -1310,7 +1372,8 @@ fn a_restricted_agent_without_discovery_still_receives_its_granted_tools() {
 #[test]
 fn damaged_settings_fail_the_request_instead_of_reopening_every_tool() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("customization.json"), "{broken").unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    std::fs::write(temp.path().join("config/customization.json"), "{broken").unwrap();
     let executor = executor(temp.path());
     let error = executor.tool_definitions().unwrap_err().to_string();
     assert!(error.contains("customization.json"), "{error}");
@@ -1569,7 +1632,9 @@ async fn a_restored_search_reaches_the_first_responses_request() {
         root.path().to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"));
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    );
     let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
         .await
         .unwrap()
@@ -1636,7 +1701,9 @@ async fn a_settings_change_during_a_turn_revokes_the_old_exposure() {
         root.path().to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"));
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    );
     let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
         .await
         .unwrap()
@@ -1709,7 +1776,7 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
                             format,
                             "search-1",
                             "ToolLoad",
-                            json!({"names":["ListDir","WebFetch"]}),
+                            json!({"names":["ListDir","Monitor"]}),
                         ),
                         1 => tool_call_events(format, "list-1", "ListDir", json!({"path":"."})),
                         _ => text_events(format, "done"),
@@ -1749,7 +1816,9 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        );
         let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
             .await
             .unwrap()
@@ -1779,7 +1848,7 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
         let structured: Value = serde_json::from_str(&tool_load_outputs[0]).unwrap();
         assert_eq!(
             structured["loaded_tools"],
-            json!(["ListDir", "WebFetch"]),
+            json!(["ListDir", "Monitor"]),
             "{format}"
         );
         assert!(
@@ -1804,7 +1873,7 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
             "{format}: {second:?}"
         );
         assert!(
-            second.contains(&"WebFetch".to_owned()),
+            second.contains(&"Monitor".to_owned()),
             "{format}: {second:?}"
         );
         // The resident tools keep their exact prefix, and the loaded tools
@@ -1818,7 +1887,7 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
         );
         assert_eq!(
             &second[first_tools.len()..],
-            ["ListDir", "WebFetch"],
+            ["ListDir", "Monitor"],
             "{format}: {second:?}"
         );
         assert!(
@@ -1830,7 +1899,7 @@ async fn every_transport_adds_loaded_tools_to_the_next_request() {
         let outputs = request_tool_outputs(&requests[1], format);
         assert_eq!(
             outputs,
-            ["Loaded ListDir, WebFetch. Available from the next request."],
+            ["Loaded ListDir, Monitor. Available from the next request."],
             "{format}: {outputs:?}"
         );
         assert!(requests[2].to_string().contains("needle.txt"), "{format}");
@@ -1876,7 +1945,11 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
                                 "enabled_without_on_demand" => {
                                     write_switches(&dir, &[("ListDir", true, false)])
                                 }
-                                _ => std::fs::write(dir.join("customization.json"), b"{").unwrap(),
+                                _ => {
+                                    std::fs::create_dir_all(dir.join("config")).unwrap();
+                                    std::fs::write(dir.join("config/customization.json"), b"{")
+                                        .unwrap()
+                                }
                             }
                             tool_call_events("openai", "list-1", "ListDir", json!({"path":"."}))
                         }
@@ -1900,7 +1973,9 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"))
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        )
         .with_permission_manager({
             let manager = crate::runtime::default_permissions();
             manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
@@ -2026,7 +2101,9 @@ async fn every_transport_moves_the_loadable_tool_list_to_the_first_message() {
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        );
         let reminder = loadable_reminder(&executor).expect("the initial switches list tools");
         executor = executor.with_context_reminders(vec![reminder.clone()]);
         let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
@@ -2052,10 +2129,12 @@ async fn every_transport_moves_the_loadable_tool_list_to_the_first_message() {
             "{format}: the listing uses the configured override: {user}"
         );
         assert!(user.contains("- WebSearch:"), "{format}: {user}");
-        assert!(user.contains("- MultiEdit:"), "{format}: {user}");
+        assert!(user.contains("- Monitor:"), "{format}: {user}");
         for absent in [
             "- Bash",
             "- WebFetch",
+            "- MultiEdit",
+            "- TaskGet",
             "computer_use",
             "private_tool",
             "git_status",
@@ -2070,7 +2149,7 @@ async fn every_transport_moves_the_loadable_tool_list_to_the_first_message() {
         let frozen_user = request_first_user(&requests[1], format);
         assert!(frozen_user.contains("- ListDir: Directory listing from the shared snapshot"), "{format}: {frozen_user}");
         assert!(frozen_user.contains("- WebSearch:"), "{format}: {frozen_user}");
-        assert!(frozen_user.contains("- MultiEdit:"), "{format}: {frozen_user}");
+        assert!(frozen_user.contains("- Monitor:"), "{format}: {frozen_user}");
         assert_eq!(
             frozen_user.matches("Tools you can load with ToolLoad").count(),
             1,
@@ -2102,8 +2181,9 @@ async fn every_transport_lists_only_loadable_mcp_tools_when_the_loader_is_presen
     for format in ["anthropic", "openai", "responses"] {
         for loader_enabled in [true, false] {
             let root = tempfile::tempdir().unwrap();
-            std::fs::write(
-                root.path().join("customization.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(&root.path())
+                    .config_file("customization.json"),
                 json!({
                     "disabled_tools": [disabled],
                     "tool_loading": {"ToolLoad": {"enabled": loader_enabled, "on_demand": false}}
@@ -2151,7 +2231,9 @@ async fn every_transport_lists_only_loadable_mcp_tools_when_the_loader_is_presen
                 root.path().to_string_lossy().into_owned(),
                 ReasoningMode::Standard,
             )
-            .with_search_config_path(root.path().join("config.json"))
+            .with_search_config_path(
+                crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+            )
             .with_allowed_tools(Some(vec![
                 "ToolLoad".into(),
                 eligible.into(),
@@ -2281,7 +2363,9 @@ async fn an_empty_loadable_set_produces_no_reminder() {
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"))
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        )
         .with_allowed_tools(Some(
             allowed.iter().map(|name| (*name).to_owned()).collect(),
         ));
@@ -2338,7 +2422,9 @@ async fn a_request_without_callable_tool_load_does_not_promise_loading() {
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        );
         let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
             .await
             .unwrap()
@@ -2451,7 +2537,9 @@ async fn a_loaded_tool_still_asks_for_approval_and_a_denial_leaves_no_trace() {
         root.path().to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    )
     .with_permission_manager(manager);
     executor.permission_host_available = true;
     let mailbox = executor.permission_mailbox.clone();
@@ -2578,7 +2666,9 @@ async fn cancelling_an_approval_stops_the_turn_without_running_the_tool() {
         root.path().to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    )
     .with_permission_manager(manager);
     executor.permission_host_available = true;
     let task = tokio::spawn(async move { executor.execute().await });
@@ -2660,7 +2750,9 @@ async fn cancelling_a_running_loaded_tool_terminates_it_and_stops_the_turn() {
         root.path().to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    )
     .with_permission_manager({
         let manager = crate::runtime::default_permissions();
         manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
@@ -2766,7 +2858,9 @@ async fn every_attempt_of_a_request_shares_one_tool_schema_and_estimation() {
             root.path().to_string_lossy().into_owned(),
             ReasoningMode::Standard,
         )
-        .with_search_config_path(root.path().join("config.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+        );
         let (text, _) = timeout(Duration::from_secs(40), executor.execute())
             .await
             .unwrap_or_else(|_| panic!("{format}: the retried request timed out"))
@@ -2894,11 +2988,9 @@ async fn tool_load_loads_multiple_exact_names_and_handles_already_loaded_names()
     let mut executor = executor(root.path());
     let wanted = [
         "ListDir",
-        "MultiEdit",
-        "WebFetch",
-        "WebSearch",
+        "Monitor",
+        "NotebookEdit",
         "TaskCreate",
-        "TaskGet",
         "TaskList",
     ];
     let (_, output, failed) = executor
@@ -2987,4 +3079,93 @@ async fn monitor_is_deferred_and_loadable() {
 
     let next: std::collections::HashSet<String> = names(&executor).into_iter().collect();
     assert!(next.contains("Monitor"), "{next:?}");
+}
+
+#[tokio::test]
+async fn file_memory_tool_dispatch_preserves_path_rules_hooks_roles_and_plan() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode, PermissionResult};
+    use crate::services::{memory_files::FileMemory, EnvironmentCredentials, ServiceContext};
+    let temp = tempfile::tempdir().unwrap();
+    let paths = crate::runtime::RuntimePaths::new(temp.path().join("session-store")).unwrap();
+    let service = ServiceContext::open(paths, Arc::new(EnvironmentCredentials)).unwrap();
+    let session = crate::runtime::SessionStore::new(service.db.clone())
+        .create(temp.path(), "fixture", "fixture")
+        .unwrap();
+    let memory = FileMemory::session(&service, &session).unwrap();
+    let path = memory.directory.join("test.md");
+    // The rule syntax treats a leading "/" as workspace-relative. On Unix an
+    // absolute path therefore starts with "//" after this prefix; a Windows
+    // drive path is already absolute. Strip the extended-length prefix the
+    // canonical temp directory may carry: rules are written in user-facing
+    // paths, and the matcher resolves the real path separately.
+    let display = path.to_string_lossy().into_owned();
+    let rule_path = if cfg!(windows) {
+        display.strip_prefix(r"\\?\").unwrap_or(&display).to_owned()
+    } else {
+        format!("/{display}")
+    };
+    let input = json!({"file_path":path,"content":"---\nname: Testing\ndescription: Test preferences\nmetadata:\n  type: user\n---\nUse isolated fixtures\n"});
+    let mut executor = executor(temp.path())
+        .with_conv_id(session.clone())
+        .with_file_memory(memory.clone());
+    let pm = executor.permission_manager.clone().unwrap();
+    pm.set_mode(PermissionMode::DontAsk);
+    let (_, output, failed) = executor.execute_tool_call("Write", &input, "create").await;
+    assert!(!failed, "{output}");
+    assert!(path.exists());
+    pm.set_session_rules(
+        &session,
+        HashMap::from([(
+            format!("Write({rule_path})"),
+            PermissionAction::Deny,
+        )]),
+    );
+    let patch = json!({"patch":format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch",path.display())});
+    assert!(matches!(
+        executor
+            .check_permission_with("ApplyPatch", &patch, "patch")
+            .await,
+        PermissionResult::Denied(_)
+    ));
+    pm.set_mode(PermissionMode::AskPermissions);
+    pm.set_session_rules(
+        &session,
+        HashMap::from([(
+            format!("Write({rule_path})"),
+            PermissionAction::Confirm,
+        )]),
+    );
+    executor.approved_call = Some(tool_approval::ExactApproval {
+        tool: "ApplyPatch".into(),
+        input: patch.clone(),
+        id: "patch".into(),
+        pre_tool_hook: true,
+    });
+    assert!(matches!(
+        executor
+            .check_permission_with("ApplyPatch", &patch, "patch")
+            .await,
+        PermissionResult::RequiresConfirmation(_)
+    ));
+    executor.approved_call = None;
+    pm.set_session_rules(&session, HashMap::new());
+    executor.super_agent_role = crate::super_agent::role::Role::Router;
+    let (_, output, failed) = executor.execute_tool_call("Write", &input, "router").await;
+    assert!(failed && output.contains("Router"), "{output}");
+    executor.super_agent_role = crate::super_agent::role::Role::Agent;
+    pm.set_mode(PermissionMode::PlanMode);
+    let (_, output, failed) = executor
+        .execute_tool_call("Read", &json!({"file_path":path}), "plan-read")
+        .await;
+    assert!(!failed, "{output}");
+    let (_, output, failed) = executor
+        .execute_tool_call("Write", &input, "plan-write")
+        .await;
+    assert!(failed && output.contains("Plan mode"), "{output}");
+    assert!(executor
+        .memory_target(
+            "Write",
+            &json!({"file_path":memory.directory.join("../../other/memory/test.md")})
+        )
+        .is_err());
 }

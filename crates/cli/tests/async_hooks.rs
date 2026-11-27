@@ -87,7 +87,7 @@ const timer=setInterval(()=>{if(!fs.existsSync('release'))return;clearInterval(t
 console.log(JSON.stringify({systemMessage:'ASYNC_SYSTEM_SENTINEL',continue:false,decision:'block',hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:'ASYNC_CONTEXT_SENTINEL',permissionDecision:'deny'}}));
 fs.writeFileSync('finished','');process.exit(2);},20);});
 "#).unwrap();
-    std::fs::write(data.join("settings.json"),json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node hook.cjs","async":true,"asyncRewake":rewake,"once":true,"timeout":20}]}]}}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"),json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node hook.cjs","async":true,"asyncRewake":rewake,"once":true,"timeout":20}]}]}}).to_string()).unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

@@ -20,6 +20,10 @@ fn windows() -> bool {
     cfg!(windows)
 }
 
+fn tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
 fn missing_language_server() -> bool {
     let workspace = std::env::current_dir().unwrap_or_default();
     deepseek_code_core::tools::lsp_servers::LANGUAGES
@@ -49,25 +53,36 @@ const TIPS: &[Tip] = &[
     Tip { id: "team-sync", text: "dcl team-sync shares team memories through a self-hosted server", cooldown: 25, relevant: always },
     Tip { id: "status", text: "/status shows the session, model, permission mode and servers in use", cooldown: 15, relevant: always },
     Tip { id: "windows-shell", text: "On Windows the Bash tool runs PowerShell; ask for PowerShell syntax when it matters", cooldown: 15, relevant: windows },
+    Tip { id: "tmux-mouse", text: "In tmux, run `tmux set -g mouse on` to use drag selection and right-click copy", cooldown: 8, relevant: tmux },
 ];
 
 fn enabled(data_dir: &Path) -> bool {
-    std::fs::read_to_string(data_dir.join("settings.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .is_none_or(|settings| settings["spinnerTipsEnabled"] != Value::Bool(false))
+    std::fs::read_to_string(
+        deepseek_code_core::data_layout::DataLayout::from_root(&data_dir)
+            .config_file("settings.json"),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    .is_none_or(|settings| settings["spinnerTipsEnabled"] != Value::Bool(false))
 }
 
 fn load(data_dir: &Path) -> Value {
-    std::fs::read_to_string(data_dir.join("tips.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({"sessions": 0, "shown": {}}))
+    std::fs::read_to_string(
+        deepseek_code_core::data_layout::DataLayout::from_root(&data_dir).config_file("tips.json"),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str(&text).ok())
+    .filter(Value::is_object)
+    .unwrap_or_else(|| json!({"sessions": 0, "shown": {}}))
 }
 
 fn save(data_dir: &Path, history: &Value) {
-    let _ = std::fs::write(data_dir.join("tips.json"), history.to_string());
+    let path =
+        deepseek_code_core::data_layout::DataLayout::from_root(&data_dir).config_file("tips.json");
+    if let Some(directory) = path.parent() {
+        let _ = std::fs::create_dir_all(directory);
+    }
+    let _ = std::fs::write(path, history.to_string());
 }
 
 /// Counts an interactive session; cooldowns are measured in sessions.
@@ -123,7 +138,12 @@ mod tests {
         assert_ne!(chosen.id, "btw");
         assert!(choose(&history, |tip| tip.id == "btw").is_none());
 
-        std::fs::write(dir.path().join("settings.json"), r#"{"spinnerTipsEnabled":false}"#).unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            deepseek_code_core::data_layout::DataLayout::from_root(&dir.path())
+                .config_file("settings.json"),
+            r#"{"spinnerTipsEnabled":false}"#,
+        )
+        .unwrap();
         start_session(dir.path());
         assert!(next(dir.path()).is_none());
     }

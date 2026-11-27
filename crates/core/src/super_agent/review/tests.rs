@@ -327,7 +327,7 @@ fn artifacts_are_reports_or_regular_task_files_only() {
         std::fs::write(&outside, "secret").unwrap();
         let artifacts = fixture
             .data
-            .join("super-agent")
+            .join("tasks/super-agent")
             .join(&task.task_id)
             .join("artifacts");
         std::os::unix::fs::symlink(&outside, artifacts.join("link")).unwrap();
@@ -489,7 +489,7 @@ fn non_git_review_reads_submission_snapshot_not_later_edits() {
 fn published_submissions(fixture: &Fixture) -> Vec<std::ffi::OsString> {
     let submissions = fixture
         .data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&fixture.task_id)
         .join("submissions");
     std::fs::read_dir(&submissions)

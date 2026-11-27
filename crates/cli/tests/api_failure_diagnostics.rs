@@ -418,7 +418,7 @@ impl Project {
         std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
         std::fs::write(
             temp.path().join("project/config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml")
+            include_str!("../../../config/orchestration.toml")
                 .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
         )
         .unwrap();
@@ -502,7 +502,11 @@ impl Project {
             "retry_base_backoff_ms = 10",
             &format!("retry_base_backoff_ms = {backoff_ms}"),
         );
-        std::fs::write(self.workspace().join("config/orchestration.toml"), config).unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            self.workspace().join("config/orchestration.toml"),
+            config,
+        )
+        .unwrap();
     }
 
     /// Turn on the opt-in post-content replay in the cwd orchestration file.
@@ -671,7 +675,7 @@ fn turn_rows(data: &Path, session: &str) -> Vec<(String, String)> {
 /// Terminal request records written for each turn, in order.
 fn turn_end_records(data: &Path, session: &str) -> Vec<Value> {
     let path = data
-        .join("logs/request-attempts")
+        .join("diagnostics/logs/request-attempts")
         .join(format!("{session}.jsonl"));
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -733,7 +737,7 @@ async fn attempts_are_consistent_between_cli_output_server_and_session() {
     let log = std::fs::read_to_string(
         project
             .data()
-            .join("logs/request-attempts")
+            .join("diagnostics/logs/request-attempts")
             .join(format!("{SESSION_MARKER}.jsonl")),
     )
     .unwrap();
@@ -797,7 +801,7 @@ async fn an_authentication_error_is_sent_once_and_keeps_its_meaning() {
 /// file, which is exactly what `/tasks cancel ID` writes.
 fn worker_directory(data: &Path, session: &str) -> PathBuf {
     let id = uuid::Uuid::new_v4().to_string();
-    let directory = data.join("background-tasks").join(&id);
+    let directory = data.join("tasks/background").join(&id);
     std::fs::create_dir_all(&directory).unwrap();
     let job = json!({
         "id": id,
@@ -954,7 +958,7 @@ async fn an_sse_error_records_a_linked_turn_failure() {
     // what the CLI writes for `/tasks` and the trajectory view.
     let path = project
         .data()
-        .join("logs")
+        .join("diagnostics/logs")
         .join("request-attempts")
         .join(format!("{SESSION_MARKER}.jsonl"));
     let record = std::fs::read_to_string(&path)
@@ -1089,7 +1093,7 @@ fn stream_events(output: &Output) -> Vec<Value> {
 
 fn request_attempts(data: &Path, session: &str) -> Vec<Value> {
     let path = data
-        .join("logs/request-attempts")
+        .join("diagnostics/logs/request-attempts")
         .join(format!("{session}.jsonl"));
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("reading attempts: {error}"))
@@ -1103,7 +1107,7 @@ fn request_attempts(data: &Path, session: &str) -> Vec<Value> {
 /// for an event the running process may not have written yet.
 fn observed_attempts(data: &Path, session: &str) -> Vec<Value> {
     let path = data
-        .join("logs/request-attempts")
+        .join("diagnostics/logs/request-attempts")
         .join(format!("{session}.jsonl"));
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();

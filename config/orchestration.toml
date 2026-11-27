@@ -38,9 +38,6 @@ display_width = 1920
 display_height = 1080
 
 [memory]
-# MemEx (memory extraction service) backend URL.
-memex_backend_url = "http://127.0.0.1:8765"
-
 # Whether the memory subsystem is enabled by default.
 enabled = true
 
@@ -56,6 +53,13 @@ port = 30085
 # split event frames and split UTF-8 sequences. Buffered model requests keep a
 # fixed 300-second total deadline of their own.
 request_timeout_secs = 300
+
+# How long an idle keep-alive connection stays in the process-wide shared model
+# client pools (in seconds). Must be positive. Reuse only happens for the same
+# scheme + host + port while the connection is still idle; servers may close it
+# earlier. Read when each shared client is first built (restart required for
+# changes to take effect).
+pool_idle_timeout_secs = 300
 
 # Maximum retries for transient HTTP errors (429, 5xx).
 max_retries = 7

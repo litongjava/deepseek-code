@@ -276,7 +276,6 @@ pub async fn stream_with_options_counted(
 /// transport. A single-post budget uses a client with no redirects and no
 /// internal retries, so one authorized replacement really is one POST.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
 pub(super) async fn stream_with_options_counted_budget(
     provider: &ResolvedProvider,
     messages: Vec<OpenAIMessage>,

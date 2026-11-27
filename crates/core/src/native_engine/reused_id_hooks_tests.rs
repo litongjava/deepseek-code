@@ -82,8 +82,8 @@ esac
         "cat >> failure.jsonl\nprintf '\\n' >> failure.jsonl\n",
     )
     .unwrap();
-    std::fs::write(
-        data.join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
         json!({"hooks":{
             "PreToolUse":[{"matcher":"^Bash$","hooks":[hook("sh pre.sh")]}],
             "PermissionRequest":[{"matcher":"^Bash$","hooks":[hook("sh permission.sh")]}],

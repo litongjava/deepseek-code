@@ -235,7 +235,7 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        std::fs::write(data.join("config.json"),serde_json::to_vec(&json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":null,"base_url":format!("http://{addr}"),"models":[{"id":"fixture","name":"Fixture","enabled":true,"max_tokens":4096,"supports_tools":true,"supports_streaming":true,"context_window":128000}],"enabled":true,"is_default":true,"settings":{},"supports_web_search":false}],"default_provider_id":"fixture"})).unwrap()).unwrap();
+        deepseek_code_core::data_layout::write_config_file(data.join("config/config.json"),serde_json::to_vec(&json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":null,"base_url":format!("http://{addr}"),"models":[{"id":"fixture","name":"Fixture","enabled":true,"max_tokens":4096,"supports_tools":true,"supports_streaming":true,"context_window":128000}],"enabled":true,"is_default":true,"settings":{},"supports_web_search":false}],"default_provider_id":"fixture"})).unwrap()).unwrap();
         let context = ServiceContext::open(
             RuntimePaths::new(data.clone()).unwrap(),
             Arc::new(EnvironmentCredentials),
@@ -370,7 +370,7 @@ impl Fixture {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let job = self.job();
-        let dir = self.data.join("background-tasks").join(&job.id);
+        let dir = self.data.join("tasks/background").join(&job.id);
         panic!(
             "mock barrier timed out: {job:?}; stderr: {}; output: {}",
             std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default(),
@@ -466,7 +466,7 @@ impl Drop for Fixture {
                     // Also works for a paused supervisor's stale heartbeat.
                     let _ = std::fs::write(
                         self.data
-                            .join("background-tasks")
+                            .join("tasks/background")
                             .join(&job.id)
                             .join("cancel"),
                         b"cancel",
@@ -694,7 +694,7 @@ async fn watcher_stops_stale_old_instance_before_starting_a_replacement() {
     assert!(process_start(job.child_pid.unwrap()).is_some());
     assert!(f
         .data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(&job.id)
         .join("cancel")
         .exists());
@@ -817,7 +817,7 @@ async fn watcher_cannot_resume_while_another_session_claim_is_held() {
     let session = f.task().coder.session_id.unwrap();
     let claim = f
         .data
-        .join("background-tasks")
+        .join("tasks/background")
         .join(format!("session-{session}.claim"));
     std::fs::write(&claim, "fixture-existing-owner").unwrap();
     let old = f.job().id;

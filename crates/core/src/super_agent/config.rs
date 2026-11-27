@@ -311,7 +311,7 @@ pub fn router_model(
 /// Parses and validates a raw settings value. Kept separate from loading so a
 /// test can prove rejection without a database.
 fn settings_file_config(data_dir: &std::path::Path) -> Result<Option<serde_json::Value>> {
-    let path = data_dir.join("settings.json");
+    let path = crate::data_layout::DataLayout::from_root(&data_dir).config_file("settings.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -381,8 +381,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(
-            data.join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
             serde_json::to_vec(&json!({
                 "superAgent": {
                     "agents": {"coder": {"model": "coder-model"}, "reviewer": {"model": "reviewer-model"}},

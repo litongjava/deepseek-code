@@ -5,7 +5,7 @@ use std::{io::Write, path::Path};
 
 pub fn record(root: &Path, session: &str, event: &Value) -> Result<()> {
     let session = uuid::Uuid::parse_str(session)?;
-    let directory = root.join("logs").join("request-attempts");
+    let directory = root.join("diagnostics/logs").join("request-attempts");
     std::fs::create_dir_all(&directory)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)

@@ -64,9 +64,14 @@ impl SessionStore<Stores> {
         let parent = root
             .parent()
             .context("Workspace root has no parent directory")?;
+        let expected = self.db.layout().data_root().canonicalize()?;
+        let actual = parent.canonicalize()?;
         ensure!(
-            root.ends_with("workspaces") && parent.canonicalize()? == self.db.data_dir(),
-            "Workspace root differs from the session data root"
+            root.ends_with("workspaces") && actual == expected,
+            "Workspace root differs from the session data root: root={} parent={} expected={}",
+            root.display(),
+            actual.display(),
+            expected.display()
         );
         self.db.open_session(id)
     }
@@ -86,10 +91,19 @@ impl SessionStore<Stores> {
     pub fn append(&self, id: &str, role: &str, text: &str) -> Result<String> {
         self.db.open_session(id)?.write(|w| w.append(role, text))
     }
-    pub fn append_user_content(&self, id: &str, text: &str, content: &Value) -> Result<String> {
+    pub fn append_prompt(&self, id: &str, text: &str, origin: &str) -> Result<String> {
+        self.db.open_session(id)?.admit_prompt(text, None, origin)
+    }
+    pub fn append_user_content(
+        &self,
+        id: &str,
+        text: &str,
+        content: &Value,
+        origin: &str,
+    ) -> Result<String> {
         self.db
             .open_session(id)?
-            .write(|w| w.append_user_content(text, content))
+            .admit_prompt(text, Some(content), origin)
     }
     pub fn append_hook_user(&self, id: &str, text: &str) -> Result<String> {
         self.db
@@ -110,9 +124,12 @@ mod tests {
         std::fs::create_dir(&project)?;
         let store = SessionStore::new(RuntimePaths::new(data.clone())?.open_database()?);
         let id = store.create(&project, "model", "provider")?;
-        let root = data.join("..").join("data").join("workspaces");
+        let root = data.join("data").join("workspaces");
         assert!(!root.exists());
-        assert_eq!(store.workspace(&id, &root)?, project.canonicalize()?);
+        assert_eq!(
+            store.workspace(&id, &root)?.canonicalize()?,
+            project.canonicalize()?
+        );
         assert!(store.workspace(&id, &project.join("workspaces")).is_err());
         assert!(store.workspace(&id, &data.join("other")).is_err());
         Ok(())

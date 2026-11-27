@@ -119,7 +119,7 @@ mod tests {
         let child = store
             .derive_owned_child(
                 &parent,
-                &context.paths.data_dir.join("workspaces"),
+                &context.paths.data_dir.join("data/workspaces"),
                 root.path(),
             )
             .unwrap();
@@ -208,8 +208,8 @@ mod tests {
         .unwrap();
         let tool = PermissionContext {
             mcp_read_only: false,
-            tool_name: "Write".into(),
-            tool_input: json!({"file_path":".bashrc","content":"fixture"}),
+            tool_name: "WebFetch".into(),
+            tool_input: json!({"url":"https://example.com/public"}),
             conversation_id: parent.clone(),
             workspace_path: Some(root.path().to_string_lossy().into_owned()),
             user_id: None,

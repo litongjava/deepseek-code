@@ -50,7 +50,7 @@ pub struct GStackManager {
 
 impl GStackManager {
     pub fn new(data_dir: &Path) -> Self {
-        let plans_dir = data_dir.join("workplans");
+        let plans_dir = data_dir.join("tasks/workplans");
         if !plans_dir.exists() {
             let _ = fs::create_dir_all(&plans_dir);
         }

@@ -54,7 +54,9 @@ pub fn notification_summary(text: &str) -> Option<&str> {
 /// call; each is returned exactly once, across processes.
 pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
     let session = uuid::Uuid::parse_str(session)?.to_string();
-    let path = root.join("tasks").join(format!("{session}.sqlite3"));
+    let path = root
+        .join("data/session-tasks")
+        .join(format!("{session}.sqlite3"));
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -93,7 +95,7 @@ pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
     let mut finished = Vec::new();
     for (id, subject, status, output, log_dir) in tasks {
         let id = uuid::Uuid::parse_str(&id)?.to_string();
-        let base = root.join("shell-tasks").join(&session);
+        let base = root.join("tasks/shell").join(&session);
         if !base.join(&id).is_dir() {
             continue;
         }
@@ -191,7 +193,7 @@ mod tests {
             )
             .unwrap();
             let id = task["id"].as_str().unwrap();
-            std::fs::create_dir_all(root.path().join("shell-tasks").join(&session).join(id))
+            std::fs::create_dir_all(root.path().join("tasks/shell").join(&session).join(id))
                 .unwrap();
             crate::tools::tasks::execute_for_shell_owner(
                 "TaskUpdate",
@@ -235,7 +237,7 @@ mod tests {
         )
         .unwrap();
         let id = task["id"].as_str().unwrap();
-        std::fs::create_dir_all(root.path().join("shell-tasks").join(&session).join(id)).unwrap();
+        std::fs::create_dir_all(root.path().join("tasks/shell").join(&session).join(id)).unwrap();
         crate::tools::tasks::execute_for_shell_owner(
             "TaskUpdate",
             serde_json::json!({"id":id,"status":"completed"}),
@@ -245,7 +247,9 @@ mod tests {
         .unwrap();
 
         let holder = rusqlite::Connection::open(
-            root.path().join("tasks").join(format!("{session}.sqlite3")),
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
         )
         .unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();

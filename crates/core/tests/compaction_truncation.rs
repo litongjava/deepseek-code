@@ -184,7 +184,7 @@ impl Fixture {
                     self.config.window,
                     self.config.max_tokens,
                 )],
-                paths.data_dir.join("providers.json"),
+                paths.data_dir.join("config/providers.json"),
             ))),
             runtime::default_permissions(),
             Arc::new(FileCache::new()),
@@ -486,7 +486,7 @@ async fn start(config: Config) -> Fixture {
                 config.window,
                 config.max_tokens,
             )],
-            paths.data_dir.join("providers.json"),
+            paths.data_dir.join("config/providers.json"),
         ))),
         runtime::default_permissions(),
         Arc::new(FileCache::new()),
@@ -897,8 +897,8 @@ async fn a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_s
             History::Unique(30_000),
         ))
         .await;
-        std::fs::write(
-            fixture.dir.path().join("data/settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            fixture.dir.path().join("data/config/settings.json"),
             r#"{"requestRecording":{"enabled":true}}"#,
         )
         .unwrap();
@@ -951,7 +951,7 @@ async fn a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_s
         let dir = fixture
             .dir
             .path()
-            .join("data/request-records")
+            .join("data/diagnostics/request-records")
             .join(&fixture.id);
         let mut records: Vec<Value> = std::fs::read_dir(&dir)
             .unwrap()

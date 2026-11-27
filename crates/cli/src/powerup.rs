@@ -175,7 +175,7 @@ fn example(id: &str) -> &'static str {
         "background" => "Try: /subtask inspect the test layout\nUse /tasks to follow progress and read the result.",
         "memory" => "Example CLAUDE.md:\nRun tests with cargo test.\nKeep shared business logic independent of the UI.",
         "mcp" => "Inspect: /mcp\nConfigure from your shell: dcl mcp add --help",
-        "skills" => "Example: .claude/skills/review/SKILL.md\n---\nname: review\ndescription: Review local changes\n---\nCheck the diff for correctness.\nThen run /reload-skills and /review.",
+        "skills" => "Example: ~/.deepseek-code/skills/review/SKILL.md\n---\nname: review\ndescription: Review local changes\n---\nCheck the diff for correctness.\nThen run /reload-skills and /review. Project skills live in <workspace>/.agents/skills or <workspace>/.claude/skills and override data-directory skills of the same name; .agents wins over .claude.",
         "sessions" => "Try: /rename investigate-tests\nUse /branch alternative to try another approach.",
         "details" => "After a tool finishes, press Ctrl+O for its details.\nPgUp/PgDn scrolls; Ctrl+O closes.",
         "language" => "Try: /ide status\nThen: /ide lsp src/main.rs documentSymbol",

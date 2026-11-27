@@ -24,6 +24,7 @@ fn workflow_child_command(workspace: &Path) -> Result<tokio::process::Command> {
 
 pub(super) fn definition() -> ToolDefinition {
     ToolDefinition {
+        summary: Some("Run a workflow script in a background child process".into()),
         name: "Workflow".into(),
         description: "A workflow script is plain JavaScript that a `workflow-run` child process executes in the background. The call returns a task ID and run ID at once; TaskGet shows progress and TaskStop cancels. Scripts begin with an object literal `export const meta = { name, description, phases? }`, stay within 512 KiB, and are supplied inline, from a file path, or as a saved name. The async body can call agent(), parallel(), pipeline(), phase(), log() and read args; agent() starts a child dcl session with this session's provider and permission mode, optionally shaped by a JSON schema. Only the main session may start a workflow, at most four agents run at once, and resumeFromRunId reuses completed agents.".into(),
         input_schema: json!({"type":"object","properties":{
@@ -81,11 +82,11 @@ impl ToolLoopExecutor {
             let root = self
                 .search_config_path
                 .as_deref()
-                .and_then(Path::parent)
+                .and_then(crate::data_layout::data_root_of)
                 .map(Path::to_path_buf);
             let candidates = [
                 Some(PathBuf::from(&self.workspace_cwd).join(".claude/workflows")),
-                root.map(|root| root.join("workflows")),
+                root.map(|root| root.join("tasks/workflows")),
             ];
             candidates
                 .into_iter()
@@ -113,12 +114,12 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(Path::parent)
+            .and_then(crate::data_layout::data_root_of)
             .context("Runtime directory is unavailable")?
             .to_path_buf();
         let session = self.conv_id.clone().context("Workflows need a session")?;
         let script = self.workflow_script(input)?;
-        let sessions = root.join("workflows").join(&session);
+        let sessions = root.join("tasks/workflows").join(&session);
         let resume_dir = match input["resumeFromRunId"].as_str() {
             Some(id) => {
                 ensure!(

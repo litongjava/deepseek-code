@@ -423,10 +423,34 @@ async fn mobile_local_bridge_reopens_history_from_its_app_directory() -> anyhow:
         session.write(|w| w.append("user", "mobile history"))?;
     }
     assert!(root.join("global.db").is_file());
-    assert!(root.join("sessions").join(&id).join("session.db").is_file());
+    assert!(root
+        .join("data/sessions")
+        .join(&id)
+        .join("session.db")
+        .is_file());
     let reopened = super::BridgeServer::open_mobile(root.to_owned())?;
     let messages = reopened.db_manager.open_session(&id)?.read(|r| r.messages())?;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "mobile history");
     Ok(())
+}
+
+#[test]
+fn desktop_starts_in_auto_and_launch_flags_can_still_select_bypass() {
+    use deepseek_code_core::permissions::PermissionMode;
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let bridge = super::BridgeServer::open_mobile(app.path().to_owned()).unwrap();
+    assert_eq!(bridge.permission_manager().get_mode(), PermissionMode::Auto);
+
+    let bypassed = super::BridgeServer::open_mobile(app.path().to_owned())
+        .unwrap()
+        .with_launch_permissions(crate::launch_permissions::LaunchPermissions {
+            allow_bypass: true,
+            start_in_bypass: true,
+        });
+    assert_eq!(
+        bypassed.permission_manager().get_mode(),
+        PermissionMode::BypassPermissions
+    );
 }

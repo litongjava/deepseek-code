@@ -14,6 +14,7 @@ use crate::worktree::{hooks, session as worktrees};
 pub fn definitions() -> Vec<super::ToolDefinition> {
     vec![
         super::ToolDefinition {
+            summary: Some("Bind this session to a Git worktree".into()),
             name: "EnterWorktree".into(),
             description: "Bind this session to a Git worktree. With `path`, it enters a worktree already listed by `git worktree list` for this repository; otherwise it creates one from HEAD at `<git-common-dir>/desktop-worktrees/<name>` on branch `worktree/<name>` (`session/<uuid>` when no name is given). A project subdirectory is preserved and the binding is recorded for the conversation; later prompts and tool calls run there. The session must not already be in a worktree, the project must be trusted, and `name` and `path` are mutually exclusive. ExitWorktree returns to the original directory.".into(),
             input_schema: json!({"type":"object","properties":{
@@ -22,6 +23,7 @@ pub fn definitions() -> Vec<super::ToolDefinition> {
             },"additionalProperties":false}),
         },
         super::ToolDefinition {
+            summary: Some("Leave the session worktree and return to the original checkout".into()),
             name: "ExitWorktree".into(),
             description: "Leave the worktree bound to this session by EnterWorktree or `dcl --worktree` and return to the original checkout. action \"keep\" preserves the directory and branch; \"remove\" deletes the directory but keeps its branch, and is refused for a worktree you entered by path rather than created here. When removing a worktree with uncommitted or untracked files, the call lists them and stops unless discard_changes: true is passed; confirm with the user first. With no bound worktree, nothing changes.".into(),
             input_schema: json!({"type":"object","properties":{

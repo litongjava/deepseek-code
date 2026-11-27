@@ -137,14 +137,13 @@ use crate::performance::{retry_with_backoff, checked_response};
 
 pub struct OpenAIClient {
     client: Client,
-    /// Built once and reused by every stream send; a stream is idle-bounded.
-    stream_client: std::sync::OnceLock<Client>,
-    /// Replacement POSTs disable redirects and reqwest's internal retries.
-    single_client: std::sync::OnceLock<Client>,
     /// Test injection also covers the streaming transport.
     stream_override: Option<Client>,
     response_schema: Option<Value>,
     retry_requests: bool,
+    /// The permission classifier uses one bounded attempt; other callers that
+    /// opt out of request-level retries keep the transport's own stream retry.
+    classifier_bound: bool,
     pub(super) request_options: super::request_options::RequestOptions,
 }
 
@@ -156,31 +155,21 @@ impl OpenAIClient {
             .unwrap_or_else(|_| Client::new());
         Self {
             client,
-            stream_client: std::sync::OnceLock::new(),
-            single_client: std::sync::OnceLock::new(),
             stream_override: None,
             request_options: Default::default(),
             response_schema: None,
             retry_requests: true,
+            classifier_bound: false,
         }
     }
 
     /// The streaming transport keeps no total deadline; each read is bounded by
-    /// the configured idle timeout instead.
+    /// the configured idle timeout instead, and shares the process-wide pool.
     pub(super) fn streaming_client(&self) -> Result<Client> {
         if let Some(client) = &self.stream_override {
             return Ok(client.clone());
         }
-        if let Some(client) = self.stream_client.get() {
-            return Ok(client.clone());
-        }
-        let client = super::model_http::streaming_client(super::model_http::Redirect::Default)?;
-        let _ = self.stream_client.set(client);
-        Ok(self
-            .stream_client
-            .get()
-            .expect("the streaming client was just set")
-            .clone())
+        super::model_http::streaming_client(super::model_http::Redirect::Default)
     }
 
     /// A replacement POST must not become two physical requests through a
@@ -189,16 +178,7 @@ impl OpenAIClient {
         if let Some(client) = &self.stream_override {
             return Ok(client.clone());
         }
-        if let Some(client) = self.single_client.get() {
-            return Ok(client.clone());
-        }
-        let client = super::model_http::single_post_client()?;
-        let _ = self.single_client.set(client);
-        Ok(self
-            .single_client
-            .get()
-            .expect("the single-post client was just set")
-            .clone())
+        super::model_http::single_post_client()
     }
 
     pub fn with_request_options(mut self, options: super::request_options::RequestOptions) -> Self {
@@ -219,6 +199,13 @@ impl OpenAIClient {
         self
     }
 
+    /// The classifier response is small and must not spend a second POST or
+    /// grow unbounded. Other no-retry callers keep their normal transport.
+    pub(crate) fn with_classifier_bound(mut self) -> Self {
+        self.classifier_bound = true;
+        self
+    }
+
     pub fn with_response_schema(mut self, schema: Option<Value>) -> Self {
         self.response_schema = schema;
         self
@@ -235,17 +222,33 @@ impl OpenAIClient {
         let provider = &provider.current()?;
         anyhow::ensure!(!crate::services::anthropic_auth::is_oauth_marker(&provider.provider.api_key), "Anthropic OAuth credentials require Anthropic messages API");
         if provider.provider.builtin_id.is_some() {
-            let mut stream = super::provider_runtime::stream_with_options(
-                provider,
-                messages,
-                system_prompt,
-                tools,
-                max_tokens,
-                self.response_schema.as_ref(),
-                None,
-                &self.request_options,
-            )
-            .await?;
+            let mut stream = if !self.classifier_bound {
+                super::provider_runtime::stream_with_options(
+                    provider,
+                    messages,
+                    system_prompt,
+                    tools,
+                    max_tokens,
+                    self.response_schema.as_ref(),
+                    None,
+                    &self.request_options,
+                )
+                .await?
+            } else {
+                super::provider_runtime::stream_with_options_counted_budget(
+                    provider,
+                    messages,
+                    system_prompt,
+                    tools,
+                    max_tokens,
+                    self.response_schema.as_ref(),
+                    None,
+                    &self.request_options,
+                    crate::performance::AttemptBudget::single_attempt(),
+                )
+                .await?
+                .0
+            };
             let mut text = String::new();
             let mut thinking = String::new();
             let mut calls = std::collections::BTreeMap::<usize, Value>::new();
@@ -302,6 +305,20 @@ impl OpenAIClient {
                         usage = Some(serde_json::from_value(reported.clone())?);
                     }
                 }
+                // The classifier has no tool loop and expects a tiny JSON answer.
+                // Keep the builtin transport under the same bound as the direct
+                // without_retries path instead of accepting an unbounded stream.
+                if self.classifier_bound
+                    && text.len().saturating_add(thinking.len()) > 16 * 1024
+                {
+                    anyhow::bail!("Classifier response exceeds size limit");
+                }
+            }
+            // Record the account and model that issued this provider-native block so a later
+            // turn can tell whether its opaque state is still replayable.
+            if let Some(object) = native.as_mut().and_then(Value::as_object_mut) {
+                object.insert("provider".into(), json!(provider.provider.id));
+                object.insert("model".into(), json!(provider.model.id));
             }
             return Ok(OpenAIResponse { id: uuid::Uuid::new_v4().to_string(), object: "chat.completion".into(), created: 0, model: provider.model.id.clone(),
                 choices: vec![OpenAIChoice { index: 0, finish_reason: finish, message: OpenAIMessage { role: "assistant".into(), content: OpenAIContent::Text(text),

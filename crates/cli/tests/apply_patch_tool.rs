@@ -412,8 +412,8 @@ async fn plan_mode_denies_the_patch_without_touching_files() {
 }
 
 fn settings_with_hook(data: &Path, matcher: &str, command: &str) {
-    std::fs::write(
-        data.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/settings.json"),
         json!({"hooks":{"PreToolUse":[{"matcher":matcher,"hooks":[{"type":"command","command":command}]}]}})
             .to_string(),
     )
@@ -446,6 +446,7 @@ async fn a_rejecting_hook_leaves_every_target_unchanged() {
         .contains("PreToolUse hook blocked tool"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_hook_rewritten_patch_still_obeys_path_scope() {
     let env = start(vec![("ApplyPatch", json!({"patch": MIXED_PATCH}))]).await;
@@ -714,6 +715,7 @@ async fn a_move_destination_confirmation_blocks_the_whole_move_in_the_cli() {
     assert_eq!(result["is_error"], true, "{result}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_hook_rewritten_target_cannot_inherit_approval_or_bypass_a_deny() {
     for action in ["Confirm", "Deny"] {

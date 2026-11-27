@@ -1,11 +1,12 @@
-//! Per-skill states stored in `<data dir>/skill-states.json`.
+//! Per-skill states stored in `<data dir>/config/skill-states.json`.
 //!
 //! A skill without an entry gets its default state: [`SkillState::User`], except
 //! the bundled translation skills, which default to [`SkillState::UserOnly`],
 //! and installed built-in skills, which default to [`SkillState::Off`] except
-//! `skill-creator` and `codegraph` when CodeGraph is installed. Existing
-//! installations therefore keep a stored user choice until the user changes it,
-//! while a built-in the user never touched follows the current defaults.
+//! `skill-creator`, the repository tooling skills, and `codegraph` when CodeGraph
+//! is installed. Existing installations therefore keep a stored user choice
+//! until the user changes it, while a built-in the user never touched follows
+//! the current defaults.
 use crate::skills::discovery::SkillCommand;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ pub enum SkillState {
     User,
     NameOnly,
     UserOnly,
+    Always,
 }
 
 impl SkillState {
@@ -32,6 +34,7 @@ impl SkillState {
             SkillState::User => "user",
             SkillState::NameOnly => "name-only",
             SkillState::UserOnly => "user-only",
+            SkillState::Always => "always",
         }
     }
 }
@@ -45,8 +48,9 @@ impl std::str::FromStr for SkillState {
             "user" => Ok(SkillState::User),
             "name-only" => Ok(SkillState::NameOnly),
             "user-only" => Ok(SkillState::UserOnly),
+            "always" => Ok(SkillState::Always),
             other => Err(anyhow::anyhow!(
-                "Unknown skill state {other:?}; expected one of: off, user, name-only, user-only"
+                "Unknown skill state {other:?}; expected one of: off, user, name-only, user-only, always"
             )),
         }
     }
@@ -63,7 +67,7 @@ struct SkillStatesFile {
 /// that every skill stays at its default; an unknown label only skips its own
 /// entry.
 pub fn load(data_dir: &Path) -> BTreeMap<String, SkillState> {
-    let path = data_dir.join(FILE_NAME);
+    let path = crate::data_layout::DataLayout::from_root(data_dir).config_file(FILE_NAME);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
@@ -111,8 +115,11 @@ pub fn default_state(name: &str) -> SkillState {
 /// over this function, so a user choice survives upgrades and reinstallation.
 pub fn bundled_default_state(name: &str) -> SkillState {
     match name {
-        "skill-creator" => SkillState::User,
-        "codegraph" if codegraph_installed() => SkillState::User,
+        "skill-creator"
+        | "dc-docs"
+        | "llm-proxy-data-troubleshooting"
+        | "project-docs" => SkillState::User,
+        "codegraph" if codegraph_installed() => SkillState::Always,
         _ => SkillState::Off,
     }
 }
@@ -187,16 +194,17 @@ pub fn get(data_dir: &Path, name: &str) -> SkillState {
 pub fn set(data_dir: &Path, name: &str, state: SkillState) -> Result<()> {
     let mut states = load(data_dir);
     states.insert(name.to_owned(), state);
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("Creating {}", data_dir.display()))?;
+    let layout = crate::data_layout::DataLayout::from_root(data_dir);
+    std::fs::create_dir_all(layout.config_root())
+        .with_context(|| format!("Creating {}", layout.config_root().display()))?;
     let file = SkillStatesFile {
         skills: states
             .into_iter()
             .map(|(name, state)| (name, state.label().to_owned()))
             .collect(),
     };
-    let path = data_dir.join(FILE_NAME);
-    let temp = data_dir.join(TEMP_NAME);
+    let path = layout.config_file(FILE_NAME);
+    let temp = layout.config_file(TEMP_NAME);
     let mut text = serde_json::to_string_pretty(&file)?;
     text.push('\n');
     std::fs::write(&temp, text).with_context(|| format!("Writing {}", temp.display()))?;
@@ -241,6 +249,11 @@ pub fn apply_in(
                     command.user_invocable = true;
                 }
             }
+            SkillState::Always => {
+                if let Some(command) = commands.get_mut(&name) {
+                    command.always_inline = true;
+                }
+            }
         }
     }
 }
@@ -262,6 +275,7 @@ mod tests {
             user_invocable: true,
             disable_model_invocation: false,
             listing_name_only: false,
+            always_inline: false,
             context: None,
             shell: None,
             agent: None,
@@ -272,12 +286,14 @@ mod tests {
     fn missing_or_invalid_file_means_every_skill_is_user() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(get(dir.path(), "anything"), SkillState::User);
+        let config = crate::data_layout::DataLayout::from_root(dir.path()).config_root();
+        std::fs::create_dir_all(&config).unwrap();
 
-        std::fs::write(dir.path().join(FILE_NAME), "not json").unwrap();
+        std::fs::write(config.join(FILE_NAME), "not json").unwrap();
         assert_eq!(get(dir.path(), "anything"), SkillState::User);
 
         std::fs::write(
-            dir.path().join(FILE_NAME),
+            config.join(FILE_NAME),
             r#"{"skills":{"known":"name-only","future":"brand-new"}}"#,
         )
         .unwrap();
@@ -298,9 +314,14 @@ mod tests {
         assert_eq!(states.get("b"), Some(&SkillState::Off));
         assert_eq!(states.get("c"), Some(&SkillState::User));
 
-        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+        let text = std::fs::read_to_string(
+            crate::data_layout::DataLayout::from_root(dir.path()).config_file(FILE_NAME),
+        )
+        .unwrap();
         assert!(text.contains("\"c\": \"user\""), "{text}");
-        assert!(!dir.path().join(TEMP_NAME).exists());
+        assert!(!crate::data_layout::DataLayout::from_root(dir.path())
+            .config_file(TEMP_NAME)
+            .exists());
     }
 
     #[test]
@@ -358,12 +379,13 @@ mod tests {
     }
 
     #[test]
-    fn labels_and_parsing_cover_exactly_the_four_states() {
+    fn labels_and_parsing_cover_all_five_states() {
         let expected = [
             (SkillState::Off, "off"),
             (SkillState::User, "user"),
             (SkillState::NameOnly, "name-only"),
             (SkillState::UserOnly, "user-only"),
+            (SkillState::Always, "always"),
         ];
         for (state, label) in expected {
             assert_eq!(state.label(), label);
@@ -371,7 +393,7 @@ mod tests {
         }
         assert_eq!(SkillState::default(), SkillState::User);
         let error = "marketplace".parse::<SkillState>().unwrap_err().to_string();
-        for label in ["off", "user", "name-only", "user-only"] {
+        for label in ["off", "user", "name-only", "user-only", "always"] {
             assert!(error.contains(label), "{error}");
         }
     }
@@ -396,12 +418,19 @@ mod tests {
     }
 
     #[test]
-    fn bundled_defaults_disable_every_builtin_except_skill_creator_and_installed_codegraph() {
+    fn bundled_defaults_enable_the_always_available_toolkit() {
         let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let empty = tempfile::tempdir().unwrap();
         let _path = PathGuard::set(empty.path());
 
-        assert_eq!(bundled_default_state("skill-creator"), SkillState::User);
+        for name in [
+            "skill-creator",
+            "dc-docs",
+            "llm-proxy-data-troubleshooting",
+            "project-docs",
+        ] {
+            assert_eq!(bundled_default_state(name), SkillState::User, "{name}");
+        }
         for name in ["codegraph", "docx", "task-template", "translate-zh-en"] {
             assert_eq!(bundled_default_state(name), SkillState::Off, "{name}");
         }
@@ -421,7 +450,28 @@ mod tests {
             assert_eq!(bundled_default_state("codegraph"), SkillState::Off);
             std::fs::set_permissions(&codegraph, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(bundled_default_state("codegraph"), SkillState::User);
+        assert_eq!(bundled_default_state("codegraph"), SkillState::Always);
+    }
+
+    #[test]
+    fn always_state_round_trips_and_marks_command_for_inline_injection() {
+        assert_eq!("always".parse::<SkillState>().unwrap(), SkillState::Always);
+        assert_eq!(SkillState::Always.label(), "always");
+        let err = "bogus".parse::<SkillState>().unwrap_err().to_string();
+        assert!(err.contains("always"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        set(dir.path(), "style-guide", SkillState::Always).unwrap();
+        assert_eq!(load(dir.path()).get("style-guide"), Some(&SkillState::Always));
+
+        let mut commands = BTreeMap::from([
+            ("style-guide".to_owned(), command("style-guide")),
+            ("normal".to_owned(), command("normal")),
+        ]);
+        apply(&mut commands, &load(dir.path()));
+        assert!(commands["style-guide"].always_inline);
+        assert!(commands["style-guide"].model_invocable());
+        assert!(!commands["normal"].always_inline);
     }
 
     #[test]

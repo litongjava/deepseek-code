@@ -247,7 +247,7 @@ pub async fn run(context: ServiceContext, host: &PeripheralHost, request: Reques
             Request::AgentCreate { project_id,agent_type,provider,model } => {
                 let project = context.db.trusted_project(&project_id)?;
                 ensure!(!project.is_archived,"Select an active project");
-                let root = project.workspace_path.context("Project has no workspace")?;
+                let _root = project.workspace_path.context("Project has no workspace")?;
                 let definition = deepseek_code_core::services::agents::resolve(&context,&agent_type)?;
                 Generator::saved(&context.paths,&provider,&model)?;
                 use deepseek_code_core::db::session_store::{CreateOptions,ProjectSelection};

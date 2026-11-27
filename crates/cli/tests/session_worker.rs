@@ -580,7 +580,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
         let event_log = std::fs::read_to_string(
             paths
                 .data_dir
-                .join("background-tasks")
+                .join("tasks/background")
                 .join(&job)
                 .join("output.jsonl"),
         )
@@ -679,8 +679,16 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
         paths: paths.clone(), db: store.db.clone(), credentials: Arc::new(deepseek_code_core::services::EnvironmentCredentials),
     };
     std::fs::write(workspace.join("lifecycle.cjs"), "require('fs').appendFileSync('lifecycle-count','start\\n'); console.log('WORKER_HOOK_CONTEXT');").unwrap();
-    std::fs::write(paths.data_dir.join("settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node lifecycle.cjs"}]}]}}).to_string()).unwrap();
-    deepseek_code_core::services::session_hooks::start(&hook_service, &workspace, &session, "startup", "fixture-one").await.unwrap();
+    deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node lifecycle.cjs"}]}]}}).to_string()).unwrap();
+    deepseek_code_core::services::session_hooks::start(
+        &hook_service,
+        &workspace,
+        &session,
+        "startup",
+        "fixture-one",
+    )
+    .await
+    .unwrap();
     let marker = temp.path().join("starts.txt");
     let script = temp.path().join("mcp.cjs");
     std::fs::write(&script,r#"require('fs').appendFileSync(process.env.START_MARKER,'start\n');require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id!==undefined)process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'},tools:[],resources:[]}})+'\n');});"#).unwrap();
@@ -832,8 +840,8 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     );
     worker::shutdown(&paths.data_dir, &session).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_no_secret(&paths.data_dir.join("session-workers"));
-    assert_no_secret(&paths.data_dir.join("background-tasks"));
+    assert_no_secret(&paths.data_dir.join("state/workers"));
+    assert_no_secret(&paths.data_dir.join("tasks/background"));
     server.abort();
 }
 
@@ -863,7 +871,7 @@ async fn ensure_worker_replaces_a_predecessor_that_stops_before_ready() {
         "recovery-fixture"
     });
     std::fs::copy(test_cli_executable(), &executable).unwrap();
-    let base = paths.data_dir.join("session-workers").join(&session);
+    let base = paths.data_dir.join("state/workers").join(&session);
     let id = uuid::Uuid::new_v4().to_string();
     let dir = base.join(&id);
     std::fs::create_dir_all(&dir).unwrap();

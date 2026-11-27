@@ -39,7 +39,7 @@ pub(super) fn fixture() -> (
         ReasoningMode::Standard,
     )
     .with_conv_id(id)
-    .with_search_config_path(context.paths.data_dir.join("config.json"))
+    .with_search_config_path(context.paths.layout().config_file("config.json"))
     .with_permission_manager(manager.clone());
     (temp, context, sessions, executor, rx, manager)
 }
@@ -251,6 +251,13 @@ async fn approval_choices_preserve_rules_cancel_waiters_and_rollback_failed_boun
 async fn clear_plan_context_skips_stale_tools_and_survives_resume_on_both_protocols() {
     for format in ["openai", "anthropic"] {
         let (temp, context, sessions, mut executor, mut events, manager) = fixture();
+        let memory = crate::services::memory_files::FileMemory::session(
+            &context,
+            executor.conv_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        memory.store(false).unwrap();
+        std::fs::write(memory.directory.join("MEMORY.md"), "PLAN-BOUNDARY-INDEX").unwrap();
         let target = temp.path().join("must-not-exist.txt");
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let recorder = requests.clone();
@@ -317,6 +324,14 @@ async fn clear_plan_context_skips_stale_tools_and_survives_resume_on_both_protoc
         assert!(!requests[1]["messages"]
             .to_string()
             .contains("OLD_HISTORY_SENTINEL"));
+        assert_eq!(
+            requests[1]["messages"]
+                .to_string()
+                .matches("PLAN-BOUNDARY-INDEX")
+                .count(),
+            1,
+            "{format}"
+        );
         assert!(requests[1].to_string().contains("APPROVED_PLAN"));
         assert!(requests[1].to_string().contains("CURRENT_SYSTEM"));
         let restored = sessions
@@ -397,7 +412,7 @@ async fn teammate_plan_approval_routes_to_leader_and_never_self_approves() {
     let requests_file = context
         .paths
         .data_dir
-        .join("teams")
+        .join("data/teams")
         .join(&team.name)
         .join("requests.json");
     let request = teams::pending_plan_request(&context.paths.data_dir, &team.name, &member_session)

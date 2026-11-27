@@ -5,7 +5,7 @@ import { memoryApi } from '../api/memory';
 
 vi.mock('../api/memory', () => ({ memoryApi: { stats: vi.fn(), config: vi.fn(), search: vi.fn(), update: vi.fn(), remove: vi.fn(), ingest: vi.fn(), saveConfig: vi.fn(), clear: vi.fn(), exportArchive: vi.fn(), importArchive: vi.fn() } }));
 
-const config = { enabled: true, backend_url: 'local', search_top_k: 5, compression_threshold_tokens: 2500000, min_importance_threshold: 0.3 };
+const config = { enabled: true, search_top_k: 5, compression_threshold_tokens: 2500000, min_importance_threshold: 0.3 };
 
 beforeEach(() => {
   vi.resetAllMocks();

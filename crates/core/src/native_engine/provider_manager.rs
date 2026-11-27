@@ -495,7 +495,8 @@ mod provider_selection_tests {
     #[tokio::test]
     async fn provider_cache_rebinds_bare_and_qualified_models_on_update_reload_and_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("providers.json");
+        let path =
+            crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json");
         let mut provider: Provider = serde_json::from_value(serde_json::json!({
             "id":"p","name":"test","enabled":true,"api_format":"openai",
             "base_url":"http://127.0.0.1:1","api_key":"first",

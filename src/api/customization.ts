@@ -22,6 +22,8 @@ export interface Customization {
   /** Legacy entries. A built-in name here is normalized on the first save. */
   disabled_tools: string[];
   tool_descriptions: Record<string, string>;
+  /** Per-tool text for the loadable-tool listing; wins over the built-in summary. */
+  tool_summaries: Record<string, string>;
   custom_tools: CustomTool[];
   tool_loading: Record<string, ToolLoading>;
 }

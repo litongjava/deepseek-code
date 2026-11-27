@@ -84,7 +84,7 @@ async fn agent_deny_prevents_real_write() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    std::fs::write(data.join("settings.json"), json!({"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"agent","prompt":"Evaluate $ARGUMENTS","once":true,"timeout":5,"statusMessage":"AGENT integration fixture"}]}]}}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(data.join("config/settings.json"), json!({"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"agent","prompt":"Evaluate $ARGUMENTS","once":true,"timeout":5,"statusMessage":"AGENT integration fixture"}]}]}}).to_string()).unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     let output = tokio::time::timeout(
         Duration::from_secs(30),

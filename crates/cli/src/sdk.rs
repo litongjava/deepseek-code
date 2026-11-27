@@ -1,7 +1,7 @@
 ﻿//! SDK control messages share the active engine; stdin remains live during turns.
 use crate::{
     args::Cli,
-    sdk_input::{Frame, UserMessage},
+    sdk_input::{Frame, UserMessage, UserSource},
     session::Session,
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -440,7 +440,7 @@ struct SteeredFrame {
 /// Plain prompts follow the REPL rule; commands and frames for another session
 /// keep their previous next-turn behavior.
 fn steers_mid_turn(message: &UserMessage, session: &str) -> bool {
-    !message.initial_hook
+    message.source != UserSource::SessionStartHook
         && crate::session::queues_mid_turn(&message.text)
         && message
             .session_id
@@ -624,9 +624,11 @@ async fn run_inner(
     let mut frames = crate::sdk_input::stdin();
     let mut queue = VecDeque::<UserMessage>::new();
     if let Some(text) = initial {
-        queue.push_back(crate::sdk_input::parse_line(
+        let mut message = crate::sdk_input::parse_line(
             &json!({"type":"user","message":{"role":"user","content":text}}).to_string(),
-        )?);
+        )?;
+        message.source = UserSource::CommandLine;
+        queue.push_back(message);
     }
     let mut eof = false;
     let mut failed = false;
@@ -662,7 +664,7 @@ async fn run_inner(
                 let mut message = crate::sdk_input::parse_line(
                     &json!({"type":"user","message":{"role":"user","content":text}}).to_string(),
                 )?;
-                message.initial_hook = true;
+                message.source = UserSource::SessionStartHook;
                 message.envelope["origin"] = json!({"type":"hook","hookEvent":"SessionStart"});
                 queue.push_front(message);
             }
@@ -697,7 +699,7 @@ async fn run_inner(
                 envelope["uuid"] = json!(message_uuid);
                 crate::session::emit_json(&envelope)?;
             }
-            if !message.initial_hook
+            if message.source != UserSource::SessionStartHook
                 && session.sdk_overrides.prompt_suggestions
                 && crate::prompt_suggestion::enabled(&session.paths.data_dir)
             {
@@ -742,13 +744,18 @@ async fn run_inner(
             // this future records here, so the handoff below is exactly what
             // this message handled rather than whatever else saw the signal.
             let turn = Box::pin(crate::signals::capture_turn_interrupt(async {
-                if message.initial_hook {
-                    session
-                        .turn_initial_hook(cli, &text, &mut terminal, true)
-                        .await
-                } else {
-                    session.turn(cli, &text, &mut terminal).await
-                }
+                let origin = match message.source {
+                    UserSource::SessionStartHook => {
+                        return session
+                            .turn_initial_hook(cli, &text, &mut terminal, true)
+                            .await
+                    }
+                    UserSource::CommandLine => {
+                        crate::session::TurnOrigin::command_line(cli, &message.text)
+                    }
+                    UserSource::Frame => crate::session::TurnOrigin::User(&message.text),
+                };
+                session.turn(cli, &text, &mut terminal, origin).await
             }));
             tokio::pin!(turn);
             let mut turn_failed = false;
@@ -777,7 +784,7 @@ async fn run_inner(
                                 let mut user=user;
                                 let uuid=user.uuid.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string());
                                 user.uuid=Some(uuid.clone());
-                                match input_queue::enqueue(&steer_db,&steer_session,&uuid,user.content.clone(),QueueMode::Steer) {
+                                match input_queue::enqueue(&steer_db,&steer_session,&uuid,user.content.clone(),QueueMode::Steer, input_queue::QueueOrigin::User) {
                                     Ok(item) if !steered.iter().any(|frame|frame.item_id==item.id) => {
                                         let mut envelope=user.envelope.clone();
                                         envelope["uuid"]=json!(uuid);

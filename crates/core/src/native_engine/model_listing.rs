@@ -124,11 +124,138 @@ fn model_id(entry: &Value, field: IdField, index: usize) -> Result<String> {
     Ok(id.to_owned())
 }
 
-fn model_ids(entries: &[Value], field: IdField) -> Result<Vec<String>> {
+/// One model entry returned by an endpoint's model-listing API, including any
+/// context/output limits or vision capabilities the endpoint declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub context_window: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub supports_vision: Option<bool>,
+    pub capabilities: Vec<String>,
+}
+
+fn positive_u32(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|&n| n > 0)
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+fn parse_supports_vision(entry: &Value) -> Option<bool> {
+    for path in [
+        entry.get("modalities").and_then(|m| m.get("input")),
+        entry.get("inputTypes"),
+        entry.get("input_types"),
+        entry.get("architecture").and_then(|a| a.get("input_modalities")),
+    ] {
+        if let Some(items) = path.and_then(Value::as_array) {
+            if !items.is_empty() {
+                let sees = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|item| item.to_ascii_lowercase().starts_with("image"));
+                return Some(sees);
+            }
+        }
+    }
+    if let Some(value) = entry
+        .get("supports_vision")
+        .or_else(|| entry.get("supportsVision"))
+        .and_then(Value::as_bool)
+    {
+        return Some(value);
+    }
+    if let Some(caps) = entry.get("capabilities").and_then(Value::as_object) {
+        if let Some(vision) = caps.get("vision").and_then(Value::as_bool) {
+            return Some(vision);
+        }
+        if let Some(image) = caps
+            .get("image_input")
+            .and_then(|v| v.as_bool().or_else(|| v.get("supported").and_then(Value::as_bool)))
+        {
+            return Some(image);
+        }
+    }
+    None
+}
+
+fn parse_capabilities(entry: &Value) -> Vec<String> {
+    let mut caps = Vec::new();
+    let Some(obj) = entry.get("capabilities").and_then(Value::as_object) else {
+        return caps;
+    };
+    let flag = |key: &str| {
+        obj.get(key).is_some_and(|value| {
+            value.as_bool() == Some(true)
+                || value.get("supported").and_then(Value::as_bool) == Some(true)
+        })
+    };
+    if flag("reasoning") {
+        caps.push("reasoning".into());
+    }
+    if flag("tool_use") || flag("tools") || flag("tool_call") || flag("function_calling") {
+        caps.push("tools".into());
+    }
+    if flag("structured_output") || flag("structured_outputs") {
+        caps.push("structured output".into());
+    }
+    caps
+}
+
+fn listed_model(entry: &Value, field: IdField, index: usize) -> Result<ListedModel> {
+    let id = model_id(entry, field, index)?;
+    let name = entry
+        .get("display_name")
+        .or_else(|| entry.get("displayName"))
+        .or_else(|| {
+            if field == IdField::GeminiResource {
+                None
+            } else {
+                entry.get("name")
+            }
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != id)
+        .map(str::to_owned);
+    let context_window = positive_u32(entry.get("limit").and_then(|l| l.get("context")))
+        .or_else(|| positive_u32(entry.get("context_window")))
+        .or_else(|| positive_u32(entry.get("contextWindow")))
+        .or_else(|| positive_u32(entry.get("context_length")))
+        .or_else(|| positive_u32(entry.get("max_input_tokens")))
+        .or_else(|| positive_u32(entry.get("inputTokenLimit")));
+    let max_tokens = positive_u32(entry.get("limit").and_then(|l| l.get("output")))
+        .or_else(|| positive_u32(entry.get("max_output_tokens")))
+        .or_else(|| positive_u32(entry.get("maxOutputTokens")))
+        .or_else(|| positive_u32(entry.get("max_tokens")))
+        .or_else(|| positive_u32(entry.get("maxTokens")))
+        .or_else(|| positive_u32(entry.get("outputTokenLimit")))
+        .or_else(|| {
+            positive_u32(
+                entry
+                    .get("top_provider")
+                    .and_then(|tp| tp.get("max_completion_tokens")),
+            )
+        });
+    let supports_vision = parse_supports_vision(entry);
+    let capabilities = parse_capabilities(entry);
+    Ok(ListedModel {
+        id,
+        name,
+        context_window,
+        max_tokens,
+        supports_vision,
+        capabilities,
+    })
+}
+
+fn listed_models(entries: &[Value], field: IdField) -> Result<Vec<ListedModel>> {
     entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| model_id(entry, field, index))
+        .map(|(index, entry)| listed_model(entry, field, index))
         .collect()
 }
 
@@ -270,11 +397,18 @@ fn page_url(url: &str, pairs: &[(&str, &str)], api_key: &str) -> Result<reqwest:
     Ok(url)
 }
 
+fn is_opencode_host(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
+}
+
 async fn get_page(client: &Client, url: reqwest::Url, auth: Auth, api_key: &str) -> Result<Value> {
-    let response = match authenticated(client.get(url.clone()), auth, api_key)
-        .send()
-        .await
-    {
+    let mut request = authenticated(client.get(url.clone()), auth, api_key);
+    if is_opencode_host(&url) {
+        request = request.header("x-opencode-session", format!("dcl-list-{}", uuid::Uuid::new_v4()));
+    }
+    let response = match request.send().await {
         Ok(response) => response,
         // The transport error repeats the full URL, including a cursor in the
         // query, so only a classified reason is kept.
@@ -341,9 +475,9 @@ fn model_entries<'a>(value: &'a Value, fields: &[&str]) -> Result<&'a [Value]> {
     }
 }
 
-fn finish(mut models: Vec<String>) -> Result<Vec<String>> {
-    models.sort();
-    models.dedup();
+fn finish(mut models: Vec<ListedModel>) -> Result<Vec<ListedModel>> {
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
     if models.is_empty() {
         bail!("The endpoint returned no models");
     }
@@ -351,7 +485,7 @@ fn finish(mut models: Vec<String>) -> Result<Vec<String>> {
 }
 
 /// Anthropic pages with `after_id` and reports `has_more` plus `last_id`.
-async fn list_anthropic(client: &Client, url: &str, api_key: &str) -> Result<Vec<String>> {
+async fn list_anthropic(client: &Client, url: &str, api_key: &str) -> Result<Vec<ListedModel>> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor: Option<String> = None;
@@ -361,7 +495,7 @@ async fn list_anthropic(client: &Client, url: &str, api_key: &str) -> Result<Vec
             None => page_url(url, &[("limit", PAGE_SIZE)], api_key)?,
         };
         let value = get_page(client, page, Auth::Anthropic, api_key).await?;
-        models.extend(model_ids(model_entries(&value, &["data"])?, IdField::Exact)?);
+        models.extend(listed_models(model_entries(&value, &["data"])?, IdField::Exact)?);
         // `has_more` is the only completeness signal: a missing or non-boolean
         // value cannot be treated as the last page.
         match value.get("has_more") {
@@ -393,7 +527,7 @@ async fn list_anthropic(client: &Client, url: &str, api_key: &str) -> Result<Vec
 }
 
 /// Gemini pages with `pageToken` and reports the next one as `nextPageToken`.
-async fn list_gemini(client: &Client, url: &str, api_key: &str) -> Result<Vec<String>> {
+async fn list_gemini(client: &Client, url: &str, api_key: &str) -> Result<Vec<ListedModel>> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
     let mut token: Option<String> = None;
@@ -403,7 +537,7 @@ async fn list_gemini(client: &Client, url: &str, api_key: &str) -> Result<Vec<St
             None => page_url(url, &[("pageSize", PAGE_SIZE)], api_key)?,
         };
         let value = get_page(client, page, Auth::Gemini, api_key).await?;
-        models.extend(model_ids(
+        models.extend(listed_models(
             model_entries(&value, &["models"])?,
             IdField::GeminiResource,
         )?);
@@ -454,13 +588,18 @@ fn ensure_single_page(value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Fetches the model IDs a provider advertises, sorted and de-duplicated.
+/// Fetches the model entries a provider advertises, including declared context
+/// limits and image input support, sorted and de-duplicated by model ID.
 /// Every page is read before anything is returned, so a partial list is never
 /// mistaken for the complete one.
 ///
 /// `protocol` is the same value saved in `provider_type`: `openai`,
-/// `anthropic` or `gemini`.
-pub async fn list_models(protocol: &str, base_url: &str, api_key: &str) -> Result<Vec<String>> {
+/// `responses`, `anthropic` or `gemini`.
+pub async fn list_models_detailed(
+    protocol: &str,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<ListedModel>> {
     let (url, auth) = endpoint(protocol, base_url);
     let client = Client::builder()
         .timeout(LIST_TIMEOUT)
@@ -471,11 +610,25 @@ pub async fn list_models(protocol: &str, base_url: &str, api_key: &str) -> Resul
             let value = get_page(&client, page_url(&url, &[], api_key)?, auth, api_key).await?;
             ensure_single_page(&value)?;
             let entries = model_entries(&value, &["data", "models"])?;
-            finish(model_ids(entries, IdField::Exact)?)
+            finish(listed_models(entries, IdField::Exact)?)
         }
         Auth::Anthropic => list_anthropic(&client, &url, api_key).await,
         Auth::Gemini => list_gemini(&client, &url, api_key).await,
     }
+}
+
+/// Fetches the model IDs a provider advertises, sorted and de-duplicated.
+/// Every page is read before anything is returned, so a partial list is never
+/// mistaken for the complete one.
+///
+/// `protocol` is the same value saved in `provider_type`: `openai`,
+/// `anthropic` or `gemini`.
+pub async fn list_models(protocol: &str, base_url: &str, api_key: &str) -> Result<Vec<String>> {
+    Ok(list_models_detailed(protocol, base_url, api_key)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
 }
 
 /// The effect of replacing a saved model list with the IDs the endpoint
@@ -1149,5 +1302,64 @@ mod tests {
             models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
             ["a", "b"]
         );
+    }
+
+    #[tokio::test]
+    async fn detailed_listing_parses_limits_modalities_and_capabilities() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "beam-free"
+                },
+                {
+                    "id": "deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro",
+                    "limit": { "context": 1_000_000, "output": 384_000 },
+                    "modalities": { "input": ["text"] }
+                },
+                {
+                    "id": "claude-haiku-5-5",
+                    "limit": { "context": 1_000_000, "output": 128_000 },
+                    "modalities": { "input": ["text", "image"] },
+                    "capabilities": { "reasoning": { "supported": true }, "tool_use": true }
+                }
+            ]
+        });
+        let base = serve_listing("responses", body).await;
+        let models = list_models_detailed("responses", &base, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "beam-free");
+        assert_eq!(models[0].context_window, None);
+        assert_eq!(models[0].max_tokens, None);
+        assert_eq!(models[0].supports_vision, None);
+        assert!(models[0].capabilities.is_empty());
+
+        assert_eq!(models[1].id, "claude-haiku-5-5");
+        assert_eq!(models[1].context_window, Some(1_000_000));
+        assert_eq!(models[1].max_tokens, Some(128_000));
+        assert_eq!(models[1].supports_vision, Some(true));
+        assert_eq!(models[1].capabilities, ["reasoning", "tools"]);
+
+        assert_eq!(models[2].id, "deepseek-v4-pro");
+        assert_eq!(models[2].name.as_deref(), Some("DeepSeek V4 Pro"));
+        assert_eq!(models[2].context_window, Some(1_000_000));
+        assert_eq!(models[2].max_tokens, Some(384_000));
+        assert_eq!(models[2].supports_vision, Some(false));
+        assert!(models[2].capabilities.is_empty());
+    }
+
+    #[test]
+    fn opencode_host_detection_matches_opencode_domains() {
+        assert!(is_opencode_host(
+            &reqwest::Url::parse("https://opencode.ai/inference/go/openai/v1/models").unwrap()
+        ));
+        assert!(is_opencode_host(
+            &reqwest::Url::parse("https://api.opencode.ai/v1/models").unwrap()
+        ));
+        assert!(!is_opencode_host(
+            &reqwest::Url::parse("https://api.deepseek.com/v1/models").unwrap()
+        ));
     }
 }

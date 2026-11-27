@@ -25,7 +25,7 @@ fn shared_lock(file: &File) -> Result<()> {
 
 impl Stores {
     fn workspace_lock_file(&self, key: &str) -> Result<File> {
-        let locks = self.data_dir().join("workspace-locks");
+        let locks = self.layout().lock_path("workspace");
         fs::create_dir_all(&locks)?;
         Ok(File::options()
             .create(true)
@@ -43,8 +43,8 @@ impl Stores {
             "Invalid workspace lease identity"
         );
         Ok(self
-            .data_dir()
-            .join("workspace-locks")
+            .layout()
+            .lock_path("workspace")
             .join(format!("lease-{incarnation}")))
     }
 
@@ -268,10 +268,10 @@ mod tests {
         let removal = stores.hold_worktree_removal(&worktree)?;
         assert!(resident.acquire_execution().is_err());
         assert!(change().is_err());
-        assert_eq!(moving.workspace()?, source.canonicalize()?);
+        assert_eq!(moving.workspace()?.canonicalize()?, source.canonicalize()?);
         let elsewhere = moving.acquire_execution()?;
         drop((elsewhere, removal));
-        assert_eq!(change()?, target.canonicalize()?);
+        assert_eq!(change()?.canonicalize()?, target.canonicalize()?);
         let lease = moving.acquire_execution()?;
         assert!(stores.hold_worktree_removal(&worktree).is_err());
         drop(lease);

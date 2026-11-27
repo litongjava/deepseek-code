@@ -544,6 +544,34 @@ pub(crate) fn display_name(name: &str) -> &str {
     }
 }
 
+/// `description | code or filepath`: a Python call should say what it is for
+/// and what it runs. The code detail is the first non-empty line, clipped so a
+/// collapsed transcript row stays readable; a saved draft names its file path.
+fn python_preview(input: &Value) -> Option<String> {
+    let description = input["description"]
+        .as_str()
+        .map(single_line)
+        .filter(|description| !description.is_empty());
+    let detail = input["save_name"]
+        .as_str()
+        .map(single_line)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            input["code"]
+                .as_str()
+                .and_then(|code| code.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(single_line)
+                .filter(|line| !line.is_empty())
+        })
+        .map(|detail| clipped(&detail, 80));
+    match (description, detail) {
+        (Some(description), Some(detail)) => Some(format!("{description} | {detail}")),
+        (Some(description), None) => Some(description),
+        (None, Some(detail)) => Some(detail),
+        (None, None) => None,
+    }
+}
+
 pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
     if name == deepseek_code_core::tools::TOOL_LOAD_NAME {
         return tool_load_label(input, 80);
@@ -554,6 +582,8 @@ pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Op
         input["url"].as_str().map(single_line)
     } else if name == "WebSearch" {
         input["query"].as_str().map(|query| format!("\"{}\"", single_line(query)))
+    } else if name == "Python" {
+        python_preview(input)
     } else if matches!(name.as_str(), "Bash" | "PowerShell") {
         input["command"].as_str().map(|command| {
             let lower = command.to_ascii_lowercase();
@@ -980,6 +1010,45 @@ mod tests {
                 &serde_json::json!({"prompt": "private task", "agent_type": "general"})
             ),
             "Agent: general"
+        );
+        assert_eq!(
+            tool_preview(
+                "Python",
+                &serde_json::json!({"code": "print(1)\nprint(2)", "description": "Inspect data"})
+            ),
+            "Python: Inspect data | print(1)"
+        );
+        assert_eq!(
+            tool_preview(
+                "Python",
+                &serde_json::json!({"code": "print(1)", "save_name": "python/script/001.py"})
+            ),
+            "Python: python/script/001.py"
+        );
+        assert_eq!(
+            tool_preview(
+                "Python",
+                &serde_json::json!({"code": "print(1)", "description": "Inspect data", "save_name": "python/script/001.py"})
+            ),
+            "Python: Inspect data | python/script/001.py"
+        );
+        assert_eq!(
+            tool_preview("Python", &serde_json::json!({"code": "print(1)"})),
+            "Python: print(1)"
+        );
+        assert_eq!(
+            tool_preview(
+                "Python",
+                &serde_json::json!({
+                    "description": "Sample cpu_usage 8 times to verify no false zeros",
+                    "code": "import importlib.util, time\n\nvals = []"
+                })
+            ),
+            "Python: Sample cpu_usage 8 times to verify no false zeros | import importlib.util, time"
+        );
+        assert_eq!(
+            tool_preview("Python", &serde_json::json!({"code": "\n\n"})),
+            "Python"
         );
     }
 

@@ -100,6 +100,10 @@ const ToolDiffView: React.FC<ToolDiffViewProps> = ({ toolName, input, result }) 
     return renderBashView(input, result, isDark);
   }
 
+  if (toolName === 'Python') {
+    return renderPythonView(input, result, isDark);
+  }
+
   if (toolName === 'Read') {
     return renderReadView(input, result, isDark);
   }
@@ -320,6 +324,56 @@ function renderBashView(input: any, result: string | any, isDark: boolean) {
   );
 }
 
+// ── Python tool: show code, run details + output ──
+function renderPythonView(input: any, result: string | any, isDark: boolean) {
+  const code = input?.code || '';
+  const output = typeof result === 'string' ? result : (result != null ? JSON.stringify(result) : '');
+  const env = input?.env && typeof input.env === 'object' ? Object.entries(input.env as Record<string, string>) : [];
+  const description = typeof input?.description === 'string' ? input.description.trim() : '';
+  const firstCodeLine = typeof input?.code === 'string'
+    ? (input.code.split(/\r?\n/).map((line: string) => line.trim()).find((line: string) => line.length > 0) || '')
+    : '';
+  const detail = (typeof input?.save_name === 'string' && input.save_name.trim()) || firstCodeLine;
+  const label = [description, detail.slice(0, 80)].filter(Boolean).join(' | ') || 'Python';
+
+  if (!code && !output) return null;
+
+  return (
+    <div className={`rounded-md overflow-hidden border text-[12px] font-mono ${
+      isDark ? 'border-[#383836] bg-[#1e1e1e]' : 'border-[#E5E5E5] bg-[#FCFCFA]'
+    }`}>
+      <div className={`flex items-center gap-2 px-3 py-1.5 ${
+        isDark ? 'bg-[#2d2d2d] border-b border-[#383836]' : 'bg-[#f5f5f0] border-b border-[#E5E5E5]'
+      }`}>
+        <span className={isDark ? 'text-[#7ee787]' : 'text-[#1a7f37]'}>python</span>
+        <span className={isDark ? 'text-[#888]' : 'text-[#777]'}>{label}</span>
+      </div>
+      {code && (
+        <pre className={`px-3 py-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-words ${
+          isDark ? 'text-[#ccc] border-b border-[#383836]' : 'text-[#333] border-b border-[#E5E5E5]'
+        }`}>{code}</pre>
+      )}
+      {(input?.interpreter || input?.conda || input?.cwd || env.length > 0) && (
+        <div className={`px-3 py-2 space-y-0.5 ${
+          isDark ? 'text-[#888] border-b border-[#383836]' : 'text-[#777] border-b border-[#E5E5E5]'
+        }`}>
+          {input?.conda && <div>conda: {input.conda}</div>}
+          {input?.interpreter && <div>interpreter: {input.interpreter}</div>}
+          {input?.cwd && <div>cwd: {input.cwd}</div>}
+          {env.map(([key, value]) => <div key={key}>{key}={String(value)}</div>)}
+        </div>
+      )}
+      {output && (
+        <div className={`px-3 py-2 max-h-[400px] overflow-y-auto overflow-x-auto whitespace-pre-wrap break-all ${
+          isDark ? 'text-[#aaa]' : 'text-[#555]'
+        }`}>
+          {output.length > 3000 ? output.slice(0, 3000) + '\n...(truncated)' : output}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Read tool: show file content with line numbers ──
 function renderReadView(input: any, result: string | any, isDark: boolean) {
   const filePath = input?.file_path || '';
@@ -385,6 +439,9 @@ export function shouldUseDiffView(toolName: string, input: any): boolean {
   }
   if (toolName === 'Bash') {
     return !!input?.command;
+  }
+  if (toolName === 'Python') {
+    return !!input?.code;
   }
   if (toolName === 'Read') {
     return !!input?.file_path;

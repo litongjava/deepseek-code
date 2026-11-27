@@ -26,7 +26,7 @@ tokio::task_local! { pub(super) static CONTEXT: Option<(PathBuf, String)>; }
 /// foreground call that was moved to the background.
 fn directory(root: &Path, session: &str, task: &Value) -> Result<PathBuf> {
     let session = uuid::Uuid::parse_str(session)?.to_string();
-    let base = root.join("shell-tasks").join(session);
+    let base = root.join("tasks/shell").join(session);
     if let Some(name) = task["metadata"]["log_dir"].as_str() {
         anyhow::ensure!(
             name.starts_with("fg-") && uuid::Uuid::parse_str(&name[3..]).is_ok(),
@@ -460,11 +460,16 @@ pub(super) fn session_environment() -> Result<Option<String>> {
 }
 
 pub(super) fn shell_settings() -> Result<crate::services::shell_settings::ShellSettings> {
-    let root = match CONTEXT.try_with(Clone::clone).ok().flatten() {
-        Some((root, _)) => root,
-        None => crate::runtime::resolve_default_data_dir()?,
-    };
-    crate::services::shell_settings::load(&root)
+    crate::services::shell_settings::load(&settings_root()?)
+}
+
+/// The data directory of the owning session, or the process default outside
+/// an engine turn. Tools that read `settings.json` share this resolution.
+pub(crate) fn settings_root() -> Result<PathBuf> {
+    match CONTEXT.try_with(Clone::clone).ok().flatten() {
+        Some((root, _)) => Ok(root),
+        None => crate::runtime::resolve_default_data_dir(),
+    }
 }
 
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -662,7 +667,7 @@ pub(crate) fn start(
         &session,
     )?;
     let id = task["id"].as_str().context("Task ID missing")?.to_string();
-    let directory = root.join("shell-tasks").join(&session).join(&id);
+    let directory = root.join("tasks/shell").join(&session).join(&id);
     let StartedShell {
         lease,
         stdin_pipe,
@@ -775,7 +780,7 @@ fn prepare_stdin_pipe(_directory: &Path, _id: &str) -> Result<(std::fs::File, st
 /// ignore the request.
 pub fn request_background(root: &Path, session: &str) -> Result<()> {
     let directory = root
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(uuid::Uuid::parse_str(session)?.to_string());
     std::fs::create_dir_all(&directory)?;
     std::fs::write(directory.join("background-now"), b"1")?;
@@ -797,7 +802,7 @@ impl Drop for AbortOnDrop {
 /// Background calls are excluded by their absent active marker.
 pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
     let base = root
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(uuid::Uuid::parse_str(session)?.to_string());
     let mut output = String::new();
     let Ok(entries) = std::fs::read_dir(base) else {
@@ -873,7 +878,7 @@ pub(super) async fn run_foreground(
     // A delegated child's background tasks are reported and stopped by the
     // delegation owner that started it, so this path is the same for every
     // managed session.
-    let session_directory = root.join("shell-tasks").join(id.to_string());
+    let session_directory = root.join("tasks/shell").join(id.to_string());
     let log_dir = format!("fg-{}", uuid::Uuid::new_v4());
     let directory = session_directory.join(&log_dir);
     std::fs::create_dir_all(&directory)?;
@@ -1873,7 +1878,7 @@ pub(super) async fn control_async(
     let session_id = uuid::Uuid::parse_str(session)?.to_string();
     // Moved foreground calls also get this directory, as a marker.
     let managed_directory = root
-        .join("shell-tasks")
+        .join("tasks/shell")
         .join(&session_id)
         .join(&id)
         .is_dir();
@@ -1950,7 +1955,7 @@ mod tests {
             session,
         )
         .unwrap();
-        let directory = root.join("shell-tasks").join(session).join(&id);
+        let directory = root.join("tasks/shell").join(session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("heartbeat"), b"alive").unwrap();
         std::fs::write(directory.join("stdout.log"), b"partial output").unwrap();
@@ -1982,7 +1987,7 @@ mod tests {
             &session,
         )
         .unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(id);
+        let directory = root.path().join("tasks/shell").join(&session).join(id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("heartbeat"), b"alive").unwrap();
         std::fs::write(directory.join("stdout.log"), b"live output").unwrap();
@@ -2100,7 +2105,7 @@ mod tests {
             &session,
         )
         .unwrap();
-        std::fs::create_dir_all(root.path().join("shell-tasks").join(&session).join(id)).unwrap();
+        std::fs::create_dir_all(root.path().join("tasks/shell").join(&session).join(id)).unwrap();
         let snapshot = control(
             "TaskGet",
             &json!({"task_id":id,"block":false}),
@@ -2186,7 +2191,7 @@ mod tests {
         .is_err());
         assert!(!root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(&id)
             .join("cancel")
@@ -2198,7 +2203,9 @@ mod tests {
         let session = uuid::Uuid::new_v4().to_string();
         let id = waiting_fixture(root.path(), &session);
         let lock = rusqlite::Connection::open(
-            root.path().join("tasks").join(format!("{session}.sqlite3")),
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
         )
         .unwrap();
         lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
@@ -2247,7 +2254,7 @@ mod tests {
         .is_err());
         assert!(!root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(&id)
             .join("cancel")
@@ -2281,7 +2288,7 @@ mod tests {
             &session,
         )
         .unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(id);
+        let directory = root.path().join("tasks/shell").join(&session).join(id);
         std::fs::create_dir_all(&directory).unwrap();
         let stopped = control("TaskStop", &json!({"task_id":id}), root.path(), &session)
             .unwrap()
@@ -2323,7 +2330,7 @@ mod tests {
             &session,
         )
         .unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         // A lease nobody holds proves the recorded owner is gone.
         std::fs::write(directory.join("owner.lock"), b"").unwrap();
@@ -2418,7 +2425,7 @@ mod tests {
         // The persisted facts no longer depend on the supervisor file.
         let state_path = root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(&id)
             .join("supervisor-state.json");
@@ -2606,7 +2613,7 @@ mod tests {
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(id);
+        let directory = root.path().join("tasks/shell").join(&session).join(id);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
             let value = super::super::tasks::execute_for_session(
@@ -2865,6 +2872,7 @@ console.log('ready');
 console.error('diagnostic');
 setInterval(() => {}, 10000);
 "#;
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_running_foreground_call_moves_to_the_background_on_request() {
         crate::config::OrchestrationConfig::init_global().unwrap();
@@ -3131,12 +3139,12 @@ setInterval(() => {}, 10000);
         assert_eq!(outcome.requested, vec!["waiting fixture"]);
         assert!(outcome.stopped.is_empty(), "{outcome:?}");
         assert!(outcome.failed.is_empty(), "{outcome:?}");
-        let session_dir = root.path().join("shell-tasks").join(&session);
+        let session_dir = root.path().join("tasks/shell").join(&session);
         assert!(session_dir.join(&running).join("cancel").exists());
         assert!(!session_dir.join(&finished).join("cancel").exists());
         assert!(!root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&other)
             .join(&foreign)
             .join("cancel")
@@ -3160,7 +3168,11 @@ setInterval(() => {}, 10000);
         id: &str,
         status: &'static str,
     ) -> tokio::task::JoinHandle<()> {
-        let cancel = root.join("shell-tasks").join(session).join(id).join("cancel");
+        let cancel = root
+            .join("tasks/shell")
+            .join(session)
+            .join(id)
+            .join("cancel");
         let (root, session, id) = (root.to_owned(), session.to_owned(), id.to_owned());
         tokio::spawn(async move {
             let started = std::time::Instant::now();
@@ -3190,8 +3202,14 @@ setInterval(() => {}, 10000);
         let b = running_fixture(root.path(), &session, "B");
         let c = running_fixture(root.path(), &session, "C");
         // A directory occupies B's cancel path, so writing the marker fails.
-        std::fs::create_dir_all(root.path().join("shell-tasks").join(&session).join(&b).join("cancel"))
-            .unwrap();
+        std::fs::create_dir_all(
+            root.path()
+                .join("tasks/shell")
+                .join(&session)
+                .join(&b)
+                .join("cancel"),
+        )
+        .unwrap();
         let a_driver = confirm_task_when_requested(root.path(), &session, &a, "cancelled");
         let c_driver = confirm_task_when_requested(root.path(), &session, &c, "cancelled");
 
@@ -3237,7 +3255,9 @@ setInterval(() => {}, 10000);
         // Another connection holds the session's task database exclusively, so
         // every read inside the cleanup waits for the five-second busy timeout.
         let lock = rusqlite::Connection::open(
-            root.path().join("tasks").join(format!("{session}.sqlite3")),
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
         )
         .unwrap();
         lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
@@ -3307,7 +3327,7 @@ setInterval(() => {}, 10000);
             );
             assert!(
                 !root
-                    .join("shell-tasks")
+                    .join("tasks/shell")
                     .join(session)
                     .join(id)
                     .join("cancel")
@@ -3474,7 +3494,7 @@ setInterval(() => {}, 10000);
         // loads the log would fail while the stored status says cancelled.
         let log = root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(&id)
             .join("stdout.log");
@@ -4137,7 +4157,7 @@ setInterval(() => {}, 10000);
             ),
         ]);
         let id = pipe_shell(root.path(), &session, command, "blocked writer").await;
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         let ready = wait_until(root.path(), &session, &id, "the ready marker", |value| {
             mentions(value, "stdout", "shell-ready")
         })
@@ -4209,7 +4229,7 @@ setInterval(() => {}, 10000);
             ),
         ]);
         let id = pipe_shell(root.path(), &session, command, "gated reader").await;
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         let filled = fill_pipe(root.path(), &session, &id);
 
         // The real async entry point runs the write on the blocking pool. Its
@@ -4428,7 +4448,7 @@ setInterval(() => {}, 10000);
             )
             .unwrap();
             let id = task["id"].as_str().unwrap().to_owned();
-            let directory = root.path().join("shell-tasks").join(&session).join(&id);
+            let directory = root.path().join("tasks/shell").join(&session).join(&id);
             std::fs::create_dir_all(&directory).unwrap();
             let lease = super::take_lease(&directory, &id).unwrap();
             std::fs::write(directory.join("owner.pid"), std::process::id().to_string()).unwrap();
@@ -4632,7 +4652,7 @@ setInterval(() => {}, 10000);
             ),
         ]);
         let id = pipe_shell(root.path(), &session, command, "inheritance").await;
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         fill_pipe(root.path(), &session, &id);
 
         let (root_path, session_id, task_id) =
@@ -4829,7 +4849,7 @@ setInterval(() => {}, 10000);
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(id);
+        let directory = root.path().join("tasks/shell").join(&session).join(id);
         assert_eq!(
             super::OwnerProbe::open(&directory).unwrap().state(),
             super::OwnerState::Held
@@ -4991,7 +5011,7 @@ setInterval(() => {}, 10000);
         )
         .unwrap();
         let id = task["id"].as_str().unwrap().to_owned();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("stdout.log"), b"legacy output\n").unwrap();
         std::fs::write(directory.join("heartbeat"), b"running").unwrap();
@@ -5040,9 +5060,9 @@ setInterval(() => {}, 10000);
         let session = uuid::Uuid::new_v4().to_string();
         // A regular file where the session task directory belongs makes
         // create_dir_all fail after TaskCreate inserted the record.
-        std::fs::create_dir_all(root.path().join("shell-tasks")).unwrap();
+        std::fs::create_dir_all(root.path().join("tasks/shell")).unwrap();
         std::fs::write(
-            root.path().join("shell-tasks").join(&session),
+            root.path().join("tasks/shell").join(&session),
             b"not a directory",
         )
         .unwrap();
@@ -5116,7 +5136,7 @@ setInterval(() => {}, 10000);
         )
         .unwrap();
         let id = task["id"].as_str().unwrap().to_owned();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("owner.lock"), b"historical owner record").unwrap();
         std::fs::write(directory.join("owner.pid"), b"424242").unwrap();
@@ -5179,7 +5199,7 @@ setInterval(() => {}, 10000);
         )
         .unwrap();
         let id = task["id"].as_str().unwrap().to_owned();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         // A directory where the heartbeat file belongs makes the write fail
         // after TaskUpdate already stored "running", with no chmod involved.
@@ -5223,7 +5243,10 @@ setInterval(() => {}, 10000);
         )
         .unwrap();
         let id = task["id"].as_str().unwrap().to_owned();
-        let database = root.path().join("tasks").join(format!("{session}.sqlite3"));
+        let database = root
+            .path()
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3"));
         std::fs::rename(&database, database.with_extension("original")).unwrap();
         std::fs::create_dir(&database).unwrap();
         let error = super::fail_startup(
@@ -5268,6 +5291,7 @@ setInterval(() => {}, 1000);
     /// stop the foreground process tree it already owns. A pre-existing owner
     /// record is not replaced, and its bytes are left alone. The log already
     /// captured before the failure is kept too.
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_foreground_promotion_records_failure_and_stops_the_process_tree() {
         crate::config::OrchestrationConfig::init_global().unwrap();
@@ -5299,7 +5323,7 @@ setInterval(() => {}, 1000);
                 wait_for_file(&signal_own, "foreground root pid").await;
                 wait_for_file(&signal_descendant, "foreground descendant pid").await;
                 wait_for_file(&signal_started, "foreground fixture startup").await;
-                let session_directory = root_path.join("shell-tasks").join(&session_id);
+                let session_directory = root_path.join("tasks/shell").join(&session_id);
                 let directory = std::fs::read_dir(&session_directory)
                     .unwrap()
                     .flatten()
@@ -5419,7 +5443,7 @@ setInterval(() => {}, 1000);
         .await
         .unwrap();
         let id = started["task_id"].as_str().unwrap().to_owned();
-        let directory = root.join("shell-tasks").join(&session).join(&id);
+        let directory = root.join("tasks/shell").join(&session).join(&id);
         // `start` returns before the shell is exec'd. The probe copy below is
         // deliberately inheritable, so a process spawned by this owner afterwards
         // would wrongly inherit it; wait until the real shell exists first.
@@ -5795,7 +5819,7 @@ setInterval(() => {}, 1000);
             &session,
         )
         .unwrap();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("heartbeat"), b"running").unwrap();
         std::fs::write(directory.join("stdout.log"), b"captured output\n").unwrap();
@@ -6064,7 +6088,11 @@ mod foreground_output_tests {
     fn output_tracks_appends_and_excludes_other_sessions_and_background_tasks() {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
-        let path = root.path().join("shell-tasks").join(&session).join("fg-test");
+        let path = root
+            .path()
+            .join("tasks/shell")
+            .join(&session)
+            .join("fg-test");
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("foreground-active"), b"running").unwrap();
         std::fs::write(path.join("stdout.log"), b"first").unwrap();
@@ -6093,7 +6121,7 @@ mod foreground_output_tests {
         let session = uuid::Uuid::new_v4().to_string();
         let path = root
             .path()
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join("fg-test");
         std::fs::create_dir_all(&path).unwrap();
@@ -6130,7 +6158,7 @@ mod foreground_output_tests {
             session,
         )
         .unwrap();
-        let directory = root.join("shell-tasks").join(session).join(&id);
+        let directory = root.join("tasks/shell").join(session).join(&id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("heartbeat"), b"alive").unwrap();
         std::fs::write(directory.join("stdout.log"), stdout).unwrap();
@@ -6257,6 +6285,7 @@ mod foreground_output_tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn task_get_page_rejects_a_stale_cursor_after_truncation_or_rotation() {
         let root = tempfile::tempdir().unwrap();
@@ -6268,7 +6297,7 @@ mod foreground_output_tests {
             json!({"task_id":id,"max_output_bytes":4}),
         );
         let cursor = first["next_cursor"].as_str().unwrap().to_owned();
-        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        let directory = root.path().join("tasks/shell").join(&session).join(&id);
 
         // A log shorter than the cursor position is stale, not an empty page.
         std::fs::write(directory.join("stdout.log"), b"01").unwrap();

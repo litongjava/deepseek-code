@@ -174,7 +174,7 @@ fn archive(path: &Path, backup: &Path) -> Result<()> {
 pub(super) fn repair(root: &Path, session: &str) -> Result<bool> {
     let base = worker_path(root, session)?;
     let claim_path = root
-        .join("background-tasks")
+        .join("tasks/background")
         .join(format!("session-{session}.claim"));
     if !base.join("current.json").exists() && !claim_path.exists() {
         return Ok(false);
@@ -393,7 +393,7 @@ mod tests {
             error: None,
         };
         fs::create_dir_all(directory(&worker)).unwrap();
-        fs::create_dir_all(root.join("background-tasks")).unwrap();
+        fs::create_dir_all(root.join("tasks/background")).unwrap();
         jobs::save(&directory(&worker).join("worker.json"), &worker).unwrap();
         jobs::save(
             &worker_path(root, &worker.session_id)
@@ -557,7 +557,7 @@ mod tests {
         fs::write(&state, [0; 409]).unwrap();
         fs::write(
             root.path()
-                .join("background-tasks")
+                .join("tasks/background")
                 .join(format!("session-{}.claim", worker.session_id)),
             [0; 36],
         )
@@ -639,7 +639,7 @@ mod tests {
         );
         assert!(!root
             .path()
-            .join("background-tasks")
+            .join("tasks/background")
             .join(format!("session-{}.claim", worker.session_id))
             .exists());
     }

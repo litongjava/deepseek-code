@@ -657,6 +657,58 @@ mod tests {
     }
 
     #[test]
+    fn independent_search_config_routes_each_provider_to_its_strategy() {
+        let configured = |provider: Option<&str>, base_url: &str, model: &str| {
+            let mut config = crate::config::DeepSeekSearchConfig::default();
+            config.provider = provider.map(str::to_owned);
+            config.base_url = base_url.into();
+            config.model = model.into();
+            config.api_key = "search-key".into();
+            config.resolved_provider().unwrap()
+        };
+
+        let deepseek = configured(
+            None,
+            "https://api.deepseek.com/anthropic/v1",
+            "deepseek-flash",
+        );
+        let (selected, url) = endpoint(&deepseek).unwrap();
+        assert_eq!(selected, Strategy::DeepSeek);
+        assert_eq!(
+            url.as_str(),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        let body = request_body(selected, "query", &deepseek.model.id);
+        assert_eq!(body["tools"][0]["type"], "web_search_20250305");
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["model"], "deepseek-flash");
+
+        let openai = configured(Some("openai"), "https://api.openai.com/v1", "gpt-5-mini");
+        let (selected, url) = endpoint(&openai).unwrap();
+        assert_eq!(selected, Strategy::OpenAI);
+        assert_eq!(url.as_str(), "https://api.openai.com/v1/responses");
+        let body = request_body(selected, "query", &openai.model.id);
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["model"], "gpt-5-mini");
+
+        let anthropic = configured(
+            Some("anthropic"),
+            "https://api.anthropic.com",
+            "claude-haiku-4-5",
+        );
+        let (selected, url) = endpoint(&anthropic).unwrap();
+        assert_eq!(selected, Strategy::Anthropic);
+        assert_eq!(url.as_str(), "https://api.anthropic.com/v1/messages");
+        let body = request_body(selected, "query", &anthropic.model.id);
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type":"tool", "name":"web_search"})
+        );
+        assert_eq!(body["model"], "claude-haiku-4-5");
+    }
+
+    #[test]
     fn unsuccessful_search_preserves_reported_usage_without_inventing_counts() {
         let response = json!({"id":"response-id", "model":"actual-model", "content":[{"type":"tool_use","name":"web_search"}],
             "usage":{"input_tokens":40,"output_tokens":12,"cache_read_input_tokens":8}});

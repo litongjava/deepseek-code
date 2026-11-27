@@ -598,13 +598,15 @@ fn finalizing_accepts_only_the_current_final_delivery_review_and_harness() {
         .save_repo(&RepoTarget {
             task_id: task.task_id.clone(),
             repository_id: "repo-code".into(),
-            repo_root: "/workspace/code".into(),
-            git_common_dir: "/workspace/code/.git".into(),
-            target_path: "/workspace/code".into(),
+            repo_root: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
+            git_common_dir: format!("{}/code/.git", crate::super_agent::TEST_WORKSPACE).into(),
+            target_path: format!("{}/code", crate::super_agent::TEST_WORKSPACE).into(),
             target_branch: "develop".into(),
             task_branch: "agent/task".into(),
-            worktree_path: "/data/worktrees/task".into(),
-            working_path: "/data/worktrees/task".into(),
+            worktree_path: format!("{}/data/worktrees/task", crate::super_agent::TEST_WORKSPACE)
+                .into(),
+            working_path: format!("{}/data/worktrees/task", crate::super_agent::TEST_WORKSPACE)
+                .into(),
             base_commit: "base".into(),
             submitted_commit: Some("submitted".into()),
             reviewed_commit: Some("reviewed".into()),

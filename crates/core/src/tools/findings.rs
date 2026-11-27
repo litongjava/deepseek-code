@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 pub fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Record a code review findings as structured data".into()),
         name: "ReportFindings".into(),
         description: "Record a code review's findings as structured data. Call it once when the review instructions ask for findings through this tool, and give the verified findings most severe first; an empty array records that nothing survived verification. Each finding needs `file`, `summary` and `failure_scenario`, while `line` is optional. The result is a numbered list for the terminal, so do not repeat the findings in your reply. If the apply instructions ask for a follow-up report after fixes, set `outcome` on each finding.".into(),
         input_schema: json!({"type":"object","properties":{

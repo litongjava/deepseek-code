@@ -1,4 +1,4 @@
-//! Per-server MCP states stored in `<data dir>/mcp-states.json`.
+//! Per-server MCP states stored in `<data dir>/config/mcp-states.json`.
 //!
 //! A server without an entry gets [`McpState::User`], so an existing
 //! installation keeps today's behavior: every enabled server's tools are part
@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const FILE_NAME: &str = "mcp-states.json";
 const TEMP_NAME: &str = "mcp-states.json.tmp";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -62,7 +61,7 @@ struct McpStatesFile {
 /// that every server stays at its default; an unknown label only skips its own
 /// entry.
 pub fn load(data_dir: &Path) -> BTreeMap<String, McpState> {
-    let path = data_dir.join(FILE_NAME);
+    let path = crate::data_layout::DataLayout::from_root(data_dir).mcp_states();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
@@ -97,16 +96,17 @@ pub fn load(data_dir: &Path) -> BTreeMap<String, McpState> {
 pub fn set(data_dir: &Path, server: &str, state: McpState) -> Result<()> {
     let mut states = load(data_dir);
     states.insert(server.to_owned(), state);
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("Creating {}", data_dir.display()))?;
+    let layout = crate::data_layout::DataLayout::from_root(data_dir);
+    std::fs::create_dir_all(layout.config_root())
+        .with_context(|| format!("Creating {}", layout.config_root().display()))?;
     let file = McpStatesFile {
         servers: states
             .into_iter()
             .map(|(name, state)| (name, state.label().to_owned()))
             .collect(),
     };
-    let path = data_dir.join(FILE_NAME);
-    let temp = data_dir.join(TEMP_NAME);
+    let path = layout.mcp_states();
+    let temp = layout.config_file(TEMP_NAME);
     let mut text = serde_json::to_string_pretty(&file)?;
     text.push('\n');
     std::fs::write(&temp, text).with_context(|| format!("Writing {}", temp.display()))?;
@@ -151,7 +151,7 @@ pub fn server_of(tool: &str) -> Option<&str> {
 }
 
 /// The first non-empty line of a description, trimmed and cut to 120 characters.
-/// Shared by the on-demand prompt listing and the CLI's context estimate.
+/// Used by the CLI's MCP settings panel.
 pub fn description_summary(description: &str) -> String {
     let line = description
         .lines()
@@ -187,10 +187,11 @@ mod tests {
         assert_eq!(effective(&states, "unknown"), McpState::User);
         assert_eq!(effective(&BTreeMap::new(), "github"), McpState::User);
 
-        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+        let config = crate::data_layout::DataLayout::from_root(dir.path());
+        let text = std::fs::read_to_string(config.mcp_states()).unwrap();
         assert!(text.contains("\"github\": \"user-only\""), "{text}");
         assert!(text.contains("\"servers\""), "{text}");
-        assert!(!dir.path().join(TEMP_NAME).exists());
+        assert!(!config.config_file(TEMP_NAME).exists());
     }
 
     #[test]
@@ -198,11 +199,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(load(dir.path()).is_empty());
 
-        std::fs::write(dir.path().join(FILE_NAME), "not json").unwrap();
+        let config = crate::data_layout::DataLayout::from_root(dir.path());
+        std::fs::create_dir_all(config.config_root()).unwrap();
+        std::fs::write(config.mcp_states(), "not json").unwrap();
         assert!(load(dir.path()).is_empty());
 
         std::fs::write(
-            dir.path().join(FILE_NAME),
+            config.mcp_states(),
             r#"{"servers":{"known":"on-demand","future":"brand-new"}}"#,
         )
         .unwrap();

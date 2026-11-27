@@ -1,6 +1,6 @@
 //! User-owned configuration for the Rust automatic permission extension.
 use crate::{
-    native_engine::provider_manager::{Provider, ResolvedProvider},
+    native_engine::provider_manager::{ApiFormat, Provider, ResolvedProvider},
     services::ServiceContext,
 };
 use anyhow::{ensure, Context, Result};
@@ -125,9 +125,25 @@ impl AutoConfig {
             selected.provider.enabled && selected.model.enabled && selected.model.supports_text,
             "Auto classifier requires an enabled text model"
         );
-        // The first implementation uses the native messages/chat-completions
-        // adapters. Provider-specific transports must explicitly opt in later.
-        ensure!(selected.provider.builtin_id.is_none() && selected.model.api.is_none(), "Auto classifier requires a native Anthropic or OpenAI-compatible provider; this provider-specific transport is not supported");
+        // Native direct adapters, plus the two Responses routes the classifier
+        // can now speak. Other catalog transports still need an explicit opt-in.
+        let api = selected.model.api.as_deref();
+        let native = selected.provider.builtin_id.is_none()
+            && match selected.provider.api_format {
+                ApiFormat::OpenAI => matches!(
+                    api,
+                    None | Some("openai-completions" | "openai-responses")
+                ),
+                ApiFormat::Anthropic => matches!(api, None | Some("anthropic-messages")),
+            };
+        let builtin_responses = selected.provider.builtin_id.as_deref() == Some("openai")
+            && selected.provider.api_format == ApiFormat::OpenAI
+            && api == Some("openai-responses");
+        ensure!(
+            native || builtin_responses,
+            "Auto classifier requires a native Anthropic or OpenAI-compatible provider, \
+             or OpenAI Responses; this provider-specific transport is not supported"
+        );
         ensure!(
             !selected.provider.api_key.trim().is_empty(),
             "Auto classifier credentials unavailable"
@@ -152,6 +168,78 @@ pub fn save<D:crate::db::session_store::GlobalPreferences>(context: &ServiceCont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn resolved(builtin: Option<&str>, api_format: &str, api: Option<&str>) -> ResolvedProvider {
+        let provider: Provider = serde_json::from_value(json!({
+            "id":"classifier",
+            "name":"Classifier",
+            "base_url":"http://127.0.0.1:1",
+            "api_key":"fixture-only",
+            "api_format":api_format,
+            "builtin_id":builtin,
+            "enabled":true,
+            "models":[{
+                "id":"classifier-model",
+                "name":"Classifier model",
+                "enabled":true,
+                "supports_vision":false,
+                "supports_web_search":false,
+                "supports_text":true,
+                "api":api
+            }]
+        }))
+        .unwrap();
+        ResolvedProvider {
+            model: provider.models[0].clone(),
+            provider,
+        }
+    }
+
+    fn config() -> AutoConfig {
+        AutoConfig {
+            enabled: true,
+            classifier: Some(ClassifierSelection::Current),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_accepts_native_adapters_and_openai_responses() {
+        for (builtin, format, api) in [
+            (None, "openai", None),
+            (None, "openai", Some("openai-completions")),
+            (None, "openai", Some("openai-responses")),
+            (None, "anthropic", None),
+            (None, "anthropic", Some("anthropic-messages")),
+            (Some("openai"), "openai", Some("openai-responses")),
+        ] {
+            let current = resolved(builtin, format, api);
+            assert!(
+                config().resolve(&[], &current).is_ok(),
+                "expected {builtin:?}/{format}/{api:?} to be supported"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_other_catalog_transports() {
+        for (builtin, format, api) in [
+            (Some("openai"), "openai", None),
+            (Some("openai"), "openai", Some("openai-completions")),
+            (Some("google"), "openai", Some("openai-responses")),
+            (Some("amazon-bedrock"), "openai", Some("bedrock-converse-stream")),
+            (None, "openai", Some("google-generative-ai")),
+            (None, "anthropic", Some("openai-responses")),
+        ] {
+            let current = resolved(builtin, format, api);
+            assert!(
+                config().resolve(&[], &current).is_err(),
+                "expected {builtin:?}/{format}/{api:?} to be rejected"
+            );
+        }
+    }
+
     #[test]
     fn config_rejects_unknown_fields_missing_selection_and_unsafe_limits() {
         assert!(

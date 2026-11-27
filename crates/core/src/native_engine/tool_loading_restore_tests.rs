@@ -4,6 +4,7 @@
 use super::*;
 use crate::db::session_store::Stores;
 use crate::runtime::{RuntimePaths, SessionStore};
+use base64::Engine;
 
 fn restore_executor(paths: &RuntimePaths, messages: Vec<Value>) -> ToolLoopExecutor {
     let _ = crate::config::OrchestrationConfig::init_global();
@@ -20,7 +21,7 @@ fn restore_executor(paths: &RuntimePaths, messages: Vec<Value>) -> ToolLoopExecu
         paths.data_dir.to_string_lossy().into_owned(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(paths.data_dir.join("config.json"))
+    .with_search_config_path(paths.layout().config_file("config.json"))
 }
 
 /// Stores one assistant tool call and its result the way the host does.
@@ -77,7 +78,7 @@ fn a_resumed_session_keeps_the_loaded_tool_order() {
     let session = store.create(dir.path(), "fixture", "fixture").unwrap();
 
     store.append(&session, "user", "Load both").unwrap();
-    for (name, suffix) in [("WebFetch", "web"), ("ListDir", "dir")] {
+    for (name, suffix) in [("Monitor", "mon"), ("ListDir", "dir")] {
         let assistant = uuid::Uuid::new_v4().to_string();
         record_call(
             &store,
@@ -95,7 +96,7 @@ fn a_resumed_session_keeps_the_loaded_tool_order() {
     );
     from_messages.restore_loaded_tools();
     let sent = request_names(&from_messages);
-    assert_eq!(&sent[sent.len() - 2..], ["WebFetch", "ListDir"], "{sent:?}");
+    assert_eq!(&sent[sent.len() - 2..], ["Monitor", "ListDir"], "{sent:?}");
 
     // The durable rows restore the same order even when the submitted display
     // history is empty.
@@ -105,7 +106,7 @@ fn a_resumed_session_keeps_the_loaded_tool_order() {
         .unwrap();
     from_rows.restore_persisted_loaded_tools().unwrap();
     let sent = request_names(&from_rows);
-    assert_eq!(&sent[sent.len() - 2..], ["WebFetch", "ListDir"], "{sent:?}");
+    assert_eq!(&sent[sent.len() - 2..], ["Monitor", "ListDir"], "{sent:?}");
 }
 
 #[test]
@@ -276,6 +277,60 @@ fn failed_read_cannot_authorize_an_edit_and_the_successful_read_survives_resume(
         .unread_file_error("Edit", &read)
         .unwrap()
         .contains("modified"));
-    assert!(!paths.data_dir.join("file-state").exists());
+    assert!(!paths.data_dir.join("cache/file-state").exists());
     Ok(())
+}
+
+/// A stored tool image whose declared type disagrees with its bytes must be
+/// repaired during replay. It used to fail the whole turn before the request
+/// was sent, leaving the session unable to continue.
+#[test]
+fn mislabelled_tool_image_is_repaired_when_history_is_replayed() {
+    let _ = crate::config::OrchestrationConfig::init_global();
+    let dir = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+    let store = SessionStore::new(Arc::new(paths.open_stores().unwrap()));
+    let session = store.create(dir.path(), "fixture", "fixture").unwrap();
+    store
+        .append(&session, "user", "Look at the screenshot")
+        .unwrap();
+    let assistant = store.append(&session, "assistant", "").unwrap();
+
+    let webp = base64::engine::general_purpose::STANDARD.encode(b"RIFF\x00\x00\x00\x00WEBP");
+    let display = "Image file shot.png (image/png, 12 bytes)";
+    let content = json!([
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":webp}},
+        {"type":"text","text":display}
+    ])
+    .to_string();
+    record_call(&store, &session, &assistant, "call-image", "Read", display);
+    let tool_id: String = store
+        .db
+        .fixture_shard(&session, |conn| {
+            conn.query_row(
+                "SELECT id FROM tool_calls WHERE message_id=?1",
+                [&assistant],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    store
+        .db
+        .fixture_shard(&session, |conn| {
+            conn.execute(
+                "INSERT INTO mcp_tool_outputs (conversation_id,tool_use_id,content_json,metadata_json,display_text,is_error,model_content_json) VALUES (?1,?4,?2,'{}',?3,0,?2)",
+                rusqlite::params![session, content, display, tool_id],
+            )
+        })
+        .unwrap()
+        .unwrap();
+
+    for format in [ApiFormat::OpenAI, ApiFormat::Anthropic] {
+        let history = store.model_history(&session, &format).unwrap();
+        let text = serde_json::to_string(&history).unwrap();
+        assert!(text.contains("image/webp"), "{format:?}: {text}");
+        // The provider boundary accepts the repaired block instead of failing.
+        super::multimodal::normalize_messages(&history).unwrap();
+    }
 }

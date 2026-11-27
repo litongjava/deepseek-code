@@ -620,8 +620,8 @@ fn write_responses_provider(root: &Path, url: &str) {
         }))
         .unwrap(),
     );
-    std::fs::write(
-        paths.data_dir.join("config.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/config.json"),
         serde_json::to_vec(&config).unwrap(),
     )
     .unwrap();
@@ -636,7 +636,12 @@ struct Client {
 }
 impl Client {
     async fn frame(&mut self, kind: &str) -> Value {
-        tokio::time::timeout(Duration::from_secs(10), async {
+        self.frame_with_timeout(kind, Duration::from_secs(10)).await
+    }
+
+    async fn frame_with_timeout(&mut self, kind: &str, timeout: Duration) -> Value {
+        let mut seen = Vec::new();
+        tokio::time::timeout(timeout, async {
             loop {
                 let line = self
                     .output
@@ -649,13 +654,14 @@ impl Client {
                     frame["type"] != "result" || kind == "result",
                     "Unexpected terminal result while waiting for {kind}: {frame}"
                 );
+                seen.push(frame["type"].clone());
                 if frame["type"] == kind {
                     return frame;
                 }
             }
         })
         .await
-        .unwrap()
+        .unwrap_or_else(|_| panic!("Timed out waiting for {kind}, received {seen:?}"))
     }
     fn start(root: &Path, server: &Server, extra: &[&str]) -> Self {
         if matches!(server.fixture.mode, Mode::RuntimeAgent) {
@@ -1127,8 +1133,8 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
         let mut config = deepseek_code_core::config::AppConfig::default();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         config.providers.push(serde_json::from_value(json!({"id":"vision-fixture","name":"Vision fixture","provider_type":"openai","base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
-        std::fs::write(
-            paths.data_dir.join("config.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.data_dir.join("config/config.json"),
             serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
@@ -1368,7 +1374,7 @@ async fn streaming_process_handles_two_messages_before_eof_in_one_session() {
 /// A positive streaming idle deadline in the cwd config the child reads.
 fn write_stream_timeout_policy(root: &Path, idle_secs: u64, retries: u32, backoff_ms: u64) {
     std::fs::create_dir_all(root.join("config")).unwrap();
-    let config = include_str!("../../../src-tauri/config/orchestration.toml")
+    let config = include_str!("../../../config/orchestration.toml")
         .replace(
             "request_timeout_secs = 300",
             &format!("request_timeout_secs = {idle_secs}"),
@@ -1378,7 +1384,11 @@ fn write_stream_timeout_policy(root: &Path, idle_secs: u64, retries: u32, backof
             "retry_base_backoff_ms = 2000",
             &format!("retry_base_backoff_ms = {backoff_ms}"),
         );
-    std::fs::write(root.join("config/orchestration.toml"), config).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        root.join("config/orchestration.toml"),
+        config,
+    )
+    .unwrap();
 }
 
 fn turn_rows(data: &Path, session: &str) -> Vec<(String, String)> {
@@ -1401,7 +1411,7 @@ fn turn_rows(data: &Path, session: &str) -> Vec<(String, String)> {
 
 fn turn_end_records(data: &Path, session: &str) -> Vec<Value> {
     let path = data
-        .join("logs/request-attempts")
+        .join("diagnostics/logs/request-attempts")
         .join(format!("{session}.jsonl"));
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -1890,8 +1900,8 @@ async fn sdk_initialize_applies_runtime_overrides_and_reports_real_resources() {
         other.name = "Other fixture provider".into();
         other.models.retain(|model| model.id == "fixture-second");
         config.providers.push(other);
-        std::fs::write(
-            paths.data_dir.join("config.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.data_dir.join("config/config.json"),
             serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
@@ -2296,8 +2306,8 @@ async fn sdk_initialize_agents_execute_with_bounded_tools_and_run_local_catalog(
             .unwrap();
             let mut config = deepseek_code_core::config::AppConfig::default();
             config.providers.push(serde_json::from_value(json!({"id":"sdk-fixture","name":"SDK fixture provider","provider_type":if anthropic {"anthropic"}else{"openai"},"base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture primary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true},{"id":"fixture-second","name":"Fixture secondary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
-            std::fs::write(
-                paths.data_dir.join("config.json"),
+            deepseek_code_core::data_layout::write_config_file(
+                paths.data_dir.join("config/config.json"),
                 serde_json::to_vec(&config).unwrap(),
             )
             .unwrap();
@@ -2561,6 +2571,16 @@ SKILL_SENTINEL",
 async fn sdk_main_thread_agent_and_prompt_suggestions_apply() {
     let server = prompt_suggestion::Endpoint::start("chat").await;
     let root = tempfile::tempdir().unwrap();
+    use deepseek_code_core::services::{
+        memory_files::FileMemory, EnvironmentCredentials, ServiceContext,
+    };
+    let context = ServiceContext::open(
+        deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap(),
+        std::sync::Arc::new(EnvironmentCredentials),
+    )
+    .unwrap();
+    let memory = FileMemory::workspace(&context, root.path()).unwrap();
+    memory.put("saffron.md", "---\nname: saffron\ndescription: saffron\nmetadata:\n  type: user\n---\nEXPANSION_ONLY_RECALL\n", None).unwrap();
     let mut client = server.client(root.path(), &[]);
     client
         .send(initialize_request(
@@ -2569,7 +2589,7 @@ async fn sdk_main_thread_agent_and_prompt_suggestions_apply() {
                 "agents":{"main":{
                     "description":"MAIN_AGENT_DESCRIPTION",
                     "prompt":"MAIN_AGENT_SYSTEM_SENTINEL",
-                    "initialPrompt":"INITIAL_PROMPT_SENTINEL"
+                    "initialPrompt":"INITIAL_PROMPT_SENTINEL saffron"
                 }},
                 "agent":"main",
                 "promptSuggestions":true
@@ -2591,7 +2611,8 @@ async fn sdk_main_thread_agent_and_prompt_suggestions_apply() {
         let requests = server.requests.lock().unwrap();
         let first = &requests[0].1;
         assert!(first.contains("MAIN_AGENT_SYSTEM_SENTINEL"), "{first}");
-        assert!(first.contains("INITIAL_PROMPT_SENTINEL"), "{first}");
+        assert!(first.contains("INITIAL_PROMPT_SENTINEL saffron"), "{first}");
+        assert!(!first.contains("EXPANSION_ONLY_RECALL"), "{first}");
     }
     assert!(client.finish().await.0.success());
 }
@@ -2677,13 +2698,14 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
         assert_eq!(schema["required"], json!(["names"]));
         assert_eq!(schema["properties"]["names"]["items"]["type"], "string");
         let first = request_tool_names(&requests[0], anthropic);
-        // Exactly the 12 built-in defaults, each once. MCP tools keep their own
+        // Exactly the built-in defaults, each once. MCP tools keep their own
         // loading rules and are not part of the switches.
         let mut core = vec![
             "Bash",
             "Read",
             "Write",
             "Edit",
+            "MultiEdit",
             "Grep",
             "Glob",
             "Skill",
@@ -2691,24 +2713,25 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
             "AskUserQuestion",
             "EnterPlanMode",
             "ExitPlanMode",
+            "TaskGet",
             "TaskStop",
+            "TodoRead",
+            "TodoWrite",
+            "WebFetch",
+            "WebSearch",
         ];
-        let mut seen: Vec<String> = first
+        let seen: Vec<String> = first
             .iter()
             .filter(|name| !name.starts_with("mcp__") && !matches!(name.as_str(), "ListMcpResources" | "ReadMcpResource"))
             .cloned()
             .collect();
-        for name in &seen {
-            assert!(core.contains(&name.as_str()), "unexpected built-in {name}: {first:?}");
-        }
         core.sort_unstable();
-        seen.sort_unstable();
         assert_eq!(seen, core, "{first:?}");
         let mut unique = first.clone();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), first.len(), "duplicate tool: {first:?}");
-        for name in ["ListDir", "WebFetch", "Agent", "Workflow", "TaskGet"] {
+        for name in ["ListDir", "Agent", "Workflow"] {
             assert!(!first.contains(&name.to_owned()), "{name}: {first:?}");
         }
         // Retired model-facing tools: plan_mode is gone, and TaskOutput was
@@ -2717,7 +2740,9 @@ async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
             assert!(!first.contains(&name.to_owned()), "retired {name}: {first:?}");
         }
         let second = request_tool_names(&requests[1], anthropic);
-        assert!(second.contains(&"ListDir".to_owned()), "{second:?}");
+        let mut expected = first;
+        expected.push("ListDir".into());
+        assert_eq!(second, expected);
         // The loaded tool really ran on the fixture directory.
         assert!(requests[2].to_string().contains("fixture.txt"));
         drop(requests);

@@ -36,6 +36,8 @@ fn approval_notes_follow_their_result_as_user_text_after_reopen_and_fork() {
 
         let openai = reopened.model_history(session, &ApiFormat::OpenAI).unwrap();
         assert_eq!(openai[2]["role"], "tool");
-        assert_eq!(openai[3], serde_json::json!({"role": "user", "content": "use -5 instead"}));
+        assert_eq!(openai[3]["role"], "user");
+        assert_eq!(openai[3]["content"], "use -5 instead");
+        assert_eq!(openai[3]["origin"], "approval_note");
     }
 }

@@ -48,9 +48,9 @@ pub(super) fn materialize(context: &ServiceContext<impl PluginCatalog>, bundle: 
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let mut base = context.paths.data_dir.clone();
+    let mut base = context.paths.layout().plugins_cache();
     std::fs::create_dir_all(&base)?;
-    for segment in ["plugins", "cache", &bundle.id, &bundle.version] {
+    for segment in [&bundle.id, &bundle.version] {
         base.push(segment);
         directory(&base)?;
     }

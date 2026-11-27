@@ -341,6 +341,10 @@ fn request_identity_covers_every_model_provider_post() {
         ("core/src/app_studio/mod.rs", "generated JavaScript string"),
         ("core/src/native_engine/provider_runtime/cloud_auth.rs", "cloud OAuth token exchange"),
         ("core/src/native_engine/model_http.rs", "HTTP client fixture"),
+        (
+            "core/src/native_engine/auto_permissions.rs",
+            "classifier transport without session request identity",
+        ),
         ("core/src/native_engine/stream_retry_tests.rs", "transport fixture"),
         ("core/src/native_engine/request_recording/tests.rs", "transport fixture"),
         ("core/src/tools/image_generation.rs", "provider image API, reviewed separately"),

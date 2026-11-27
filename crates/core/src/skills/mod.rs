@@ -99,18 +99,6 @@ impl SkillsManager {
         Self { skills_dir }
     }
 
-    pub fn new() -> Self {
-        let skills_dir = Self::get_skills_base_path();
-        Self { skills_dir }
-    }
-
-    fn get_skills_base_path() -> PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".claude").join("skills")
-    }
-
     pub fn get_skills_path(&self, source: &SkillSource) -> PathBuf {
         match source {
             SkillSource::User => self.skills_dir.clone(),
@@ -803,11 +791,6 @@ pub struct SuperpowersCategory {
     pub skills_count: usize,
 }
 
-impl Default for SkillsManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Default for FrontmatterData {
     fn default() -> Self {

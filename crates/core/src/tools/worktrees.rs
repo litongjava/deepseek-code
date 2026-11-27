@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 pub(super) fn definition() -> super::ToolDefinition {
-    super::ToolDefinition { name:"worktree".into(), description:"Manage real Git worktrees: list, create, enter (resolve path), remove, prune, lock, unlock. Never force-removes dirty worktrees or deletes branches. Requires execution approval.".into(), input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["list","create","enter","remove","prune","lock","unlock"]},"path":{"type":"string"},"name":{"type":"string"},"branch":{"type":"string"}},"required":["operation"]}) }
+    super::ToolDefinition { summary: None, name:"worktree".into(), description:"Manage real Git worktrees: list, create, enter (resolve path), remove, prune, lock, unlock. Never force-removes dirty worktrees or deletes branches. Requires execution approval.".into(), input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["list","create","enter","remove","prune","lock","unlock"]},"path":{"type":"string"},"name":{"type":"string"},"branch":{"type":"string"}},"required":["operation"]}) }
 }
 
 async fn git(cwd: &str, args: &[String]) -> Result<String> {

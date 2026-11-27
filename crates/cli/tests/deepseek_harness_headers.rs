@@ -136,8 +136,8 @@ async fn scenario(api: &'static str, tool: &'static str) {
     let root = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
-    std::fs::write(
-        paths.data_dir.join("settings.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/settings.json"),
         r#"{"requestRecording":{"enabled":true}}"#,
     )
     .unwrap();
@@ -167,7 +167,7 @@ async fn scenario(api: &'static str, tool: &'static str) {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     // builtin_id identifies the platform while base_url keeps every request local.
     // Do not use --base-url: the CLI intentionally clears builtin_id for overrides.
-    std::fs::write(paths.data_dir.join("providers.json"), json!([{
+    deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/providers.json"), json!([{
         "id":"fixture","name":"fixture","base_url":address,"api_key":"fixture-only",
         "api_format":api,"builtin_id":"deepseek","enabled":true,
         "models":[{"id":"fixture-model","name":"fixture","enabled":true,"context_window":128000,"max_tokens":4096,
@@ -242,7 +242,7 @@ async fn scenario(api: &'static str, tool: &'static str) {
         .unwrap()
         .iter()
         .any(|message| message["content"].as_str() == Some("HEADER_NORMAL_REPLY")));
-    let dir = paths.data_dir.join("request-records").join(&id);
+    let dir = paths.data_dir.join("diagnostics/request-records").join(&id);
     let mut records: Vec<Value> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())

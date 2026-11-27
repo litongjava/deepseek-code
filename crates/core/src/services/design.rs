@@ -285,7 +285,7 @@ fn scan(root: &Path, dir: &Path, files: &mut Vec<File>) -> Result<()> {
 }
 fn plan_path(root: &Path, id: &str) -> Result<PathBuf> {
     project_id(id)?;
-    Ok(root.join("design-plans").join(format!("{id}.json")))
+    Ok(root.join("tasks/design-plans").join(format!("{id}.json")))
 }
 fn save_plan(root: &Path, plan: &UploadPlan) -> Result<()> {
     let path = plan_path(root, &plan.id)?;
@@ -988,7 +988,7 @@ pub async fn convert(root: &Path, recipe: &ConvertRecipe) -> Result<Conversion> 
         "Bundle output cannot contain the workspace, converter or dependency directory"
     );
     let id = uuid::Uuid::new_v4().to_string();
-    let directory = root.join("design-conversions").join(&id);
+    let directory = root.join("diagnostics/design-conversions").join(&id);
     std::fs::create_dir_all(&directory)?;
     let log = directory.join("converter.log");
     let stdout = directory.join("verdict.json");

@@ -6,22 +6,29 @@
 use std::path::{Path, PathBuf};
 
 /// Directory of the frozen first-message reminders.
-pub(crate) const ENVIRONMENT_DIR: &str = "environment";
+pub(crate) const ENVIRONMENT_DIR: &str = "cache/environment";
 /// Directory of the frozen MCP tool definitions.
-pub(crate) const MCP_SNAPSHOT_DIR: &str = "mcp-tool-snapshots";
+pub(crate) const MCP_SNAPSHOT_DIR: &str = "cache/mcp-tool-snapshots";
 
 /// Kinds tracked by `prompt::set_changes`; each writes `<session>.<kind>.names.json`.
 pub(crate) const SET_CHANGE_SKILLS: &str = "skills";
 pub(crate) const SET_CHANGE_LOADABLE_TOOLS: &str = "loadable-tools";
-const SET_CHANGE_KINDS: &[&str] = &[SET_CHANGE_SKILLS, SET_CHANGE_LOADABLE_TOOLS];
+pub(crate) const SET_CHANGE_EXPERIENCE: &str = "experience";
+const SET_CHANGE_KINDS: &[&str] = &[
+    SET_CHANGE_SKILLS,
+    SET_CHANGE_LOADABLE_TOOLS,
+    SET_CHANGE_EXPERIENCE,
+];
 
-/// Suffixes written directly under `environment/`.
+/// Suffixes written directly under `cache/environment/`.
 const ENVIRONMENT_SUFFIXES: &[&str] = &[
     ".txt",
     ".date.txt",
     ".announced-date",
     ".loadable-tools.json",
     ".skills.json",
+    ".inline-skills.json",
+    ".experience.json",
     SUGGESTION_SUFFIX,
 ];
 

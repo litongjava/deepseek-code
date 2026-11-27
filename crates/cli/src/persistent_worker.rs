@@ -411,7 +411,7 @@ async fn execute(
     status_target: StatusTarget,
     bash_target: BashTarget,
 ) -> Result<()> {
-    let dir = worker.root.join("background-tasks").join(id);
+    let dir = worker.root.join("tasks/background").join(id);
     service::set_event_sink(Some(dir.join("output.jsonl")));
     std::env::set_var(jobs::CONTROL_ENV, &dir);
     let mut current = sessions.lock().await;
@@ -539,7 +539,14 @@ async fn execute(
             && session.permissions.get_mode()
                 == deepseek_code_core::permissions::PermissionMode::BypassPermissions,
     );
-    let result = session.turn(&cli, &prompt, &mut None).await;
+    let result = session
+        .turn(
+            &cli,
+            &prompt,
+            &mut None,
+            crate::session::TurnOrigin::command_line(&cli, &prompt),
+        )
+        .await;
     session.idle_launch = Some((identity, Arc::new(cli)));
     session
         .engine

@@ -154,8 +154,8 @@ mod tests {
         (dir, context)
     }
     fn configure(root: &Path, hooks: serde_json::Value) {
-        std::fs::write(
-            root.join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
             json!({"hooks":hooks}).to_string(),
         )
         .unwrap();

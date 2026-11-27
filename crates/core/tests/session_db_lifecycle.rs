@@ -23,13 +23,14 @@ fn global(root: &Path) -> Connection {
     Connection::open_with_flags(root.join("global.db"), OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap()
 }
 fn shard(root: &Path) -> PathBuf {
-    root.join("sessions").join(ID).join("session.db")
+    root.join("data/sessions").join(ID).join("session.db")
 }
 fn query<T: rusqlite::types::FromSql>(db: &Connection, sql: &str) -> T {
     db.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 fn first_message() -> FirstMessage {
     FirstMessage {
+        origin: "typed".into(),
         text: "first line\n第二行".into(),
         typed: Some(serde_json::json!([{"type":"text","text":"第一"}])),
     }
@@ -189,8 +190,12 @@ fn exact_logical_ids_have_distinct_safe_storage_keys() {
         } else {
             format!("sha256-{:x}", Sha256::digest(id.as_bytes()))
         };
-        let file = tmp.path().join("sessions").join(&key).join("session.db");
-        assert!(tmp.path().join("session-locks").join(key).is_file());
+        let file = tmp
+            .path()
+            .join("data/sessions")
+            .join(&key)
+            .join("session.db");
+        assert!(tmp.path().join("state/locks/session").join(key).is_file());
         let c = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         assert_eq!(query::<String>(&c, "SELECT id FROM manifest"), id);
         assert_eq!(
@@ -265,6 +270,7 @@ fn invalid_session_files_fail_closed_without_recreation() {
             "corrupt" => fs::write(&path, "invalid SQLite").unwrap(),
             other => {
                 let c = Connection::open(&path).unwrap();
+                c.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
                 c.execute_batch(match other {
                     "kind" => "PRAGMA application_id=0x44434c47",
                     "newer" => "PRAGMA user_version=99",
@@ -339,7 +345,7 @@ fn recover_every_create_boundary() {
         drop(s);
         let reopened = Stores::open(tmp.path()).unwrap();
         assert_eq!(pending(tmp.path()), 0);
-        assert_eq!(count(tmp.path(), "sessions/.staging"), 0);
+        assert_eq!(count(tmp.path(), "data/sessions/.staging"), 0);
         if matches!(
             phase,
             BeforeCreateIntentCommit | CreateIntent | StageDirectory | BeforeSeal
@@ -397,7 +403,7 @@ fn recover_every_delete_boundary_without_resurrection() {
         let reopened = Stores::open(tmp.path()).unwrap();
         assert!(reopened.open_session(ID).is_err());
         assert_eq!(pending(tmp.path()), 0);
-        assert_eq!(count(tmp.path(), "sessions/.trash"), 0);
+        assert_eq!(count(tmp.path(), "data/sessions/.trash"), 0);
         assert!(!shard(tmp.path()).exists());
         assert_ne!(
             reopened
@@ -449,7 +455,7 @@ fn publication_rechecks_project_trust_and_quarantines_conflict() {
         ),
         1
     );
-    assert_eq!(count(tmp.path(), "sessions/.quarantine"), 1);
+    assert_eq!(count(tmp.path(), "data/sessions/.quarantine"), 1);
 }
 
 #[test]
@@ -464,7 +470,7 @@ fn orphaned_session_never_becomes_visible() {
     let reopened = Stores::open(tmp.path()).unwrap();
     assert!(reopened.open_session(ID).is_err());
     assert!(!shard(tmp.path()).exists());
-    assert_eq!(count(tmp.path(), "sessions/.quarantine"), 1);
+    assert_eq!(count(tmp.path(), "data/sessions/.quarantine"), 1);
 }
 
 #[test]
@@ -474,7 +480,7 @@ fn damaged_or_foreign_seals_are_quarantined_while_other_sessions_open() {
         let s = Stores::open(tmp.path()).unwrap();
         s.create("other", first()).unwrap();
         assert!(stop_at(&s, Phase::Sealed).create(ID, first()).is_err());
-        let stage = fs::read_dir(tmp.path().join("sessions/.staging"))
+        let stage = fs::read_dir(tmp.path().join("data/sessions/.staging"))
             .unwrap()
             .next()
             .unwrap()
@@ -498,7 +504,7 @@ fn damaged_or_foreign_seals_are_quarantined_while_other_sessions_open() {
         assert!(s.open_session(ID).is_err());
         assert!(s.open_session("other").is_ok());
         assert_eq!(pending(tmp.path()), 0);
-        assert_eq!(count(tmp.path(), "sessions/.quarantine"), 1);
+        assert_eq!(count(tmp.path(), "data/sessions/.quarantine"), 1);
         assert_eq!(
             query::<i64>(
                 &global(tmp.path()),
@@ -826,7 +832,7 @@ fn killing_writer_releases_lock_and_replays_only_sealed_work() {
         let tmp = tempdir().unwrap();
         let mut child = Worker::start(tmp.path(), mode);
         wait_file(&tmp.path().join("ready"));
-        let lock = fs::File::open(tmp.path().join("session-locks").join(ID)).unwrap();
+        let lock = fs::File::open(tmp.path().join("state/locks/session").join(ID)).unwrap();
         assert!(matches!(
             lock.try_lock_shared(),
             Err(std::fs::TryLockError::WouldBlock)
@@ -837,7 +843,7 @@ fn killing_writer_releases_lock_and_replays_only_sealed_work() {
             0
         );
         if mode == "sealed-wal" {
-            let stage = fs::read_dir(tmp.path().join("sessions/.staging"))
+            let stage = fs::read_dir(tmp.path().join("data/sessions/.staging"))
                 .unwrap()
                 .next()
                 .unwrap()
@@ -972,7 +978,7 @@ fn fix_round_structural_damage_is_quarantined_before_publication_or_retirement()
             shard(root.path())
         } else {
             assert!(stop_at(&stores, Phase::Sealed).create(ID, first()).is_err());
-            fs::read_dir(root.path().join("sessions/.staging"))?
+            fs::read_dir(root.path().join("data/sessions/.staging"))?
                 .next()
                 .unwrap()?
                 .path()
@@ -998,7 +1004,7 @@ fn fix_round_structural_damage_is_quarantined_before_publication_or_retirement()
                 ),
                 1
             );
-            assert_eq!(count(root.path(), "sessions/.quarantine"), 1);
+            assert_eq!(count(root.path(), "data/sessions/.quarantine"), 1);
             if deleting {
                 assert!(s.create(ID, first()).is_err());
             }
@@ -1011,9 +1017,9 @@ fn fix_round_structural_damage_is_quarantined_before_publication_or_retirement()
 #[test]
 fn fix_round_namespace_loss_cannot_split_an_active_snapshot() -> Result<()> {
     for name in [
-        "session-locks",
-        "session-locks/.initialized",
-        &format!("session-locks/{ID}"),
+        "state/locks/session",
+        "state/locks/session/.initialized",
+        &format!("state/locks/session/{ID}"),
     ] {
         let root = tempdir()?;
         let stores = Stores::open(root.path())?;
@@ -1109,7 +1115,7 @@ fn fix_round_orphan_sweep_requires_proof_of_local_ownership() -> Result<()> {
         &Connection::open(&foreign)?,
         "SELECT sealed_operation FROM manifest",
     );
-    let sessions = root.path().join("sessions");
+    let sessions = root.path().join("data/sessions");
     let legacy_key = "aaaaaaaa-1111-2222-3333-000000000000";
     let quarantine = sessions.join(".quarantine");
     let unrelated = quarantine.join(".orphan-inspection");
@@ -1161,7 +1167,7 @@ fn fix_round_orphan_sweep_requires_proof_of_local_ownership() -> Result<()> {
     );
     assert_eq!(fs::read(mixed.join("sentinel"))?, b"original");
     assert!(!interrupted.exists());
-    assert_eq!(count(root.path(), "sessions/.quarantine"), 4);
+    assert_eq!(count(root.path(), "data/sessions/.quarantine"), 4);
     Ok(())
 }
 
@@ -1172,7 +1178,7 @@ fn orphan_sweep_recognizes_a_local_seal_in_a_killed_writers_wal() -> Result<()> 
     let mut creator = Worker::start(root.path(), "sealed-wal");
     wait_file(&root.path().join("ready"));
     creator.kill_and_wait();
-    let stage = fs::read_dir(root.path().join("sessions/.staging"))?
+    let stage = fs::read_dir(root.path().join("data/sessions/.staging"))?
         .next()
         .unwrap()?
         .path();
@@ -1182,7 +1188,7 @@ fn orphan_sweep_recognizes_a_local_seal_in_a_killed_writers_wal() -> Result<()> 
     let reopened = Stores::open(root.path())?;
     assert!(reopened.open_session(ID).is_err());
     assert!(!stage.exists());
-    assert_eq!(count(root.path(), "sessions/.quarantine"), 1);
+    assert_eq!(count(root.path(), "data/sessions/.quarantine"), 1);
     Ok(())
 }
 
@@ -1211,7 +1217,7 @@ fn partial_trash_removal_replays_only_after_cleanup_is_authorized() -> Result<()
         assert!(h.delete().is_err());
         fs::remove_file(
             root.path()
-                .join("sessions/.trash")
+                .join("data/sessions/.trash")
                 .join(h.incarnation())
                 .join("session.db"),
         )?;
@@ -1219,9 +1225,9 @@ fn partial_trash_removal_replays_only_after_cleanup_is_authorized() -> Result<()
         let reopened = Stores::open(root.path())?;
         assert!(reopened.open_session(ID).is_err());
         assert_eq!(pending(root.path()), 0);
-        assert_eq!(count(root.path(), "sessions/.trash"), 0);
+        assert_eq!(count(root.path(), "data/sessions/.trash"), 0);
         assert_eq!(
-            count(root.path(), "sessions/.quarantine"),
+            count(root.path(), "data/sessions/.quarantine"),
             usize::from(!authorized)
         );
         assert_eq!(reopened.create(ID, first()).is_ok(), authorized);
@@ -1259,16 +1265,16 @@ fn fix_round_rename_recovery_retries_both_parent_barriers() -> Result<()> {
     for sync in [&root, &root, &root.join(".global-staging")] {
         reject(&root, sync, &global_db)?;
         assert!(global_db.is_file());
-        assert!(!root.join("session-locks/.initialized").exists());
+        assert!(!root.join("state/locks/session/.initialized").exists());
     }
     let stores = Stores::open(&root)?;
     assert!(stop_at(&stores, Phase::Sealed).create(ID, first()).is_err());
-    let stage_parent = root.join("sessions/.staging");
+    let stage_parent = root.join("data/sessions/.staging");
     let op: String = query(&global(&root), "SELECT operation FROM lifecycle");
     Connection::open(stage_parent.join(&op).join("session.db"))?
         .execute("UPDATE manifest SET sealed_operation='broken'", [])?;
     drop(stores);
-    let quarantine = root.join("sessions/.quarantine");
+    let quarantine = root.join("data/sessions/.quarantine");
     for sync in [&quarantine, &quarantine, &stage_parent] {
         reject(&root, sync, &quarantine.join(&op))?;
         assert_eq!(pending(&root), 1);
@@ -1284,10 +1290,10 @@ fn fix_round_rename_recovery_retries_both_parent_barriers() -> Result<()> {
     let root = orphan_root.path().canonicalize()?;
     Stores::open(&root)?.create(ID, first())?;
     global(&root).execute("DELETE FROM conversations", [])?;
-    let quarantine = root.join("sessions/.quarantine");
-    for parent in [&quarantine, &quarantine, &root.join("sessions")] {
+    let quarantine = root.join("data/sessions/.quarantine");
+    for parent in [&quarantine, &quarantine, &root.join("data/sessions")] {
         reject(&root, parent, &root.join("global.db"))?;
-        assert_eq!(count(&root, "sessions/.quarantine"), 1);
+        assert_eq!(count(&root, "data/sessions/.quarantine"), 1);
         assert!(!shard(&root).exists());
     }
     assert!(Stores::open(&root)?.open_session(ID).is_err());
@@ -1317,7 +1323,7 @@ fn round2_typed_history_must_be_readable_before_publish_and_on_open() -> Result<
             let s = Stores::open(root.path())?;
             let path = if staged {
                 assert!(stop_at(&s, Phase::Sealed).create(ID, first()).is_err());
-                fs::read_dir(root.path().join("sessions/.staging"))?
+                fs::read_dir(root.path().join("data/sessions/.staging"))?
                     .next()
                     .unwrap()?
                     .path()
@@ -1332,7 +1338,7 @@ fn round2_typed_history_must_be_readable_before_publish_and_on_open() -> Result<
                 let reopened = Stores::open(root.path())?;
                 assert!(reopened.global().conversation(ID)?.is_none(), "{change}");
                 assert_eq!(pending(root.path()), 0);
-                assert_eq!(count(root.path(), "sessions/.quarantine"), 1);
+                assert_eq!(count(root.path(), "data/sessions/.quarantine"), 1);
             } else {
                 assert!(s.open_session(ID).is_err(), "{change}");
             }
@@ -1347,7 +1353,7 @@ fn round2_typed_history_must_be_readable_before_publish_and_on_open() -> Result<
     options.first_message.as_mut().unwrap().typed = Some(deep);
     assert!(s.create(ID, options).is_err());
     assert!(s.global().conversation(ID)?.is_none());
-    assert_eq!(count(root.path(), "sessions/.quarantine"), 1);
+    assert_eq!(count(root.path(), "data/sessions/.quarantine"), 1);
     Ok(())
 }
 
@@ -1367,7 +1373,7 @@ fn round2_pending_shard_path_damage_is_local_to_create_and_delete() -> Result<()
                 shard(root.path())
             } else {
                 assert!(stop_at(&s, Phase::Sealed).create(ID, first()).is_err());
-                fs::read_dir(root.path().join("sessions/.staging"))?
+                fs::read_dir(root.path().join("data/sessions/.staging"))?
                     .next()
                     .unwrap()?
                     .path()
@@ -1410,7 +1416,7 @@ fn round2_pending_shard_path_damage_is_local_to_create_and_delete() -> Result<()
                     }),
                     "{reason}"
                 );
-                let evidence = fs::read_dir(root.path().join("sessions/.quarantine"))?
+                let evidence = fs::read_dir(root.path().join("data/sessions/.quarantine"))?
                     .next()
                     .unwrap()?
                     .path();

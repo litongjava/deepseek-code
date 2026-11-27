@@ -17,14 +17,13 @@ export interface MemoryStats {
 
 export interface MemoryConfig {
   enabled: boolean;
-  backend_url: string;
   search_top_k: number;
   compression_threshold_tokens: number;
   min_importance_threshold: number;
 }
 
 async function json<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await request(`/memory${path}`, options);
+  const response = await request(`/memory/legacy${path}`, options);
   return response.json();
 }
 

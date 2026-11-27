@@ -109,7 +109,7 @@ pub(super) fn start_with_runtime_limit(
         &session,
     )?;
     let id = task["id"].as_str().context("Task ID missing")?.to_string();
-    let directory = root.join("shell-tasks").join(&session).join(&id);
+    let directory = root.join("tasks/shell").join(&session).join(&id);
     let mut completion = Completion {
         root,
         session,
@@ -403,7 +403,7 @@ impl Completion {
         self.phase = MonitorPhase::Finished;
         let db = self
             .root
-            .join("tasks")
+            .join("data/session-tasks")
             .join(format!("{}.sqlite3", self.session));
         super::monitor_completion::record(db, &self.id, status, output);
     }
@@ -589,7 +589,9 @@ fn escape(text: &str) -> String {
 /// A busy database is "nothing this tick"; the next poll delivers them.
 pub fn collect_events(root: &Path, session: &str) -> Result<Vec<Event>> {
     let session = uuid::Uuid::parse_str(session)?.to_string();
-    let path = root.join("tasks").join(format!("{session}.sqlite3"));
+    let path = root
+        .join("data/session-tasks")
+        .join(format!("{session}.sqlite3"));
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -633,7 +635,7 @@ pub fn collect_events(root: &Path, session: &str) -> Result<Vec<Event>> {
             .take(160)
             .collect();
         let file = root
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(&id)
             .join("events.jsonl");
@@ -740,8 +742,9 @@ mod tests {
         for block_logs in [true, false] {
             let root = tempfile::tempdir().unwrap();
             let session = uuid::Uuid::new_v4().to_string();
-            let log_root = root.path().join("shell-tasks");
+            let log_root = root.path().join("tasks/shell");
             if block_logs {
+                std::fs::create_dir_all(root.path().join("tasks")).unwrap();
                 std::fs::write(&log_root, b"directory creation must fail").unwrap();
             }
             let program = root.path().join("nonexistent-monitor-command");
@@ -802,7 +805,9 @@ mod tests {
         )
         .unwrap();
         let db = rusqlite::Connection::open(
-            root.path().join("tasks").join(format!("{session}.sqlite3")),
+            root.path()
+                .join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
         )
         .unwrap();
         db.execute_batch(
@@ -873,8 +878,11 @@ mod tests {
                 ),
             )
             .await;
-        let db = rusqlite::Connection::open(root.join("tasks").join(format!("{session}.sqlite3")))
-            .unwrap();
+        let db = rusqlite::Connection::open(
+            root.join("data/session-tasks")
+                .join(format!("{session}.sqlite3")),
+        )
+        .unwrap();
         db.execute_batch("BEGIN IMMEDIATE").unwrap();
         std::fs::write(root.join("release"), b"").unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -953,7 +961,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let (id, db) = locked_clean_exit(root.path(), &session).await;
-        let logs = root.path().join("shell-tasks").join(&session).join(&id);
+        let logs = root.path().join("tasks/shell").join(&session).join(&id);
         std::fs::rename(&logs, logs.with_extension("archived")).unwrap();
         let get = || {
             crate::tools::tasks::execute_for_session(
@@ -1202,7 +1210,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let (id, db) = locked_clean_exit(root.path(), &session).await;
-        let path = root.path().join("tasks").join(format!("{session}.sqlite3"));
+        let path = root
+            .path()
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3"));
         let permissions = std::fs::metadata(&path).unwrap().permissions();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         db.execute_batch("ROLLBACK").unwrap();
@@ -1637,7 +1648,7 @@ mod tests {
         let id = task["task_id"].as_str().unwrap().to_owned();
         std::fs::write(
             root.path()
-                .join("shell-tasks")
+                .join("tasks/shell")
                 .join(&session)
                 .join(&id)
                 .join("cancel"),
@@ -1688,7 +1699,7 @@ mod tests {
         assert_eq!(events[0].kind, "exited");
         let log = std::fs::read_to_string(
             root.path()
-                .join("shell-tasks")
+                .join("tasks/shell")
                 .join(&session)
                 .join(&id)
                 .join("stderr.log"),

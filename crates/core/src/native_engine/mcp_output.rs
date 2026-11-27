@@ -1,6 +1,7 @@
 //! MCP transport results become model content before post hooks and publication.
 //! Metadata is retained independently; hook output is never parsed as a wire result.
 use anyhow::{Context, Result};
+use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -153,6 +154,7 @@ impl McpOutput {
                     );
                 }
             }
+            repair_images(&mut content);
             Ok(Self {
                 content,
                 metadata: serde_json::from_str(&metadata)?,
@@ -270,7 +272,9 @@ fn normalize_block(block: &Value) -> Value {
                     Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
                 )
             {
-                return json!({"type":"image","source":{"type":"base64","media_type":source["media_type"],"data":source["data"]}});
+                let mut image = json!({"type":"image","source":{"type":"base64","media_type":source["media_type"],"data":source["data"]}});
+                repair_image(&mut image);
+                return image;
             }
             if source["type"] == "url"
                 && source["url"]
@@ -291,6 +295,72 @@ fn normalize_block(block: &Value) -> Value {
         // they never become control blocks, tool calls, or silently disappear.
         _ => json!({"type":"text","text":text(block)}),
     }
+}
+
+const MAX_IMAGE_BASE64_LEN: usize = (crate::runtime::MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
+
+/// Keep stored image content sendable: the bytes decide the declared type,
+/// and an unusable image becomes text instead of failing the whole turn.
+fn repair_image(block: &mut Value) -> bool {
+    if block["type"] != "image" || block["source"]["type"] != "base64" {
+        return false;
+    }
+    let declared = block["source"]["media_type"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    let Some(data) = block["source"]["data"].as_str() else {
+        *block = json!({"type":"text","text":format!(
+            "[Image content omitted: missing base64 image data (declared {declared}).]"
+        )});
+        return true;
+    };
+    let max_mib = crate::runtime::MAX_IMAGE_BYTES / (1024 * 1024);
+    if data.len() > MAX_IMAGE_BASE64_LEN {
+        *block = json!({"type":"text","text":format!(
+            "[Image content omitted: image exceeds the {max_mib} MiB size limit (declared {declared}).]"
+        )});
+        return true;
+    }
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        *block = json!({"type":"text","text":format!(
+            "[Image content omitted: image data is not valid base64 (declared {declared}).]"
+        )});
+        return true;
+    };
+    if decoded.len() > crate::runtime::MAX_IMAGE_BYTES as usize {
+        *block = json!({"type":"text","text":format!(
+            "[Image content omitted: image exceeds the {max_mib} MiB size limit (declared {declared}).]"
+        )});
+        return true;
+    }
+    match crate::runtime::image_media_type_from_bytes(&decoded) {
+        Some(media_type) => {
+            if block["source"]["media_type"].as_str() == Some(media_type) {
+                false
+            } else {
+                block["source"]["media_type"] = json!(media_type);
+                true
+            }
+        }
+        None => {
+            *block = json!({"type":"text","text":format!(
+                "[Image content omitted: the image bytes are not a supported PNG, JPEG, GIF, or WebP image (declared {declared}).]"
+            )});
+            true
+        }
+    }
+}
+
+fn repair_images(content: &mut Value) -> bool {
+    let Some(blocks) = content.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for block in blocks {
+        changed |= repair_image(block);
+    }
+    changed
 }
 
 /// Restore typed content from durable sidecars while leaving ordinary/native
@@ -343,6 +413,9 @@ pub(crate) fn restore_history(
 mod tests {
     use super::*;
 
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY9sAAAAASUVORK5CYII=";
+    const WEBP: &str = "UklGRgAAAABXRUJQ";
+
     #[test]
     fn structured_content_and_metadata_are_independent_of_replacement() {
         let mut output = McpOutput::from_transport(&json!({"content":[{"type":"text","text":"raw"}],"structuredContent":{"answer":42},"_meta":{"trace":"test"}})).unwrap();
@@ -358,20 +431,91 @@ mod tests {
     #[test]
     fn image_content_survives_both_provider_encodings() {
         let mut output = McpOutput::from_transport(
-            &json!({"content":[{"type":"image","mimeType":"image/png","data":"aGVsbG8="}]}),
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":PNG}]}),
         )
         .unwrap();
         assert!(output.has_images());
-        assert_eq!(output.content[0]["source"]["data"], "aGVsbG8=");
+        assert_eq!(output.content[0]["source"]["data"], PNG);
         assert_eq!(
             output.openai_images("call-1")[1]["image_url"]["url"],
-            "data:image/png;base64,aGVsbG8="
+            format!("data:image/png;base64,{PNG}")
         );
         output.append_context("hook context");
         assert_eq!(output.openai_text(), "hook context");
         output.replace(&json!([{"type":"text","text":"redacted"}]));
         assert!(!output.has_images());
         assert!(output.openai_images("call-1").is_empty());
+    }
+
+    #[test]
+    fn mismatched_or_unusable_tool_images_are_repaired_not_fatal() {
+        // A declared PNG that is really WebP is stored with the real type.
+        let output = McpOutput::from_transport(
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":WEBP}]}),
+        )
+        .unwrap();
+        assert_eq!(output.content[0]["source"]["media_type"], "image/webp");
+        assert_eq!(
+            output.openai_images("call-1")[1]["image_url"]["url"],
+            format!("data:image/webp;base64,{WEBP}")
+        );
+        // Bytes that are no image at all become an actionable text placeholder.
+        let output = McpOutput::from_transport(
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":"aGVsbG8="}]}),
+        )
+        .unwrap();
+        assert!(!output.has_images());
+        let text = output.content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Image content omitted"), "{text}");
+        assert!(text.contains("not a supported"), "{text}");
+
+        // Invalid base64 reports a base64 error rather than misreporting image format.
+        let output = McpOutput::from_transport(
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":"not-base64!"}]}),
+        )
+        .unwrap();
+        assert!(!output.has_images());
+        let text = output.content[0]["text"].as_str().unwrap();
+        assert!(text.contains("not valid base64"), "{text}");
+
+        // Oversized valid images report the size limit instead of format mismatch.
+        let mut oversized = vec![0u8; crate::runtime::MAX_IMAGE_BYTES as usize + 1];
+        oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&oversized);
+        let output = McpOutput::from_transport(
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":encoded}]}),
+        )
+        .unwrap();
+        assert!(!output.has_images());
+        let text = output.content[0]["text"].as_str().unwrap();
+        assert!(text.contains("exceeds the 5 MiB size limit"), "{text}");
+        assert!(!text.contains("not a supported"), "{text}");
+    }
+
+    #[test]
+    fn stored_images_are_repaired_while_loading_history() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mcp_tool_outputs (conversation_id TEXT, tool_use_id TEXT, content_json TEXT,
+                metadata_json TEXT, display_text TEXT, is_error INTEGER, model_content_json TEXT);
+             CREATE TABLE tool_calls (id TEXT, message_id TEXT, name TEXT, output TEXT, model_output TEXT);
+             CREATE TABLE messages (id TEXT, conversation_id TEXT);",
+        )
+        .unwrap();
+        let content = json!([{"type":"image","source":{"type":"base64","media_type":"image/png","data":WEBP}}]).to_string();
+        conn.execute(
+            "INSERT INTO mcp_tool_outputs VALUES ('session','call',?1,'{}','image',0,?1)",
+            [&content],
+        )
+        .unwrap();
+        let loaded = McpOutput::load(&conn, "session", "call", "image")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.content[0]["source"]["media_type"], "image/webp");
+        assert_eq!(
+            loaded.openai_images("call")[1]["image_url"]["url"],
+            format!("data:image/webp;base64,{WEBP}")
+        );
     }
 
     #[test]

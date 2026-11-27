@@ -15,7 +15,7 @@ impl MemExClient {
     pub async fn dream_sources(&self) -> Result<Vec<MemoryItem>> {
         let config = self.get_config().await;
         ensure!(
-            config.enabled && config.backend_url == "local",
+            config.enabled,
             "Dream requires enabled local memory"
         );
         let conn = self.local.open()?;
@@ -88,7 +88,7 @@ impl MemExClient {
         {
             let config: super::MemoryConfig = serde_json::from_str(&config)?;
             ensure!(
-                config.enabled && config.backend_url == "local",
+                config.enabled,
                 "Memory configuration changed during generation"
             );
         }

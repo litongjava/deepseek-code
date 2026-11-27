@@ -208,7 +208,7 @@ fn owner_binding(
             .context("Private root missing")?
             .to_owned()
     } else {
-        root.join("workspaces")
+        crate::data_layout::DataLayout::from_root(&root).workspaces()
     };
     let resolve = |id: &str| -> Result<std::path::PathBuf> {
         if split {

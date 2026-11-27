@@ -181,7 +181,7 @@ async fn a_batch_runs_together_with_hooks_and_ordered_results() {
 async fn image_reads_preserve_content_with_legacy_text_only_metadata() {
     crate::config::OrchestrationConfig::init_global().unwrap();
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("a.png"), b"\x89PNG").unwrap();
+    std::fs::write(temp.path().join("a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
     let mut executor = executor(temp.path());
     let (_, output, failed) = executor
         .execute_tool_call("Read", &json!({"file_path":"a.png"}), "read-image")
@@ -195,8 +195,9 @@ async fn image_reads_preserve_content_with_legacy_text_only_metadata() {
         .await;
     assert!(results.iter().all(|result| !result.2));
     let mut value =
-        json!({"content":"image", "image":{"media_type":"image/png", "data":"iVBORw=="}});
-    assert!(take_read_image("Read", &mut value).unwrap().is_ok());
+        json!({"content":"image", "image":{"media_type":"image/png", "data":"iVBORw0KGgo="}});
+    let (_, content) = take_read_image("Read", &mut value).unwrap().unwrap();
+    assert!(content.has_images());
 }
 
 #[tokio::test]

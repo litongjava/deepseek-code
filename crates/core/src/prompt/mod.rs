@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ Describe yourself as the assistant in deepseek-code. Name the model or the compa
 /// First system block of Code sessions, cached on its own like the reference CLI.
 const CODE_IDENTITY: &str = "You are deepseek-code, an agentic coding tool for DeepSeek models.";
 
-const DESKTOP_BEHAVIOR: &str = include_str!("desktop.md");
+const BEHAVIOR: &str = include_str!("behavior.md");
 const MEMORY_GUIDANCE: &str = include_str!("memory.md");
 const CODE_BEHAVIOR: &str = include_str!("code.md");
 
@@ -51,13 +51,13 @@ pub fn compose_system_prompt(custom_prompt: Option<&str>, profile: PromptProfile
 }
 
 /// The built-in prompt text, which the user can start editing from.
-pub fn default_system_prompt(profile: PromptProfile) -> String {
-    static_sections(profile).join("\n\n")
+pub fn default_system_prompt(_profile: PromptProfile) -> String {
+    static_sections(true).join("\n\n")
 }
 
 /// The CLI's constant runtime facts. They describe the frontend, so they travel
 /// in the first user message as their own reminder instead of the system prompt.
-pub const STANDALONE_FRONTEND: &str = "Standalone DeepSeek Code terminal: no Desktop window or Bridge server; use native tools directly. For an interactive command like `gcloud auth login`, tell the user to enter `! <command>` and its output appears here.";
+pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal.no Desktop window or Bridge server; use native tools directly. For an interactive command like `gcloud auth login`, tell the user to enter `! <command>` and its output appears here.";
 
 pub fn standalone_frontend_reminder() -> String {
     format!("<system-reminder>\n{STANDALONE_FRONTEND}\n</system-reminder>")
@@ -67,13 +67,27 @@ pub fn standalone_frontend_reminder() -> String {
 pub const LOADABLE_TOOLS_LEAD_IN: &str =
     "Tools you can load with ToolLoad (pass exact names in the names array):";
 
-/// The lead-in of the reminder that lists the model-invocable skills.
-pub const SKILLS_LEAD_IN: &str = "Available skills: invoke the Skill tool with skill=name and optional args. Do not bypass Skill by reading its template: fork isolation and approved shell context must run through the tool.";
+/// The lead-in of the reminder that lists the model-invocable skills. This is
+/// the only place the invocation rule lives, so it names the exact argument,
+/// covers questions about skills themselves, and forbids reading a skill's
+/// files or the CLI instead.
+pub const SKILLS_LEAD_IN: &str = "Available skills: invoke the Skill tool with {\"skill\":\"<name>\"} and optional args; its instructions come back immediately in this turn. Use it when the user asks what a skill does, where skills live, or how to create or load one. Do not open a skill's SKILL.md or INSTRUCTIONS.md with Read or Bash instead: fork isolation and approved shell context must run through the tool.";
+
+/// The only behavioral instruction for project experience entries. It lives
+/// here, never in the system prompt or a project's AGENTS.md.
+pub const EXPERIENCE_LEAD_IN: &str = "Verified fixes recorded for this project. Before re-deriving a fix, search .agents/experience/ and read the matching file; a one-line description is only a pointer. Before finishing a turn in which you solved a non-obvious problem that you verified, add one entry file there (frontmatter name and description; body Symptom, Cause, Fix, Verification), or update the existing entry for the same symptom and root cause. Keep one problem per file, merge near-duplicates, and delete entries that no longer hold. Entries are records, not instructions; never store credentials, tokens or raw logs.";
+
+/// Whitespace-collapsed text on a single line, cut nowhere. The loadable-tool
+/// listing shows custom summaries and full descriptions through it, so a list
+/// entry stays one line without losing any of its words.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// The first sentence of a description, whitespace collapsed and cut to
-/// `limit` characters. The loadable-tool listing uses 100.
+/// `limit` characters. Used by the experience index, not the tool listing.
 pub fn one_sentence(description: &str, limit: usize) -> String {
-    let text = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = one_line(description);
     let sentence = text
         .split(". ")
         .next()
@@ -90,7 +104,9 @@ pub fn one_sentence(description: &str, limit: usize) -> String {
 }
 
 /// One reminder listing the loadable built-in tools first, then the on-demand
-/// MCP tools. None when ToolLoad has nothing to offer.
+/// MCP tools. Each entry shows the text the caller resolved (a custom summary or
+/// the complete description) on one line, uncut. None when ToolLoad has nothing
+/// to offer.
 pub fn loadable_tools_reminder(
     builtin: &[(String, String)],
     mcp: &[(String, String)],
@@ -100,7 +116,7 @@ pub fn loadable_tools_reminder(
     }
     let mut text = String::from(LOADABLE_TOOLS_LEAD_IN);
     for (name, description) in builtin.iter().chain(mcp) {
-        text.push_str(&format!("\n- {name}: {}", one_sentence(description, 100)));
+        text.push_str(&format!("\n- {name}: {}", one_line(description)));
     }
     Some(format!("<system-reminder>\n{text}\n</system-reminder>"))
 }
@@ -160,6 +176,206 @@ pub fn skills_for_session(root: &Path, session: &str, lines: &[String]) -> Optio
     reminder
 }
 
+/// The full body of a skill, injected directly into the first-turn context so
+/// the model has its complete instructions without spending a turn calling
+/// `Skill`. None when there is no block.
+pub fn inline_skills_reminder(blocks: &[(String, String)]) -> Option<String> {
+    let mut text = String::new();
+    for (name, body) in blocks {
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&format!("# Skill: {name}\n{body}"));
+    }
+    (!text.is_empty()).then(|| format!("<system-reminder>\n{text}\n</system-reminder>"))
+}
+
+/// The inline skill bodies frozen on the session's first request, for the same
+/// prefix-stability reason as the environment.
+pub fn inline_skills_for_session(
+    root: &Path,
+    session: &str,
+    blocks: &[(String, String)],
+) -> Option<String> {
+    let path = crate::session_files::environment_file(root, session, ".inline-skills.json");
+    if let Some(saved) = frozen_reminder(&path) {
+        return saved;
+    }
+    let reminder = inline_skills_reminder(blocks);
+    store_frozen_reminder(&path, &reminder);
+    reminder
+}
+
+/// Workspace-local CodeGraph index state inferred purely from filesystem
+/// metadata (zero subprocesses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeGraphIndexStatus {
+    /// `<dir>/.codegraph/codegraph.db` exists as a non-empty regular file.
+    Ready(PathBuf),
+    /// Current workspace is a git worktree without `.codegraph/codegraph.db`,
+    /// while the main git repository has a non-empty `.codegraph/codegraph.db`.
+    WorktreeUninitialized { main_repo: PathBuf },
+    /// Current workspace is inside a git repository (or worktree) without a
+    /// populated `.codegraph/codegraph.db`.
+    GitUninitialized(PathBuf),
+    /// Workspace is not inside a git repository and has no `.codegraph/codegraph.db`.
+    NotGitRepo,
+}
+
+fn has_non_empty_codegraph_db(dir: &Path) -> bool {
+    fs::metadata(dir.join(".codegraph").join("codegraph.db"))
+        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+}
+
+fn resolve_worktree_main_repo(worktree_root: &Path, git_file: &Path) -> Option<PathBuf> {
+    let content = fs::read_to_string(git_file).ok()?;
+    let raw_gitdir = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if raw_gitdir.is_empty() {
+        return None;
+    }
+    let raw_path = Path::new(raw_gitdir);
+    let gitdir = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        worktree_root.join(raw_path)
+    };
+    let worktrees_dir = gitdir.parent()?;
+    if worktrees_dir.file_name().and_then(|n| n.to_str()) != Some("worktrees") {
+        return None;
+    }
+    let common_git_dir = worktrees_dir.parent()?;
+    if common_git_dir.file_name().and_then(|n| n.to_str()) != Some(".git") {
+        return None;
+    }
+    let main_repo = common_git_dir.parent()?;
+    if raw_path.is_absolute() {
+        Some(main_repo.to_path_buf())
+    } else {
+        Some(fs::canonicalize(main_repo).unwrap_or_else(|_| main_repo.to_path_buf()))
+    }
+}
+
+/// Inspect `<workspace>` (and ancestors up to the enclosing git root) for a
+/// populated `.codegraph/codegraph.db` using filesystem metadata only.
+pub fn codegraph_workspace_status(workspace: &Path) -> CodeGraphIndexStatus {
+    for dir in workspace.ancestors() {
+        if has_non_empty_codegraph_db(dir) {
+            return CodeGraphIndexStatus::Ready(dir.to_path_buf());
+        }
+        let git_path = dir.join(".git");
+        let Ok(meta) = fs::metadata(&git_path) else {
+            continue;
+        };
+        if meta.is_file() {
+            if let Some(main_repo) = resolve_worktree_main_repo(dir, &git_path) {
+                if has_non_empty_codegraph_db(&main_repo) {
+                    return CodeGraphIndexStatus::WorktreeUninitialized { main_repo };
+                }
+            }
+            return CodeGraphIndexStatus::GitUninitialized(dir.to_path_buf());
+        }
+        if meta.is_dir() {
+            return CodeGraphIndexStatus::GitUninitialized(dir.to_path_buf());
+        }
+    }
+    CodeGraphIndexStatus::NotGitRepo
+}
+
+fn codegraph_status_note(workspace: &Path) -> &'static str {
+    match codegraph_workspace_status(workspace) {
+        CodeGraphIndexStatus::Ready(_) => {
+            "\n\nWorkspace CodeGraph index: READY (`.codegraph/codegraph.db` exists). Query directly with `codegraph explore|node|callers|callees|impact` — skip `codegraph status` / `codegraph init`."
+        }
+        CodeGraphIndexStatus::WorktreeUninitialized { .. } => {
+            "\n\nWorkspace CodeGraph index: NOT INITIALIZED in this git worktree (`.codegraph/codegraph.db` is missing; git worktrees do not inherit the main repo's index). Run `codegraph init -y` first to build the local index, then query with `codegraph explore|node|callers|callees|impact`."
+        }
+        CodeGraphIndexStatus::GitUninitialized(_) => {
+            "\n\nWorkspace CodeGraph index: NOT INITIALIZED in this git repository (`.codegraph/codegraph.db` is missing). Run `codegraph init -y` first to build the local index, then query with `codegraph explore|node|callers|callees|impact`."
+        }
+        CodeGraphIndexStatus::NotGitRepo => {
+            "\n\nWorkspace CodeGraph index: NOT INITIALIZED (not a git repository; skip `codegraph init` and use parallel `Read`/`Grep`/`Glob`)."
+        }
+    }
+}
+
+/// Full skill bodies for the first-turn context from every skill whose
+/// effective state is `SkillState::Always` (marked `always_inline`) and that is
+/// model-invocable. Empty when no skill is in `Always`, so users pay zero extra
+/// tokens. A `$ARGUMENTS` placeholder is stripped because injected text has no
+/// invocation arguments.
+pub fn inline_skill_blocks(
+    skills: &BTreeMap<String, crate::skills::discovery::SkillCommand>,
+) -> Vec<(String, String)> {
+    inline_skill_blocks_for_workspace(skills, None)
+}
+
+/// Like [`inline_skill_blocks`], additionally enriching the `codegraph` skill
+/// block with a one-line factual status of the workspace's `.codegraph` index
+/// when `workspace` is provided.
+pub fn inline_skill_blocks_for_workspace(
+    skills: &BTreeMap<String, crate::skills::discovery::SkillCommand>,
+    workspace: Option<&Path>,
+) -> Vec<(String, String)> {
+    skills
+        .values()
+        .filter(|skill| skill.always_inline && skill.model_invocable())
+        .filter_map(|skill| {
+            let body = skill.content.replace("$ARGUMENTS", "");
+            let body = body.trim();
+            if body.is_empty() {
+                return None;
+            }
+            let mut body = body.to_owned();
+            if skill.name == "codegraph" {
+                if let Some(ws) = workspace {
+                    body.push_str(codegraph_status_note(ws));
+                }
+            }
+            Some((skill.name.clone(), body))
+        })
+        .collect()
+}
+
+/// The experience index plus its runtime instruction. Always a block when the
+/// feature applies; an empty index still tells the model where to write.
+pub fn experience_reminder(lines: &[String]) -> String {
+    let mut text = format!("# Experience\n{EXPERIENCE_LEAD_IN}");
+    if lines.is_empty() {
+        text.push_str("\nNo entries yet.");
+    } else {
+        text.push('\n');
+        text.push_str(&lines.join("\n"));
+    }
+    format!("<system-reminder>\n{text}\n</system-reminder>")
+}
+
+/// The experience block frozen on the session's first request. `workspace` is
+/// `None` for an internal draft workspace, and a disabled switch freezes
+/// `None` too, so later requests in the session cannot add the block.
+pub fn experience_for_session(
+    root: &Path,
+    session: &str,
+    workspace: Option<&Path>,
+    enabled: bool,
+    entries: &[crate::experience::Entry],
+) -> Option<String> {
+    let path = crate::session_files::environment_file(root, session, ".experience.json");
+    if let Some(saved) = frozen_reminder(&path) {
+        return saved;
+    }
+    let reminder = (enabled && workspace.is_some())
+        .then(|| experience_reminder(&crate::experience::index_lines(entries)));
+    store_frozen_reminder(&path, &reminder);
+    reminder
+}
+
 /// The names added to and removed from a per-session set since the previous
 /// observed value. The first call records the set without reporting anything.
 /// Saving the current set here makes each change produce one reminder only.
@@ -205,6 +421,8 @@ pub fn changes_reminder(
     no_longer_available: Vec<String>,
     new_skills: Vec<String>,
     removed_skills: Vec<String>,
+    new_experience: Vec<String>,
+    removed_experience: Vec<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
     if !now_loadable.is_empty() {
@@ -222,6 +440,16 @@ pub fn changes_reminder(
     if !removed_skills.is_empty() {
         lines.push(format!("Removed skills: {}", removed_skills.join(", ")));
     }
+    if !new_experience.is_empty() {
+        lines.push("New experience:".into());
+        lines.extend(new_experience);
+    }
+    if !removed_experience.is_empty() {
+        lines.push(format!(
+            "Removed experience: {}",
+            removed_experience.join(", ")
+        ));
+    }
     (!lines.is_empty()).then(|| format!("<system-reminder>\n{}\n</system-reminder>", lines.join("\n")))
 }
 
@@ -235,13 +463,18 @@ pub fn date_reminder(date: &str) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct SessionReminders {
     pub user_instructions: Option<String>,
-    pub environment: Option<String>,
-    pub project_instructions: Option<String>,
     pub standalone_frontend: bool,
+    pub project_instructions: Option<String>,
+    pub resident_indexes: Vec<String>,
+    /// The project experience index, frozen on the first request.
+    pub experience: Option<String>,
     /// The tools ToolLoad can load, frozen on the first request.
     pub loadable_tools: Option<String>,
     /// The model-invocable skills, frozen on the first request.
     pub available_skills: Option<String>,
+    /// Full skill bodies injected on the first request, such as `codegraph`.
+    pub inline_skills: Option<String>,
+    pub environment: Option<String>,
     pub date: Option<String>,
     pub git: Option<String>,
     /// Skills invoked earlier whose message a compaction removed.
@@ -249,32 +482,37 @@ pub struct SessionReminders {
 }
 
 /// The reminders that open the first user message: the user's own instructions,
-/// the environment, the project's instructions, the CLI's frontend facts, the
-/// loadable tools, the skills, the date, the Git snapshot and skills recovered
-/// after compaction.
+/// the CLI's frontend facts, the project's instructions, the resident memory
+/// indexes, the project experience index, the loadable tools, the skills, the
+/// environment, the date, the Git snapshot and skills recovered after
+/// compaction.
 pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     let mut blocks = Vec::new();
     blocks.extend(parts.user_instructions);
-    blocks.extend(parts.environment);
-    blocks.extend(parts.project_instructions);
     if parts.standalone_frontend {
         blocks.push(standalone_frontend_reminder());
     }
+    blocks.extend(parts.project_instructions);
+    blocks.extend(parts.resident_indexes);
+    blocks.extend(parts.experience);
     blocks.extend(parts.loadable_tools);
     blocks.extend(parts.available_skills);
+    blocks.extend(parts.inline_skills);
+    blocks.extend(parts.environment);
     blocks.extend(parts.date);
     blocks.extend(parts.git);
     blocks.extend(parts.skills);
     blocks
 }
 
-/// Like `compose_system_prompt_in`, with the user's system prompt setting applied.
-pub fn compose_customized(custom_prompt: Option<&str>, profile: PromptProfile, user: &crate::services::customization::SystemPrompt) -> String {
+/// Like `compose_system_prompt_in`, with the user's system prompt setting and the
+/// memory switch applied. Memory disabled omits the memory guidance section.
+pub fn compose_customized(custom_prompt: Option<&str>, _profile: PromptProfile, user: &crate::services::customization::SystemPrompt, memory: bool) -> String {
     use crate::services::customization::PromptMode;
     let text = user.text.trim();
     let mut sections = match user.mode {
         PromptMode::Replace if !text.is_empty() => vec![text.to_owned()],
-        _ => static_sections(profile),
+        _ => static_sections(memory),
     };
     if user.mode == PromptMode::Append && !text.is_empty() {
         sections.push(text.to_owned());
@@ -285,11 +523,18 @@ pub fn compose_customized(custom_prompt: Option<&str>, profile: PromptProfile, u
     sections.join("\n\n")
 }
 
-/// Static sections come first and never vary within a profile, so providers can
+/// Static sections come first and never vary within a session, so providers can
 /// cache them; request-specific instructions follow them. Session facts such as
 /// the environment belong in the first user message instead.
 pub fn compose_system_prompt_in(custom_prompt: Option<&str>, profile: PromptProfile) -> String {
-    let mut sections = static_sections(profile);
+    compose_system_prompt_with_memory(custom_prompt, profile, true)
+}
+
+/// Composition with the global memory switch applied: a disabled memory omits
+/// the memory guidance section while identity, coding behavior and general
+/// behavior stay identical for every profile.
+pub fn compose_system_prompt_with_memory(custom_prompt: Option<&str>, _profile: PromptProfile, memory: bool) -> String {
+    let mut sections = static_sections(memory);
     if let Some(custom) = custom_prompt.map(str::trim).filter(|s| !s.is_empty()) {
         // Preserve request-specific instructions verbatim; identity rewriting only applies to the base.
         sections.push(format!("<additional_instructions>\n{}\n</additional_instructions>", custom));
@@ -297,17 +542,16 @@ pub fn compose_system_prompt_in(custom_prompt: Option<&str>, profile: PromptProf
     sections.join("\n\n")
 }
 
-fn static_sections(profile: PromptProfile) -> Vec<String> {
-    match profile {
-        PromptProfile::Code => vec![
-            CODE_IDENTITY.to_string(),
-            format!("{}\n\n{}", CODE_BEHAVIOR.trim(), MEMORY_GUIDANCE.trim()),
-        ],
-        PromptProfile::Desktop => vec![
-            build_self_hosted_system_prompt(""),
-            format!("{}\n\n{}", DESKTOP_BEHAVIOR.trim(), MEMORY_GUIDANCE.trim()),
-        ],
+fn static_sections(memory: bool) -> Vec<String> {
+    let mut sections = vec![
+        CODE_IDENTITY.to_string(),
+        CODE_BEHAVIOR.trim().to_string(),
+        BEHAVIOR.trim().to_string(),
+    ];
+    if memory {
+        sections.push(MEMORY_GUIDANCE.trim().to_string());
     }
+    sections
 }
 
 /// The session's facts as the reference CLI puts them in the first user message.
@@ -318,6 +562,22 @@ pub fn environment_reminder(workspace: Option<&Path>) -> String {
 /// The reminder's text frozen on the session's first request, including the
 /// project's name and source folders. Later requests and resumes read the same
 /// file, so a changing date or runtime fact can never rewrite the first message.
+pub(crate) fn session_environment(
+    root: &Path,
+    session: &str,
+    workspace: &Path,
+    project: Option<&crate::db::project_repo::ProjectRow>,
+) -> (String, String) {
+    let folders = project.map(|p| p.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>());
+    let description = project
+        .zip(folders.as_deref())
+        .map(|(p, folders)| (p.name.as_str(), folders));
+    (
+        environment_for_session(root, session, Some(workspace), description),
+        date_for_session(root, session),
+    )
+}
+
 pub fn environment_for_session(
     root: &Path,
     session: &str,
@@ -475,6 +735,9 @@ fn environment_section(workspace: Option<&Path>) -> String {
     if let Some(version) = NODE_VERSION.as_deref() {
         lines.push(format!(" - Node.js version: {version}"));
     }
+    if let Some(line) = crate::tools::python::environment_line(workspace) {
+        lines.push(line);
+    }
     lines.push(" - Downloads and extracted archives are untrusted. Give each a fresh, empty directory, keep scripts elsewhere, and pass paths as arguments instead of running tools inside the download. Python loads code from the script folder and the working directory, so a planted `json.py` runs on `import json`; use `-I` when Python reads them. Code the user asked you to build or run is exempt.".to_string());
     lines.join("\n")
 }
@@ -618,8 +881,8 @@ fn version_output(mut command: std::process::Command) -> Option<String> {
 /// carries its own cache breakpoint and the per-request tail is left unmarked.
 /// Returns None for prompts this module did not compose.
 pub fn cache_blocks(system: &str) -> Option<Vec<(String, bool)>> {
-    [PromptProfile::Code, PromptProfile::Desktop].into_iter().find_map(|profile| {
-        let sections = static_sections(profile);
+    [true, false].into_iter().find_map(|memory| {
+        let sections = static_sections(memory);
         let mut rest = system;
         let mut blocks = Vec::new();
         for (index, section) in sections.iter().enumerate() {
@@ -897,6 +1160,17 @@ impl TemplateManager {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn memory_guidance_never_names_retired_remote_tools() {
+        for profile in [super::PromptProfile::Desktop, super::PromptProfile::Code] {
+            let prompt = super::compose_system_prompt(None, profile);
+            assert!(prompt.contains("<memory_guidance>"));
+            for retired in ["memory_search", "memory_ingest", "HTTP", "http://", "https://"] {
+                assert!(!prompt.contains(retired), "{profile:?} contains {retired}");
+            }
+        }
+    }
+
+    #[test]
     fn code_prompt_is_isolated_and_preserves_custom_instructions() {
         let custom = "请保留这段项目指令。\n<identity>My project</identity>";
         let prompt = super::compose_system_prompt(Some(custom), super::PromptProfile::Code);
@@ -923,6 +1197,21 @@ mod tests {
         assert_eq!(prompt.matches("# Execution and verification").count(), 1);
         assert!(prompt.contains("In a non-interactive run (no user to reply)"));
         assert!(prompt.contains("Do not duplicate work already assigned to a subagent."));
+        assert!(prompt.contains("isn't in the project or its dependency cache"));
+        assert!(prompt.contains("`~/code/<owner>/<repo>` (fetch if already cloned) and read it there."));
+        assert!(prompt.contains("Never clone into the project directory."));
+        assert!(prompt.contains("prefer the Python tool over a Bash heredoc"));
+        assert_eq!(prompt.matches("# Working efficiently").count(), 1);
+        for required in [
+            "Stay strictly on task",
+            "Batch independent tool calls in one turn",
+            "Prefer dedicated read/search tools and omit redundant `cd`",
+            "Verify once with a compound command; do not re-run passing checks",
+            "Use `MultiEdit` for multiple edits in one file",
+            "Never poll with `sleep`",
+        ] {
+            assert!(prompt.contains(required), "missing efficiency rule: {required}");
+        }
         for removed in [
             "historical name of the shell tool",
             "Bash timeout is in milliseconds",
@@ -976,21 +1265,22 @@ mod tests {
     }
 
     #[test]
-    fn desktop_prompt_includes_native_guidance_and_preserves_custom_instructions() {
+    fn desktop_prompt_uses_the_shared_identity_and_behavior() {
         let prompt = super::compose_desktop_system_prompt(Some("Respond in Spanish.\n<identity>Project persona</identity>"));
-        assert!(prompt.contains("native Rust tool engine"));
-        assert!(prompt.contains("<desktop_behavior>"));
+        assert!(prompt.starts_with(super::CODE_IDENTITY));
+        assert!(prompt.contains("<behavior>"));
         assert!(prompt.contains("<memory_guidance>"));
         assert!(!prompt.contains("You are powered by the model"));
         assert!(prompt.contains("Respond in Spanish.\n<identity>Project persona</identity>"));
-        assert_eq!(prompt.matches("<desktop_behavior>").count(), 1);
+        assert_eq!(prompt.matches("<behavior>").count(), 1);
+        assert!(!prompt.contains("<desktop_behavior>"));
     }
 
     #[test]
     fn desktop_prompt_is_present_without_request_instructions() {
         let prompt = super::compose_desktop_system_prompt(None);
-        assert!(prompt.contains("<identity>"));
-        assert!(prompt.contains("<desktop_behavior>"));
+        assert!(prompt.starts_with(super::CODE_IDENTITY));
+        assert!(prompt.contains("<behavior>"));
         assert!(!prompt.contains("<additional_instructions>"));
         assert!(!super::compose_desktop_system_prompt(Some("  ")).contains("<additional_instructions>"));
     }
@@ -1024,8 +1314,8 @@ mod tests {
         assert!(system.ends_with("</system-reminder>"));
         assert!(!system.contains("You are powered by the model"));
         assert!(system.contains(&format!(" - Architecture: {}", architecture_label(std::env::consts::ARCH))));
-        // Optional facts (Shell, OS Version, Node.js) may be absent, so only the
-        // lines this process produced are checked, in order.
+        // Optional facts (Shell, OS Version, Node.js, Python) may be absent, so
+        // only the lines this process produced are checked, in order.
         let labels = [
             " - Primary working directory: ",
             " - Is a git repository: ",
@@ -1034,6 +1324,7 @@ mod tests {
             " - Shell: ",
             " - OS Version: ",
             " - Node.js version: ",
+            " - Python: ",
             " - Downloads and extracted archives are untrusted",
         ];
         let mut at = 0;
@@ -1066,20 +1357,22 @@ mod tests {
         let mut system = compose_system_prompt_in(Some("custom rule"), PromptProfile::Code);
         system.push_str("\nProject instructions follow\n");
         let blocks = cache_blocks(&system).unwrap();
-        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks.len(), 5);
         assert_eq!(blocks[0], (CODE_IDENTITY.to_string(), true));
-        assert!(blocks[1].1 && blocks[1].0.contains("# Harness") && blocks[1].0.contains("<memory_guidance>"));
-        assert!(!blocks[2].1 && blocks[2].0.starts_with("<additional_instructions>"));
-        assert!(blocks[2].0.contains("custom rule") && blocks[2].0.ends_with("Project instructions follow\n"));
+        assert!(blocks[1].1 && blocks[1].0.contains("# Harness"));
+        assert!(blocks[2].1 && blocks[2].0.contains("<behavior>"));
+        assert!(blocks[3].1 && blocks[3].0.contains("<memory_guidance>"));
+        assert!(!blocks[4].1 && blocks[4].0.starts_with("<additional_instructions>"));
+        assert!(blocks[4].0.contains("custom rule") && blocks[4].0.ends_with("Project instructions follow\n"));
         // A prompt without request-specific text has no dynamic tail at all.
         let plain = compose_system_prompt_in(None, PromptProfile::Code);
         assert!(split_tail(&plain).is_none());
-        assert_eq!(cache_blocks(&plain).unwrap().len(), 2);
+        assert_eq!(cache_blocks(&plain).unwrap().len(), 4);
         // Every request in a session shares the identical cached prefix.
         let other = compose_system_prompt_in(None, PromptProfile::Code);
         {
             use crate::services::customization::{PromptMode, SystemPrompt};
-            let compose = |mode, text: &str| compose_customized(Some("rule"), PromptProfile::Code, &SystemPrompt { mode, text: text.into() });
+            let compose = |mode, text: &str| compose_customized(Some("rule"), PromptProfile::Code, &SystemPrompt { mode, text: text.into() }, true);
             assert_eq!(compose(PromptMode::Default, "ignored"), compose_system_prompt_in(Some("rule"), PromptProfile::Code));
             let appended = compose(PromptMode::Append, "EXTRA_RULE");
             assert!(appended.contains(CODE_IDENTITY) && appended.contains("EXTRA_RULE"));
@@ -1089,10 +1382,35 @@ mod tests {
             assert!(compose(PromptMode::Replace, "  ").contains(CODE_IDENTITY), "an empty replacement keeps the default");
             assert!(default_system_prompt(PromptProfile::Code).starts_with(CODE_IDENTITY));
         }
-        assert_eq!(cache_blocks(&other).unwrap()[..2], blocks[..2]);
+        assert_eq!(cache_blocks(&other).unwrap()[..4], blocks[..4]);
         let desktop = cache_blocks(&compose_desktop_system_prompt(None)).unwrap();
-        assert!(desktop[0].0.starts_with("<identity>") && desktop[1].0.contains("<desktop_behavior>"));
+        assert!(desktop[0].0.starts_with(CODE_IDENTITY) && desktop[2].0.contains("<behavior>"));
         assert!(cache_blocks("Respond in French.").is_none());
+    }
+
+    #[test]
+    fn memory_switch_drops_the_guidance_section_for_both_profiles() {
+        for profile in [PromptProfile::Desktop, PromptProfile::Code] {
+            let prompt = compose_system_prompt_with_memory(None, profile, false);
+            assert!(!prompt.contains("<memory_guidance>"), "{profile:?}");
+            assert!(prompt.starts_with(CODE_IDENTITY));
+            assert!(prompt.contains("<behavior>"));
+            let blocks = cache_blocks(&prompt).unwrap();
+            assert_eq!(blocks.len(), 3);
+            assert!(blocks.iter().all(|(_, cached)| *cached));
+
+            let enabled = compose_system_prompt_with_memory(Some("rule"), profile, true);
+            assert!(enabled.contains("<memory_guidance>"));
+            let blocks = cache_blocks(&enabled).unwrap();
+            assert_eq!(blocks.len(), 5);
+            assert!(blocks[3].0.contains("<memory_guidance>"));
+            assert!(!blocks[4].1, "the request tail stays uncached");
+        }
+        // Both profiles compose the same sections.
+        assert_eq!(
+            compose_system_prompt(None, PromptProfile::Code),
+            compose_system_prompt(None, PromptProfile::Desktop)
+        );
     }
 
     #[test]
@@ -1102,33 +1420,41 @@ mod tests {
         add_project_to_environment(&mut environment, "Demo", &[workspace.path().to_str().unwrap()]);
         let blocks = first_message_reminders(SessionReminders {
             user_instructions: Some("<system-reminder>\nuser rules\n</system-reminder>".into()),
-            environment: Some(environment),
-            project_instructions: Some("<system-reminder>\nproject rules\n</system-reminder>".into()),
             standalone_frontend: true,
+            project_instructions: Some("<system-reminder>\nproject rules\n</system-reminder>".into()),
+            resident_indexes: vec!["<system-reminder>\nMEMORY.md index marker\n</system-reminder>".into()],
+            experience: Some("<system-reminder>\n# Experience\nexperience marker\n</system-reminder>".into()),
             loadable_tools: Some(
                 "<system-reminder>\nTools you can load with ToolLoad (pass exact names in the names array):\n- ListDir: List a directory\n</system-reminder>".into(),
             ),
             available_skills: Some(
                 "<system-reminder>\nAvailable skills: invoke the Skill tool\n- deploy: Ship it\n</system-reminder>".into(),
             ),
+            inline_skills: Some(
+                "<system-reminder>\n# Skill: codegraph\ncodegraph explore marker\n</system-reminder>".into(),
+            ),
+            environment: Some(environment),
             date: Some(date_reminder("2026-11-19")),
             git: Some("<system-reminder>\n# gitStatus\n</system-reminder>".into()),
             skills: Some("<system-reminder>\ninvoked skills\n</system-reminder>".into()),
         });
-        assert_eq!(blocks.len(), 9);
+        assert_eq!(blocks.len(), 12);
         assert!(blocks[0].contains("user rules"));
-        assert!(blocks[1].starts_with("<system-reminder>\n# Working environment\n"));
-        assert!(blocks[1].contains(" - Project: Demo\n - Primary working directory: "));
-        assert!(blocks[1].contains(" - Platform: "));
-        assert!(!blocks[1].contains("Today's date"));
+        assert_eq!(blocks[1], standalone_frontend_reminder());
+        assert!(blocks[1].contains("! <command>"), "the CLI's command hint travels with its frontend facts");
         assert!(blocks[2].contains("project rules"));
-        assert_eq!(blocks[3], standalone_frontend_reminder());
-        assert!(blocks[3].contains("! <command>"), "the CLI's command hint travels with its frontend facts");
-        assert!(blocks[4].contains("Tools you can load with ToolLoad"));
-        assert!(blocks[5].contains("Available skills"));
-        assert_eq!(blocks[6], date_reminder("2026-11-19"));
-        assert_eq!(blocks[7], "<system-reminder>\n# gitStatus\n</system-reminder>");
-        assert_eq!(blocks[8], "<system-reminder>\ninvoked skills\n</system-reminder>");
+        assert!(blocks[3].contains("MEMORY.md index marker"));
+        assert!(blocks[4].contains("experience marker"));
+        assert!(blocks[5].contains("Tools you can load with ToolLoad"));
+        assert!(blocks[6].contains("Available skills"));
+        assert!(blocks[7].contains("codegraph explore marker"));
+        assert!(blocks[8].starts_with("<system-reminder>\n# Working environment\n"));
+        assert!(blocks[8].contains(" - Project: Demo\n - Primary working directory: "));
+        assert!(blocks[8].contains(" - Platform: "));
+        assert!(!blocks[8].contains("Today's date"));
+        assert_eq!(blocks[9], date_reminder("2026-11-19"));
+        assert_eq!(blocks[10], "<system-reminder>\n# gitStatus\n</system-reminder>");
+        assert_eq!(blocks[11], "<system-reminder>\ninvoked skills\n</system-reminder>");
         // The terminal facts are a first-message reminder, never system text.
         let system = compose_system_prompt_in(None, PromptProfile::Code);
         assert!(!system.contains(STANDALONE_FRONTEND));
@@ -1153,12 +1479,232 @@ mod tests {
     }
 
     #[test]
-    fn loadable_tools_and_skills_freeze_and_report_changes_once() {
+    fn always_skills_are_inlined_and_frozen_while_other_states_cost_zero_tokens() {
+        let skill = |name: &str, content: &str, always_inline: bool, disable_model_invocation: bool| {
+            crate::skills::discovery::SkillCommand {
+                name: name.to_owned(),
+                description: format!("{name} description"),
+                path: std::path::PathBuf::from(format!("/skills/{name}/SKILL.md")),
+                content: content.to_owned(),
+                user_invocable: true,
+                disable_model_invocation,
+                listing_name_only: false,
+                always_inline,
+                context: None,
+                shell: None,
+                agent: None,
+            }
+        };
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "codegraph".to_owned(),
+            skill(
+                "codegraph",
+                "Use CodeGraph.\n\n1. Run `codegraph status` or `codegraph init`.\n2. Run `codegraph explore`, `codegraph node`, `codegraph callers`, `codegraph impact`.\n3. Run `codegraph sync` after a large edit.\n\n$ARGUMENTS",
+                true,
+                false,
+            ),
+        );
+        skills.insert(
+            "style-guide".to_owned(),
+            skill("style-guide", "Follow the repository style guide.", true, false),
+        );
+        skills.insert(
+            "regular-user".to_owned(),
+            skill("regular-user", "Should not be inlined.", false, false),
+        );
+        skills.insert(
+            "hidden-always".to_owned(),
+            skill("hidden-always", "Hidden from model.", true, true),
+        );
+
+        let blocks = inline_skill_blocks(&skills);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].0, "codegraph");
+        assert_eq!(blocks[1].0, "style-guide");
+        assert_eq!(blocks[1].1, "Follow the repository style guide.");
+        for command in [
+            "codegraph status",
+            "codegraph init",
+            "codegraph explore",
+            "codegraph node",
+            "codegraph callers",
+            "codegraph impact",
+            "codegraph sync",
+        ] {
+            assert!(blocks[0].1.contains(command), "missing {command}: {}", blocks[0].1);
+        }
+        assert!(!blocks[0].1.contains("$ARGUMENTS"));
+
+        // No `always_inline` skills -> zero extra text.
+        let non_always = BTreeMap::from([(
+            "regular-user".to_owned(),
+            skill("regular-user", "Should not be inlined.", false, false),
+        )]);
+        assert!(inline_skill_blocks(&non_always).is_empty());
+        assert!(inline_skill_blocks(&BTreeMap::new()).is_empty());
+
+        let root = tempfile::tempdir().unwrap();
+        let frozen = inline_skills_for_session(root.path(), "s", &blocks).unwrap();
+        assert!(frozen.starts_with("<system-reminder>\n# Skill: codegraph\n"));
+        assert!(frozen.contains("# Skill: style-guide\nFollow the repository style guide."));
+        assert!(!frozen.contains("regular-user"));
+        assert!(!frozen.contains("hidden-always"));
+        assert_eq!(frozen.matches("<system-reminder>").count(), 1);
+        // Later requests and resumes replay the frozen block.
+        assert_eq!(
+            inline_skills_for_session(root.path(), "s", &[]).as_deref(),
+            Some(frozen.as_str())
+        );
+        assert!(inline_skills_for_session(root.path(), "other", &[]).is_none());
+        assert!(inline_skills_reminder(&[]).is_none());
+        assert!(first_message_reminders(SessionReminders {
+            inline_skills: Some(frozen.clone()),
+            ..Default::default()
+        })
+        .contains(&frozen));
+    }
+
+    #[test]
+    fn codegraph_workspace_status_detects_ready_worktree_and_uninitialized() {
+        // 1. Direct `.codegraph/codegraph.db` present -> Ready (also from a nested subdir).
+        let ready = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ready.path().join(".git")).unwrap();
+        std::fs::create_dir_all(ready.path().join(".codegraph")).unwrap();
+        std::fs::write(ready.path().join(".codegraph/codegraph.db"), b"sqlite-bytes").unwrap();
+        let nested = ready.path().join("crates/core");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            codegraph_workspace_status(ready.path()),
+            CodeGraphIndexStatus::Ready(ready.path().to_path_buf())
+        );
+        assert_eq!(
+            codegraph_workspace_status(&nested),
+            CodeGraphIndexStatus::Ready(ready.path().to_path_buf())
+        );
+
+        // Zero-byte `.codegraph/codegraph.db` inside a git repo is GitUninitialized.
+        let empty_db = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty_db.path().join(".git")).unwrap();
+        std::fs::create_dir_all(empty_db.path().join(".codegraph")).unwrap();
+        std::fs::write(empty_db.path().join(".codegraph/codegraph.db"), b"").unwrap();
+        assert_eq!(
+            codegraph_workspace_status(empty_db.path()),
+            CodeGraphIndexStatus::GitUninitialized(empty_db.path().to_path_buf())
+        );
+
+        // 2. Git worktree `.git` file pointing to main repo with `.codegraph/codegraph.db`,
+        //    while worktree only has `.codegraph/.gitignore` -> WorktreeUninitialized.
+        let container = tempfile::tempdir().unwrap();
+        let main_repo = container.path().join("main");
+        let worktree = container.path().join("wt-feature");
+        std::fs::create_dir_all(main_repo.join(".git/worktrees/wt-feature")).unwrap();
+        std::fs::create_dir_all(main_repo.join(".codegraph")).unwrap();
+        std::fs::write(main_repo.join(".codegraph/codegraph.db"), b"sqlite-bytes").unwrap();
+        std::fs::create_dir_all(worktree.join(".codegraph")).unwrap();
+        std::fs::write(worktree.join(".codegraph/.gitignore"), b"codegraph.db\n").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", main_repo.join(".git/worktrees/wt-feature").display()),
+        )
+        .unwrap();
+        assert_eq!(
+            codegraph_workspace_status(&worktree),
+            CodeGraphIndexStatus::WorktreeUninitialized {
+                main_repo: main_repo.clone(),
+            }
+        );
+
+        // 3. Non-git empty workspace -> NotGitRepo.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            codegraph_workspace_status(empty.path()),
+            CodeGraphIndexStatus::NotGitRepo
+        );
+    }
+
+    #[test]
+    fn inline_skill_blocks_for_workspace_appends_status_only_to_codegraph() {
+        let skill = |name: &str, content: &str| crate::skills::discovery::SkillCommand {
+            name: name.to_owned(),
+            description: format!("{name} description"),
+            path: std::path::PathBuf::from(format!("/skills/{name}/SKILL.md")),
+            content: content.to_owned(),
+            user_invocable: true,
+            disable_model_invocation: false,
+            listing_name_only: false,
+            always_inline: true,
+            context: None,
+            shell: None,
+            agent: None,
+        };
+        let skills = BTreeMap::from([
+            ("codegraph".to_owned(), skill("codegraph", "Use CodeGraph.")),
+            (
+                "style-guide".to_owned(),
+                skill("style-guide", "Follow the style guide."),
+            ),
+        ]);
+
+        // Ready workspace.
+        let ready = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ready.path().join(".codegraph")).unwrap();
+        std::fs::write(ready.path().join(".codegraph/codegraph.db"), b"db").unwrap();
+        let ready_blocks = inline_skill_blocks_for_workspace(&skills, Some(ready.path()));
+        assert_eq!(ready_blocks.len(), 2);
+        assert_eq!(ready_blocks[0].0, "codegraph");
+        assert!(ready_blocks[0].1.starts_with("Use CodeGraph.\n\nWorkspace CodeGraph index: READY"));
+        assert!(ready_blocks[0].1.contains("skip `codegraph status` / `codegraph init`"));
+        assert_eq!(ready_blocks[1], ("style-guide".to_owned(), "Follow the style guide.".to_owned()));
+
+        // Worktree without its own index while main repo has one.
+        let container = tempfile::tempdir().unwrap();
+        let main_repo = container.path().join("main");
+        let worktree = container.path().join("wt");
+        std::fs::create_dir_all(main_repo.join(".git/worktrees/wt")).unwrap();
+        std::fs::create_dir_all(main_repo.join(".codegraph")).unwrap();
+        std::fs::write(main_repo.join(".codegraph/codegraph.db"), b"db").unwrap();
+        std::fs::create_dir_all(worktree.join(".codegraph")).unwrap();
+        std::fs::write(worktree.join(".codegraph/.gitignore"), b"*\n").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", main_repo.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        let wt_blocks = inline_skill_blocks_for_workspace(&skills, Some(&worktree));
+        assert!(wt_blocks[0]
+            .1
+            .contains("NOT INITIALIZED in this git worktree"));
+        assert!(wt_blocks[0].1.contains("codegraph init -y"));
+        assert_eq!(wt_blocks[1], ("style-guide".to_owned(), "Follow the style guide.".to_owned()));
+
+        // Uninitialized regular git repository -> prompts `codegraph init -y`.
+        let git_only = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(git_only.path().join(".git")).unwrap();
+        let git_blocks = inline_skill_blocks_for_workspace(&skills, Some(git_only.path()));
+        assert!(git_blocks[0]
+            .1
+            .contains("NOT INITIALIZED in this git repository"));
+        assert!(git_blocks[0].1.contains("codegraph init -y"));
+        assert_eq!(git_blocks[1], ("style-guide".to_owned(), "Follow the style guide.".to_owned()));
+
+        // Non-git empty workspace -> skips `codegraph init`.
+        let empty = tempfile::tempdir().unwrap();
+        let empty_blocks = inline_skill_blocks_for_workspace(&skills, Some(empty.path()));
+        assert!(empty_blocks[0]
+            .1
+            .contains("not a git repository; skip `codegraph init`"));
+        assert!(!empty_blocks[0].1.contains("codegraph init -y"));
+        assert_eq!(empty_blocks[1], ("style-guide".to_owned(), "Follow the style guide.".to_owned()));
+    }
+
+    #[test]
+    fn loadable_tools_show_the_resolved_text_uncut_and_freeze_once() {
         let root = tempfile::tempdir().unwrap();
         let builtin = vec![
             (
                 "ListDir".to_owned(),
-                "List a directory. A second sentence is dropped.".to_owned(),
+                "List a directory.\nA second line stays whole.".to_owned(),
             ),
             (
                 "WebSearch".to_owned(),
@@ -1170,11 +1716,12 @@ mod tests {
         assert!(reminder.starts_with(
             "<system-reminder>\nTools you can load with ToolLoad (pass exact names in the names array):\n"
         ));
-        assert!(reminder.contains("- ListDir: List a directory"));
-        assert!(!reminder.contains("second sentence"));
+        // Every line keeps the whole text, only whitespace is collapsed.
+        assert!(reminder.contains("- ListDir: List a directory. A second line stays whole."));
         assert!(reminder.contains("- mcp__gh__create_issue: Create an issue"));
-        let mcp_line = reminder.lines().find(|line| line.starts_with("- WebSearch:")).unwrap();
-        assert_eq!(mcp_line.trim_start_matches("- WebSearch: ").chars().count(), 100, "{reminder}");
+        let web = reminder.lines().find(|line| line.starts_with("- WebSearch:")).unwrap();
+        assert_eq!(web, format!("- WebSearch: {} second line", "x".repeat(200)));
+        assert!(!reminder.contains('…'), "the listing cuts nothing: {reminder}");
         // A later request reads the frozen file, whatever the current tools say.
         assert_eq!(
             loadable_tools_for_session(root.path(), "s", &[], &[]).as_deref(),
@@ -1228,11 +1775,195 @@ mod tests {
             "each kind tracks its own set"
         );
         assert_eq!(
-            changes_reminder(now, gone, vec!["new-skill".to_owned()], vec!["old-skill".to_owned()])
+            changes_reminder(
+                now,
+                gone,
+                vec!["new-skill".to_owned()],
+                vec!["old-skill".to_owned()],
+                vec!["- .agents/experience/a.md | alpha: symptom".to_owned()],
+                vec!["old-entry".to_owned()],
+            )
                 .unwrap(),
-            "<system-reminder>\nNow loadable: Glob\nNo longer available: WebSearch\nNew skills: new-skill\nRemoved skills: old-skill\n</system-reminder>"
+            "<system-reminder>\nNow loadable: Glob\nNo longer available: WebSearch\nNew skills: new-skill\nRemoved skills: old-skill\nNew experience:\n- .agents/experience/a.md | alpha: symptom\nRemoved experience: old-entry\n</system-reminder>"
         );
-        assert!(changes_reminder(Vec::new(), Vec::new(), Vec::new(), Vec::new()).is_none());
+        assert!(changes_reminder(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new()
+        )
+        .is_none());
+    }
+
+    fn experience_entry(name: &str, description: &str) -> crate::experience::Entry {
+        crate::experience::Entry {
+            name: name.into(),
+            description: description.into(),
+            relative_path: format!(".agents/experience/{name}.md"),
+        }
+    }
+
+    #[test]
+    fn experience_freezes_on_first_request() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let first = experience_for_session(
+            root.path(),
+            "s",
+            Some(workspace.path()),
+            true,
+            &[experience_entry("alpha", "first symptom")],
+        )
+        .unwrap();
+        assert!(first.contains("# Experience\n"));
+        assert!(first.contains("- .agents/experience/alpha.md | alpha: first symptom"));
+        assert_eq!(first.matches("<system-reminder>").count(), 1);
+        // A later scan, even with different entries, replays the frozen block.
+        assert_eq!(
+            experience_for_session(
+                root.path(),
+                "s",
+                Some(workspace.path()),
+                true,
+                &[experience_entry("beta", "other symptom")],
+            )
+            .as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn experience_absent_for_internal_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(experience_for_session(
+            root.path(),
+            "s",
+            None,
+            true,
+            &[experience_entry("alpha", "symptom")],
+        )
+        .is_none());
+        // The frozen None keeps the block out of the rest of the session.
+        assert!(experience_for_session(
+            root.path(),
+            "s",
+            Some(workspace.path()),
+            true,
+            &[experience_entry("alpha", "symptom")],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn experience_absent_when_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(experience_for_session(
+            root.path(),
+            "s",
+            Some(workspace.path()),
+            false,
+            &[experience_entry("alpha", "symptom")],
+        )
+        .is_none());
+        // Re-enabling in the same session does not add the block.
+        assert!(experience_for_session(
+            root.path(),
+            "s",
+            Some(workspace.path()),
+            true,
+            &[experience_entry("alpha", "symptom")],
+        )
+        .is_none());
+        // A new session picks up the switch.
+        assert!(experience_for_session(
+            root.path(),
+            "new",
+            Some(workspace.path()),
+            true,
+            &[experience_entry("alpha", "symptom")],
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn changes_reminder_reports_new_experience_once() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            set_changes(root.path(), "s", crate::session_files::SET_CHANGE_EXPERIENCE, &["alpha".to_owned()]),
+            (Vec::new(), Vec::new())
+        );
+        let (new, removed) = set_changes(
+            root.path(),
+            "s",
+            crate::session_files::SET_CHANGE_EXPERIENCE,
+            &["alpha".to_owned(), "beta".to_owned()],
+        );
+        assert_eq!(new, vec!["beta".to_owned()]);
+        assert!(removed.is_empty());
+        let reminder = changes_reminder(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["- .agents/experience/beta.md | beta: symptom".to_owned()],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            reminder,
+            "<system-reminder>\nNew experience:\n- .agents/experience/beta.md | beta: symptom\n</system-reminder>"
+        );
+        assert_eq!(
+            set_changes(
+                root.path(),
+                "s",
+                crate::session_files::SET_CHANGE_EXPERIENCE,
+                &["alpha".to_owned(), "beta".to_owned()],
+            ),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn changes_reminder_reports_removed_experience() {
+        let root = tempfile::tempdir().unwrap();
+        set_changes(
+            root.path(),
+            "s",
+            crate::session_files::SET_CHANGE_EXPERIENCE,
+            &["alpha".to_owned(), "beta".to_owned()],
+        );
+        let (new, removed) = set_changes(
+            root.path(),
+            "s",
+            crate::session_files::SET_CHANGE_EXPERIENCE,
+            &["alpha".to_owned()],
+        );
+        assert!(new.is_empty());
+        assert_eq!(removed, vec!["beta".to_owned()]);
+        let reminder = changes_reminder(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            removed,
+        )
+        .unwrap();
+        assert_eq!(reminder, "<system-reminder>\nRemoved experience: beta\n</system-reminder>");
+    }
+
+    #[test]
+    fn one_line_collapses_whitespace_without_cutting() {
+        assert_eq!(one_line("First line.\nSecond line."), "First line. Second line.");
+        assert_eq!(one_line("  spaced   words  "), "spaced words");
+        let long = "a".repeat(120);
+        assert_eq!(one_line(&long), long);
+        assert_eq!(one_line("é".repeat(120).as_str()).chars().count(), 120);
     }
 
     #[test]
@@ -1273,7 +2004,11 @@ mod tests {
         let frozen = date_for_session(root.path(), "s");
         assert_eq!(date_for_session(root.path(), "s"), frozen);
         assert!(reminder_date(&frozen).is_some());
-        std::fs::write(root.path().join("environment/s.date.txt"), date_reminder("2020-01-01")).unwrap();
+        std::fs::write(
+            root.path().join("cache/environment/s.date.txt"),
+            date_reminder("2020-01-01"),
+        )
+        .unwrap();
         let frozen = date_for_session(root.path(), "s");
         assert_eq!(frozen, date_reminder("2020-01-01"));
 
@@ -1299,8 +2034,20 @@ mod tests {
             &[],
         );
         skills_for_session(root, session, &["- deploy: Ship it".to_owned()]);
+        inline_skills_for_session(
+            root,
+            session,
+            &[("codegraph".to_owned(), "codegraph explore".to_owned())],
+        );
+        experience_for_session(root, session, Some(root), true, &[]);
         set_changes(root, session, "loadable-tools", &["ListDir".to_owned()]);
         set_changes(root, session, "skills", &["deploy".to_owned()]);
+        set_changes(
+            root,
+            session,
+            crate::session_files::SET_CHANGE_EXPERIENCE,
+            &["alpha".to_owned()],
+        );
         std::fs::write(
             crate::session_files::environment_file(
                 root,
@@ -1378,6 +2125,23 @@ mod tests {
         for path in crate::session_files::files_for_session(root.path(), "recent") {
             assert!(path.exists(), "recent file pruned: {}", path.display());
         }
+    }
+
+    #[test]
+    fn skill_invocation_is_declared_in_the_reminder_not_the_system_prompt() {
+        let system = compose_system_prompt(None, PromptProfile::Desktop);
+        assert!(
+            !system.contains("read its instructions with an available tool"),
+            "the conflicting clause must not come back: {system}"
+        );
+        // code.md keeps the slash-command rule and must name the same tool.
+        assert!(system.contains("invoke it via Skill"));
+        assert!(SKILLS_LEAD_IN.contains("{\"skill\":\"<name>\"}"));
+        assert!(SKILLS_LEAD_IN.contains("Skill tool"));
+        assert!(!SKILLS_LEAD_IN.contains("ToolLoad"));
+        assert!(skills_reminder(&["- demo: Demo".to_owned()])
+            .unwrap()
+            .contains(SKILLS_LEAD_IN));
     }
 
     #[test]

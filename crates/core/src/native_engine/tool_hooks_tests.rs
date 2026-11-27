@@ -20,7 +20,7 @@ fn executor(root: &std::path::Path) -> ToolLoopExecutor {
 }
 
 fn write_hook(root: &std::path::Path, event: &str, command: &str) {
-    std::fs::write(root.join("settings.json"), json!({"hooks":{event:[{"matcher":"Write","hooks":[{"type":"command","command":command,"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]}}).to_string()).unwrap();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"), json!({"hooks":{event:[{"matcher":"Write","hooks":[{"type":"command","command":command,"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]}}).to_string()).unwrap();
 }
 
 #[tokio::test]
@@ -86,7 +86,7 @@ async fn modified_input_is_executed_and_post_context_reaches_tool_result() {
         format!("printf '%s' '{hook_output}'")
     };
     write_hook(root.path(), "PreToolUse", &command);
-    let path = root.path().join("settings.json");
+    let path = crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json");
     let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let post_output = r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Run formatter before completion"}}"#;
     let post_command = if cfg!(windows) {
@@ -217,15 +217,17 @@ async fn task_created_and_completed_hooks_block_and_roll_back() {
         &[],
     )
     .unwrap();
-    std::fs::write(
-        temp.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        temp.path().join("config/settings.json"),
         json!({"hooks":{"TaskCreated":[{"hooks":[{"type":"command","command":"exit 2","shell":shell}]}]}})
             .to_string(),
     )
     .unwrap();
     let mut executor = executor(temp.path())
         .with_conv_id(session.clone())
-        .with_search_config_path(data.join("settings.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
+        );
     let (_, output, failed) = executor
         .execute_tool_call("TaskCreate", &json!({"subject":"blocked task"}), "create")
         .await;
@@ -236,8 +238,8 @@ async fn task_created_and_completed_hooks_block_and_roll_back() {
         .await;
     assert!(!listed.contains("blocked task"), "{listed}");
 
-    std::fs::write(
-        temp.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        temp.path().join("config/settings.json"),
         json!({"hooks":{"TaskCompleted":[{"hooks":[{"type":"command","command":"exit 2","shell":shell}]}]}})
             .to_string(),
     )
@@ -245,7 +247,9 @@ async fn task_created_and_completed_hooks_block_and_roll_back() {
     // HookRunner snapshots settings at load time.
     let mut executor = make(temp.path())
         .with_conv_id(session)
-        .with_search_config_path(data.join("settings.json"));
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
+        );
     let (_, created, failed) = executor
         .execute_tool_call("TaskCreate", &json!({"subject":"kept task"}), "create")
         .await;

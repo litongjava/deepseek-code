@@ -38,7 +38,11 @@ async fn skills_bridge_streams_with_permissions_rejects_disabled_and_supports_ex
         axum::serve(model_listener, app).await.unwrap();
     });
     let config = json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{model_addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"supports_vision":false,"supports_tools":true,"supports_streaming":true}]}]});
-    std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        dir.path().join("config/config.json"),
+        config.to_string(),
+    )
+    .unwrap();
     let skills = SkillsManager::with_path(dir.path().join("skills"));
     let skill = skills
         .create_skill(

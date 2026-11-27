@@ -9,15 +9,15 @@ use super::background_shell;
 use crate::services::shell_settings::{self, ResolvedShell, ShellSettings};
 use std::sync::Mutex;
 
-const BASH_DESCRIPTION: &str = "Run a command and read its output. Each call starts a fresh shell. Explicit background tasks start in the workspace.
+const BASH_DESCRIPTION: &str = "Run a command and read its output. Each call spawns a new process; foreground calls start in the workspace and keep their directory across calls, so do not repeat a leading `cd` to the workspace. Explicit background tasks start in the workspace.
 
-A foreground timeout in a managed session returns recent output and a task_id while the process continues. Without a managed session, the timeout stops the process tree. Read the task with TaskGet, use block:true to wait for completion, or end it with TaskStop.
+Use `Read`, `Grep`, and `Glob` instead of `cat`/`sed`/`head`/`tail`/`grep`/`find` so read and search calls run in parallel. Combine dependent steps with `&&` and independent checks or test runs with `;` or `&&` in one compound command; fix all errors before re-running.
 
-When a call ends, every process it started is stopped, including background children. A server, daemon or other service that must keep running after the call has to be started with `detach: true`, which returns its PID and log files; stop it yourself when it is no longer needed.
+Background tasks (`run_in_background: true`) and timed-out managed foreground commands notify and wake you automatically on completion. Never poll with foreground `sleep` loops or repeated TaskGet calls: continue other work or finish your turn, and call TaskGet only for intermediate output or `block: true`, or TaskStop to stop it. Without a managed session, a foreground timeout stops the process tree.
 
-Ordinary capture keeps up to 1 MiB per stream. Long results show the beginning and end within the configured preview budget (100 KiB per stream by default).
+When a call ends, every process it started is stopped, including background children. Start a server or daemon that must keep running after the call with `detach: true` (returns PID and log paths; stop it yourself when done).
 
-Command permission checks also apply outside the sandbox.";
+Ordinary capture keeps up to 1 MiB per stream; long results show head and tail within the preview budget (100 KiB per stream by default). Command permission checks also apply outside the sandbox.";
 
 const GIT_BASH_NOTE: &str = "The default is Git Bash. Use $NAME for variables, /dev/null for discarded output and slash-separated paths. Native Windows executables receive translated path arguments. Set MSYS_NO_PATHCONV=1 for a command that needs its arguments verbatim, or use cygpath -w to supply a Windows path explicitly.";
 const POWER_SHELL_NOTE: &str = "The default is Windows PowerShell 5.1 with UTF-8 I/O. Read environment values with $env:NAME and discard output with Out-Null. Use a newline between statements and test $? for conditional execution. Backticks escape special characters.";
@@ -146,7 +146,7 @@ fn append_execution_note(note: &mut String, shell: &ResolvedShell, host_os: &str
     note.push_str(if name == "fish" {
         " Foreground commands start in the workspace."
     } else {
-        " Foreground commands can reuse the session's last allowed directory."
+        " A foreground call starts in the previous foreground call's directory. It reports `cwd` on the first call, when the directory changes or resets, and once after resume or context compaction; when `cwd` is omitted, assume the last reported directory and do not repeat `cd`. Add a leading `cd` only to change directories, or use `(cd ... && ...)` or `git -C` for a temporary switch. Other tools still resolve relative paths against the primary working directory."
     });
     if super::pipeline_failure_flag(shell.command_flag, name, shell.wsl.is_some()) {
         note.push_str(" With pipefail enabled, a failing pipeline stage can surface even when the last stage succeeds.");
@@ -529,7 +529,10 @@ mod tests {
             assert_eq!(text.contains("Git Bash"), label == "Git Bash");
             assert_eq!(text.contains("PowerShell 5.1"), name == "powershell");
             assert_eq!(text.contains("PowerShell 7"), name == "pwsh");
-            assert_eq!(text.contains("last allowed directory"), name != "fish");
+            assert_eq!(
+                text.contains("when the directory changes or resets, and once after resume or context compaction"),
+                name != "fish"
+            );
             assert_eq!(
                 text.contains("Foreground commands start in the workspace"),
                 name == "fish"
@@ -585,5 +588,14 @@ mod tests {
     fn cached_description_is_stable_for_the_process() {
         assert_eq!(bash_tool(), bash_tool());
         assert!(!bash_tool().shell_parameter().is_empty());
+    }
+
+    #[test]
+    fn bash_description_reinforces_efficiency_rules() {
+        assert!(BASH_DESCRIPTION.contains("do not repeat a leading `cd`"));
+        assert!(BASH_DESCRIPTION.contains("Use `Read`, `Grep`, and `Glob` instead"));
+        assert!(BASH_DESCRIPTION.contains("Combine dependent steps with `&&`"));
+        assert!(BASH_DESCRIPTION.contains("fix all errors before re-running"));
+        assert!(BASH_DESCRIPTION.contains("Never poll with foreground `sleep` loops"));
     }
 }

@@ -61,6 +61,7 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
             output.status.code().unwrap_or(-1)
         ));
     }
+    crate::terminal::release_handoff();
     let mut history = crate::terminal::scrollback::Scrollback::take();
     let safe_command = crate::terminal::tool_view::plain_terminal_text(command);
     let rendered = format!("! {safe_command}\n{text}");
@@ -76,9 +77,11 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
         history.push(styled, None);
     }
     history.save();
-    session
-        .store
-        .append(&session.id, "user", &transcript(command, &stdout, &stderr))?;
+    session.store.append_prompt(
+        &session.id,
+        &transcript(command, &stdout, &stderr),
+        "shell_transcript",
+    )?;
     Ok(())
 }
 

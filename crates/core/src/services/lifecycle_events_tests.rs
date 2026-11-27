@@ -52,8 +52,8 @@ async fn six_events_exact_payload_matcher_once_resume_and_isolation() {
                 .push(json!({"matcher":"^wrong$","hooks":[{"type":"command","command":cmd}]}));
         }
     }
-    std::fs::write(
-        dir.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"),
         json!({"hooks":definitions}).to_string(),
     )
     .unwrap();
@@ -119,8 +119,8 @@ fn lifecycle_output_semantics_and_type_limits() {
         );
         let dir = tempfile::tempdir().unwrap();
         for kind in ["prompt", "agent"] {
-            std::fs::write(
-                dir.path().join("settings.json"),
+            crate::data_layout::write_config_file(
+                crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"),
                 json!({"hooks":{event.name():[{"hooks":[{"type":kind,"prompt":"check"}]}]}})
                     .to_string(),
             )
@@ -133,8 +133,8 @@ fn lifecycle_output_semantics_and_type_limits() {
         }
     }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"),
         json!({"hooks":{"Setup":[{"hooks":[{"type":"http","url":"http://127.0.0.1/"}]}]}})
             .to_string(),
     )
@@ -149,7 +149,7 @@ fn lifecycle_output_semantics_and_type_limits() {
 #[tokio::test]
 async fn policy_settings_cannot_be_blocked() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("settings.json"), json!({"hooks":{"ConfigChange":[{"hooks":[{"type":"command","command":"node -e \"process.exit(2)\""}]}]}}).to_string()).unwrap();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"), json!({"hooks":{"ConfigChange":[{"hooks":[{"type":"command","command":"node -e \"process.exit(2)\""}]}]}}).to_string()).unwrap();
     let runner = HookRunner::load(dir.path(), dir.path()).unwrap();
     assert!(
         !runner
@@ -243,7 +243,7 @@ async fn lifecycle_cancellation_timeout_and_status_leave_once_retryable() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("slow.cjs");
         std::fs::write(&script, "const fs=require('fs'); if(fs.existsSync('ready')) { fs.appendFileSync('success','x'); } else { setTimeout(()=>{},30000); }").unwrap();
-        std::fs::write(dir.path().join("settings.json"),json!({"hooks":{event.name():[{"hooks":[{"type":"command","command":format!("node \"{}\"",script.display()),"once":true,"timeout":1,"statusMessage":"lifecycle pending"}]}]}}).to_string()).unwrap();
+        crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"),json!({"hooks":{event.name():[{"hooks":[{"type":"command","command":format!("node \"{}\"",script.display()),"once":true,"timeout":1,"statusMessage":"lifecycle pending"}]}]}}).to_string()).unwrap();
         let runner = HookRunner::load(dir.path(), dir.path()).unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let mut status = hook_progress::subscribe(&session);
@@ -312,8 +312,8 @@ async fn http_lifecycle_events_use_the_same_payload_and_output_rules() {
     for (event, _) in &events {
         config[event.name()] = json!([{"hooks":[{"type":"http","url":url,"timeout":5}]}]);
     }
-    std::fs::write(
-        dir.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&dir.path()).config_file("settings.json"),
         json!({"hooks":config}).to_string(),
     )
     .unwrap();
@@ -358,7 +358,7 @@ async fn unmatched_hooks_and_callbacks_never_materialize_transcripts() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("settings.json"), json!({"hooks":{
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{
         "PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"must-not-run"}]},{"matcher":"Read","hooks":[{"type":"command","command":"must-not-run","if":"Read(*.rs)"}]}],
         "PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","command":"must-not-run"}]}]
     }}).to_string()).unwrap();
@@ -390,7 +390,9 @@ async fn unmatched_hooks_and_callbacks_never_materialize_transcripts() {
         assert!(!outcome.blocked);
         assert!(outcome.warnings.is_empty());
     }
-    assert!(!root.path().join("hook-transcripts").exists());
+    assert!(!crate::data_layout::DataLayout::from_root(root.path())
+        .hook_transcripts()
+        .exists());
     assert_eq!(
         std::fs::read_to_string(root.path().join("global.db")).unwrap(),
         "not a database"
@@ -436,7 +438,10 @@ async fn callback_transcripts_are_lazy_shared_and_failure_is_nonfatal() {
         for fail in [false, true] {
             let root = tempfile::tempdir().unwrap();
             if fail {
-                std::fs::write(root.path().join("hook-transcripts"), "obstruction").unwrap();
+                let transcripts =
+                    crate::data_layout::DataLayout::from_root(root.path()).hook_transcripts();
+                std::fs::create_dir_all(transcripts.parent().unwrap()).unwrap();
+                std::fs::write(transcripts, "obstruction").unwrap();
             }
             let session = uuid::Uuid::new_v4().to_string();
             let capture = Arc::new(Capture {
@@ -474,8 +479,8 @@ async fn callback_transcripts_are_lazy_shared_and_failure_is_nonfatal() {
 async fn completed_once_hook_does_not_regenerate_transcript() {
     let root = tempfile::tempdir().unwrap();
     let cmd = command(root.path());
-    std::fs::write(
-        root.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
         json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":cmd,"once":true}]}]}})
             .to_string(),
     )
@@ -489,9 +494,10 @@ async fn completed_once_hook_does_not_regenerate_transcript() {
         )
         .await
         .unwrap();
+    let layout = crate::data_layout::DataLayout::from_root(root.path());
     std::fs::rename(
-        root.path().join("hook-transcripts"),
-        root.path().join("retained-transcripts"),
+        layout.hook_transcripts(),
+        layout.diagnostics_dir("retained-transcripts"),
     )
     .unwrap();
     runner
@@ -502,7 +508,7 @@ async fn completed_once_hook_does_not_regenerate_transcript() {
         )
         .await
         .unwrap();
-    assert!(!root.path().join("hook-transcripts").exists());
+    assert!(!layout.hook_transcripts().exists());
     assert_eq!(
         std::fs::read_to_string(root.path().join("events.jsonl"))
             .unwrap()

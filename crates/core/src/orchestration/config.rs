@@ -97,7 +97,7 @@ impl OrchestratorConfigFile {
 
     /// Where the orchestrator settings live for a data directory.
     pub fn path_in(data_dir: &Path) -> PathBuf {
-        data_dir.join(ORCHESTRATOR_CONFIG_FILE)
+        crate::data_layout::DataLayout::from_root(&data_dir).orchestrator_config()
     }
 
     /// The saved settings, or the defaults when there is no file yet.
@@ -146,7 +146,7 @@ mod tests {
     fn settings_round_trip_in_the_data_directory_and_default_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = OrchestratorConfigFile::path_in(dir.path());
-        assert_eq!(path, dir.path().join("orchestrator.toml"));
+        assert_eq!(path, dir.path().join("config/orchestrator.toml"));
         let defaults = OrchestratorConfigFile::load_or_default(&path);
         assert_eq!(defaults.orchestrator.max_concurrent_agents, 8);
 
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn the_bundled_engine_config_is_not_this_format() {
         // config/orchestration.toml belongs to crate::config::OrchestrationConfig.
-        let bundled = include_str!("../../../../src-tauri/config/orchestration.toml");
+        let bundled = include_str!("../../../../config/orchestration.toml");
         assert!(toml::from_str::<crate::config::OrchestrationConfig>(bundled).is_ok());
         assert!(!bundled.contains("[orchestrator]"));
     }

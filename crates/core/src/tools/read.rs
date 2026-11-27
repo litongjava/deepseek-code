@@ -12,8 +12,9 @@ const PDF_PAGES_REQUIRED_OVER: usize = 10;
 
 pub fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Read a workspace file and return its text with 1-based line numbers".into()),
         name: "Read".into(),
-        description: "Read a file and return its text with 1-based line numbers. Text reads 2000 lines from line 1 by default; offset and limit select another range, and rendered output over 256 KiB is refused unless allow_large is true. PNG, JPEG, GIF and WebP images up to 5 MiB return as image content when the model accepts it; PDFs return page text for the pages range; .ipynb files return cells with outputs. Long base64 runs in text are replaced with a short placeholder; pass raw=true to read them unchanged. A missing path or directory is an error, and an empty file returns only a warning.".into(),
+        description: "Read a file and return its text with 1-based line numbers. Text reads 2000 lines from line 1 by default; offset and limit select another range, and rendered output over 256 KiB is refused unless allow_large is true. Prefer Read over shell cat/sed/head/tail, batch independent Read calls in parallel in one turn, and read whole files or 200-400-line blocks at once instead of slicing 60-100-line chunks. PNG, JPEG, GIF and WebP images up to 5 MiB return as image content when the model accepts it; PDFs return page text for the pages range; .ipynb files return cells with outputs. Long base64 runs in text are replaced with a short placeholder; pass raw=true to read them unchanged. A missing path or directory is an error, and an empty file returns only a warning.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -69,8 +70,8 @@ pub(crate) fn execute_bound(
         .unwrap_or_default()
         .to_ascii_lowercase();
     let render = |bytes: Vec<u8>| {
-        if let Some(media_type) = image_media_type(&extension) {
-            return image(path, media_type, &bytes);
+        if image_media_type(&extension).is_some() {
+            return image(path, &extension, &bytes);
         }
         let pages = optional_pages(&input)?;
         if extension == "pdf" {
@@ -165,17 +166,34 @@ fn image_media_type(extension: &str) -> Option<&'static str> {
     }
 }
 
-/// The tool loop turns `image` into model image content when the model accepts it.
-fn image(path: &Path, media_type: &str, bytes: &[u8]) -> Result<Value> {
+/// The tool loop turns `image` into model image content when the model accepts
+/// it. The declared type comes from the bytes; a mislabelled extension is
+/// noted, and a non-image under an image extension is reported instead of
+/// poisoning the stored history.
+fn image(path: &Path, extension: &str, bytes: &[u8]) -> Result<Value> {
     anyhow::ensure!(
         bytes.len() <= MAX_IMAGE_BYTES,
         "Image is {} MB; the limit is {} MB",
         bytes.len() / 1024 / 1024,
         MAX_IMAGE_BYTES / 1024 / 1024
     );
+    let Some(media_type) = crate::runtime::image_media_type_from_bytes(bytes) else {
+        return Ok(json!({
+            "content": format!(
+                "{} is named .{extension} but its bytes are not a supported PNG, JPEG, GIF, or WebP image; inspect it with Bash `file`.",
+                path.display()
+            ),
+            "is_error": true,
+        }));
+    };
+    let note = if image_media_type(extension) == Some(media_type) {
+        String::new()
+    } else {
+        format!("; the .{extension} extension does not match its bytes")
+    };
     use base64::Engine;
     Ok(json!({
-        "content": format!("Image file {} ({media_type}, {} bytes)", path.display(), bytes.len()),
+        "content": format!("Image file {} ({media_type}, {} bytes{note})", path.display(), bytes.len()),
         "image": {"media_type": media_type, "data": base64::engine::general_purpose::STANDARD.encode(&bytes)}
     }))
 }
@@ -312,10 +330,22 @@ mod tests {
             "<cell id=\"c1\" type=\"code\">\nprint(1)\n\n</cell>\n<output>\n1\n</output>"
         ));
 
-        std::fs::write(dir.path().join("p.png"), b"\x89PNG").unwrap();
+        std::fs::write(dir.path().join("p.png"), b"\x89PNG\r\n\x1a\n").unwrap();
         let image = execute(json!({"file_path":"p.png"}), cwd).unwrap();
         assert_eq!(image["image"]["media_type"], "image/png");
-        assert_eq!(image["image"]["data"], "iVBORw==");
+        assert_eq!(image["image"]["data"], "iVBORw0KGgo=");
+
+        // The bytes, not the extension, decide the declared type.
+        std::fs::write(dir.path().join("webp.png"), b"RIFF\x00\x00\x00\x00WEBP").unwrap();
+        let image = execute(json!({"file_path":"webp.png"}), cwd).unwrap();
+        assert_eq!(image["image"]["media_type"], "image/webp");
+        assert!(image["content"].as_str().unwrap().contains("does not match"));
+
+        std::fs::write(dir.path().join("fake.png"), b"plain text").unwrap();
+        let error = execute(json!({"file_path":"fake.png"}), cwd).unwrap();
+        assert_eq!(error["is_error"], true);
+        assert!(error["content"].as_str().unwrap().contains("not a supported"));
+
         assert!(execute(json!({"file_path":"a.txt","pages":"1"}), cwd).is_err());
     }
 

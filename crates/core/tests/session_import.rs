@@ -14,7 +14,7 @@ fn session_import_previews_backs_up_preserves_and_rolls_back_conflicts() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    let source = dir.path().join("sessions");
+    let source = dir.path().join("legacy-sessions");
     std::fs::create_dir(&source).unwrap();
     let context = ServiceContext::from_stores(
         RuntimePaths::new(dir.path().join("data")).unwrap(),

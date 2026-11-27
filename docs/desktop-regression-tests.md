@@ -25,14 +25,14 @@ npm run tauri -- dev
 
 ## 场景
 
-### A. 长期记忆
+### A. 记忆
 
-1. 侧边栏打开长期记忆：统计、列表和搜索正常。
-2. 添加一条，列表出现。
-3. 编辑内容和重要性，保存后显示新内容；取消不改变内容。
-4. 删除时出现确认；取消不删除，确认后消失。
-5. `dcl memory list` 看到同样的修改（两端共用数据目录时）。
-6. 导入预览未通过时不能确认导入；导出得到 JSON。
+1. 侧边栏打开记忆（Memory）：没有会话或可信项目时提示选择范围；选择后列出当前范围的记忆文件和搜索框。
+2. 新建一条记忆，列表出现；编辑后内容更新，版本冲突时提示刷新。
+3. 删除前出现确认；取消不删除，确认后消失。
+4. 打开“Legacy archive / remote settings”后，旧归档的统计、列表、搜索、编辑和导入导出正常。
+5. `dcl memory files --project ID list` 与面板显示一致（同一数据目录时）。
+6. 在归档的“记忆设置”里取消“启用长期记忆”，或在终端运行 `dcl config memory off`，两者作用于同一开关：新请求不再包含 `<memory_guidance>` 和 MEMORY.md 索引，memory 目录写入被拒绝；重新开启后恢复。
 
 ### B. 提示词与工具（自定义页的两个入口）
 
@@ -116,9 +116,9 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 
 Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的发现入口，改动 `skills/discovery.rs`、`native_engine/engine_core.rs` 的技能列表或 `native_engine/skill_tool.rs` 时，除 `docs/cli-regression-tests.md` 的 N 节外，在桌面窗口确认：
 
-1. 用独立数据目录启动 Desktop，`CLAUDE_CONFIG_DIR` 指向空目录，只在 `<数据目录>/skills/<名称>/SKILL.md` 放一个技能，发送普通请求：模型的 `Available skills` 含该名称。
+1. 用独立数据目录启动 Desktop，只在 `<数据目录>/skills/<名称>/SKILL.md` 放一个技能，发送普通请求：模型的 `Available skills` 含该名称。
 2. 让模型调用 `Skill`：工具成功，说明中的技能目录是数据目录下的真实路径，引用 `references/...` 可读取。
-3. 同名技能放在工作区 `.claude/skills`、数据目录和 `~/.claude`：项目优先，其次数据目录，最后 Claude 用户；模型列表只出现一项，技能面板/斜杠名称一致。
+3. 同名技能放在工作区 `.agents/skills`、`.claude/skills` 和数据目录：按 `.agents` > `.claude` > 数据目录选择，模型列表只出现一项，技能面板/斜杠名称一致；`~/.claude` 不参与发现。
 4. `enabled: false` 与 `disable-model-invocation` 的显示和调用行为与 CLI 一致。
 5. `<数据目录>/skills/bundled`、`mcp` 中的同名副本不覆盖内置工作流。
 
@@ -127,6 +127,22 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 1. 用独立数据目录启动 Desktop，创建两个会话，各发送不同的消息。核对侧边栏标题、项目和归档状态与 `global.db` 的已发布目录一致，分别打开会话时，历史来自对应的 `sessions/<storage_key>/session.db`。
 2. 对同一数据目录运行 `dcl --data-dir <目录> sessions export <id> --output <file>`。逐行解析 JSONL，核对头部会话 ID、incarnation、消息顺序、审批、附件路径和轨迹中的请求。归档后重复导出。流式回答期间导出时，核对已提交片段和运行状态；随后收到的片段应出现在下一次导出。
 3. 运行 `cargo test --locked -p deepseek-code-desktop --test conversation_generation_bridge --test input_queue_bridge --test trajectory_persistence` 覆盖 Bridge 的生成、排队和轨迹。运行 `cargo test --locked -p deepseek-code-cli --test session_export` 校验导出末行计数、SHA-256、文件名冲突和旧库三个文件的哨兵。
+
+### D5a. 内置资源监控（resource_alert）
+
+Desktop 与 CLI 共用 `crates/core` 的监控服务。Bridge 在 `src-tauri/src/bridge/routes/chat.rs` 把引擎事件转成 SSE：`{"type":"resource_alert","kind":"cpu|memory|disk","summary":"...","details":"..."}`。前端由 `src/api.ts`、`src/api/chat.ts`、`src/api/conversations.ts` 转发到 `onSystem('resource_alert', summary, parsed)`；`src/features/streaming/createStreamCallbacks.ts` 的 `onSystemEvents` 与 `onSystemEventsLight` 调用 `onResourceAlert`，`MainContent` 以底部警告 toast 显示 `System resource warning: <summary>`（8 秒后自动消失），不改写流式正文、工具步骤或加载状态。
+
+1. 在隔离数据目录压低阈值（配置见 `cli-regression-tests.md` 的 I43），用真实 Desktop 窗口发送消息：Bridge SSE 出现 `resource_alert`，界面显示非阻塞警告；连续告警不打断回答，空或缺失 `summary` 不显示。
+2. 恢复会话、EnterWorktree/ExitWorktree 后再次触发磁盘告警：`details` 中的目标工作区跟随当前工作区，恢复前已过期的告警不再显示。
+3. 自动检查：
+
+   ```bash
+   npx tsc --noEmit
+   npm run test:run
+   cargo check --locked -p deepseek-code-desktop --all-targets
+   ```
+
+   `src/features/streaming/resourceAlert.test.ts` 覆盖两条 `onSystemEvents` 路径的告警分发、空/缺失 `summary`、非活动会话，以及流式正文和工具状态保持不变。本轮的 Desktop/WebView 手工场景未运行。
 
 ### E. 浏览器和手机（dcd-server）
 
@@ -175,6 +191,7 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 - `AgentCustomization`、`api/customization`、`routes/customization.rs`、`services/customization.rs`、`prompt/`：B
 - `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、Desktop 入口 `main.rs` 的调度部分：C
 - `CustomizePage`：B、D5
+- 内置资源监控（`services/resource_monitor.rs`、`bridge/routes/chat.rs`、`api.ts`/`api/chat.ts`/`api/conversations.ts`、`features/streaming/`、`MainContent`）：I43、D5a
 - `services/bridgeConnection.ts`、`features/server/`、`platform/native.ts`、`bridge/server_mode.rs`、`bin/dcd-server.rs`、`lib.rs` 的移动端入口、`gen/android/`：E、D1
 - `features/project/FolderPicker.tsx`、`FolderFields.tsx`、`routes/filesystem.rs`、core 的 `fs/directories.rs`、`components/ui/Modal.tsx`：E3、D3
 - 轮询与请求合并（`QueueDock`、`PlanApprovalController`、`useVisiblePolling`、`utils/inflight.ts`）、压缩与缓存（`bridge/mod.rs` 的静态文件）、`routes/conversations.rs` 的快照共享：E11、E13、D1、D2
@@ -183,9 +200,52 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 - `crates/core` 的摘要实现（`native_engine/generation.rs`、`services/compaction*`）：D3，以及 `cli-regression-tests.md` 的 L 节
 - 语音输入（`VoiceInput`、`peripheral.rs` 的 `voice_transcribe`）：Desktop 中配置音频转写后端，录音 5 秒后停止并转写，文本正确；录音以二进制传给后端（无 JSON 数字数组）。浏览器的 HTTP 页面点击麦克风弹出“需要 HTTPS”。
 - `features/trajectory/`（工具调用分组）：D6
+- `ToolPermissionPrompt`、`ToolCallDisplay`、`ToolDiffView`、`AssistantMessage` 的 Python 分支：D1，以及下方“Python 工具审批与展示”
 - `crates/core` 的技能发现、模型技能列表和 `Skill` 工具：D4，以及 `cli-regression-tests.md` 的 N 节
 - 其他范围：至少跑 D1
 
 ### ToolScript 内层审批来源
 
 复用 `ToolPermissionPrompt` 和已有权限响应路由。模型经 ToolLoad 加载 ToolScript 后，ask 模式中的内层 Write 应展示实际输入以及 ToolScript 父调用 ID，允许/拒绝与普通工具一致；取消或 TaskStop 后提示消失，旧回复不能执行工具。`ToolPermissionPrompt.test.tsx` 覆盖来源文字与既有按钮行为；真实 Desktop/WebView 和私有 worker 的全链路需另行运行，不以 SDK 测试代替。
+
+### 文件记忆模式补充（2026-11-13）
+
+A 节旧流程适用于显式 Legacy archive 入口；默认 Project memories 面板改为当前会话/可信项目的 Markdown 记忆：
+
+1. 无会话/项目时不查询全局记忆；选择项目后显示文件 name、description、type。与同 data_dir、同 Git common-dir 的 `dcl memory files list` 对照。
+2. 新增带 frontmatter 的文件；编辑正文保留 metadata，feedback/project 缺 Why 或 How to apply 应报错。删除取消不变，确认后索引同步删除。
+3. 两个窗口读同版本，窗口一保存后窗口二保存报 409；第二窗口草稿保留，刷新后重读。切换 scope 时旧请求返回不能显示前一项目内容。
+4. 缺 scope 的旧 `/api/memory/ingest`、缺版本更新/删除明确失败；Legacy archive 下的导出/导入继续保留旧数据，默认项目召回不使用它们。
+5. 在临时 data-dir 中为各 scope 的 `MEMORY.md` 和正文写不同标记。对照 Desktop 实际模型请求：首条用户消息在项目指令之后依次是 global、可选 team、project、仅子代理的 subagent、当前 session；各有路径，无自动附加的正文，也无父 session 泄漏。编辑两份索引后，下次请求仅新增一条合并提醒，冻结首条不变；重复发送不新增提醒。手动 compact 后索引各一次，无边界前提醒；关闭重开会话比较相同历史前缀，再改一个索引确认仅它产生新提醒。构建检查不等于此 WebView 场景通过。
+6. Plan Read 成功，Write/Edit/ApplyPatch 删除拒绝；Router/Coder 门禁、显式 deny/ask 与 hooks 不被目录免确认绕过。禁用记忆后不注入，配置远程 HTTP 后只有远程工具可加载；本地工具目录不得残留 memory_search/ingest。
+7. 自动化组件覆盖文件编辑、CAS 参数、冲突草稿、删除取消和显式旧归档入口；这不代表原生 Desktop/WebView2、Windows reparse 和服务器/手机操作已验证。
+
+## Python 工具审批与展示
+
+自动检查：
+
+```bash
+npx tsc --noEmit
+npm run test:run -- src/components/ToolPermissionPrompt.test.tsx
+```
+
+在真实 Desktop/WebView 中：
+
+1. 用 `ToolLoad` 加载 `Python`，在 ask 模式触发调用。审批框标题为 “Python code”，显示完整代码、描述、`env` 的 `KEY=value`、`cwd`、`interpreter` 或 `conda`，以及 `Will write: <当前项目工作区>/temp/<save_name>` 的绝对路径；不显示 “Allow for Session”。
+2. 选择 Allow 后，工具调用摘要显示 “Run Python” 和 `description | 首行代码或保存路径`；展开详情能看到代码、运行参数和输出。`ToolDiffView` 的 Python 视图显示代码块、运行参数和 stdout/stderr。
+3. 选择 **Cancel turn** 终止整个回合；选择 **Deny** 只拒绝当前调用，模型继续回答。审批接口报错时弹窗保留并显示原因。
+4. 计划模式发起 Python 调用被拒绝；切出 Plan 模式后可正常审批。
+5. 开启沙箱（Linux/macOS）后 Python 仍被包装；Windows 上显示明确的“不支持沙箱”错误，不静默在沙箱外执行。
+6. `save_name` 的目标已存在时审批仍显示同一路径；批准后文件被覆盖，结果为 `script_saved:true` 且 `script_path` 是绝对路径。目标为符号链接时工具报错，不写入。
+7. 后台 Python 调用完成后，`TaskGet` 的结果和 `/tasks` 中的任务名使用描述或保存名，不包含整段代码。
+
+### Experience 索引（2026-11-25）
+
+1. 在项目工作区根与 `docs/.agents/experience/` 各放一个条目，新建会话；首条用户消息在 MEMORY.md 索引之后、前端说明之前出现 Experience 块，索引行是 `- 相对路径 | 名称: 描述`，不含正文，也不含 `docs/sub/.agents/experience/` 的三级条目。
+2. 同一会话让模型新增一个条目：下一轮只出现一次 `New experience:`，首条消息不变；再次请求不重复。
+3. 手动压缩上下文：Experience 块重新附在剩余的第一条用户消息上，只出现一次。
+4. 无项目会话（内部草稿工作区）不出现 Experience 块。
+5. 在 `/config` 关闭 Experience 后新建会话不出现；重新打开后新会话恢复。
+6. 删除一个条目：下一轮出现一次 `Removed experience: <name>`。
+
+本机（macOS）只执行了 core/CLI 自动化；Desktop WebView、Windows 与真实 Tauri 窗口的上述步骤尚未在本轮验证。

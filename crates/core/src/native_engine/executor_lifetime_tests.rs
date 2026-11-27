@@ -70,7 +70,7 @@ async fn fixture() -> Fixture {
         store.db.clone(),
         Arc::new(Mutex::new(ProviderManager::in_memory(
             vec![provider],
-            paths.data_dir.join("providers.json"),
+            paths.layout().config_file("providers.json"),
         ))),
         runtime::default_permissions(),
         Arc::new(FileCache::new()),

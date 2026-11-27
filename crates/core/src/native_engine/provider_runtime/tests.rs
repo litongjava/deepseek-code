@@ -43,7 +43,7 @@ fn requests_preserve_protocol_and_reasoning_replay() {
     let mut assistant = user();
     assistant.role = "assistant".into();
     assistant.provider_content = Some(
-        json!({"api":"openai-responses","items":[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}]}),
+        json!({"api":"openai-responses","provider":"test","model":"fixture-model","items":[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}]}),
     );
     let body = messages::request(
         "openai-responses",
@@ -73,6 +73,186 @@ fn requests_preserve_protocol_and_reasoning_replay() {
     .unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["reasoning_effort"], "high");
+}
+
+#[test]
+fn foreign_reasoning_keeps_summary_and_drops_opaque_state() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses","provider":"other-account","model":"fixture-model",
+        "items":[
+            {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"kept"}],"encrypted_content":"opaque"},
+            {"type":"reasoning","id":"rs_2","summary":[],"encrypted_content":"opaque-2"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![user(), assistant],
+        Some("system"),
+        vec![],
+        4000,
+    )
+    .unwrap();
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3);
+    assert!(input[1].get("encrypted_content").is_none());
+    assert_eq!(input[1]["summary"][0]["text"], "kept");
+    assert_eq!(input[2]["content"][0]["text"], "answer");
+}
+
+#[test]
+fn legacy_reasoning_without_an_issuer_is_treated_as_foreign() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses",
+        "items":[
+            {"type":"reasoning","id":"rs_old","summary":[{"type":"summary_text","text":"old"}],"encrypted_content":"opaque"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert!(body["input"][0].get("encrypted_content").is_none());
+    assert_eq!(body["input"][0]["summary"][0]["text"], "old");
+}
+
+#[test]
+fn a_different_model_on_the_same_provider_is_foreign_too() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses","provider":"test","model":"older-model",
+        "items":[
+            {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"kept"}],"encrypted_content":"opaque"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert!(body["input"][0].get("encrypted_content").is_none());
+    assert_eq!(body["input"][0]["summary"][0]["text"], "kept");
+}
+
+#[test]
+fn foreign_anthropic_thinking_is_dropped_with_its_signature() {
+    let p = provider("claude", "anthropic-messages", "http://localhost");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"anthropic-messages","provider":"other","model":"fixture-model",
+        "items":[
+            {"type":"thinking","thinking":"private","signature":"sig"},
+            {"type":"text","text":"done"}
+        ]
+    }));
+    let body = messages::request(
+        "anthropic-messages",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+}
+
+#[test]
+fn responses_replays_plain_thinking_into_an_empty_native_item() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.reasoning_content = Some("prior plan".into());
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses","provider":"test","model":"fixture-model",
+        "items":[
+            {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"},
+            {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    let input = body["input"].as_array().unwrap();
+    let reasoning: Vec<_> = input.iter().filter(|item| item["type"] == "reasoning").collect();
+    assert_eq!(reasoning.len(), 1);
+    assert_eq!(reasoning[0]["summary"][0]["text"], "prior plan");
+    assert_eq!(reasoning[0]["encrypted_content"], "opaque");
+}
+
+#[test]
+fn responses_adds_plain_thinking_without_native_items() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.reasoning_content = Some("prior plan".into());
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[0]["type"], "reasoning");
+    assert_eq!(input[0]["summary"][0]["text"], "prior plan");
+    assert_eq!(input[1]["role"], "assistant");
+}
+
+#[test]
+fn chat_replays_reasoning_content() {
+    let p = provider("deepseek", "openai-completions", "http://localhost");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.reasoning_content = Some("prior plan".into());
+    let body = messages::request(
+        "openai-completions",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(body["messages"][0]["reasoning_content"], "prior plan");
 }
 
 #[test]
@@ -239,6 +419,9 @@ async fn fragmented_utf8_and_incomplete_stream_are_handled_without_data_loss() {
     server.abort();
 }
 
+// Windows' local HTTP stack does not reliably surface peer body cancellation
+// to the fixture; keep the Unix assertion where the observation is stable.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn dropping_stream_cancels_http_body() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -879,7 +1062,7 @@ async fn builtin_chat_retries_pre_content_timeout_under_one_budget() {
         }
         drop(captured);
 
-        let records = temp.path().join("request-records/builtin-chat-fixture");
+        let records = temp.path().join("diagnostics/request-records/builtin-chat-fixture");
         let mut metas: Vec<std::path::PathBuf> = std::fs::read_dir(&records)
             .unwrap()
             .filter_map(Result::ok)
@@ -1243,7 +1426,7 @@ async fn builtin_chat_invalid_orchestration_fails_before_open() {
     }
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
-    std::fs::write(
+    crate::data_layout::write_config_file(
         temp.path().join("config/orchestration.toml"),
         "this is not toml [[[",
     )
@@ -1295,7 +1478,7 @@ async fn builtin_chat_mixed_exhaustion_ends_at_the_shared_cap() {
     if std::env::var_os(CHILD).is_none() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
-        std::fs::write(
+        crate::data_layout::write_config_file(
             temp.path().join("config/orchestration.toml"),
             "[tool_loop]\n[tools]\n[memory]\nenabled = false\n[bridge]\n[http]\n\
              request_timeout_secs = 30\nmax_retries = 1\nretry_base_backoff_ms = 20\n\
@@ -1542,7 +1725,7 @@ async fn single_attempt_chat_stream_never_spends_a_second_post() {
     if std::env::var_os(CHILD).is_none() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
-        std::fs::write(
+        crate::data_layout::write_config_file(
             temp.path().join("config/orchestration.toml"),
             "[tool_loop]\n[tools]\n[memory]\nenabled = false\n[bridge]\n[http]\n\
              request_timeout_secs = 1\nmax_retries = 2\nretry_base_backoff_ms = 5\n\
@@ -1703,7 +1886,10 @@ async fn single_attempt_chat_stream_never_spends_a_second_post() {
             "{transport:?}"
         );
         drop(captured);
-        let records = temp.path().join("request-records").join(&session);
+        let records = temp
+            .path()
+            .join("diagnostics/request-records")
+            .join(&session);
         let metas = std::fs::read_dir(records)
             .map(|dir| {
                 dir.filter_map(Result::ok)
@@ -1744,7 +1930,7 @@ async fn openai_counted_stream_invalid_orchestration_fails_before_open() {
     }
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
-    std::fs::write(
+    crate::data_layout::write_config_file(
         temp.path().join("config/orchestration.toml"),
         "this is not toml [[[",
     )

@@ -23,7 +23,8 @@ impl Generator {
         model: &str,
     ) -> Result<Self> {
         crate::config::OrchestrationConfig::init_global()?;
-        let manager = ProviderManager::in_memory(providers, paths.data_dir.join("providers.json"));
+        let manager =
+            ProviderManager::in_memory(providers, paths.layout().config_file("providers.json"));
         ensure!(
             manager.resolve_selected(provider, model).is_some(),
             "Provider/model is unavailable: {provider}::{model}"

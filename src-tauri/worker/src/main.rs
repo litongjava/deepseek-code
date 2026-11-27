@@ -125,14 +125,12 @@ async fn take_screenshot(
     let screenshot = state.desktop_engine.take_screenshot().await.ok();
     let duration = start.elapsed();
 
+    let success = screenshot.is_some();
+    let error = (!success).then(|| "Screenshot failed".to_string());
     Json(ActionResponse {
-        success: screenshot.is_some(),
+        success,
         screenshot,
-        error: if screenshot.is_none() {
-            Some("Screenshot failed".to_string())
-        } else {
-            None
-        },
+        error,
         duration_ms: duration.as_millis() as u64,
     })
 }

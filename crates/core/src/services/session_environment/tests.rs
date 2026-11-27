@@ -41,7 +41,11 @@ async fn hooks_feed_bash_isolate_sessions_reset_cwd_and_close() {
         "CwdChanged":[{"hooks":[{"type":"command","command":"printf 'export CCL_ENV_CWD=cwd\\n' > \"$CLAUDE_ENV_FILE\""}]}],
         "FileChanged":[{"matcher":"probe","hooks":[{"type":"command","command":"printf 'export CCL_ENV_FILE_VALUE=file\\n' > \"$CLAUDE_ENV_FILE\""}]}]
     }});
-    std::fs::write(root.path().join("settings.json"), config.to_string()).unwrap();
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
+        config.to_string(),
+    )
+    .unwrap();
     let runner = HookRunner::load(root.path(), root.path()).unwrap();
     for (event, payload) in [
         (HookEvent::Setup, json!({"trigger":"init"})),
@@ -137,7 +141,7 @@ async fn async_writer_and_failed_script_are_observed_by_next_bash() {
     use serde_json::json;
     let root = tempfile::tempdir().unwrap();
     let context = crate::services::session_messages::context(root.path()).unwrap();
-    std::fs::write(root.path().join("settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","async":true,"command":"sleep 0.1; printf 'export CCL_ASYNC_ENV=ready\\n' > \"$CLAUDE_ENV_FILE\""}]}]}}).to_string()).unwrap();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","async":true,"command":"sleep 0.1; printf 'export CCL_ASYNC_ENV=ready\\n' > \"$CLAUDE_ENV_FILE\""}]}]}}).to_string()).unwrap();
     let runner = HookRunner::load(root.path(), root.path()).unwrap();
     runner
         .run(

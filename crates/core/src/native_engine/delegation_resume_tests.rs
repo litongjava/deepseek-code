@@ -48,7 +48,7 @@ fn owner(
         ReasoningMode::Standard,
     )
     .with_conv_id(id.into())
-    .with_search_config_path(context.paths.data_dir.join("settings.json"))
+    .with_search_config_path(context.paths.layout().config_file("settings.json"))
     .with_owned_children(registry)
 }
 fn fixture() -> (
@@ -318,7 +318,10 @@ async fn retained_child_keeps_its_launch_binding_and_new_children_use_the_owner_
     let (a, first, server_a) = endpoint().await;
     let (b, second, server_b) = endpoint().await;
     let mut host = owner(&context, &parent, &cwd, &a, Default::default());
-    let manager = ProviderManager::in_memory(Vec::new(), context.paths.data_dir.join("providers.json"));
+    let manager = ProviderManager::in_memory(
+        Vec::new(),
+        context.paths.layout().config_file("providers.json"),
+    );
     let binding = manager.binding.clone();
     let snapshot = |generation, url: String, key: &str| {
         let mut provider = host.provider.provider.clone();

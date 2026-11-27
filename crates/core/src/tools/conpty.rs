@@ -255,7 +255,7 @@ pub(super) fn start(
         &session,
     )?;
     let id = task["id"].as_str().context("Missing task ID")?.to_owned();
-    let directory = root.join("shell-tasks").join(&session).join(&id);
+    let directory = root.join("tasks/shell").join(&session).join(&id);
     let active = Active::new();
     let prepared = (|| -> Result<_> {
         let key = key(root, &session, &id)?;

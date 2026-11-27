@@ -72,8 +72,8 @@ fn runner(root: &Path, provider: ResolvedProvider, extra: Value) -> HookRunner {
     hook.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
-    std::fs::write(
-        root.join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
         json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[hook]}]}}).to_string(),
     )
     .unwrap();
@@ -115,7 +115,7 @@ async fn agent_command_and_sdk_keep_deny_and_ask_priority() {
     let (url, state, server) = fixture().await;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("hook.cjs"), "process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:process.argv[2]}}));").unwrap();
-    std::fs::write(root.path().join("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node hook.cjs allow"},{"type":"command","command":"node hook.cjs ask"},{"type":"agent","prompt":"check"}]}]}}).to_string()).unwrap();
+    crate::data_layout::write_config_file(crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"), json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"node hook.cjs allow"},{"type":"command","command":"node hook.cjs ask"},{"type":"agent","prompt":"check"}]}]}}).to_string()).unwrap();
     let provider = provider(&url, "openai");
     let runner = HookRunner::load(root.path(), root.path())
         .unwrap()
@@ -163,8 +163,8 @@ async fn permission_request_waits_for_agent_guard_before_callback_approval() {
     *state.reply.lock().unwrap() = (200, "{\"ok\":false,\"reason\":\"guard denied\"}".into());
     state.delay.store(100, Ordering::Relaxed);
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
         json!({"hooks":{"PermissionRequest":[{"hooks":[{"type":"agent","prompt":"check"}]}]}})
             .to_string(),
     )
@@ -384,8 +384,8 @@ fn reject_events_and_unsupported_options() {
         "Unknown",
     ] {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             json!({"hooks":{event:[{"hooks":[{"type":"agent","prompt":"verify"}]}]}}).to_string(),
         )
         .unwrap();
@@ -407,8 +407,8 @@ fn reject_events_and_unsupported_options() {
         hook.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        std::fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             json!({"hooks":{"Stop":[{"hooks":[hook]}]}}).to_string(),
         )
         .unwrap();

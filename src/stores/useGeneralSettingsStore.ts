@@ -5,7 +5,7 @@ import type { WorkspaceMode } from './useWorkspaceModeStore';
 import { hasNativeDesktop } from '../services/bridgeConnection';
 
 export type WorkDetails = 'compact' | 'standard' | 'detailed' | 'verbose';
-export type PermissionMode = 'ask_permissions' | 'accept_edits' | 'plan_mode' | 'bypass_permissions' | 'dont_ask';
+export type PermissionMode = 'ask_permissions' | 'accept_edits' | 'plan_mode' | 'bypass_permissions' | 'dont_ask' | 'auto';
 export type HomeModelMode = Exclude<WorkspaceMode, 'code'>;
 export interface ModeModel { providerId: string; modelId: string }
 export interface GeneralSettings {
@@ -24,11 +24,11 @@ export interface GeneralSettings {
   defaultModelByMode: Record<HomeModelMode, ModeModel | null>;
 }
 
-const permissions = ['ask_permissions', 'accept_edits', 'plan_mode', 'bypass_permissions', 'dont_ask'];
+const permissions = ['ask_permissions', 'accept_edits', 'plan_mode', 'bypass_permissions', 'dont_ask', 'auto'];
 const sendKeys = ['enter', 'ctrl_enter', 'cmd_enter', 'alt_enter'];
 const newlineKeys = [...sendKeys, 'shift_enter'];
 const defaults: GeneralSettings = {
-  defaultPermissionMode: 'accept_edits', theme: 'light', fontSize: 14, typographyVersion: 1,
+  defaultPermissionMode: 'auto', theme: 'light', fontSize: 14, typographyVersion: 1,
   workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' },
   showCodingView: true, chatLinks: 'sidebar',
   showUsageByMode: { chat: false, work: false, study: false, code: true }, showAiDisclaimer: true,

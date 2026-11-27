@@ -52,8 +52,8 @@ async fn print_turn_survives_a_busy_database_during_live_writes() {
         .route("/v1/chat/completions", post(respond))
         .with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         json!([{
             "id":"fixture","name":"Fixture","base_url":base,"api_key":"fixture-only",
             "api_format":"openai","enabled":true,

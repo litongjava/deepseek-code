@@ -1,13 +1,17 @@
 //! MemEx - Infinite Memory Engine for DeepSeek Code (Tauri)
 //!
-//! Provides: semantic search, auto-ingest, context compression
-//! Backend: persistent local SQLite, or an optional MemEx HTTP service
+//! Provides: local semantic search, auto-ingest, context compression
+//! Backend: persistent local SQLite, retained for the legacy archive,
+//! migration, export and import. Runtime memory is file-based.
 //!
 //! Also includes Caveman + RTK (Recursive Token Keeping) compression
 //! and RLM (Reinforcement Learning from Memory) system
 
 mod caveman_rtk;
 mod local;
+pub(crate) use local::search_terms;
+/// Scoped file storage primitives; runtime policy lives in services::memory_files.
+pub mod files;
 mod transfer;
 pub mod dream;
 pub use transfer::{MemoryArchive, MemoryImportReport};
@@ -20,7 +24,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{info, warn};
+use tracing::info;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Data Types
@@ -43,12 +47,6 @@ pub struct MemorySearchRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemorySearchResponse {
-    pub results: Vec<MemoryItem>,
-    pub total_indexed: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryIngestRequest {
     pub content: String,
     pub importance: Option<f64>,
@@ -66,17 +64,26 @@ pub struct MemoryStats {
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
-    pub backend_url: String,
     pub search_top_k: usize,
     pub compression_threshold_tokens: usize,
     pub min_importance_threshold: f64,
+}
+
+impl MemoryConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=50).contains(&self.search_top_k) { return Err(anyhow!("Search result count must be between 1 and 50")); }
+        if !self.min_importance_threshold.is_finite() || !(0.0..=1.0).contains(&self.min_importance_threshold) {
+            return Err(anyhow!("Importance threshold must be between 0 and 1"));
+        }
+        if self.compression_threshold_tokens == 0 { return Err(anyhow!("Compression threshold must be positive")); }
+        Ok(())
+    }
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            backend_url: "local".to_string(),
             search_top_k: 5,
             compression_threshold_tokens: 2_500_000,
             min_importance_threshold: 0.3,
@@ -85,36 +92,29 @@ impl Default for MemoryConfig {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MemEx HTTP Client
+// MemEx local client
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Clone)]
 pub struct MemExClient {
-    client: reqwest::Client,
-    pub base_url: String,
     config: Arc<RwLock<MemoryConfig>>,
     local: local::LocalMemory,
 }
 
 impl MemExClient {
-    pub fn new(base_url: Option<String>) -> Self {
+    pub fn new() -> Self {
         // The shared data directory, where the CLI and Desktop keep memory.
         let directory = crate::runtime::resolve_default_data_dir()
             .unwrap_or_else(|_| std::env::temp_dir().join("deepseek-code"));
-        Self::with_path(directory.join("memory.sqlite3"), base_url)
+        Self::with_path(directory.join("data/memory.sqlite3"))
     }
 
-    pub fn with_path(path: std::path::PathBuf, base_url: Option<String>) -> Self {
-        let local = local::LocalMemory { path };
-        let mut config = local.config().unwrap_or_else(|error| {
-            warn!("[Memory] Unable to load configuration: {}", error);
-            None
-        }).unwrap_or_default();
-        if let Some(url) = base_url { config.backend_url = url; }
+    pub fn with_path(path: std::path::PathBuf) -> Self {
+        // Both frontends retain a handle for explicit archive operations.
+        // Constructing that handle during file-mode startup must not open SQLite.
         Self {
-            client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default(),
-            base_url: config.backend_url.clone(),
-            config: Arc::new(RwLock::new(config)), local,
+            config: Arc::new(RwLock::new(MemoryConfig::default())),
+            local: local::LocalMemory { path },
         }
     }
 
@@ -130,38 +130,19 @@ impl MemExClient {
     }
 
     pub async fn update_config(&self, config: MemoryConfig) -> Result<()> {
-        if !(1..=50).contains(&config.search_top_k) { return Err(anyhow!("Search result count must be between 1 and 50")); }
-        if !config.min_importance_threshold.is_finite() || !(0.0..=1.0).contains(&config.min_importance_threshold) {
-            return Err(anyhow!("Importance threshold must be between 0 and 1"));
-        }
-        if config.compression_threshold_tokens == 0 { return Err(anyhow!("Compression threshold must be positive")); }
-        if config.backend_url != "local" && !config.backend_url.starts_with("http://") && !config.backend_url.starts_with("https://") {
-            return Err(anyhow!("Backend must be local or an HTTP(S) URL"));
-        }
+        config.validate()?;
         self.local.save_config(&config)?;
         *self.config.write().await = config;
         Ok(())
-    }
-
-    pub async fn health_check(&self) -> Result<bool> {
-        let config = self.get_config().await;
-        if config.backend_url == "local" { return Ok(self.local.stats().is_ok()); }
-        Ok(self.client.get(format!("{}/health", config.backend_url.trim_end_matches('/'))).send().await.map(|r| r.status().is_success()).unwrap_or(false))
     }
 
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<MemoryItem>> {
         let config = self.get_config().await;
         if !config.enabled { return Ok(vec![]); }
         let top_k = top_k.unwrap_or(config.search_top_k).clamp(1, 100);
-        if config.backend_url == "local" {
-            let local = self.local.clone();
-            let query = query.to_string();
-            return tokio::task::spawn_blocking(move || local.search(&query, top_k)).await?;
-        }
-        let req = MemorySearchRequest { query: query.to_string(), top_k: Some(top_k) };
-        let result: MemorySearchResponse = self.client.post(format!("{}/search", config.backend_url.trim_end_matches('/')))
-            .json(&req).send().await?.error_for_status()?.json().await?;
-        Ok(result.results)
+        let local = self.local.clone();
+        let query = query.to_string();
+        tokio::task::spawn_blocking(move || local.search(&query, top_k)).await?
     }
 
     pub async fn ingest(&self, content: &str, importance: Option<f64>, metadata: Option<HashMap<String, String>>) -> Result<()> {
@@ -173,58 +154,37 @@ impl MemExClient {
         let importance = importance.unwrap_or_else(|| Self::estimate_importance(content));
         if !importance.is_finite() || !(0.0..=1.0).contains(&importance) { return Err(anyhow!("Importance must be between 0 and 1")); }
         if importance < config.min_importance_threshold { return Err(anyhow!("Memory importance is below the configured threshold")); }
-        if config.backend_url == "local" {
-            let local = self.local.clone();
-            let content = content.to_string();
-            return tokio::task::spawn_blocking(move || local.ingest(&content, importance, metadata)).await?;
-        }
-        let req = MemoryIngestRequest { content: content.to_string(), importance: Some(importance), metadata };
-        self.client.post(format!("{}/ingest", config.backend_url.trim_end_matches('/'))).json(&req).send().await?.error_for_status()?;
-        Ok(())
+        let local = self.local.clone();
+        let content = content.to_string();
+        tokio::task::spawn_blocking(move || local.ingest(&content, importance, metadata)).await?
     }
 
-    /// Replaces one entry. Only the local store addresses entries by ID.
+    /// Replaces one entry in the local store.
     pub async fn update(&self, id: &str, content: &str, importance: f64) -> Result<bool> {
         let content = content.trim();
         if content.is_empty() { return Err(anyhow!("Memory content cannot be empty")); }
         if content.chars().count() > 32_000 { return Err(anyhow!("Memory must be at most 32000 characters")); }
         if !importance.is_finite() || !(0.0..=1.0).contains(&importance) { return Err(anyhow!("Importance must be between 0 and 1")); }
-        let local = self.local_only("Editing").await?;
+        let local = self.local.clone();
         let (id, content) = (id.to_string(), content.to_string());
         tokio::task::spawn_blocking(move || local.update(&id, &content, importance)).await?
     }
 
-    /// Removes one entry. Only the local store addresses entries by ID.
+    /// Removes one entry from the local store.
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let local = self.local_only("Deleting").await?;
+        let local = self.local.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || local.delete(&id)).await?
     }
 
-    async fn local_only(&self, action: &str) -> Result<local::LocalMemory> {
-        if self.get_config().await.backend_url != "local" {
-            return Err(anyhow!("{action} a single memory requires the local store"));
-        }
-        Ok(self.local.clone())
-    }
-
     pub async fn stats(&self) -> Result<MemoryStats> {
-        let config = self.get_config().await;
-        if config.backend_url == "local" {
-            let local = self.local.clone();
-            return tokio::task::spawn_blocking(move || local.stats()).await?;
-        }
-        Ok(self.client.get(format!("{}/stats", config.backend_url.trim_end_matches('/'))).send().await?.error_for_status()?.json().await?)
+        let local = self.local.clone();
+        tokio::task::spawn_blocking(move || local.stats()).await?
     }
 
     pub async fn clear(&self) -> Result<()> {
-        let config = self.get_config().await;
-        if config.backend_url == "local" {
-            let local = self.local.clone();
-            return tokio::task::spawn_blocking(move || local.clear()).await?;
-        }
-        self.client.post(format!("{}/clear", config.backend_url.trim_end_matches('/'))).send().await?.error_for_status()?;
-        Ok(())
+        let local = self.local.clone();
+        tokio::task::spawn_blocking(move || local.clear()).await?
     }
 
     fn estimate_importance(content: &str) -> f64 {
@@ -592,7 +552,7 @@ impl TieredCompressor {
             let kw_str = keywords.join(", ");
             result.push(json!({
                 "role": "system",
-                "content": format!("[Earlier context keywords: {}] Use memory_search to retrieve details", kw_str)
+                "content": format!("[Earlier context keywords: {}] Use ContextSearch to retrieve details", kw_str)
             }));
         }
 
@@ -639,7 +599,7 @@ impl TieredCompressor {
 
         result.push(json!({
             "role": "system",
-            "content": format!("[Compressed context] Key topics: {}. Use memory_search for details.", kw_str)
+            "content": format!("[Compressed context] Key topics: {}. Use ContextSearch for details.", kw_str)
         }));
 
         // Add the most recent messages
@@ -700,7 +660,7 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
-    fn contains_credentials(content: &str) -> bool {
+    pub(crate) fn contains_credentials(content: &str) -> bool {
         static CREDENTIALS: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| Regex::new(
             r#"(?i)(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bbearer\s+[a-z0-9._~+/=-]+|\bsk-[a-z0-9_-]{8,}|\b(?:api[-_ ]?key|password|passwd|secret|access[-_ ]?token|refresh[-_ ]?token)["']?\s*(?:[:=]|is\b)\s*["']?\S+|(?:密码|密钥|令牌)\s*(?:是|为|[:：=])\s*\S+)"#,
         ).expect("credential detection regex is valid"));
@@ -810,12 +770,12 @@ mod tests {
     #[tokio::test]
     async fn local_memory_survives_restart_and_retrieves_chinese() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("memory.sqlite3");
-        let client = MemExClient::with_path(path.clone(), None);
+        let path = directory.path().join("data/memory.sqlite3");
+        let client = MemExClient::with_path(path.clone());
         client.ingest("用户偏好中文回复，项目使用 Rust", Some(0.8), None).await.unwrap();
         client.ingest("用户偏好中文回复，项目使用 Rust", Some(0.8), None).await.unwrap();
         drop(client);
-        let reopened = MemExClient::with_path(path, None);
+        let reopened = MemExClient::with_path(path);
         assert_eq!(reopened.stats().await.unwrap().total_memories, 1);
         assert_eq!(reopened.search("我之前的中文偏好是什么", None).await.unwrap().len(), 1);
         assert!(reopened.search("unrelated database", None).await.unwrap().is_empty());
@@ -826,9 +786,9 @@ mod tests {
     #[tokio::test]
     async fn settings_persist_and_apply_to_other_clients() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("memory.sqlite3");
-        let client = MemExClient::with_path(path.clone(), None);
-        let runtime = MemExClient::with_path(path, None);
+        let path = directory.path().join("data/memory.sqlite3");
+        let client = MemExClient::with_path(path.clone());
+        let runtime = MemExClient::with_path(path);
         let mut config = client.get_config().await;
         config.enabled = false;
         client.update_config(config.clone()).await.unwrap();
@@ -839,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_content_and_config_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
-        let client = MemExClient::with_path(directory.path().join("memory.sqlite3"), None);
+        let client = MemExClient::with_path(directory.path().join("data/memory.sqlite3"));
         assert!(client.ingest("  ", None, None).await.is_err());
         assert!(client.ingest("test", Some(2.0), None).await.is_err());
         let mut config = client.get_config().await;
@@ -848,35 +808,31 @@ mod tests {
         assert_eq!(client.get_config().await.search_top_k, 5);
     }
 
-    #[tokio::test]
-    async fn remote_errors_are_reported_and_saved_backend_changes_take_effect() {
-        let directory = tempfile::tempdir().unwrap();
-        let client = MemExClient::with_path(directory.path().join("memory.sqlite3"), None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let router = axum::Router::new()
-            .route("/ingest", axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }))
-            .route("/clear", axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }));
-        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
-        let mut config = client.get_config().await;
-        config.backend_url = format!("http://{}", address);
-        client.update_config(config.clone()).await.unwrap();
-        assert!(client.ingest("Remember project settings", Some(0.8), None).await.is_err());
-        assert!(client.clear().await.is_err());
-        config.backend_url = "local".into();
-        client.update_config(config).await.unwrap();
-        client.ingest("Remember project settings", Some(0.8), None).await.unwrap();
-        assert_eq!(client.stats().await.unwrap().total_memories, 1);
-        server.abort();
-    }
-
     #[test]
-    fn saved_settings_with_removed_auto_keys_still_load() {
+    fn saved_settings_with_removed_remote_keys_still_load() {
         let config: MemoryConfig = serde_json::from_str(
-            r#"{"enabled":true,"backend_url":"local","auto_ingest":true,"auto_search":true,"search_top_k":3}"#,
+            r#"{"enabled":true,"backend_url":"http://127.0.0.1:8765","auto_ingest":true,"auto_search":true,"search_top_k":3}"#,
         ).unwrap();
         assert!(config.enabled);
         assert_eq!(config.search_top_k, 3);
+    }
+
+    #[test]
+    fn compressor_hints_use_context_search() {
+        let messages = (0..70)
+            .map(|index| {
+                json!({
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": format!("message {index} about architecture")
+                })
+            })
+            .collect::<Vec<_>>();
+        let compressed = TieredCompressor::new().compress(&messages);
+        let hints = compressed.iter().map(|message| message.to_string()).collect::<String>();
+        assert!(hints.contains("ContextSearch"), "{hints}");
+        assert!(!hints.contains("memory_search"), "{hints}");
+        let aggressive = TieredCompressor::new().compress_aggressive(&messages, 3);
+        assert!(aggressive[0].to_string().contains("ContextSearch"));
     }
 
     #[test]

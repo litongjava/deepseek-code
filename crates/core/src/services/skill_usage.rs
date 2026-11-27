@@ -193,6 +193,7 @@ mod tests {
             user_invocable: true,
             disable_model_invocation: false,
             listing_name_only: false,
+            always_inline: false,
             context: None,
             shell: None,
             agent: None,

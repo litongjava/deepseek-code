@@ -534,6 +534,7 @@ mod tests {
             user_invocable,
             disable_model_invocation: false,
             listing_name_only: false,
+            always_inline: false,
             context: None,
             shell: None,
             agent: None,
@@ -565,7 +566,9 @@ mod tests {
                 .find(|entry| entry["name"] == name)
                 .unwrap_or_else(|| panic!("missing {name}"))
         };
-        assert_eq!(by_name("translate-zh-en")["state"], "user-only");
+        // Installed built-ins, including the bundled translation skills, follow
+        // the disabled default until the user stores a state.
+        assert_eq!(by_name("translate-zh-en")["state"], "off");
         assert_eq!(by_name("translate-zh-en")["source"], "built-in");
         // A built-in without a stored state follows the disabled default.
         assert_eq!(by_name("simplify")["state"], "off");

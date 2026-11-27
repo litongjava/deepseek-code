@@ -13,9 +13,18 @@ use std::{process::Stdio, time::Duration};
 /// The planner runs as an ordinary read-only session, so it must not inherit
 /// the parent worker's control channel, job or model snapshot. Only the
 /// credential forwarded by `launch` is applied afterwards.
-fn planner_command(executable: &std::path::Path) -> tokio::process::Command {
+fn planner_command(
+    executable: &std::path::Path,
+    arguments: &[String],
+    options: &[&str],
+    prompt: &str,
+) -> tokio::process::Command {
     let mut process = tokio::process::Command::new(executable);
     deepseek_code_core::services::background_sessions::strip_internal_env(&mut process);
+    process
+        .args(arguments)
+        .args(options)
+        .args(background_sessions::PromptOrigin::Generated.arguments(prompt));
     process
 }
 
@@ -245,10 +254,10 @@ pub async fn handle(
                 deepseek_code_core::services::agents::bind(&session.store.db, &planner_id, &agent)?;
             }
             let prompt=format!("Research this repository using read-only tools and plan the user's batch change: {instruction}\nReturn 5–30 roughly equal independent units, each mergeable without other units. Give each unit non-overlapping repository-relative file/directory paths (no traversal), a precise title and self-contained implementation instructions. Include observed code conventions in summary, and a concrete shared unit/e2e verification recipe. Do not fabricate repository findings. Do not modify files or run workers. Return only the requested structured plan.");
-            let mut process = planner_command(&launch.executable);
-            process
-                .args(&launch.arguments)
-                .args([
+            let mut process = planner_command(
+                &launch.executable,
+                &launch.arguments,
+                &[
                     "--path",
                     workspace.to_str().context("Non-UTF8 workspace")?,
                     "--resume",
@@ -260,9 +269,10 @@ pub async fn handle(
                     "json",
                     "--json-schema",
                     &batch::schema().to_string(),
-                    "--",
-                    &prompt,
-                ])
+                ],
+                &prompt,
+            );
+            process
                 .envs(environment)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -305,7 +315,11 @@ mod tests {
 
     #[test]
     fn planner_drops_inherited_worker_state() {
-        let command = planner_command(std::path::Path::new("fixture"));
+        let command = planner_command(std::path::Path::new("fixture"), &[], &["--print"], "--plan");
+        assert_eq!(
+            command.as_std().get_args().collect::<Vec<_>>(),
+            ["--print", "--prompt-origin=generated", "--", "--plan"]
+        );
         let stripped: Vec<_> = command.as_std().get_envs().collect();
         for name in deepseek_code_core::services::background_sessions::INTERNAL_ENV {
             assert!(

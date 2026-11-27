@@ -251,8 +251,8 @@ async fn deepseek_search_reads_independent_endpoint_model_and_new_key_on_each_ca
 async fn web_search_recording_matches_wire_and_existing_trace_id() {
     use axum::{body::Bytes, routing::post, Json, Router};
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("settings.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
         r#"{"requestRecording":{"enabled":true}}"#,
     )
     .unwrap();
@@ -294,7 +294,9 @@ async fn web_search_recording_matches_wire_and_existing_trace_id() {
         }
     }
     let trace = trace.unwrap();
-    let dir = root.path().join("request-records/search-session");
+    let dir = root
+        .path()
+        .join("diagnostics/request-records/search-session");
     let meta = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())

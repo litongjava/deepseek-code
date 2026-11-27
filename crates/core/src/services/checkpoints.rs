@@ -297,7 +297,7 @@ fn dir(root: &Path, session: &str) -> Result<PathBuf> {
         uuid::Uuid::parse_str(session).is_ok(),
         "Invalid checkpoint session ID"
     );
-    Ok(root.join("checkpoints").join(session))
+    Ok(root.join("tasks/checkpoints").join(session))
 }
 fn save(root: &Path, checkpoint: &Checkpoint) -> Result<()> {
     let dir = dir(root, &checkpoint.session_id)?;

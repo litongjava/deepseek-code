@@ -145,7 +145,9 @@ impl Fixture {
             ReasoningMode::Standard,
         )
         .with_conv_id(self.parent.clone())
-        .with_search_config_path(self.data.join("settings.json"))
+        .with_search_config_path(
+            crate::data_layout::DataLayout::from_root(&self.data).config_file("settings.json"),
+        )
         .with_permission_manager(manager)
     }
 
@@ -213,7 +215,7 @@ async fn wait_for_status(root: &Path, session: &str, id: &str, expected: &str) -
 async fn wait_for_child_session(root: &Path, parent: &str) -> String {
     let started = std::time::Instant::now();
     loop {
-        if let Ok(entries) = std::fs::read_dir(root.join("tasks")) {
+        if let Ok(entries) = std::fs::read_dir(root.join("data/session-tasks")) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|value| value.to_str()) != Some("sqlite3") {
@@ -284,6 +286,7 @@ fn process_finished(pid: u32) -> bool {
     crate::services::session_worker::process_exited(pid)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_subagent_background_task_is_stopped_when_the_subagent_ends() {
     let temp = tempfile::tempdir().unwrap();
@@ -338,6 +341,7 @@ async fn a_finished_subagent_task_is_left_alone() {
 }
 
 /// The cleanup summary must reach the parent on the error path as well.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_subagent_still_reports_the_stopped_tasks() {
     let temp = tempfile::tempdir().unwrap();
@@ -386,8 +390,12 @@ async fn a_scan_error_is_reported_to_the_parent() {
     let root = tempfile::tempdir().unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     // The task store opens this path: a directory there cannot be a database.
-    std::fs::create_dir_all(root.path().join("tasks").join(format!("{session}.sqlite3")))
-        .unwrap();
+    std::fs::create_dir_all(
+        root.path()
+            .join("data/session-tasks")
+            .join(format!("{session}.sqlite3")),
+    )
+    .unwrap();
     let mut cleanup = ChildSessionTasks::new(Some(root.path().to_path_buf()), session);
     let stop = cleanup.stop().await;
     let summary = stop_summary(&stop);
@@ -402,6 +410,7 @@ async fn a_scan_error_is_reported_to_the_parent() {
 /// Dropping the owner while the child still runs must not leave its shell
 /// behind: the guard inside the child's own task requests the stop when the
 /// child future is dropped, and the shell owner confirms it.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aborting_the_owner_stops_a_task_created_late() {
     let temp = tempfile::tempdir().unwrap();
@@ -512,9 +521,13 @@ async fn verify_delegated_monitor_cleanup(owner_exit: MonitorOwnerExit) {
     if owner_exit == MonitorOwnerExit::ReturnWithHistoricalStatus {
         // This spelling was writable on older versions. Keep the actual runner
         // and its pinned descendant alive while seeding its historical row.
-        let db =
-            rusqlite::Connection::open(fixture.data.join("tasks").join(format!("{child}.sqlite3")))
-                .unwrap();
+        let db = rusqlite::Connection::open(
+            fixture
+                .data
+                .join("data/session-tasks")
+                .join(format!("{child}.sqlite3")),
+        )
+        .unwrap();
         assert_eq!(
             db.execute(
                 "UPDATE tasks SET body=json_set(body,'$.status','in_progress') WHERE id=?1",

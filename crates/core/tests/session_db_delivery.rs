@@ -168,10 +168,10 @@ fn admitted_mcp_result_is_durable_while_another_writer_remains_locked() -> Resul
             "{action}: {} ms before releasing writer; A={} B={} G={}",
             start.elapsed().as_millis(),
             root.path()
-                .join(format!("sessions/{A}/session.db"))
+                .join(format!("data/sessions/{A}/session.db"))
                 .display(),
             root.path()
-                .join(format!("sessions/{B}/session.db"))
+                .join(format!("data/sessions/{B}/session.db"))
                 .display(),
             root.path().join("global.db").display()
         );
@@ -193,13 +193,23 @@ fn killed_delivery_owners_recover_one_effect_and_one_dispatch() -> Result<()> {
             let a = s.create(A, project(root.path()))?;
             let b = s.create(B, project(root.path()))?;
             if kind == "queue" {
-                b.enqueue("request", &json!("user intent"), QueueMode::NextTurn)?;
+                b.enqueue(
+                    "request",
+                    &json!("user intent"),
+                    QueueMode::NextTurn,
+                    deepseek_code_core::services::input_queue::QueueOrigin::User,
+                )?;
             } else if kind == "tool" {
                 b.write(|w| {
                     let m = w.append("assistant", "using tool")?;
                     w.tool(&tool("frozen", &m, 0), None)
                 })?;
-                b.enqueue("request", &json!("tool intent"), QueueMode::Steer)?;
+                b.enqueue(
+                    "request",
+                    &json!("tool intent"),
+                    QueueMode::Steer,
+                    deepseek_code_core::services::input_queue::QueueOrigin::User,
+                )?;
             } else {
                 a.send_peer(&b, "operation", "peer data")?;
             }
@@ -259,10 +269,28 @@ fn queue_revision_pause_tool_delivery_and_peer_revocation() -> Result<()> {
     let s = Stores::open(root.path())?;
     let a = s.create(A, project(root.path()))?;
     let b = s.create(B, project(root.path()))?;
-    let q = b.enqueue("unique", &json!("earlier"), QueueMode::Steer)?;
-    assert_eq!(b.enqueue("unique", &json!("earlier"), QueueMode::Steer)?, q);
+    let q = b.enqueue(
+        "unique",
+        &json!("earlier"),
+        QueueMode::Steer,
+        deepseek_code_core::services::input_queue::QueueOrigin::User,
+    )?;
+    assert_eq!(
+        b.enqueue(
+            "unique",
+            &json!("earlier"),
+            QueueMode::Steer,
+            deepseek_code_core::services::input_queue::QueueOrigin::User
+        )?,
+        q
+    );
     assert!(b
-        .enqueue("unique", &json!("other"), QueueMode::Steer)
+        .enqueue(
+            "unique",
+            &json!("other"),
+            QueueMode::Steer,
+            deepseek_code_core::services::input_queue::QueueOrigin::User
+        )
         .is_err());
     assert_eq!(b.queue_items()?[0].content, json!("earlier"));
     let edit = b.edit_queue(q.id, q.revision, QueueEdit::Text("edited"))?;
@@ -322,7 +350,12 @@ fn history_nested_replay_full_partial_clear_and_worker_address() -> Result<()> {
     let root = tempdir()?;
     let stores = Stores::open(root.path())?;
     let a = stores.create(A, Default::default())?;
-    let (turn,m)=a.write(|w|{w.append_user("first",&json!([{"type":"text","text":"user scope"}]))?;
+    a.admit_user(
+        "first",
+        &json!([{"type":"text","text":"user scope"}]),
+        "typed",
+    )?;
+    let (turn,m)=a.write(|w|{
         w.bind_agent("agent restrictions")?;let t=w.start_turn()?;let m=w.segment(&t)?;w.message_content(&m,"reply")?;
         let nested=format!("{m}:nested");
         w.tool(&tool("parent",&m,0),None)?;w.tool(&tool(&nested,&m,1),Some(("parent",1)))?;
@@ -458,7 +491,7 @@ fn import_preview_replay_dedup_and_atomic_visibility() -> Result<()> {
             s.import_json(src.path(), root.path(), true)?.imported.len(),
             2
         );
-        assert!(!root.path().join("backups").exists());
+        assert!(!root.path().join("data/backups").exists());
         let stopped = s.with_fault_hook(move |p| {
             ensure!(p != phase, "interrupted");
             Ok(())
@@ -492,6 +525,22 @@ fn import_preview_replay_dedup_and_atomic_visibility() -> Result<()> {
     Ok(())
 }
 
+fn commit_native_fixture(session: &SessionDb, native: Value) -> Result<String> {
+    session.write(|w| {
+        w.append("user", "request")?;
+        w.append("assistant", "answer")?;
+        w.request_compaction("retain", 50, 100)
+    })?;
+    let owner = session.delivery_owner()?;
+    owner.finish_compaction(
+        &owner.claim_compaction()?.unwrap(),
+        &deepseek_code_core::services::compaction::GeneratedSummary {
+            text: "summary".into(),
+            native: Some(native),
+        },
+    )
+}
+
 #[test]
 fn fork_pins_one_snapshot_and_resets_local_compaction_count() -> Result<()> {
     use deepseek_code_core::native_engine::provider_manager::ApiFormat;
@@ -499,11 +548,7 @@ fn fork_pins_one_snapshot_and_resets_local_compaction_count() -> Result<()> {
     let root = tempdir()?;
     let stores = Stores::open(root.path())?;
     let a = stores.create(A, Default::default())?;
-    let boundary = a.write(|w| {
-        let id = w.append("assistant", "summary")?;
-        w.native_boundary(&id, &json!({"compaction":true,"model":"original"}))?;
-        Ok(id)
-    })?;
+    let boundary = commit_native_fixture(&a, json!({"compaction":true,"model":"original"}))?;
     let (pinned, observed) = mpsc::sync_channel(1);
     let (release, wait) = mpsc::sync_channel(1);
     let wait = Mutex::new(wait);
@@ -520,11 +565,11 @@ fn fork_pins_one_snapshot_and_resets_local_compaction_count() -> Result<()> {
     release.send(())?;
     let fork = copy.join().unwrap()?;
     late?;
-    assert_eq!(a.read(|r| r.messages())?.len(), 2);
+    assert_eq!(a.read(|r| r.messages())?.len(), 4);
     assert_eq!(a.read(|r| r.compaction_count())?, 1);
     fork.read(|r| {
         assert_eq!(r.compaction_count()?, 0);
-        assert_eq!(r.messages()?.len(), 1);
+        assert_eq!(r.messages()?.len(), 3);
         let (history, id) = r.model_history(&ApiFormat::OpenAI)?;
         assert_ne!(id.as_ref(), Some(&boundary));
         assert_eq!(history.len(), 1);
@@ -624,7 +669,12 @@ fn rewind_retires_undispatched_generation_and_fork_keeps_early_nested_origin() -
     let root = tempdir()?;
     let stores = Stores::open(root.path())?;
     let a = stores.create(A, Default::default())?;
-    a.enqueue("request", &json!("withdrawn"), QueueMode::NextTurn)?;
+    a.enqueue(
+        "request",
+        &json!("withdrawn"),
+        QueueMode::NextTurn,
+        deepseek_code_core::services::input_queue::QueueOrigin::User,
+    )?;
     let mut owner = a.delivery_owner()?;
     let effect = owner.next_queue(QueueMode::NextTurn, None)?.unwrap();
     a.write(|w| w.rewind_from(&effect.id))?;
@@ -674,12 +724,12 @@ fn accepted_p1_directory_and_shard_upgrade_without_changing_identity() -> Result
     let store = uuid::Uuid::new_v4().to_string();
     let inc = uuid::Uuid::new_v4().to_string();
     let seal = uuid::Uuid::new_v4().to_string();
-    let sessions = root.path().join("sessions");
+    let sessions = root.path().join("data/sessions");
     for dir in [".staging", ".trash", ".quarantine", A] {
         fs::create_dir_all(sessions.join(dir))?
     }
-    let locks = root.path().join("session-locks");
-    fs::create_dir(&locks)?;
+    let locks = root.path().join("state/locks/session");
+    fs::create_dir_all(&locks)?;
     for name in [".directory", ".orphan-sweep", A] {
         fs::write(locks.join(name), [])?
     }
@@ -712,6 +762,10 @@ fn accepted_p1_directory_and_shard_upgrade_without_changing_identity() -> Result
     let a = stores.open_session(A)?;
     assert_eq!(a.address().incarnation, inc);
     assert_eq!(a.read(|r| r.messages())?[0].content, "old");
+    let (legacy, _) = a.read(|r| {
+        r.model_history(&deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI)
+    })?;
+    assert!(legacy[0].get("origin").is_none());
     // The v10 migration publishes the refreshed prompt projection once.
     assert_eq!(a.read(|r| r.projection())?.revision, 2);
     a.save_mcp("assistant", "new", &wire(), false)?;
@@ -776,7 +830,12 @@ fn killed_executor_settles_its_started_turn_and_never_redispatches_it() -> Resul
     let root = tempdir()?;
     let stores = Stores::open(root.path())?;
     let b = stores.create(B, Default::default())?;
-    b.enqueue("launch", &json!("work"), QueueMode::NextTurn)?;
+    b.enqueue(
+        "launch",
+        &json!("work"),
+        QueueMode::NextTurn,
+        deepseek_code_core::services::input_queue::QueueOrigin::User,
+    )?;
     let mut worker = Worker::start(root.path(), "dispatch")?;
     wait(&root.path().join("ready"))?;
     let turn = fs::read_to_string(root.path().join("started-turn"))?;
@@ -897,7 +956,12 @@ fn review_frozen_rewound_tool_cancels_and_unblocks_fifo() -> Result<()> {
         Ok(m)
     })?;
     for key in ["one", "two"] {
-        b.enqueue(key, &json!(key), QueueMode::Steer)?;
+        b.enqueue(
+            key,
+            &json!(key),
+            QueueMode::Steer,
+            deepseek_code_core::services::input_queue::QueueOrigin::User,
+        )?;
     }
     let stop = s.with_fault_hook(|p| {
         ensure!(p != Phase::DeliveryClaimed, "cut");
@@ -927,7 +991,12 @@ fn review_running_turn_consumes_steer_once() -> Result<()> {
     let mut owner = b.delivery_owner()?;
     let turn = b.write(|w| w.start_turn())?;
     for key in ["one", "two"] {
-        b.enqueue(key, &json!(key), QueueMode::Steer)?;
+        b.enqueue(
+            key,
+            &json!(key),
+            QueueMode::Steer,
+            deepseek_code_core::services::input_queue::QueueOrigin::User,
+        )?;
         assert!(owner.next_queue(QueueMode::Steer, None)?.unwrap().applied);
     }
     b.write(|w| w.finish_turn(&turn, TurnStatus::Completed, 10))?;
@@ -944,7 +1013,12 @@ fn review_edit_classifies_conflict_before_attachments() -> Result<()> {
     let s = Stores::open(root.path())?;
     let b = s.create(B, Default::default())?;
     let input = json!([{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]);
-    let item = b.enqueue("image", &input, QueueMode::NextTurn)?;
+    let item = b.enqueue(
+        "image",
+        &input,
+        QueueMode::NextTurn,
+        deepseek_code_core::services::input_queue::QueueOrigin::User,
+    )?;
     let edit = |id, rev| {
         b.edit_queue(id, rev, QueueEdit::Text("edit"))
             .unwrap_err()
@@ -1001,7 +1075,7 @@ fn review_partial_fork_excludes_later_parent_and_sidecars() -> Result<()> {
         assert!(r.origins(m)?.is_empty());
         Ok(())
     })?;
-    let db = Connection::open(root.path().join("sessions").join(B).join("session.db"))?;
+    let db = Connection::open(root.path().join("data/sessions").join(B).join("session.db"))?;
     for table in ["tool_call_timings", "tool_call_notes", "mcp_tool_outputs"] {
         assert_eq!(
             db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
@@ -1016,16 +1090,15 @@ fn review_partial_fork_excludes_later_parent_and_sidecars() -> Result<()> {
 fn review_fork_rewrites_retry_and_compaction_references() -> Result<()> {
     let root = tempdir()?;
     let a = Stores::open(root.path())?.create(A, Default::default())?;
+    let boundary = commit_native_fixture(&a, json!({}))?;
     a.write(|w|{
-        let boundary=w.append("assistant","summary")?;
-        w.native_boundary(&boundary,&json!({}))?;
         let m=w.append("assistant","response")?;
         w.snapshots(&m,&json!([{"id":"retry","replacesRequestId":"original","contextBoundary":boundary},{"id":"original"}]))
     })?;
     a.branch(B, Branch::Full)?.read(|r| {
         let rows = r.messages()?;
-        let requests = r.requests(&rows[1].id)?;
-        assert_eq!(requests[0]["contextBoundary"], rows[0].id);
+        let requests = r.requests(&rows[3].id)?;
+        assert_eq!(requests[0]["contextBoundary"], rows[2].id);
         assert_eq!(requests[0]["replacesRequestId"], requests[1]["id"]);
         assert_ne!(requests[1]["id"], "original");
         Ok(())
@@ -1046,7 +1119,7 @@ fn review_recovery_quarantines_unreadable_later_message() -> Result<()> {
         Ok(())
     });
     assert!(stop.open_session(A)?.branch(B, Branch::Full).is_err());
-    let stage = fs::read_dir(root.path().join("sessions/.staging"))?
+    let stage = fs::read_dir(root.path().join("data/sessions/.staging"))?
         .next()
         .unwrap()?
         .path();
@@ -1058,7 +1131,7 @@ fn review_recovery_quarantines_unreadable_later_message() -> Result<()> {
     let again = Stores::open(root.path())?;
     assert!(again.open_session(B).is_err());
     assert!(again.global().conversation(B)?.is_none());
-    assert!(fs::read_dir(root.path().join("sessions/.quarantine"))?
+    assert!(fs::read_dir(root.path().join("data/sessions/.quarantine"))?
         .next()
         .is_some());
     assert_eq!(again.open_session(A)?.read(|r| r.messages())?.len(), 2);
@@ -1089,7 +1162,7 @@ fn review_import_keeps_selected_workspace_across_backup() -> Result<()> {
     thread::scope(|scope| -> Result<()> {
         let job = scope.spawn(|| s.import_json_into_project(&input, old.path(), false, Some(&id)));
         let start = Instant::now();
-        while !fs::read_dir(root.path().join("backups"))
+        while !fs::read_dir(root.path().join("data/backups"))
             .into_iter()
             .flatten()
             .flatten()
@@ -1177,7 +1250,7 @@ fn review_rewind_removes_whole_tied_group() -> Result<()> {
         w.append("user", "last")?;
         Ok(m)
     })?;
-    Connection::open(root.path().join("sessions").join(A).join("session.db"))?.execute(
+    Connection::open(root.path().join("data/sessions").join(A).join("session.db"))?.execute(
         "UPDATE messages SET sort_order=CASE WHEN sort_order<2 THEN 8 ELSE 20 END",
         [],
     )?;
@@ -1307,8 +1380,14 @@ fn round2_partial_and_full_forks_preserve_snapshot_shapes() -> Result<()> {
         assert_eq!(r.requests(&rows[4].id)?[0]["replacesRequestId"], new_id);
         Ok(())
     })?;
-    let shard =
-        |id: &str| Connection::open(root.path().join("sessions").join(id).join("session.db"));
+    let shard = |id: &str| {
+        Connection::open(
+            root.path()
+                .join("data/sessions")
+                .join(id)
+                .join("session.db"),
+        )
+    };
     for id in [A, B] {
         let anonymous: usize = shard(id)?.query_row(
             "SELECT count(*) FROM model_requests WHERE id IS NULL",
@@ -1343,9 +1422,19 @@ fn host_execution_lease_is_shared_for_handoff_and_fenced_to_the_shard() -> Resul
     let lease=Arc::new(source.acquire_execution()?);
     assert!(source.acquire_execution().is_err());
     assert!(other.delivery_under_lease(lease.clone()).is_err());
-    let mut boundary=source.delivery_under_lease(lease.clone())?;
-    source.enqueue("r",&json!("queued"),QueueMode::NextTurn)?;
-    assert!(boundary.next_queue(QueueMode::NextTurn,None)?.unwrap().applied);
+    let mut boundary = source.delivery_under_lease(lease.clone())?;
+    source.enqueue(
+        "r",
+        &json!("queued"),
+        QueueMode::NextTurn,
+        deepseek_code_core::services::input_queue::QueueOrigin::User,
+    )?;
+    assert!(
+        boundary
+            .next_queue(QueueMode::NextTurn, None)?
+            .unwrap()
+            .applied
+    );
     assert!(boundary.begin_generation()?.is_some());
     drop(boundary);
     assert!(source.acquire_execution().is_err());
@@ -1366,16 +1455,24 @@ async fn task_get_parent_admission_uses_the_wait_budget() -> Result<()> {
     let child = stores.create(&child_id, Default::default())?;
     child.write(|w| w.append("assistant", "committed report"))?;
     let job = uuid::Uuid::new_v4().to_string();
-    let directory = root.path().join("background-tasks").join(&job);
+    let directory = root.path().join("tasks/background").join(&job);
     std::fs::create_dir_all(&directory)?;
-    std::fs::write(directory.join("state.json"), json!({
-        "id":job,"parent_session_id":parent_id,"session_id":child_id,
-        "status":"completed","title":"fixture","started_ms":1,"heartbeat_ms":1
-    }).to_string())?;
-    std::fs::write(directory.join("session-owners.json"), json!({
-        "parent":parent.incarnation(),"execution":child.incarnation()
-    }).to_string())?;
-    let key = std::fs::File::open(root.path().join("session-locks").join(&parent_id))?;
+    std::fs::write(
+        directory.join("state.json"),
+        json!({
+            "id":job,"parent_session_id":parent_id,"session_id":child_id,
+            "status":"completed","title":"fixture","started_ms":1,"heartbeat_ms":1
+        })
+        .to_string(),
+    )?;
+    std::fs::write(
+        directory.join("session-owners.json"),
+        json!({
+            "parent":parent.incarnation(),"execution":child.incarnation()
+        })
+        .to_string(),
+    )?;
+    let key = std::fs::File::open(root.path().join("state/locks/session").join(&parent_id))?;
     key.lock()?;
     let (release, rx) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {

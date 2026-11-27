@@ -12,8 +12,9 @@ const MAX_LINE_CHARS: usize = 500;
 pub fn definitions() -> Vec<super::ToolDefinition> {
     vec![
         super::ToolDefinition {
+            summary: Some("Find files by glob pattern".into()),
             name: "Glob".into(),
-            description: "Find files by glob pattern. Glob walks the directory (the working directory by default), skips .git and .gitignore matches, and matches the pattern against each file path. Results are file paths ordered newest first and capped at 100; when more match, the result says how to narrow the search.".into(),
+            description: "Find files by glob pattern. Glob walks the directory (the working directory by default), skips .git and .gitignore matches, and matches the pattern against each file path. Results are file paths ordered newest first and capped at 100; when more match, the result says how to narrow the search. Prefer Glob over shell find and batch independent Glob calls in parallel in one turn.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -25,8 +26,9 @@ pub fn definitions() -> Vec<super::ToolDefinition> {
             }),
         },
         super::ToolDefinition {
+            summary: Some("Search file contents with a regular expression".into()),
             name: "Grep".into(),
-            description: "Search file contents with a regular expression. Grep walks the path recursively, honors .gitignore, includes hidden files, and skips .git and binary files. output_mode selects the result shape: files_with_matches (default) lists paths, content shows matching lines with optional context, count reports matches per file. head_limit caps the result at 250 entries by default and 0 removes the cap; offset skips entries. Narrow the walk with glob or type; multiline lets a pattern span lines.".into(),
+            description: "Search file contents with a regular expression. Grep walks the path recursively, honors .gitignore, includes hidden files, and skips .git and binary files. output_mode selects the result shape: files_with_matches (default) lists paths, content shows matching lines with optional context, count reports matches per file. head_limit caps the result at 250 entries by default and 0 removes the cap; offset skips entries. Narrow the walk with glob or type; multiline lets a pattern span lines. Prefer Grep over shell grep/rg and batch independent Grep calls in parallel in one turn.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

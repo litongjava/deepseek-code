@@ -476,7 +476,7 @@ fn a_failed_append_rolls_back_after_message_and_counter_writes() {
     .unwrap();
     let content = serde_json::json!([{"type": "text", "text": "structured body"}]);
     let error = store
-        .append_user_content(&id, "structured body", &content)
+        .append_user_content(&id, "structured body", &content, "typed")
         .unwrap_err();
     assert!(!deepseek_code_core::db::is_contention(&error), "{error:#}");
     assert!(

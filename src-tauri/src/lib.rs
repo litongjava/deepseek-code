@@ -34,6 +34,27 @@ pub fn use_large_stack_runtime() {
     }
 }
 
+/// Starts the host resource monitor on the Desktop runtime.
+///
+/// Tauri's setup callback runs outside the async runtime, so that path enters
+/// the shared runtime explicitly; a caller already inside one starts directly.
+/// The monitor stays disabled when its configuration disables it.
+pub fn start_resource_monitor(
+    data_dir: &std::path::Path,
+    workspace: std::path::PathBuf,
+) -> deepseek_code_core::services::resource_monitor::ResourceMonitor {
+    use deepseek_code_core::services::resource_monitor::{ResourceMonitor, ResourceMonitorConfig};
+    let config = ResourceMonitorConfig::load(data_dir);
+    let data_dir = data_dir.to_path_buf();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        ResourceMonitor::start(config, workspace, data_dir)
+    } else {
+        tauri::async_runtime::block_on(async move {
+            ResourceMonitor::start(config, workspace, data_dir)
+        })
+    }
+}
+
 /// Android and iOS entry point.
 ///
 /// The app runs the engine in-process: the Bridge listens on loopback with a
@@ -114,7 +135,7 @@ fn prepare_linux_environment(data_dir: &std::path::Path) {
     if !proot.is_file() {
         return tracing::warn!(module = "LinuxEnv", "PRoot is not bundled in this build");
     }
-    let rootfs = data_dir.join("linux").join("rootfs");
+    let rootfs = deepseek_code_core::data_layout::DataLayout::from_root(data_dir).linux_rootfs();
     std::env::set_var(linux_env::PROOT_ENV, &proot);
     std::env::set_var(linux_env::LOADER_ENV, libs.join("libproot-loader.so"));
     std::env::set_var(linux_env::ROOTFS_ENV, &rootfs);

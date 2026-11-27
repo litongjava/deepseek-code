@@ -376,6 +376,17 @@ pub(crate) async fn prepare_child_session(
         }
     };
 
+    if let Some(definition) = &definition {
+        if !resumed {
+            context.db.open_session(&session_id)?.write(|w| {
+                w.set_setting(
+                    crate::db::session_store::settings::MEMORY_AGENT,
+                    &definition.id,
+                )
+            })?;
+        }
+    }
+
     let owners = match resume_pair {
         Some(pair) => pair,
         None => context.db.worker_pair(&spawn.parent_session_id, &session_id)?,
@@ -423,6 +434,7 @@ pub(crate) async fn prepare_child_session(
     arguments.extend([
         "--resume".into(),
         session_id.clone(),
+        "--generated-continuation=delegation".into(),
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
@@ -454,7 +466,7 @@ pub(crate) async fn prepare_child_session(
     } else {
         spawn.prompt.clone()
     };
-    arguments.extend(["--".into(), directive]);
+    arguments.extend(background_sessions::PromptOrigin::Generated.arguments(&directive));
     // Explicit caller values win over inherited launch values.
     for (key, value) in &spawn.extra_env {
         environment.retain(|(existing, _)| existing != key);
@@ -919,7 +931,7 @@ mod tests {
 
     fn launch_arguments(root: &Path, job: &str) -> Vec<String> {
         let launch =
-            std::fs::read_to_string(root.join("background-tasks").join(job).join("launch.json"))
+            std::fs::read_to_string(root.join("tasks/background").join(job).join("launch.json"))
                 .unwrap();
         let launch: Value = serde_json::from_str(&launch).unwrap();
         launch["arguments"]
@@ -968,7 +980,12 @@ mod tests {
         assert!(pair(&arguments, "--permission-mode", "bypass"));
         assert!(pair(&arguments, "--resume", &handle.session_id));
         assert!(pair(&arguments, "--output-format", "stream-json"));
-        assert!(arguments.iter().any(|arg| arg == "inspect"));
+        assert!(arguments
+            .iter()
+            .any(|arg| arg == "--generated-continuation=delegation"));
+        assert!(
+            arguments.ends_with(&background_sessions::PromptOrigin::Generated.arguments("inspect"))
+        );
     }
 
     #[tokio::test]
@@ -1165,11 +1182,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            row.workspace_path.as_deref(),
-            Some(canonical.to_string_lossy().as_ref())
+            std::path::Path::new(row.workspace_path.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            canonical.canonicalize().unwrap()
         );
         let launch = std::fs::read_to_string(
-            data.join("background-tasks")
+            data.join("tasks/background")
                 .join(&handle.job_id)
                 .join("launch.json"),
         )

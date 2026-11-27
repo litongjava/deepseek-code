@@ -114,7 +114,7 @@ enum SummaryCheck {
 
 impl SessionDb {
     fn repair_locks(&self, exclusive: bool) -> Result<Option<(File, File)>> {
-        let dir = self.stores.root.path.join("session-locks");
+        let dir = self.stores.layout().lock_path("session");
         let open = |p: PathBuf| File::options().read(true).write(true).open(p);
         let namespace = open(dir.join(".directory"))?;
         if namespace.try_lock_shared().is_err() {

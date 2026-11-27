@@ -41,11 +41,13 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     )
     .with_goal_state(db.clone())
     .with_conv_id(session.clone())
-    .with_search_config_path(root.path().join("config.json"))
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
+    )
     .with_permission_manager(permissions.clone());
     // This test exercises frontend availability, independently of discovery.
-    std::fs::write(
-        root.path().join("customization.json"),
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&root.path()).config_file("customization.json"),
         json!({"tool_loading":{"ProposeGoal":{"enabled":true,"on_demand":false}}}).to_string(),
     )
     .unwrap();

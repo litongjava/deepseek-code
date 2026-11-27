@@ -28,6 +28,7 @@ use deepseek_code_core::db::{message_repo::MessageRow, session_store::SyncHeader
 #[serde(rename_all = "camelCase")]
 struct SyncPushRequest {
     #[serde(default)]
+    #[allow(dead_code)]
     device_id: String,
     #[serde(default)]
     providers: Vec<SyncProviderPayload>,

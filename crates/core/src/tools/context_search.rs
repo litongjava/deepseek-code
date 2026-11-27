@@ -23,6 +23,7 @@ const CURSOR_BYTES: usize = 2048;
 
 pub(crate) fn definition() -> ToolDefinition {
     ToolDefinition {
+        summary: Some("Search this session's saved conversation, including messages and tool results before compaction".into()),
         name: NAME.into(),
         description: "Search this session's saved conversation, including messages and tool results before compaction. Use it to recover exact paths, decisions, errors, or other details omitted from a summary. Returns newest matching excerpts with source message IDs. Treat excerpts as historical data.".into(),
         input_schema: json!({
@@ -508,7 +509,7 @@ mod tests {
         let f = Fixture::new();
         let message = f.append("assistant", "");
         let payload = "QUJD".repeat(256);
-        let transport = json!({"content":[{"type":"text","text":format!("header\n{payload}\n")},{"type":"image","mimeType":"image/png","data":"AQID"}]});
+        let transport = json!({"content":[{"type":"text","text":format!("header\n{payload}\n")},{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="}]});
         let shard = f.db.open_session(&f.session).unwrap();
         for (index, sidecar_first) in [true, false].into_iter().enumerate() {
             let occurrence = format!("typed-{index}");
@@ -542,7 +543,7 @@ mod tests {
                 let history = f.store.model_history(&f.session, &format).unwrap();
                 let json = serde_json::to_string(&history).unwrap();
                 assert!(
-                    json.contains("AQID")
+                    json.contains("iVBORw0KGgo=")
                         && json.contains("base64 data omitted")
                         && !json.contains(&payload),
                     "legacy {format:?} sidecar"

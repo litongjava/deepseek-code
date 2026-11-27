@@ -50,6 +50,28 @@ impl GlobalDb {
             Ok(())
         })
     }
+    /// Import a preference once without replacing a concurrent explicit edit.
+    pub(crate) fn initialize_setting<T: Serialize + DeserializeOwned>(
+        &self,
+        key: GlobalSetting<'_>,
+        initial: &T,
+    ) -> Result<T> {
+        layout::allow_entry()?;
+        let [domain, name] = key.parts();
+        let raw = serde_json::to_string(initial)?;
+        self.write("initialize global setting", name, false, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO global_settings(domain,name,value) VALUES(?1,?2,?3)",
+                [domain, name, &raw],
+            )?;
+            let chosen: String = tx.query_row(
+                "SELECT value FROM global_settings WHERE domain=?1 AND name=?2",
+                [domain, name],
+                |r| r.get(0),
+            )?;
+            Ok(serde_json::from_str(&chosen)?)
+        })
+    }
     pub fn summary(&self, id: &str) -> Result<Option<Projection>> {
         self.read_directory_row(id, |c| {
             Ok(c.query_row(
@@ -115,6 +137,23 @@ impl SessionRead<'_> {
         read_metadata(self.0, "request_metadata", "request_id", id)
     }
 }
+impl SessionDb {
+    pub fn approve_plan(&self, content: &str) -> Result<String> {
+        let _locks = self.hold_incarnation()?;
+        let memory = crate::services::memory_files::prompt::Admission::session(self)?;
+        self.write_locked("approve plan", |w| {
+            let message = w.plan_marker(content, &memory)?;
+            permission_authority::record_conn(
+                w.0,
+                w.1,
+                permission_authority::Source::ApprovedPlan,
+                &Value::String(content.into()),
+            )?;
+            Ok(message)
+        })
+    }
+}
+
 impl SessionWrite<'_> {
     pub fn set_goal(&self, condition: &str) -> Result<session_goals::Goal> {
         session_goals::set_conn(self.0, self.1, condition)
@@ -156,20 +195,21 @@ impl SessionWrite<'_> {
         self.2.set(true);
         Ok(())
     }
-    pub fn approve_plan(&self, content:&str) -> Result<String> {
-        let message=self.plan_marker(content)?;
-        permission_authority::record_conn(self.0,self.1,permission_authority::Source::ApprovedPlan,&Value::String(content.into()))?;
-        Ok(message)
-    }
-    pub(super) fn plan_marker(&self, content: &str) -> Result<String> {
-        // The legacy plan setting refers to the latest approval only. A rewind
-        // removing that marker must never reactivate an older approval.
+    pub(super) fn plan_marker(
+        &self,
+        content: &str,
+        memory: &crate::services::memory_files::prompt::Admission,
+    ) -> Result<String> {
         self.0.execute("DELETE FROM approved_plan_boundaries", [])?;
-        let message = self.append("user", content)?;
-        self.0.execute(
-            "UPDATE messages SET is_compact_boundary=1 WHERE id=?1",
-            [&message],
+        let message = boundary::create(
+            self.0,
+            self.1,
+            self.next_order()?,
+            content,
+            boundary::Kind::ApprovedPlan,
+            boundary::Storage::Shard(memory),
         )?;
+        self.2.set(true);
         self.0.execute(
             "INSERT INTO approved_plan_boundaries VALUES(?1)",
             [&message],
@@ -177,12 +217,28 @@ impl SessionWrite<'_> {
         Ok(message)
     }
     pub fn set_message_metadata(&self, id: &str, value: &Value) -> Result<()> {
-        save_metadata(self.0, "message_metadata", "message_id", id, value)
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            if !object.contains_key("promptOrigin") {
+                if let Some(origin) = message_origin(self.0, id)? {
+                    object.insert("promptOrigin".into(), Value::String(origin));
+                }
+            }
+        }
+        save_metadata(self.0, "message_metadata", "message_id", id, &value)
     }
     pub fn set_request_metadata(&self, id: &str, value: &Value) -> Result<()> {
         save_metadata(self.0, "request_metadata", "request_id", id, value)
     }
 }
+pub(crate) fn message_origin(c: &Connection, id: &str) -> Result<Option<String>> {
+    let meta = read_metadata(c, "message_metadata", "message_id", id)?;
+    Ok(meta
+        .as_ref()
+        .and_then(|v| v["promptOrigin"].as_str())
+        .map(|s| if s == "user" { "typed" } else { s }.to_owned()))
+}
+
 fn read_metadata(c: &Connection, table: &str, key: &str, id: &str) -> Result<Option<Value>> {
     let raw: Option<String> = c
         .query_row(

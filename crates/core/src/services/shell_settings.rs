@@ -54,7 +54,7 @@ impl Default for WslSettings {
 }
 
 pub(crate) fn document(root: &Path) -> Result<Value> {
-    let path = root.join("settings.json");
+    let path = crate::data_layout::DataLayout::from_root(&root).config_file("settings.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
@@ -87,11 +87,13 @@ pub fn save(root: &Path, settings: &ShellSettings) -> Result<()> {
 }
 
 pub(crate) fn save_document(root: &Path, value: &Value) -> Result<()> {
-    std::fs::create_dir_all(root)?;
-    let mut file = tempfile::NamedTempFile::new_in(root)?;
+    let path = crate::data_layout::DataLayout::from_root(&root).config_file("settings.json");
+    let directory = path.parent().context("Settings file has no parent")?;
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(&serde_json::to_vec_pretty(value)?)?;
     file.as_file().sync_all()?;
-    file.persist(root.join("settings.json"))?;
+    file.persist(path)?;
     GENERATION.fetch_add(1, Ordering::AcqRel);
     Ok(())
 }
@@ -337,8 +339,9 @@ mod tests {
     fn settings_roundtrip_preserves_other_fields_and_rejects_invalid_files() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(load(root.path()).unwrap(), ShellSettings::default());
-        let file = root.path().join("settings.json");
-        std::fs::write(
+        let file =
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json");
+        crate::data_layout::write_config_file(
             &file,
             r#"{"hooks":{"sentinel":true},"sandbox":{"enabled":true}}"#,
         )

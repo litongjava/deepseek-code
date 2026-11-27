@@ -8,6 +8,6 @@ Automatic storage saves up to 2,000 characters from each side of a completed tur
 
 Local recall uses case-insensitive keywords and Chinese character bigrams; it is not embedding-based semantic search. Try concrete names or topic keywords if a paraphrase finds no matches. Empty searches browse the latest 50 entries. Duplicate content is stored once. Recall respects the configured result count and limits each recalled excerpt to 2,000 characters. Retrieved material is marked as reference data rather than instructions. Token totals in the panel are estimates.
 
-The optional **MemEx HTTP 服务** setting connects to an existing MemEx service implementing `/search`, `/ingest`, `/stats`, and `/clear`. Changing backends does not migrate existing data. Request failures are reported, including failed writes or clears; the application does not report a successful save when the service rejected it.
+Remote MemEx HTTP backend support and the `memory_search`/`memory_ingest` tools were removed. Memory is file-based when enabled; the SQLite store remains only for migration, export, and import.
 
 Verification: `cargo test --lib memory::tests` from `src-tauri`, and `npx vitest run src/components/MemoryPanel.test.tsx src/api/memory.test.ts` from the repository root cover persistence, Chinese recall, cross-session recall, shared settings, disabling automatic writes, credential filtering, backend errors, authenticated development requests, and management UI actions.

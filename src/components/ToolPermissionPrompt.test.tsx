@@ -23,6 +23,30 @@ describe('tool permission prompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(respond).toHaveBeenCalledWith('allow'));
   });
+  it('shows Python code, environment, working directory and save target', () => {
+    const python = {
+      request_id: 'r', tool_use_id: 't', tool_name: 'Python',
+      input: {
+        code: 'import os\nprint(os.getcwd())',
+        description: 'Inspect cwd',
+        env: { DCL_TEST: 'visible' },
+        cwd: 'src',
+        interpreter: '/opt/python',
+        save_name: 'python/script/001.py',
+      },
+      allow_session: true,
+    };
+    render(<ToolPermissionPrompt request={python} workspace="/repo" onRespond={vi.fn()} />);
+    expect(screen.getByText('Python code')).toBeInTheDocument();
+    expect(screen.getByText(/import os/)).toBeInTheDocument();
+    expect(screen.getByText('Interpreter:')).toBeInTheDocument();
+    expect(screen.getByText('/opt/python')).toBeInTheDocument();
+    expect(screen.getByText('Working directory:')).toBeInTheDocument();
+    expect(screen.getByText('src')).toBeInTheDocument();
+    expect(screen.getByText('DCL_TEST=visible')).toBeInTheDocument();
+    expect(screen.getByText('/repo/temp/python/script/001.py')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Allow for Session' })).toBeNull();
+  });
   it('keeps the prompt with an error after a rejected response', async () => {
     render(<ToolPermissionPrompt request={request} onRespond={vi.fn().mockRejectedValue(new Error('Request expired'))} />);
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));

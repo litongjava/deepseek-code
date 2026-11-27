@@ -77,3 +77,8 @@ legacy/**/target/
 # AOCI agent host integration (machine-bound; do not commit)
 .mcp.json
 .mcp.json.backup.*
+opencode.json
+opencode.json.backup.*
+
+# AtomCode local workspace
+/.atomcode/

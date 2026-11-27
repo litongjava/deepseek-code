@@ -213,7 +213,9 @@ mod tests {
     async fn session(root: &std::path::Path, base_url: &str) -> Session {
         let paths = RuntimePaths::new(root.join("data")).unwrap();
         let selection = crate::config::Selection{providers:vec![serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":base_url,"api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture Model","enabled":true,"context_window":10000,"supports_vision":false,"supports_web_search":false}]})).unwrap()],provider_id:"fixture".into(),model:"fixture".into()};
-        let cli = crate::args::Cli::try_parse_with_mode_source(["dcl"]).unwrap();
+        let cli =
+            crate::args::Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"])
+                .unwrap();
         let store = SessionStore::new(paths.open_database().unwrap());
         let id = store.create(root, "fixture", "fixture").unwrap();
         Session::open(&cli, &paths, selection, Some(&id))

@@ -45,7 +45,12 @@ fn continue_is_scoped_to_directory_and_skips_unavailable_sessions() {
     assert_eq!(store.latest(&a.join(".")).unwrap().unwrap().id, first);
     assert_eq!(store.latest(&b).unwrap().unwrap().id, other);
     assert_eq!(
-        std::fs::canonicalize(store.workspace(&first, &paths.data_dir.join("workspaces")).unwrap()).unwrap(),
+        std::fs::canonicalize(
+            store
+                .workspace(&first, &paths.data_dir.join("data/workspaces"))
+                .unwrap()
+        )
+        .unwrap(),
         std::fs::canonicalize(&a).unwrap()
     );
     store.db.directory_sql(|conn| {

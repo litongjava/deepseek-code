@@ -12,7 +12,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
     let db = paths.open_database()?;
     let store = SessionStore::new(db.clone());
     let session = store.resume(id)?;
-    let workspace = store.workspace(id, &paths.data_dir.join("workspaces"))?;
+    let workspace = store.workspace(id, &paths.data_dir.join("data/workspaces"))?;
     let context = crate::services::context(paths)?;
     let selected = config::select(
         cli,
@@ -21,8 +21,10 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
         session.provider.as_deref(),
     )?;
     deepseek_code_core::config::OrchestrationConfig::init_global()?;
-    let manager =
-        ProviderManager::in_memory(selected.providers, paths.data_dir.join("providers.json"));
+    let manager = ProviderManager::in_memory(
+        selected.providers,
+        paths.layout().config_file("providers.json"),
+    );
     let engine = runtime::create_engine(
         paths,
         db.clone(),

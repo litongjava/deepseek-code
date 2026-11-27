@@ -11,6 +11,7 @@ const MAX_RESPONSE: usize = MAX_IMAGE.div_ceil(3) * 4 + 1024 * 1024;
 
 pub fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Generate or edit an image through the selected provider image API".into()),
         name: "ImageGenerate".into(),
         description: "Generate or edit an image through the selected provider's image API. The gateway handles image-model routing and authentication. Use a new .png file_path inside the workspace; existing files are never overwritten. For edits, supply up to five referenced_image_paths in order. The result contains the saved path and the actual generated image. This can take several minutes and consumes image-service usage. Relay endpoint errors; do not pretend that an image was created.".into(),
         input_schema: json!({"type":"object","properties":{

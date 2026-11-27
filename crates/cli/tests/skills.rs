@@ -245,6 +245,16 @@ async fn slash_skills_expand_once_fork_without_parent_history_and_reject_private
             assert_eq!(result["is_error"], false);
             if extra.contains("context: fork") {
                 assert_ne!(result["child_session_id"], parent);
+                let rows = store
+                    .model_history(
+                        result["child_session_id"].as_str().unwrap(),
+                        &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    rows.iter().find(|r| r["role"] == "user").unwrap()["origin"],
+                    "generated"
+                );
                 assert!(result["task_id"].is_string());
                 assert_eq!(store.history(&parent).unwrap().len(), 1);
             }
@@ -322,9 +332,9 @@ async fn doctor_injects_real_snapshot_despite_bad_skill_and_respects_custom_over
         // Built-in skills default to off; /doctor is exercised here because the
         // user enabled it.
         let data = temp.path().join(format!("data-{index}"));
-        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(data.join("config")).unwrap();
         std::fs::write(
-            data.join("skill-states.json"),
+            data.join("config/skill-states.json"),
             r#"{"skills":{"doctor":"user"}}"#,
         )
         .unwrap();
@@ -403,9 +413,9 @@ async fn doctor_sdk_manual_invocation_uses_shared_native_snapshot() {
     // Built-in skills default to off; /doctor is exercised because the user
     // enabled it.
     let data = temp.path().join("data");
-    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(data.join("config")).unwrap();
     std::fs::write(
-        data.join("skill-states.json"),
+        data.join("config/skill-states.json"),
         r#"{"skills":{"doctor":"user"}}"#,
     )
     .unwrap();

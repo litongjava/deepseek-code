@@ -148,7 +148,7 @@ async fn background_agent_binds_worktree_before_resuming_child() {
     let errors = std::fs::read_to_string(
         paths
             .data_dir
-            .join("background-tasks")
+            .join("tasks/background")
             .join(&job.id)
             .join("stderr.log"),
     )
@@ -156,7 +156,7 @@ async fn background_agent_binds_worktree_before_resuming_child() {
     assert_eq!(job.status, "completed", "{errors}");
     let store = SessionStore::new(paths.open_database().unwrap());
     let workspace = store
-        .workspace(&job.session_id, &paths.data_dir.join("workspaces"))
+        .workspace(&job.session_id, &paths.data_dir.join("data/workspaces"))
         .unwrap();
     assert_ne!(
         workspace.canonicalize().unwrap(),
@@ -227,7 +227,7 @@ async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_pr
         String::from_utf8_lossy(&first.stderr)
     );
     let workspace = store
-        .workspace(&id, &paths.data_dir.join("workspaces"))
+        .workspace(&id, &paths.data_dir.join("data/workspaces"))
         .unwrap();
     assert_ne!(workspace, source);
     assert_eq!(
@@ -271,7 +271,7 @@ async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_pr
     );
     assert_eq!(
         store
-            .workspace(&id, &paths.data_dir.join("workspaces"))
+            .workspace(&id, &paths.data_dir.join("data/workspaces"))
             .unwrap(),
         workspace
     );
@@ -312,7 +312,7 @@ async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_pr
     );
     assert_ne!(
         store
-            .workspace(&generated, &paths.data_dir.join("workspaces"))
+            .workspace(&generated, &paths.data_dir.join("data/workspaces"))
             .unwrap(),
         workspace
     );
@@ -386,7 +386,7 @@ async fn non_git_hook_worktree_uses_real_cli_tools_and_resumes_without_recreatin
         String::from_utf8_lossy(&result.stderr)
     );
     let path = store
-        .workspace(&session, &paths.data_dir.join("workspaces"))
+        .workspace(&session, &paths.data_dir.join("data/workspaces"))
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
@@ -406,7 +406,7 @@ async fn non_git_hook_worktree_uses_real_cli_tools_and_resumes_without_recreatin
         );
         assert_eq!(
             store
-                .workspace(id, &paths.data_dir.join("workspaces"))
+                .workspace(id, &paths.data_dir.join("data/workspaces"))
                 .unwrap(),
             path
         );

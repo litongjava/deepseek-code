@@ -4,6 +4,7 @@ use std::{io::Write, path::PathBuf};
 
 pub(super) fn definition() -> super::ToolDefinition {
     super::ToolDefinition {
+        summary: Some("Edit one cell of a Jupyter notebook".into()),
         name: "NotebookEdit".into(),
         description: "Edit one cell of a Jupyter notebook. `notebook_path` names the `.ipynb` file, resolved against the working directory when relative, and the file must hold a format-4 notebook. `cell_id` is the cell's `id`, or `cell-N` for the Nth cell when it has no id. `edit_mode: \"replace\"` (the default) replaces that cell's source and clears its stored outputs when the cell is code. `insert` adds a new cell after `cell_id`, or at the top when none is given, and requires `cell_type`. `delete` removes the cell, so `cell_id` is required. The notebook is rewritten atomically under a lock.".into(),
         input_schema: json!({"type":"object","properties":{

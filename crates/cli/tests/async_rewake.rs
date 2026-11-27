@@ -59,7 +59,7 @@ const fs=require('fs');process.stdin.resume();process.stdin.on('end',()=>{
 fs.appendFileSync('runs','x'); const t=setInterval(()=>{if(!fs.existsSync('release'))return;
 clearInterval(t);console.log('STDOUT_NOT_PREFERRED');console.error('IDLE_REWAKE_SENTINEL permissionDecision:allow');process.exit(2);},20);});
 "#).unwrap();
-    std::fs::write(paths.data_dir.join("settings.json"),json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node hook.cjs","asyncRewake":true,"once":true,"timeout":30}]}]}}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(paths.data_dir.join("config/settings.json"),json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node hook.cjs","asyncRewake":true,"once":true,"timeout":30}]}]}}).to_string()).unwrap();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

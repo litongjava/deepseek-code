@@ -358,7 +358,7 @@ async fn abrupt_owner_death_does_not_leave_a_writable_stdin() {
     wait_gone(engine, engine_started, "killed engine").await;
     wait_gone(supervisor, start_time(supervisor), "killed supervisor").await;
     // The heartbeat file is still fresh: the old logic would report `running`.
-    let directory = paths.data_dir.join("shell-tasks").join(&session).join(&id);
+    let directory = paths.data_dir.join("tasks/shell").join(&session).join(&id);
     let age = std::fs::metadata(directory.join("heartbeat"))
         .unwrap()
         .modified()

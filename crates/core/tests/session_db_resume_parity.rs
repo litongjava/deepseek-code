@@ -58,7 +58,7 @@ fn fork_and_clear_remain_visible_in_the_worktree_picker() -> Result<()> {
         true,
     )?;
     sessions.append(&source.id, "user", "Pick this worktree")?;
-    let path = sessions.workspace(&source.id, &root.path().join("workspaces"))?;
+    let path = sessions.workspace(&source.id, &root.path().join("data/workspaces"))?;
     let fork = sessions.fork(&source.id)?;
     let clear = sessions.clear(&source.id)?;
     sessions.append(&clear, "user", "New session")?;
@@ -162,7 +162,12 @@ fn latest_preview_uses_creation_time_after_import() -> Result<()> {
     assert_eq!(entry.latest.as_deref(), Some(first_line.as_str()));
     drop((shard, db));
 
-    let old = rusqlite::Connection::open(root.path().join("sessions").join(id).join("session.db"))?;
+    let old = rusqlite::Connection::open(
+        root.path()
+            .join("data/sessions")
+            .join(id)
+            .join("session.db"),
+    )?;
     old.execute_batch(
         "UPDATE projection_state SET latest_prompt='last in transcript'; PRAGMA user_version=9",
     )?;

@@ -2,6 +2,7 @@ import type { TurnRecord } from '../features/message-list/turnTiming';
 import { DocumentInfo } from '../components/DocumentCard';
 import { DocumentDraftInfo } from '../components/DocumentCreationProcess';
 import type { PendingFile } from '../components/FileUploadPreview';
+import { readImageDataUrl } from './userContent';
 
 export interface ContentBlock {
   type: string;
@@ -36,13 +37,13 @@ export async function buildContentBlocks(
   for (const file of files) {
     if (file.fileType === 'image' && file.file) {
       try {
-        const base64 = await fileToBase64(file.file);
+        const { mediaType, data } = await readImageDataUrl(file.file);
         blocks.push({
           type: 'image',
           source: {
             type: 'base64',
-            media_type: file.mimeType || 'image/png',
-            data: base64,
+            media_type: mediaType || file.mimeType || 'image/png',
+            data,
           },
         });
       } catch (e) {
@@ -59,20 +60,6 @@ export async function buildContentBlocks(
   }
 
   return blocks;
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      // Strip the data:image/...;base64, prefix
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 interface MessageLike {

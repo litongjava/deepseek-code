@@ -68,7 +68,7 @@ pub fn is_terminal(status: &str) -> bool {
 }
 
 pub fn jobs_dir(root: &Path) -> PathBuf {
-    root.join("toolscript-jobs")
+    root.join("tasks/toolscript-jobs")
 }
 
 pub fn directory(root: &Path, id: &str) -> Result<PathBuf> {
@@ -560,9 +560,9 @@ fn reap(child: std::process::Child) {
 }
 
 fn kill_exact(child: &mut std::process::Child) {
-    let pid = child.id();
     #[cfg(unix)]
     {
+        let pid = child.id();
         // The owner runs in its own process group; signal only that group.
         let _ = std::process::Command::new("kill")
             .args(["-9", "--", &format!("-{pid}")])
@@ -1047,7 +1047,7 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
         let mut flushed: std::collections::HashSet<String> = std::collections::HashSet::new();
         // A history or log write that fails must stop further side effects and
         // make the job fail; it must never be reported as a success.
-        let mut fail = |message: String| {
+        let fail = |message: String| {
             let mut slot = consumer_failure
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -1242,7 +1242,7 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
         if let Err(outcome) = outcome {
             let _ = outcome;
         }
-        append_line(
+        let _ = append_line(
             &log_path,
             &format!("persistence_failed {}\n", sanitize(&error)),
         );
@@ -1279,7 +1279,7 @@ async fn run_script(directory: &Path, spec: &JobSpec, state: &mut JobState) -> R
             state.calls_succeeded = succeeded;
             let cancelled = cancellation.is_cancelled();
             let message = format!("{error:#}");
-            append_line(
+            let _ = append_line(
                 &log_path,
                 &format!(
                     "{} {}\n",
@@ -1405,7 +1405,9 @@ fn resolve_provider(
         binding.install(state)?;
         return binding.resolve(None).context("ToolScript launch provider is unavailable");
     }
-    let mut managers = ProviderManager::new(data_dir.join("providers.json"));
+    let mut managers = ProviderManager::new(
+        crate::data_layout::DataLayout::from_root(&data_dir).config_file("providers.json"),
+    );
     managers.load();
     let mut provider = managers
         .resolve_selected(&spec.provider_id, &spec.model)
@@ -1659,7 +1661,7 @@ mod j1_tests {
     }
 
     fn job_dir(root: &Path, id: &str) -> PathBuf {
-        let directory = root.join("toolscript-jobs").join(id);
+        let directory = root.join("tasks/toolscript-jobs").join(id);
         fs::create_dir_all(&directory).unwrap();
         directory
     }
@@ -1681,12 +1683,15 @@ mod j1_tests {
         spec.session = uuid::Uuid::new_v4().to_string();
         spec.workspace = root.to_string_lossy().into_owned();
         spec.data_dir = root.to_string_lossy().into_owned();
-        spec.settings_path = root.join("config.json").to_string_lossy().into_owned();
+        spec.settings_path = crate::data_layout::DataLayout::from_root(&root)
+            .config_file("config.json")
+            .to_string_lossy()
+            .into_owned();
         spec
     }
 
     fn only_job_dir(root: &Path) -> PathBuf {
-        let mut entries: Vec<PathBuf> = fs::read_dir(root.join("toolscript-jobs"))
+        let mut entries: Vec<PathBuf> = fs::read_dir(root.join("tasks/toolscript-jobs"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect();
@@ -1929,7 +1934,7 @@ mod j1_tests {
         let root = tempfile::tempdir().unwrap();
         let spec = start_spec(root.path());
         let session = spec.session.clone();
-        let tasks = root.path().join("tasks");
+        let tasks = root.path().join("data/session-tasks");
         let database = tasks.join(format!("{session}.sqlite3"));
         let worker = fake_worker(
             root.path(),
@@ -2112,8 +2117,8 @@ mod j2_tests {
         fs::create_dir_all(&workspace).unwrap();
         let db = database(root.path());
         let session = "session";
-        fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             json!({"permissions": {"allow": ["Bash"], "deny": ["Bash"]}}).to_string(),
         )
         .unwrap();
@@ -2199,7 +2204,11 @@ mod j2_tests {
         let db = database(root.path());
         db.create("s3", Default::default()).unwrap();
         assert!(read_permission_snapshot(root.path(), &workspace, &db, "s3").is_ok());
-        fs::write(root.path().join("settings.json"), "{\"permissions\": ").unwrap();
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
+            "{\"permissions\": ",
+        )
+        .unwrap();
         let error = read_permission_snapshot(root.path(), &workspace, &db, "s3")
             .expect_err("a malformed settings file must fail");
         let text = format!("{error:#}");

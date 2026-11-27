@@ -151,7 +151,11 @@ fn write_customization(data: &std::path::Path) {
     let customization = json!({"tool_loading":{
         "TaskCreate":switch,"TaskGet":switch,"TaskUpdate":switch,"TaskList":switch
     }});
-    std::fs::write(data.join("customization.json"), customization.to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/customization.json"),
+        customization.to_string(),
+    )
+    .unwrap();
 }
 
 #[derive(Clone)]
@@ -180,8 +184,8 @@ async fn start_fixture() -> (CliFixture, FixtureState) {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    std::fs::write(
-        data.join("providers.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/providers.json"),
         provider_config(&base).to_string(),
     )
     .unwrap();
@@ -446,7 +450,7 @@ async fn task_tools_load_through_comma_and_space_search_then_run_for_real() {
     assert_eq!(read_back["output"], "root-output-marker");
     assert!(fixture
         .data
-        .join("tasks")
+        .join("data/session-tasks")
         .join(format!("{session}.sqlite3"))
         .is_file());
 }

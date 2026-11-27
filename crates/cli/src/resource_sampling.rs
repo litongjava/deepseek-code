@@ -27,7 +27,7 @@ pub fn start(root: &Path) -> Option<Sampler> {
     if !cfg!(windows) || std::env::var("DCL_RESOURCE_SAMPLING").as_deref() == Ok("0") {
         return None;
     }
-    let directory = root.join("logs").join("resources");
+    let directory = root.join("diagnostics/logs").join("resources");
     std::fs::create_dir_all(&directory).ok()?;
     let file = directory.join(format!(
         "process-{}-{}.jsonl",
@@ -319,7 +319,7 @@ mod tests {
         session("sampling-fixture");
         std::thread::sleep(Duration::from_secs(11));
         drop(guard);
-        let path = std::fs::read_dir(directory.join("logs/resources"))
+        let path = std::fs::read_dir(directory.join("diagnostics/logs/resources"))
             .unwrap()
             .next()
             .unwrap()

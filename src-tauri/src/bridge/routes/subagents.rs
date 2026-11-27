@@ -118,7 +118,7 @@ mod tests {
         let display = child.save_mcp(
             &first_id,
             "tool-0",
-            &json!({"content":[{"type":"image","mimeType":"image/png","data":"YWJj"}]}),
+            &json!({"content":[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="}]}),
             false,
         )?;
         child.write(|w| {
@@ -160,7 +160,7 @@ mod tests {
         );
         assert_eq!(
             first["messages"][0]["tool_calls"][0]["mcp_result"]["content"][0]["source"]["data"],
-            "YWJj"
+            "iVBORw0KGgo="
         );
         assert_eq!(first["messages"][0]["tool_calls"][35]["status"], "running");
         assert_eq!(first["next_offset"], 100);

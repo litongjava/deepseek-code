@@ -361,8 +361,8 @@ mod tests {
             }
         }
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&root.path()).config_file("settings.json"),
             r#"{"disableAllHooks":true}"#,
         )
         .unwrap();

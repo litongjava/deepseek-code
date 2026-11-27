@@ -233,7 +233,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(std::path::Path::parent)
+            .and_then(crate::data_layout::data_root_of)
             .context("Research runtime directory unavailable")?;
         let context = ServiceContext::open(
             RuntimePaths::new(root.to_path_buf())?,
@@ -819,7 +819,7 @@ mod tests {
         )
         .with_conv_id(parent)
         .with_permission_manager(manager)
-        .with_search_config_path(paths.data_dir.join("config.json"))
+        .with_search_config_path(paths.layout().config_file("config.json"))
         .with_user_skill(Some(
             json!({"skill":"deep-research","args":"What does the local fixture establish?"}),
         ));
@@ -839,8 +839,8 @@ mod tests {
             let ask = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
             hooks["PreToolUse"] = json!([{"matcher":"WebSearch","hooks":[{"type":"command","shell":shell,"command":emit(ask)}]}]);
         }
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        crate::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             serde_json::to_vec(&json!({"hooks":hooks})).unwrap(),
         )
         .unwrap();

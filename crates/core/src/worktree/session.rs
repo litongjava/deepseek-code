@@ -9,9 +9,15 @@ use std::{
 
 pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
     let mut command = Command::new("git");
+    let cwd_text = cwd.to_string_lossy();
+    let cwd_text = super::git_path_text(&cwd_text);
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| super::git_path_text(arg).to_string())
+        .collect();
     command
-        .current_dir(cwd)
-        .args(args)
+        .current_dir(cwd_text)
+        .args(&args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C");
     #[cfg(windows)]

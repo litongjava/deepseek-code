@@ -191,7 +191,7 @@ mod tests {
         assert!(anthropic_auth::is_oauth_marker(&provider.api_key));
         assert_eq!(provider.models.len(), 2);
         assert!(provider.models.iter().all(|model| !model.fast));
-        let saved = std::fs::read_to_string(paths.data_dir.join("config.json")).unwrap();
+        let saved = std::fs::read_to_string(paths.layout().config_file("config.json")).unwrap();
         assert!(!saved.contains("access_token") && !saved.contains("refresh_token"));
     }
 }

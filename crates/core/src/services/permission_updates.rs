@@ -44,7 +44,10 @@ impl SettingsScope {
     fn file(&self, destination: Destination) -> Result<Option<PathBuf>> {
         Ok(match destination {
             Destination::Session => None,
-            Destination::UserSettings => Some(self.data_dir.join("settings.json")),
+            Destination::UserSettings => Some(
+                crate::data_layout::DataLayout::from_root(&self.data_dir)
+                    .config_file("settings.json"),
+            ),
             Destination::ProjectSettings => {
                 ensure!(
                     self.project_trusted,
@@ -721,8 +724,14 @@ fn load_settings_inner(
 ) -> Result<LoadedPermissions> {
     let mut loaded = LoadedPermissions::default();
     let sources = [
-        (data_dir.join("settings.json"), true),
-        (workspace.join(".claude").join("settings.json"), project_trusted),
+        (
+            crate::data_layout::DataLayout::from_root(&data_dir).config_file("settings.json"),
+            true,
+        ),
+        (
+            workspace.join(".claude").join("settings.json"),
+            project_trusted,
+        ),
         (
             workspace.join(".claude").join("settings.local.json"),
             project_trusted,
@@ -958,8 +967,9 @@ mod tests {
         let scope = scope(&temp);
         std::fs::create_dir_all(&scope.workspace.join(".claude")).unwrap();
         std::fs::create_dir_all(&scope.data_dir).unwrap();
-        let user = scope.data_dir.join("settings.json");
-        std::fs::write(&user, b"\xEF\xBB\xBF{\n  \"theme\": \"dark\",\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n").unwrap();
+        let user =
+            crate::data_layout::DataLayout::from_root(&scope.data_dir).config_file("settings.json");
+        crate::data_layout::write_config_file(&user, b"\xEF\xBB\xBF{\n  \"theme\": \"dark\",\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n").unwrap();
         let local = scope.workspace.join(".claude").join("settings.local.json");
         std::fs::write(&local, json!({"permissions":{"deny":["Bash(rm *)"]}}).to_string()).unwrap();
         let manager = Arc::new(PermissionManager::new(Arc::new(AuditLogger::new(16))));
@@ -1021,8 +1031,8 @@ mod tests {
 
         std::fs::create_dir_all(scope.workspace.join(".claude")).unwrap();
         std::fs::create_dir_all(&scope.data_dir).unwrap();
-        std::fs::write(
-            scope.data_dir.join("settings.json"),
+        crate::data_layout::write_config_file(
+            crate::data_layout::DataLayout::from_root(&scope.data_dir).config_file("settings.json"),
             json!({"permissions":{"allow":["Write"],"deny":["Bash(rm *)"]}}).to_string(),
         )
         .unwrap();
@@ -1065,7 +1075,7 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let path = data.join("settings.json");
+        let path = crate::data_layout::DataLayout::from_root(&data).config_file("settings.json");
         let cases = [
             (r#"{"permissions":[]}"#, "permissions must be an object"),
             (r#"{"permissions":{"deny":5}}"#, "permissions.deny must be an array of strings"),
@@ -1088,7 +1098,7 @@ mod tests {
             (r#"{"permissions":{"deny":["Bash("]}}"#, "Invalid deny rule"),
         ];
         for (body, stage) in cases {
-            std::fs::write(&path, body).unwrap();
+            crate::data_layout::write_config_file(&path, body).unwrap();
             // The interactive path still loads what it can.
             assert!(
                 load_settings(&data, &workspace, true).is_ok(),
@@ -1150,7 +1160,11 @@ mod concurrency_tests {
             thread.join().unwrap();
         }
         let value: Value = serde_json::from_slice(
-            &std::fs::read(scope.data_dir.join("settings.json")).unwrap(),
+            &std::fs::read(
+                crate::data_layout::DataLayout::from_root(&scope.data_dir)
+                    .config_file("settings.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         let rules = value["permissions"]["allow"].as_array().unwrap();

@@ -4,8 +4,10 @@ use crate::fixture_sql::FixtureSql;
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::{
+    db::session_store::SessionDb,
     runtime::RuntimePaths,
     services::background_sessions::{self, Launch},
+    services::ServiceContext,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +21,7 @@ pub async fn handle(
     cli: &Cli,
     command: &str,
     argument: &str,
+    origin: crate::session::TurnOrigin<'_>,
     paths: &RuntimePaths,
     session: &mut Session,
     input: &mut Option<crate::terminal::input::TerminalInput>,
@@ -42,7 +45,7 @@ pub async fn handle(
             }
             session.allow_automatic_wake();
             if !wake_for_notifications(cli, session, input).await? {
-                session.turn(cli, "Continue the unfinished work in this conversation. Review the saved progress first and do not repeat completed operations.", input).await?;
+                session.turn(cli, "Continue the unfinished work in this conversation. Review the saved progress first and do not repeat completed operations.", input, crate::session::TurnOrigin::Continuation).await?;
             }
         }
         "/btw" => {
@@ -89,10 +92,10 @@ pub async fn handle(
             deepseek_code_core::services::permission_authority::record_user(&session.store.db, &child_id, &serde_json::json!(prompt))?;
             let workspace = session
                 .store
-                .workspace(&child_id, &paths.data_dir.join("workspaces"))?;
+                .workspace(&child_id, &paths.data_dir.join("data/workspaces"))?;
             let executable = std::env::current_exe()?;
             let provider = session.launch_provider().await?;
-            let arguments = arguments(cli, paths, session, &child_id, prompt, &provider)?;
+            let arguments = arguments(cli, paths, session, &child_id, prompt, origin, &provider)?;
             let environment = worker_environment(session.auto_route, &provider)?;
             let job = background_sessions::spawn(
                 &paths.data_dir,
@@ -648,7 +651,7 @@ pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, St
 
 pub(crate) use deepseek_code_core::db::session_store::HistoryAddress;
 
-/// One background agent started by this session.
+/// One running agent started by this session.
 #[derive(Clone)]
 pub(crate) struct Agent {
     pub address: HistoryAddress,
@@ -670,7 +673,11 @@ pub(crate) fn running_agents(
     };
     let Ok(parent) = db.select_session(session).and_then(|r| context.db.open_recorded(session, r.observation_identity())) else { return Vec::new(); };
     let Ok(_parent) = parent.hold_incarnation() else { return Vec::new(); };
-    let Ok(jobs) = background_sessions::owned_jobs(&paths.data_dir, session) else {
+    background_agent_rows(&context, &parent)
+}
+
+fn background_agent_rows(context: &ServiceContext, parent: &SessionDb) -> Vec<Agent> {
+    let Ok(jobs) = background_sessions::owned_jobs(&context.paths.data_dir, parent.id()) else {
         return Vec::new();
     };
     jobs.into_iter()
@@ -680,7 +687,7 @@ pub(crate) fn running_agents(
                 .db.background_agent(&job.id)
                 .ok()
                 .flatten()?;
-            let child = background_sessions::owned_execution(&paths.data_dir, &parent, &job).ok()?;
+            let child = background_sessions::owned_execution(&context.paths.data_dir, parent, &job).ok()?;
             let output_tokens = child.read(|r| r.output_tokens()).ok()?;
             Some(Agent {
                 address: child.address(),
@@ -692,6 +699,27 @@ pub(crate) fn running_agents(
             })
         })
         .collect()
+}
+
+/// Return the background count (for the title) and one panel row per child.
+/// Detached turns still own foreground children, but the idle editor has no event stream.
+pub(crate) fn panel_agents(
+    context: &ServiceContext,
+    parent: &SessionDb,
+    live: &[(HistoryAddress, String)],
+) -> (usize, Vec<Agent>) {
+    let Ok(_guard) = parent.hold_incarnation() else {
+        return (0, Vec::new());
+    };
+    let mut agents = background_agent_rows(context, parent);
+    let background = agents.len();
+    let persisted = parent.running_foreground_children().unwrap_or_default();
+    for (address, kind) in persisted.iter().chain(live) {
+        if !agents.iter().any(|row| &row.address == address) {
+            agents.extend(foreground_agent(context, address, kind));
+        }
+    }
+    (background, agents)
 }
 
 /// Agent questions already answered here; one stays pending until its
@@ -909,6 +937,7 @@ pub(crate) fn arguments(
     session: &Session,
     child_id: &str,
     prompt: &str,
+    origin: crate::session::TurnOrigin<'_>,
     provider: &deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
 ) -> Result<Vec<String>> {
     let mut args = vec!["--provider".into(), provider.provider.id.clone(), "--model".into(), session.binding_state().model.clone()];
@@ -916,14 +945,21 @@ pub(crate) fn arguments(
     if !provider.provider.api_key.is_empty() {
         args.extend(["--api-key-env".into(), "DEEPSEEK_CODE_CHILD_API_KEY".into()]);
     }
-    args.extend(turn_arguments(cli, paths, session, child_id, prompt, provider)?);
+    args.extend(turn_arguments(
+        cli, paths, session, child_id, prompt, origin, provider,
+    )?);
     Ok(args)
 }
 
 /// Turn options shared by a frozen child launch and a submission to a live worker.
 /// The persistent protocol carries its provider binding separately, once.
 pub(crate) fn turn_arguments(
-    cli: &Cli, paths: &RuntimePaths, session: &Session, child_id: &str, prompt: &str,
+    cli: &Cli,
+    paths: &RuntimePaths,
+    session: &Session,
+    child_id: &str,
+    prompt: &str,
+    origin: crate::session::TurnOrigin<'_>,
     provider: &deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
 ) -> Result<Vec<String>> {
     let mut args = vec![
@@ -973,7 +1009,7 @@ pub(crate) fn turn_arguments(
         }
     }
     // A positional prompt after -- cannot be parsed as a CLI flag/subcommand.
-    args.extend(["--".into(), prompt.into()]);
+    args.extend(origin.worker_arguments(prompt)?);
     Ok(args)
 }
 
@@ -1164,8 +1200,14 @@ pub(crate) fn notification_text(text: &str) -> Option<String> {
 /// notification, as in the reference CLI, and announced once.
 fn shell_notifications(session: &Session) -> Result<Vec<String>> {
     let mut notices = Vec::new();
-    for task in deepseek_code_core::tools::background_shell::collect_finished(&session.paths.data_dir, &session.id)? {
-        session.selected_session()?.enqueue_cli_notification(&task.notification())?;
+    for task in deepseek_code_core::tools::background_shell::collect_finished(
+        &session.paths.data_dir,
+        &session.id,
+    )? {
+        session.selected_session()?.enqueue_cli_input(
+            deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+            &task.notification(),
+        )?;
         notices.push(format!("\u{25cf} {}", task.summary()));
     }
     Ok(notices)
@@ -1175,20 +1217,40 @@ fn shell_notifications(session: &Session) -> Result<Vec<String>> {
 /// announced once.
 fn monitor_notifications(session: &Session) -> Result<Vec<String>> {
     let mut notices = Vec::new();
-    for event in deepseek_code_core::tools::monitor::collect_events(&session.paths.data_dir, &session.id)? {
-        session.selected_session()?.enqueue_cli_notification(&event.notification())?;
+    for event in
+        deepseek_code_core::tools::monitor::collect_events(&session.paths.data_dir, &session.id)?
+    {
+        session.selected_session()?.enqueue_cli_input(
+            deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+            &event.notification(),
+        )?;
         notices.push(format!("\u{25cf} {}", event.summary()));
     }
     Ok(notices)
 }
 
+/// A detached turn still owns execution. Leave input queued for its owner
+/// rather than yielding the idle editor to start a competing turn.
+pub(crate) fn next_idle_input(session: &Session) -> Result<Option<deepseek_code_core::services::input_queue::QueueItem>> {
+    if session.waiting_for_continue() {
+        return Ok(None);
+    }
+    let item = session.store.db.next_desktop_input(&session.id)?;
+    if item.is_some() && crate::observe::execution_lease_active(session)? {
+        return Ok(None);
+    }
+    Ok(item)
+}
+
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
-    if session.waiting_for_continue() {
+    let Some(item) = next_idle_input(session)? else { return Ok(false); };
+    // Another process may own the session even when this terminal was not
+    // resumed. Leave the notification queued instead of racing its lease.
+    if crate::worker_frontend::occupancy(session)?.is_some() {
         return Ok(false);
     }
-    let Some(item)=session.store.db.next_desktop_input(&session.id)? else { return Ok(false); };
     session.dispatch_input(cli,item,input).await?;
     Ok(true)
 }
@@ -1221,7 +1283,7 @@ fn agent_notice(session: &Session, report: String) -> Result<String> {
             summary.push_str(&safe_output(reason).chars().take(400).collect::<String>());
         }
     }
-    session.selected_session()?.enqueue_cli_notification(
+    session.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
         &format!("{}\n<task-id>{id}</task-id>\n<status>{status}</status>\n<summary>{summary}</summary>\n<result>See the background task report for this task above.</result>\n</task-notification>", deepseek_code_core::tools::background_shell::NOTIFICATION_START),
     )?;
     Ok(format!("\u{25cf} {summary}"))
@@ -1257,7 +1319,7 @@ mod worker_config_tests {
     async fn resume_waits_for_continue_and_preserves_notifications() {
         use axum::{extract::State, routing::post, Json, Router};
         use clap::Parser;
-        use deepseek_code_core::{runtime::SessionStore, services::input_queue};
+        use deepseek_code_core::runtime::SessionStore;
         use std::sync::{Arc, Mutex};
 
         let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
@@ -1273,8 +1335,8 @@ mod worker_config_tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             r#"{"disableAllHooks":true}"#,
         )
         .unwrap();
@@ -1291,7 +1353,15 @@ mod worker_config_tests {
         };
         let cli = Cli::parse_from(["dcl", "--print", "--permission-mode", "dont-ask"]);
         let notification = "<task-notification>RESUME_PENDING_REPORT</task-notification>";
-        store.db.open_session(&id).unwrap().enqueue_cli_notification(notification).unwrap();
+        store
+            .db
+            .open_session(&id)
+            .unwrap()
+            .enqueue_cli_input(
+                deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+                notification,
+            )
+            .unwrap();
         let mut session = Session::open(&cli, &paths, selection(), Some(&id))
             .await
             .unwrap();
@@ -1313,6 +1383,7 @@ mod worker_config_tests {
             &cli,
             "/continue",
             "unexpected",
+            crate::session::TurnOrigin::Continuation,
             &paths,
             &mut session,
             &mut None
@@ -1329,9 +1400,17 @@ mod worker_config_tests {
         assert!(!wake_for_notifications(&cli, &mut session, &mut None)
             .await
             .unwrap());
-        handle(&cli, "/continue", "", &paths, &mut session, &mut None)
-            .await
-            .unwrap();
+        handle(
+            &cli,
+            "/continue",
+            "",
+            crate::session::TurnOrigin::Continuation,
+            &paths,
+            &mut session,
+            &mut None,
+        )
+        .await
+        .unwrap();
         assert!(!session.waiting_for_continue());
         assert!(!store.db.pending_input(&id, is_notification).unwrap());
         assert!(!wake_for_notifications(&cli, &mut session, &mut None)
@@ -1346,16 +1425,29 @@ mod worker_config_tests {
         }
         session.resume_saved(&paths, &id).await.unwrap();
         assert!(session.waiting_for_continue());
-        handle(&cli, "/continue", "", &paths, &mut session, &mut None)
-            .await
-            .unwrap();
+        handle(
+            &cli,
+            "/continue",
+            "",
+            crate::session::TurnOrigin::Continuation,
+            &paths,
+            &mut session,
+            &mut None,
+        )
+        .await
+        .unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
         assert!(requests.lock().unwrap()[1]["messages"]
             .to_string()
             .contains("Continue the unfinished work"));
         session.resume_saved(&paths, &id).await.unwrap();
         session
-            .turn(&cli, "Explicit new task", &mut None)
+            .turn(
+                &cli,
+                "Explicit new task",
+                &mut None,
+                crate::session::TurnOrigin::User("Explicit new task"),
+            )
             .await
             .unwrap();
         assert!(!session.waiting_for_continue());
@@ -1369,7 +1461,16 @@ mod worker_config_tests {
             .unwrap();
         assert!(!fresh.waiting_for_continue());
         fresh.workspace = dir.path().to_owned();
-        fresh.store.db.open_session(&fresh.id).unwrap().enqueue_cli_notification(notification).unwrap();
+        fresh
+            .store
+            .db
+            .open_session(&fresh.id)
+            .unwrap()
+            .enqueue_cli_input(
+                deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+                notification,
+            )
+            .unwrap();
         assert!(wake_for_notifications(&cli, &mut fresh, &mut None)
             .await
             .unwrap());
@@ -1391,9 +1492,22 @@ mod worker_config_tests {
         };
         let cli = Cli::parse_from(["dcl"]);
         let session = Session::open(&cli, &paths, selection, None).await.unwrap();
-        std::fs::create_dir_all(paths.data_dir.join("tasks")).unwrap();
-        std::fs::write(paths.data_dir.join("tasks").join(format!("{}.sqlite3", session.id)), b"not a SQLite database").unwrap();
-        assert!(deepseek_code_core::tools::background_shell::collect_completed(&paths.data_dir, &session.id).is_err());
+        std::fs::create_dir_all(paths.data_dir.join("data/session-tasks")).unwrap();
+        std::fs::write(
+            paths
+                .data_dir
+                .join("data/session-tasks")
+                .join(format!("{}.sqlite3", session.id)),
+            b"not a SQLite database",
+        )
+        .unwrap();
+        assert!(
+            deepseek_code_core::tools::background_shell::collect_completed(
+                &paths.data_dir,
+                &session.id
+            )
+            .is_err()
+        );
         assert!(collect_completed(&session).is_ok());
         session.close().await.unwrap();
     }
@@ -1477,8 +1591,8 @@ mod worker_config_tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(
-            paths.data_dir.join("settings.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
             r#"{"disableAllHooks":true}"#,
         )
         .unwrap();
@@ -1509,6 +1623,12 @@ mod worker_config_tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        let lease = session.selected_session().unwrap().acquire_execution().unwrap();
+        assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        assert!(requests.lock().unwrap().is_empty());
+        drop(lease);
         assert!(wake_for_notifications(&cli, &mut session, &mut None)
             .await
             .unwrap());
@@ -1555,10 +1675,42 @@ mod worker_config_tests {
         resolved.model.effort = Some("high".into());
         resolved.model.max_tokens = Some(321);
         let prompt = "--disallowed-tools this is literal user input";
-        let args = arguments(&cli, &paths, &session, &session.id, prompt, &resolved).unwrap();
+        let args = arguments(
+            &cli,
+            &paths,
+            &session,
+            &session.id,
+            prompt,
+            crate::session::TurnOrigin::User(prompt),
+            &resolved,
+        )
+        .unwrap();
         let worker = Cli::parse_from(std::iter::once("dcl".into()).chain(args));
         assert_eq!(worker.effort.as_deref(), Some("off"));
         assert_eq!(worker.prompt.as_deref(), Some(prompt));
+        assert_eq!(
+            worker.prompt_origin,
+            background_sessions::PromptOrigin::Typed
+        );
+        let scheduled = arguments(
+            &cli,
+            &paths,
+            &session,
+            &session.id,
+            prompt,
+            crate::session::TurnOrigin::Scheduled,
+            &resolved,
+        )
+        .unwrap();
+        let scheduled = Cli::parse_from(std::iter::once("dcl".into()).chain(scheduled));
+        assert_eq!(
+            scheduled.prompt_origin,
+            background_sessions::PromptOrigin::Generated
+        );
+        assert!(matches!(
+            crate::session::TurnOrigin::command_line(&scheduled, prompt),
+            crate::session::TurnOrigin::Scheduled
+        ));
         assert_eq!(worker.allowed_tools, cli.allowed_tools);
         assert_eq!(worker.disallowed_tools, cli.disallowed_tools);
         assert_eq!(worker.max_tokens, None);
@@ -1570,7 +1722,16 @@ mod worker_config_tests {
         cli.max_tokens = Some(456);
         cli.allowed_tools.clear();
         cli.disallowed_tools.clear();
-        let args = arguments(&cli, &paths, &session, &session.id, "hello", &resolved).unwrap();
+        let args = arguments(
+            &cli,
+            &paths,
+            &session,
+            &session.id,
+            "hello",
+            crate::session::TurnOrigin::User("hello"),
+            &resolved,
+        )
+        .unwrap();
         let worker = Cli::parse_from(std::iter::once("dcl".into()).chain(args));
         assert_eq!(worker.effort.as_deref(), Some("high"));
         assert_eq!(worker.max_tokens, Some(456));
@@ -1601,6 +1762,84 @@ mod worker_config_tests {
         assert_eq!(snapshot.context_window, Some(12345));
         assert_eq!(snapshot.max_tokens, Some(321));
         assert!(!values["DEEPSEEK_CODE_WORKER_MODEL"].contains("test-secret"));
+    }
+
+    #[tokio::test]
+    async fn notifications_and_direct_input_wait_while_another_owner_holds_the_lease() {
+        use clap::Parser;
+        use deepseek_code_core::runtime::SessionStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("settings.json"),
+            r#"{"disableAllHooks":true}"#,
+        )
+        .unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store.create(dir.path(), "fixture-model", "fixture").unwrap();
+        let notification = "<task-notification>LEASE_BUSY</task-notification>";
+        store
+            .db
+            .open_session(&id)
+            .unwrap()
+            .enqueue_cli_input(
+                deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
+                notification,
+            )
+            .unwrap();
+        let mut provider = deepseek_code_core::runtime::provider_from_config(
+            &crate::config::provider_template("fixture-model"),
+        );
+        provider.id = "fixture".into();
+        provider.api_key = "fixture".into();
+        provider.base_url = "http://127.0.0.1:1".into();
+        let cli = Cli::parse_from(["dcl", "--print", "--permission-mode", "dont-ask"]);
+        let mut session = Session::open(
+            &cli,
+            &paths,
+            crate::config::Selection {
+                providers: vec![provider],
+                provider_id: "fixture".into(),
+                model: "fixture-model".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        session.allow_automatic_wake();
+        let incarnation = session
+            .selected_session()
+            .unwrap()
+            .incarnation()
+            .to_owned();
+        let lease = deepseek_code_core::services::session_messages::ExecutionLease::acquire(
+            &paths.data_dir,
+            &incarnation,
+        )
+        .unwrap()
+        .expect("session incarnation is a UUID");
+        assert!(crate::observe::execution_lease_active(&session).unwrap());
+        assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        assert!(store.db.pending_input(&id, is_notification).unwrap());
+        let item = store.db.next_desktop_input(&id).unwrap().unwrap();
+        let error = session
+            .dispatch_input(&cli, item, &mut None)
+            .await
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("executing in another process") || text.contains("still running"),
+            "{text}"
+        );
+        assert!(!text.contains("lock acquisition failed"), "{text}");
+        assert!(store.db.pending_input(&id, is_notification).unwrap());
+        drop(lease);
+        assert!(store.db.next_desktop_input(&id).unwrap().is_some());
+        session.close().await.unwrap();
     }
 }
 

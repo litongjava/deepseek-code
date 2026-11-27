@@ -3,6 +3,7 @@
 mod child_transcript;
 use super::{EngineEvent, ToolLoopExecutor};
 use crate::{
+    db::session_store::ExecutorHistory,
     runtime::{RuntimePaths, SessionStore},
     services::{agents, EnvironmentCredentials, ServiceContext},
     tools::{background_shell::SessionStop, ToolDefinition},
@@ -66,6 +67,7 @@ impl OwnedChild {
 
 pub(super) fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
+        summary: Some("Start a child agent on one task and return its result".into()),
         name: "Agent".into(),
         description: "Start a child agent on one task. Pick a subagent_type from the runtime list; leaving it out starts a general-purpose agent, whose prompt and tools come from its definition.\n\nA fork branches this session instead: it keeps the full history, runs in the background on this session's model and takes prompt as its directive, and it cannot start another fork.\n\nMain-session children run in the background by default and send a completion notification, so keep working rather than polling; pass run_in_background: false to get the result before you continue. isolation: \"worktree\" puts the child in its own git worktree. The user does not see a child's report, so relay what matters; SendMessage continues the same child with its context, while a new Agent call starts fresh.".into(),
         input_schema: json!({"type":"object","properties":{
@@ -257,7 +259,7 @@ fn agent_memory(
         "Invalid agent type for memory scope"
     );
     let directory = match scope {
-        "user" => root.join("agent-memory").join(agent),
+        "user" => root.join("data/agent-memory").join(agent),
         "project" => workspace.join(".claude/agent-memory").join(agent),
         "local" => workspace.join(".claude/agent-memory-local").join(agent),
         _ => anyhow::bail!("Invalid agent memory scope"),
@@ -399,7 +401,11 @@ impl ToolLoopExecutor {
                 .map(|(id, _)| id.clone())
                 .collect()
         };
-        let Some(root) = self.search_config_path.as_deref().and_then(|p| p.parent()) else {
+        let Some(root) = self
+            .search_config_path
+            .as_deref()
+            .and_then(crate::data_layout::data_root_of)
+        else {
             return;
         };
         let Ok(context) = crate::services::session_messages::context(root) else {
@@ -464,7 +470,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(|path| path.parent())
+            .and_then(crate::data_layout::data_root_of)
             .context("Runtime unavailable")?;
         let context = crate::services::session_messages::context(root)?;
         let saved: Value = context
@@ -543,11 +549,12 @@ impl ToolLoopExecutor {
         child_history.inherit_child_authority(&parent_history)?;
         let sessions = SessionStore::new(context.db.clone());
         if let Some(prompt) = prompt {
-            sessions.append(id, "user", prompt)?;
+            sessions.append_prompt(id, prompt, "delegation_resume")?;
         }
-        (entry.executor.messages, entry.executor.context_boundary_id) = sessions
-            .model_history_with_boundary(id, &entry.executor.provider.provider.api_format)?;
-        entry.executor.applied_compaction = entry.executor.context_boundary_id.is_some();
+        entry
+            .executor
+            .load_foreground_child_context(&context, id)
+            .await?;
         let (events, receiver) = tokio::sync::mpsc::channel(500);
         entry.executor.event_tx = events;
         entry.executor.answer_waiters = self.answer_waiters.clone();
@@ -720,7 +727,7 @@ impl ToolLoopExecutor {
             let root = self
                 .search_config_path
                 .as_deref()
-                .and_then(|path| path.parent())
+                .and_then(crate::data_layout::data_root_of)
                 .context("Runtime unavailable")?;
             let context = crate::services::session_messages::context(root)?;
             let saved: Value = context
@@ -748,7 +755,7 @@ impl ToolLoopExecutor {
         let default_for = self
             .search_config_path
             .as_deref()
-            .and_then(|path| path.parent())
+            .and_then(crate::data_layout::data_root_of)
             .and_then(|data_dir| fill_default_model(&mut input, data_dir));
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
             return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
@@ -827,7 +834,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(|p| p.parent())
+            .and_then(crate::data_layout::data_root_of)
             .context("Runtime directory is unavailable")?
             .to_path_buf();
         let context = ServiceContext::open(
@@ -927,6 +934,109 @@ impl ToolLoopExecutor {
         }))
     }
 
+    async fn load_foreground_child_context(
+        &mut self,
+        context: &ServiceContext,
+        id: &str,
+    ) -> Result<()> {
+        let root = &context.paths.data_dir;
+        let Some(ExecutorHistory::Session(shard)) = &self.executor_history else {
+            anyhow::bail!("Foreground child requires its session history");
+        };
+        ensure!(
+            shard.id() == id,
+            "Foreground child history belongs to another session"
+        );
+        let (workspace, project, profile) = shard.scoped_stores().engine_workspace(
+            &root.join("data/workspaces"),
+            id,
+            Some(&self.workspace_cwd),
+        )?;
+        self.prompt_profile = profile;
+        self.reload_history(&shard.clone())?;
+        let resident_indexes = self.session_reminders.resident_indexes.clone();
+        let instructions = crate::project_instructions::load_all(Some(root), &workspace)?;
+        let (user_instructions, project_instructions) =
+            crate::project_instructions::reminder_parts(&instructions);
+        let (environment, date) =
+            crate::prompt::session_environment(root, id, &workspace, project.as_ref());
+
+        let customization = self.customization()?;
+        let (builtin, mcp) = if customization.loading("ToolLoad").enabled
+            && self
+                .allowed_tools
+                .as_ref()
+                .is_none_or(|tools| tools.iter().any(|name| name == "ToolLoad"))
+        {
+            let catalog = customization.described(self.builtin_catalog());
+            let mcp_tools = match &self.mcp_registry {
+                Some(registry) => super::discover_mcp_tools(registry).await?.0,
+                None => Vec::new(),
+            };
+            super::loadable_tool_lists(
+                &customization,
+                &catalog,
+                &mcp_tools,
+                &crate::mcp::states::load(root),
+                self.allowed_tools.as_deref(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut skills = crate::services::plugins::skill_commands(context)?;
+        skills.extend(crate::skills::discovery::discover(root, &workspace)?);
+        let lines = skills
+            .values()
+            .filter(|skill| skill.model_invocable() && !skill.always_inline)
+            .map(|skill| {
+                crate::native_engine::engine_core::skill_listing_line(
+                    &skill.name,
+                    &skill.description,
+                    skill.context.as_deref(),
+                    skill.listing_name_only,
+                )
+            })
+            .collect::<Vec<_>>();
+        let experience_enabled = crate::experience::enabled(context);
+        let experience_workspace =
+            (!crate::experience::is_internal_workspace(&workspace, &root.join("data/workspaces")))
+                .then(|| workspace.clone());
+        let scanned = experience_workspace
+            .as_deref()
+            .map(crate::experience::scan)
+            .unwrap_or_default();
+        self.set_session_reminders(crate::prompt::SessionReminders {
+            user_instructions,
+            project_instructions,
+            resident_indexes,
+            experience: crate::prompt::experience_for_session(
+                root,
+                id,
+                experience_workspace.as_deref(),
+                experience_enabled,
+                &scanned.entries,
+            ),
+            environment: Some(environment),
+            date: Some(date),
+            git: crate::services::git_snapshot::for_session(root, id, &workspace)
+                .as_deref()
+                .map(crate::services::git_snapshot::reminder),
+            loadable_tools: crate::prompt::loadable_tools_for_session(root, id, &builtin, &mcp),
+            available_skills: crate::prompt::skills_for_session(root, id, &lines),
+            inline_skills: crate::prompt::inline_skills_for_session(
+                root,
+                id,
+                &crate::prompt::inline_skill_blocks_for_workspace(&skills, Some(&workspace)),
+            ),
+            standalone_frontend: self.standalone_frontend,
+            skills: crate::services::turn_context::invoked_skills_reminder(
+                &self.turn_context,
+                &self.messages,
+            ),
+        });
+        Ok(())
+    }
+
     /// Builds an owned child session without running it so a leader can start
     /// several teammates before awaiting any of them.
     async fn prepare_delegated_child(
@@ -950,7 +1060,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(|p| p.parent())
+            .and_then(crate::data_layout::data_root_of)
             .context("Runtime directory is unavailable")?;
         let context = ServiceContext::open(
             RuntimePaths::new(root.to_path_buf())?,
@@ -1103,7 +1213,7 @@ impl ToolLoopExecutor {
                     .context("Private workspace has no root")?
                     .to_path_buf()
             } else {
-                context.paths.data_dir.join("workspaces")
+                context.paths.data_dir.join("data/workspaces")
             };
             let child = sessions.derive_owned_child(
                 parent,
@@ -1159,8 +1269,14 @@ impl ToolLoopExecutor {
         } else {
             agents::bind(&context.db, &id, &definition)?;
         }
-        context.set_child_description(&id,input["description"].as_str().unwrap_or(prompt))?;
-        sessions.append(&id, "user", prompt)?;
+        context.set_child_description(&id, input["description"].as_str().unwrap_or(prompt))?;
+        context.db.open_session(&id)?.write(|w| {
+            w.set_setting(
+                crate::db::session_store::settings::MEMORY_AGENT,
+                &definition.id,
+            )
+        })?;
+        sessions.append_prompt(&id, prompt, "delegation")?;
         let (events, receiver) = tokio::sync::mpsc::channel(500);
         let mut system = format!(
             "{}\nChild task role:\n{}\nChild session ID: {}\nParent session ID: {}",
@@ -1198,7 +1314,7 @@ impl ToolLoopExecutor {
         let read_only_shell = definition.read_only_shell;
         let mut child = ToolLoopExecutor::new(
             provider,
-            vec![json!({"role":"user","content":prompt})],
+            Vec::new(),
             Some(system),
             child_max_tokens,
             events,
@@ -1210,7 +1326,6 @@ impl ToolLoopExecutor {
         .with_allowed_tools(definition.tools)
         .with_read_only_shell(read_only_shell)
         .with_prompt_profile(self.prompt_profile)
-        .with_context_reminders(self.context_reminders.clone())
         .with_conv_id(id.clone())
         .with_executor_history(context.db.executor_history(&id)?)?
         .with_answer_waiters(self.answer_waiters.clone())
@@ -1294,8 +1409,10 @@ impl ToolLoopExecutor {
             },
         );
         child.mcp_registry = self.mcp_registry.clone();
-        if let Some(memory) = &self.memex_client {
-            child = child.with_memex(memory.clone());
+        child.standalone_frontend = self.standalone_frontend;
+        child.load_foreground_child_context(&context, &id).await?;
+        if let Some(memory) = &self.file_memory {
+            child = child.with_file_memory(memory.child(&id)?);
         }
         let policy = self.child_owner_policy();
         Ok(PreparedChild {
@@ -1318,7 +1435,7 @@ impl ToolLoopExecutor {
         let root = self
             .search_config_path
             .as_deref()
-            .and_then(std::path::Path::parent)
+            .and_then(crate::data_layout::data_root_of)
             .context("Runtime unavailable")?;
         let session = self
             .conv_id
@@ -1509,7 +1626,7 @@ impl ToolLoopExecutor {
             let cleanup_root = self
                 .search_config_path
                 .as_deref()
-                .and_then(std::path::Path::parent)
+                .and_then(crate::data_layout::data_root_of)
                 .map(std::path::Path::to_path_buf);
             let child_id = id.clone();
             // Boxing alone still polls the child on the parent's deep tool-call stack.
@@ -1612,9 +1729,11 @@ impl ToolLoopExecutor {
                             let mut state = (*state).clone();
                             state.provider_id = launch_provider.provider.id.clone();
                             state.model = launch_provider.model.id.clone();
-                            let manager = crate::native_engine::provider_manager::ProviderManager::in_memory(
-                                Vec::new(), context.paths.data_dir.join("providers.json"),
-                            );
+                            let manager =
+                                crate::native_engine::provider_manager::ProviderManager::in_memory(
+                                    Vec::new(),
+                                    context.paths.layout().config_file("providers.json"),
+                                );
                             manager.binding.install(state)?;
                             let mut retained = launch_provider;
                             retained.provider.lease = manager.binding.resolve(None)
@@ -1631,10 +1750,6 @@ impl ToolLoopExecutor {
                         child.streaming_tool_args.clear();
                         child.streaming_tool_args.shrink_to_fit();
                         child.execution_lease = None;
-                        child.context_manager = child
-                            .memex_client
-                            .clone()
-                            .map(|client| crate::memory::ContextManager::new(Arc::new(client)));
                         child.answer_waiters = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
                         child.permission_mailbox = Default::default();
                         let (events, _receiver) = tokio::sync::mpsc::channel(1);

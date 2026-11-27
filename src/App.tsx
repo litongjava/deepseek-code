@@ -30,7 +30,7 @@ import CustomizePage from './components/CustomizePage';
 import ProjectsPage from './components/ProjectsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import DesignPage from './components/DesignPage';
-import MemoryPanel from './components/MemoryPanel';
+import { FileMemoryPanel } from './components/FileMemoryPanel';
 import { tauriAPI } from './utils/tauriAPI';
 import ChatHeader from './components/ChatHeader';
 import Tooltip from './components/ui/Tooltip';
@@ -453,7 +453,7 @@ const Layout = () => {
               ) : location.pathname === '/design' ? (
                 <DesignPage />
               ) : location.pathname === '/memory' ? (
-                <MemoryPanel />
+                <FileMemoryPanel />
               ) : location.pathname === '/code' ? (
                 <CodeWorkspace />
               ) : (

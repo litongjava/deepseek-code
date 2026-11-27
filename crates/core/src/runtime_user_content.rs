@@ -3,6 +3,21 @@ use anyhow::{bail, ensure, Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
 
+/// The supported image media type a byte stream actually declares.
+pub fn image_media_type_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 pub fn normalize_user_content(content: &Value) -> Result<Value> {
     if let Some(text) = content.as_str() {
         ensure!(!text.trim().is_empty(), "User message is empty");
@@ -93,15 +108,8 @@ pub fn normalize_user_content(content: &Value) -> Result<Value> {
                     !decoded.is_empty() && decoded.len() <= 5 * 1024 * 1024,
                     "Image must contain 1 byte to 5 MiB"
                 );
-                let valid = match mime {
-                    "image/png" => decoded.starts_with(b"\x89PNG\r\n\x1a\n"),
-                    "image/jpeg" => decoded.starts_with(&[0xff, 0xd8, 0xff]),
-                    "image/gif" => decoded.starts_with(b"GIF87a") || decoded.starts_with(b"GIF89a"),
-                    "image/webp" => {
-                        decoded.starts_with(b"RIFF") && decoded.get(8..12) == Some(b"WEBP")
-                    }
-                    _ => false,
-                };
+                let valid =
+                    image_media_type_from_bytes(&decoded) == Some(mime);
                 ensure!(valid, "Image bytes do not match declared media type");
                 let mut normalized = json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}});
                 if let Some(name) = block.get("fileName") {
@@ -351,17 +359,19 @@ pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-/// An embedded base64 image block for a PNG, JPEG, GIF or WebP file.
+/// An embedded base64 image block for a PNG, JPEG, GIF or WebP file. The
+/// declared type comes from the bytes, so a mislabelled extension still works.
 pub fn image_block_from_file(path: &std::path::Path) -> Result<Value> {
-    let media_type =
-        image_media_type(path).context("Only PNG, JPEG, GIF and WebP images can be attached")?;
     let size = std::fs::metadata(path)?.len();
     ensure!(
         size <= MAX_IMAGE_BYTES,
         "Image {} is larger than 5 MB",
         path.display()
     );
-    let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path)?);
+    let bytes = std::fs::read(path)?;
+    let media_type = image_media_type_from_bytes(&bytes)
+        .context("Only PNG, JPEG, GIF and WebP images can be attached")?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(
         serde_json::json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":data}}),
     )
@@ -391,6 +401,12 @@ mod image_file_tests {
             normalize_user_content(&serde_json::json!([{"type":"text","text":"see"}, block]))
                 .is_ok()
         );
+        // The bytes, not the extension, decide the declared media type.
+        let webp = dir.path().join("mislabelled.png");
+        std::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBP").unwrap();
+        let block = image_block_from_file(&webp).unwrap();
+        assert_eq!(block["source"]["media_type"], "image/webp");
+        assert!(normalize_user_content(&serde_json::json!([block])).is_ok());
         assert!(image_block_from_file(&dir.path().join("notes.txt")).is_err());
     }
 }

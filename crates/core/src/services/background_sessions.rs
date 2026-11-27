@@ -59,6 +59,35 @@ impl EnvScrub for tokio::process::Command {
     }
 }
 
+/// Provenance of the positional prompt at a standalone CLI process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptOrigin {
+    Typed,
+    Generated,
+}
+
+impl std::str::FromStr for PromptOrigin {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "typed" => Ok(Self::Typed),
+            "generated" => Ok(Self::Generated),
+            _ => Err("expected typed or generated"),
+        }
+    }
+}
+
+impl PromptOrigin {
+    pub fn arguments(self, prompt: &str) -> [String; 3] {
+        let flag = match self {
+            Self::Typed => "--prompt-origin=typed",
+            Self::Generated => "--prompt-origin=generated",
+        };
+        [flag.into(), "--".into(), prompt.into()]
+    }
+}
+
 /// Remove the host-private variables from a command about to start an ordinary
 /// child process. The supervisor that starts a managed worker passes its own
 /// control directory explicitly, so it is unaffected.
@@ -494,13 +523,60 @@ pub(crate) fn directory(root: &Path, id: &str) -> Result<PathBuf> {
         uuid::Uuid::parse_str(id).is_ok(),
         "Invalid background task ID"
     );
-    Ok(root.join("background-tasks").join(id))
+    Ok(root.join("tasks/background").join(id))
 }
 pub(crate) fn read_job(dir: &Path) -> Result<Job> {
     let path = dir.join("state.json");
-    let bytes =
-        fs::read(&path).with_context(|| format!("Reading task state {}", path.display()))?;
+    let bytes = read_with_retry(|| fs::read(&path), |error| transient_state_error(error, &path))
+        .with_context(|| format!("Reading task state {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("Parsing task state {}", path.display()))
+}
+
+/// Retries a read while `retry` accepts the error, for at most 50 ms. Windows
+/// filesystem filters can briefly deny or hide a file that is being replaced;
+/// one such window must not fail a whole turn, while a persistent failure is
+/// still reported.
+fn read_with_retry<T>(
+    mut read: impl FnMut() -> std::io::Result<T>,
+    retry: impl Fn(&std::io::Error) -> bool,
+) -> std::io::Result<T> {
+    for attempt in 0..=5 {
+        match read() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < 5 && retry(&error) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+fn transient_state_error(error: &std::io::Error, path: &Path) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    match error.raw_os_error() {
+        // Sharing violation or access denied while a replacement is published.
+        Some(5 | 32) => true,
+        // A replaced name can be unresolvable for a moment. A job that never
+        // published its state must still fail fast.
+        Some(2 | 3) => path.parent().is_some_and(Path::exists),
+        _ => false,
+    }
+}
+
+/// Whether a failed task read may succeed on a later attempt. Frontends use
+/// this to defer one observation instead of treating it as a dead worker.
+pub fn is_transient_state_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| {
+                error.kind() == std::io::ErrorKind::NotFound
+                    || (cfg!(windows) && matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32)))
+            })
+    })
 }
 fn observed(mut job: Job) -> Job {
     if matches!(job.status.as_str(), "starting" | "running")
@@ -524,7 +600,7 @@ impl SessionClaim {
             "Invalid foreground session ID"
         );
         Ok(root
-            .join("background-tasks")
+            .join("tasks/background")
             .join(format!("session-{session}.claim")))
     }
     pub(crate) fn acquire(root: &Path, session: &str, id: &str) -> Result<Self> {
@@ -685,13 +761,16 @@ impl Drop for PublicationFence {
 }
 
 pub(crate) fn job_publication_fence(root: &Path, cleanup: bool) -> Result<PublicationFence> {
-    fs::create_dir_all(root)?;
+    let path = crate::data_layout::DataLayout::from_root(root).publication_lock();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let file = fs::File::options()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(root.join("background-task-publication.lock"))?;
+        .open(path)?;
     if cleanup {
         crate::fs::try_lock_file(&file).context("Background job publication in progress")?;
     } else {
@@ -1116,7 +1195,7 @@ pub fn list(root: &Path, parent: Option<&str>) -> Result<Vec<Job>> {
 }
 
 fn list_matching(root: &Path, include: impl Fn(&Job) -> bool) -> Result<Vec<Job>> {
-    let directory = root.join("background-tasks");
+    let directory = root.join("tasks/background");
     if !directory.exists() {
         return Ok(Vec::new());
     }
@@ -2171,6 +2250,65 @@ mod tests {
         .unwrap();
         (root, dir, id)
     }
+
+    #[test]
+    fn task_state_read_retries_transient_failures_and_then_reports_persistent_ones() {
+        let attempts = std::cell::Cell::new(0);
+        let value = read_with_retry(
+            || {
+                let attempt = attempts.get();
+                attempts.set(attempt + 1);
+                if attempt < 2 {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                } else {
+                    Ok(7)
+                }
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(attempts.get(), 3);
+
+        let attempts = std::cell::Cell::new(0);
+        let error = read_with_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err::<u8, _>(std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+            |_| true,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(attempts.get(), 6);
+    }
+
+    #[test]
+    fn missing_task_state_is_retried_only_under_an_existing_job_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        // A synthesized kind has no OS code; the retry reads the raw Windows code.
+        let error = std::io::Error::from_raw_os_error(2);
+        let state = temp.path().join("job").join("state.json");
+        #[cfg(windows)]
+        {
+            assert!(!transient_state_error(&error, &state));
+            std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+            assert!(transient_state_error(&error, &state));
+        }
+        #[cfg(not(windows))]
+        assert!(!transient_state_error(&error, &state));
+    }
+
+    #[test]
+    fn frontend_classifies_only_transient_task_reads() {
+        let missing = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("Reading task state state.json");
+        assert!(is_transient_state_error(&missing));
+        assert!(!is_transient_state_error(&anyhow::anyhow!(
+            "Invalid background stream JSON"
+        )));
+    }
+
     #[cfg(windows)]
     #[test]
     fn pending_question_survives_short_file_lock_but_reports_persistent_failure() {
@@ -2263,7 +2401,7 @@ mod tests {
     #[test]
     fn discovery_preserves_crash_damaged_records_and_ownership() {
         let (root, dir, id) = fixture("");
-        let claim = root.path().join("background-tasks/session-test.claim");
+        let claim = root.path().join("tasks/background/session-test.claim");
         fs::write(&claim, &id).unwrap();
         for bytes in [
             Vec::new(),
@@ -2313,7 +2451,7 @@ mod tests {
     #[test]
     fn foreground_claim_is_exclusive_and_released_only_by_owner() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("background-tasks")).unwrap();
+        fs::create_dir_all(root.path().join("tasks/background")).unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         let mut claim = SessionClaim::acquire(root.path(), &session, "owner").unwrap();
         assert!(SessionClaim::acquire(root.path(), &session, "other").is_err());

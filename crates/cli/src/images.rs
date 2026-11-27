@@ -179,7 +179,7 @@ fn run(program: &str, args: &[&str]) -> Option<Vec<u8>> {
 /// Saves a clipboard image as PNG under `<data dir>/pasted-images`, or returns
 /// the image file copied in a file manager.
 pub fn paste_clipboard() -> Result<Option<PathBuf>> {
-    let dir = deepseek_code_core::runtime::resolve_default_data_dir()?.join("pasted-images");
+    let dir = deepseek_code_core::runtime::resolve_default_data_dir()?.join("data/pasted-images");
     let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
     #[cfg(windows)]
     let bytes = match native_clipboard::image() {
@@ -286,7 +286,7 @@ mod tests {
         let folder = dir.path().join("中文 图片项目");
         std::fs::create_dir(&folder).unwrap();
         let path = folder.join("红色 red.png");
-        std::fs::write(&path, b"x").unwrap();
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
         for quote in ['"', '\''] {
             let prompt = format!("INTEROP_SINGLE 请保留这张图片。 {quote}{}{quote} 然后描述图片", path.display());
             assert_eq!(image_paths(dir.path(), &prompt), [path.clone()]);

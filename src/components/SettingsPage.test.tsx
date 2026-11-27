@@ -136,8 +136,10 @@ describe('general preferences', () => {
   it('changes the default permission without modifying an active session', async () => {
     useChatStore.getState().setPermissionMode('ask_permissions');
     await renderSettings();
-    fireEvent.click(screen.getByRole('button', { name: 'Accept edits' }));
-    fireEvent.click(screen.getByRole('button', { name: /Plan mode/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Auto permissions/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Accept edits/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Accept edits/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Plan mode/ }));
     expect(useGeneralSettingsStore.getState().defaultPermissionMode).toBe('plan_mode');
     expect(useChatStore.getState().permissionMode).toBe('ask_permissions');
   });

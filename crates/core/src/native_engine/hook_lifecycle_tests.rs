@@ -130,7 +130,7 @@ async fn child_start_context_and_stop_continuation_are_isolated_from_parent_stop
         ReasoningMode::Standard,
     )
     .with_conv_id(parent.clone())
-    .with_search_config_path(paths.data_dir.join("config.json"))
+    .with_search_config_path(paths.layout().config_file("config.json"))
     .with_permission_manager(crate::runtime::default_permissions())
     .with_hooks(hooks);
     let result = tokio::time::timeout(
@@ -324,7 +324,9 @@ async fn transcript_write_failure_does_not_block_hooks_or_the_tool() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     std::fs::create_dir(&data).unwrap();
-    std::fs::write(data.join("hook-transcripts"), "obstruction").unwrap();
+    let transcripts = crate::data_layout::DataLayout::from_root(&data).hook_transcripts();
+    std::fs::create_dir_all(transcripts.parent().unwrap()).unwrap();
+    std::fs::write(&transcripts, "obstruction").unwrap();
     let script = root.path().join("capture-transcript.cjs");
     std::fs::write(&script,r#"const fs=require('fs');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{fs.appendFileSync('transcript-events.jsonl',JSON.stringify(JSON.parse(s))+'\n');console.log('{}')});"#).unwrap();
     let command = json!({"type":"command","command":format!("node \"{}\"",script.display())});
@@ -369,7 +371,7 @@ async fn transcript_write_failure_does_not_block_hooks_or_the_tool() {
         );
     }
     assert_eq!(
-        std::fs::read_to_string(data.join("hook-transcripts")).unwrap(),
+        std::fs::read_to_string(transcripts).unwrap(),
         "obstruction"
     );
 }

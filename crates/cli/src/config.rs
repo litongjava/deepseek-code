@@ -92,7 +92,7 @@ impl Selection {
 }
 
 fn preferences(paths: &RuntimePaths) -> Result<Value> {
-    let path = paths.data_dir.join("cli.json");
+    let path = paths.layout().config_file("cli.json");
     if !path.exists() {
         return Ok(json!({}));
     }
@@ -125,14 +125,13 @@ thread_local! {
 }
 
 fn save_preferences(paths: &RuntimePaths, value: &Value) -> Result<()> {
-    std::fs::create_dir_all(&paths.data_dir)?;
-    let path = paths.data_dir.join("cli.json");
+    let path = paths.layout().config_file("cli.json");
+    let directory = path.parent().context("CLI preferences have no parent")?;
+    std::fs::create_dir_all(directory)?;
     let json = serde_json::to_vec_pretty(value)?;
     // A crash or a failed write must leave the previous file usable, so the new
     // content goes to a temporary file and replaces the old one in one step.
-    let temporary = paths
-        .data_dir
-        .join(format!("cli.json.{}.tmp", uuid::Uuid::new_v4()));
+    let temporary = directory.join(format!("cli.json.{}.tmp", uuid::Uuid::new_v4()));
     let commit = || -> Result<()> {
         std::fs::write(&temporary, &json)?;
         #[cfg(unix)]
@@ -458,7 +457,7 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
         ConfigCommands::Show => {
-            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"tools":crate::tool_settings::rows(paths)?});
+            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"python":deepseek_code_core::services::python_settings::load(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"memory":deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)?,"experience":json!({"enabled":deepseek_code_core::experience::enabled(&crate::services::context(paths)?)}),"tools":crate::tool_settings::rows(paths)?});
             value[deepseek_code_core::config::command_output::KEY] =
                 json!(deepseek_code_core::config::command_output::enabled(
                     Some(&paths.data_dir),
@@ -473,6 +472,11 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
                 eprintln!("Updated {key}; applies to the next command or new terminal");
                 return Ok(());
             }
+            if let Some(field) = key.strip_prefix("python.") {
+                deepseek_code_core::services::python_settings::set(&paths.data_dir, field, value)?;
+                eprintln!("Updated {key}; applies to the next Python tool call");
+                return Ok(());
+            }
             if matches!(
                 key.as_str(),
                 deepseek_code_core::config::command_output::KEY
@@ -480,6 +484,22 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
             ) {
                 let enabled = value.parse::<bool>().context("Expected true or false")?;
                 deepseek_code_core::config::command_output::set(&paths.data_dir, enabled)?;
+                eprintln!("Updated {key}");
+                return Ok(());
+            }
+            if key == "experience.enabled" {
+                let enabled = value.parse::<bool>().context("Expected true or false")?;
+                let context = crate::services::context(paths)?;
+                deepseek_code_core::experience::set_enabled(&context, enabled)?;
+                eprintln!("Updated {key}");
+                return Ok(());
+            }
+            if key == "memory.enabled" {
+                let enabled = value.parse::<bool>().context("Expected true or false")?;
+                let context = crate::services::context(paths)?;
+                let mut config = deepseek_code_core::services::memory_files::config(&context)?;
+                config.enabled = enabled;
+                deepseek_code_core::services::memory_files::save_config(&context, &config)?;
                 eprintln!("Updated {key}");
                 return Ok(());
             }
@@ -501,11 +521,28 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
                     "api_key" => search.api_key = value.trim().into(),
                     "base_url" => search.base_url = value.trim().into(),
                     "model" => search.model = value.trim().into(),
+                    "provider" => {
+                        let provider = value.trim().to_ascii_lowercase();
+                        search.provider = (!provider.is_empty()).then_some(provider);
+                    }
                     _ => bail!("Unsupported setting: {key}"),
                 }
                 search.validate()?;
                 manager.update_config(|c| c.deepseek_search = search)?;
                 eprintln!("Updated {key}");
+                return Ok(());
+            }
+            if let Some(field) = key
+                .strip_prefix("fetch.")
+                .or_else(|| key.strip_prefix("web_fetch."))
+            {
+                ensure!(field == "proxy", "Unsupported setting: {key}");
+                let mut manager = ConfigManager::new(paths.data_dir.clone());
+                let mut web_fetch = manager.get_config().web_fetch.clone();
+                web_fetch.set_proxy(value)?;
+                let cleared = web_fetch.proxy.is_none();
+                manager.update_config(|c| c.web_fetch = web_fetch)?;
+                eprintln!("{} {key}", if cleared { "Cleared" } else { "Updated" });
                 return Ok(());
             }
             ensure!(
@@ -562,6 +599,19 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
             })?;
             save_preferences(paths, &prefs)?;
             eprintln!("Updated {key}");
+        }
+        ConfigCommands::Memory { state } => {
+            let context = crate::services::context(paths)?;
+            let mut config = deepseek_code_core::services::memory_files::config(&context)?;
+            if let Some(state) = state {
+                config.enabled = match state.trim().to_ascii_lowercase().as_str() {
+                    "on" | "enable" | "enabled" | "true" => true,
+                    "off" | "disable" | "disabled" | "false" => false,
+                    _ => bail!("Expected on or off"),
+                };
+                deepseek_code_core::services::memory_files::save_config(&context, &config)?;
+            }
+            crate::services::print(&config)?;
         }
         ConfigCommands::Reset => {
             ConfigManager::new(paths.data_dir.clone()).remove_provider("cli")?;
@@ -624,6 +674,19 @@ mod budget_tests {
         assert_eq!(settings.tool_default, "pwsh");
         assert_eq!(settings.terminal_default, "auto");
         assert!(run(&paths, &ConfigCommands::Set { key: "shell.bashPath".into(), value: "does-not-exist".into() }).is_err());
+        run(&paths, &ConfigCommands::Set { key: "python.path".into(), value: "/opt/python".into() }).unwrap();
+        assert_eq!(
+            deepseek_code_core::services::python_settings::load(&paths.data_dir)
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/opt/python")
+        );
+        run(&paths, &ConfigCommands::Set { key: "python.path".into(), value: String::new() }).unwrap();
+        assert_eq!(
+            deepseek_code_core::services::python_settings::load(&paths.data_dir).unwrap().path,
+            None
+        );
     }
 
     #[test]
@@ -636,7 +699,11 @@ mod budget_tests {
             default_model(&paths),
             Some(("cli".into(), "fixture-model".into()))
         );
-        std::fs::write(paths.data_dir.join("cli.json"), r#"{"model":"broken"}"#).unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("cli.json"),
+            r#"{"model":"broken"}"#,
+        )
+        .unwrap();
         assert_eq!(default_model(&paths), None);
     }
 
@@ -707,9 +774,17 @@ mod search_tests {
             default_model(&paths),
             Some(("second".into(), "fixture-model".into()))
         );
-        std::fs::write(paths.data_dir.join("cli.json"), r#"{"model":"unqualified"}"#).unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("cli.json"),
+            r#"{"model":"unqualified"}"#,
+        )
+        .unwrap();
         assert_eq!(default_model(&paths), None);
-        std::fs::write(paths.data_dir.join("cli.json"), "not json").unwrap();
+        deepseek_code_core::data_layout::write_config_file(
+            paths.layout().config_file("cli.json"),
+            "not json",
+        )
+        .unwrap();
         assert_eq!(default_model(&paths), None);
     }
 
@@ -718,7 +793,7 @@ mod search_tests {
         let root = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
         save_default_model(&paths, "first", "model-a").unwrap();
-        let path = paths.data_dir.join("cli.json");
+        let path = paths.layout().config_file("cli.json");
         let before = std::fs::read(&path).unwrap();
 
         FAIL_PREFERENCE_COMMIT.with(|flag| flag.set(true));
@@ -749,7 +824,7 @@ mod search_tests {
             let root = tempfile::tempdir().unwrap();
             let paths = RuntimePaths::new(root.path().join("data")).unwrap();
             save_default_model(&paths, "one", "model-a").unwrap();
-            let mode = std::fs::metadata(paths.data_dir.join("cli.json"))
+            let mode = std::fs::metadata(paths.layout().config_file("cli.json"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -765,15 +840,44 @@ mod search_tests {
         let set = |key: &str, value: &str| run(&paths, &ConfigCommands::Set { key: key.into(), value: value.into() });
         set("search.api_key", " search-key ").unwrap();
         set("search.model", "deepseek-pro").unwrap();
+        set("search.provider", "OpenAI").unwrap();
         assert!(set("search.base_url", "ftp://example.com").is_err());
         assert!(set("search.other", "x").is_err());
-        let saved: deepseek_code_core::config::AppConfig =
-            serde_json::from_slice(&std::fs::read(paths.data_dir.join("config.json")).unwrap()).unwrap();
+        assert!(set("search.provider", "gemini").is_err());
+        let saved: deepseek_code_core::config::AppConfig = serde_json::from_slice(
+            &std::fs::read(paths.layout().config_file("config.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(saved.deepseek_search.api_key, "search-key");
         assert_eq!(saved.deepseek_search.model, "deepseek-pro");
+        assert_eq!(saved.deepseek_search.provider.as_deref(), Some("openai"));
         assert_eq!(saved.deepseek_search.base_url, "https://api.deepseek.com/anthropic/v1");
         let mut shown = json!({"config": saved});
         redact(&mut shown);
         assert!(!shown.to_string().contains("search-key"));
+    }
+
+    #[test]
+    fn web_fetch_proxy_settings_are_saved_cleared_and_kept_on_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let set = |key: &str, value: &str| run(&paths, &ConfigCommands::Set { key: key.into(), value: value.into() });
+        let saved = || paths.read_config().unwrap().web_fetch.proxy;
+        set("fetch.proxy", "http://127.0.0.1:10808").unwrap();
+        assert_eq!(saved().as_deref(), Some("http://127.0.0.1:10808"));
+        let error = set("fetch.proxy", "socks5://127.0.0.1:1080")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("http://127.0.0.1:10808"), "{error}");
+        assert_eq!(
+            saved().as_deref(),
+            Some("http://127.0.0.1:10808"),
+            "a rejected value must keep the saved proxy"
+        );
+        assert!(set("fetch.other", "x").is_err());
+        set("web_fetch.proxy", "off").unwrap();
+        assert_eq!(saved(), None);
+        set("fetch.proxy", "https://proxy.example:8443").unwrap();
+        assert_eq!(saved().as_deref(), Some("https://proxy.example:8443"));
     }
 }

@@ -62,10 +62,6 @@ fn parse(value: Value) -> Result<Vec<MemoryItem>> {
 
 impl MemExClient {
     pub async fn export_archive(&self) -> Result<MemoryArchive> {
-        ensure!(
-            self.get_config().await.backend_url == "local",
-            "Memory transfer requires local storage"
-        );
         let local = self.local.clone();
         tokio::task::spawn_blocking(move || {
             Ok(MemoryArchive {
@@ -77,10 +73,6 @@ impl MemExClient {
     }
 
     pub async fn import_archive(&self, value: Value, preview: bool) -> Result<MemoryImportReport> {
-        ensure!(
-            self.get_config().await.backend_url == "local",
-            "Memory transfer requires local storage"
-        );
         let items = parse(value)?;
         let local = self.local.clone();
         tokio::task::spawn_blocking(move || {

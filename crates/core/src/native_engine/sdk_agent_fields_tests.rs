@@ -21,9 +21,21 @@ async fn executor(
         Arc::new(EnvironmentCredentials),
     )
     .unwrap();
-    context.db.create(parent, crate::db::session_store::CreateOptions { model: Some("fixture".into()), provider: Some("fixture".into()), ..Default::default() }).unwrap();
-    let private_root = context.paths.data_dir.join("workspaces");
-    let cwd = context.db.engine_workspace(&private_root, parent, None)
+    context
+        .db
+        .create(
+            parent,
+            crate::db::session_store::CreateOptions {
+                model: Some("fixture".into()),
+                provider: Some("fixture".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let private_root = context.paths.data_dir.join("data/workspaces");
+    let cwd = context
+        .db
+        .engine_workspace(&private_root, parent, None)
         .unwrap()
         .0;
     std::fs::create_dir_all(&cwd).unwrap();
@@ -42,7 +54,7 @@ async fn executor(
         ReasoningMode::Standard,
     )
     .with_conv_id(parent.to_string())
-    .with_search_config_path(context.paths.data_dir.join("settings.json"))
+    .with_search_config_path(context.paths.layout().config_file("settings.json"))
     .with_runtime_agents(Arc::new(vec![RuntimeAgent {
         definition: agents::Definition {
             id: "analyst".into(),
@@ -92,12 +104,9 @@ async fn runtime_agent_fields_reach_the_child_request() {
     let temp = tempfile::tempdir().unwrap();
     let parent = uuid::Uuid::new_v4().to_string();
     let (executor, context) = executor(temp.path(), &parent, endpoint, requests.clone()).await;
-    std::fs::create_dir_all(context.paths.data_dir.join("agent-memory/analyst")).unwrap();
-    std::fs::write(
-        context.paths.data_dir.join("agent-memory/analyst/notes.md"),
-        "MEMORY_SENTINEL",
-    )
-    .unwrap();
+    let memory_dir = context.paths.layout().agent_memory().join("analyst");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(memory_dir.join("notes.md"), "MEMORY_SENTINEL").unwrap();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         executor.execute_delegated(&json!({"prompt":"go","agent_type":"analyst"})),
@@ -159,7 +168,7 @@ async fn sdk_agent_invocation_rebinds_and_its_retained_executor_rejects_rotation
     child.api_key = "old-dummy".into();
     let manager = Arc::new(tokio::sync::Mutex::new(ProviderManager::in_memory(
         vec![owner, child.clone()],
-        dir.path().join("providers.json"),
+        crate::data_layout::DataLayout::from_root(&dir.path()).config_file("providers.json"),
     )));
     host.provider_manager = Some(manager.clone());
     Arc::make_mut(&mut host.runtime_agents)[0].provider = Some(AgentModel {

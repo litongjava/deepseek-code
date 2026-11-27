@@ -8,10 +8,13 @@ use serde_json::Value;
 use std::{path::Path, sync::Arc};
 
 pub fn enabled(data_dir: &Path) -> bool {
-    std::fs::read_to_string(data_dir.join("settings.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .is_none_or(|settings| settings["promptSuggestionEnabled"] != Value::Bool(false))
+    std::fs::read_to_string(
+        deepseek_code_core::data_layout::DataLayout::from_root(&data_dir)
+            .config_file("settings.json"),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    .is_none_or(|settings| settings["promptSuggestionEnabled"] != Value::Bool(false))
 }
 
 /// Drops empty, meta, labelled or otherwise unusable suggestions.

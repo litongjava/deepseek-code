@@ -60,6 +60,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "Read",
     "Write",
     "Edit",
+    "MultiEdit",
     "Grep",
     "Glob",
     "Skill",
@@ -67,7 +68,12 @@ pub const CORE_TOOLS: &[&str] = &[
     "AskUserQuestion",
     "EnterPlanMode",
     "ExitPlanMode",
+    "TaskGet",
     "TaskStop",
+    "TodoRead",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
 ];
 
 /// Whether the name belongs to the default core set. The list only decides the
@@ -97,13 +103,17 @@ pub struct Customization {
     pub system_prompt: SystemPrompt,
     pub disabled_tools: Vec<String>,
     pub tool_descriptions: BTreeMap<String, String>,
+    /// Text for the loadable-tool listing, per tool. Shown as written (only
+    /// whitespace collapsed) and never cut; it wins over the tool's own
+    /// `summary` and over the complete description.
+    pub tool_summaries: BTreeMap<String, String>,
     pub custom_tools: Vec<CustomTool>,
     /// Explicit switches per built-in tool. A missing entry follows the default.
     pub tool_loading: BTreeMap<String, ToolLoading>,
 }
 
 pub fn path(data_dir: &Path) -> PathBuf {
-    data_dir.join(FILE)
+    crate::data_layout::DataLayout::from_root(&data_dir).config_file(FILE)
 }
 
 /// A missing file means no customization. A damaged one is reported, not ignored,
@@ -118,10 +128,12 @@ pub fn load(data_dir: &Path) -> Result<Customization> {
 
 fn write(data_dir: &Path, customization: &Customization, builtin: &[String]) -> Result<()> {
     customization.validate(builtin)?;
-    std::fs::create_dir_all(data_dir)?;
-    let mut file = tempfile::NamedTempFile::new_in(data_dir)?;
+    let path = path(data_dir);
+    let directory = path.parent().context("Customization has no parent")?;
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
     std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(customization)?)?;
-    file.persist(path(data_dir))?;
+    file.persist(path)?;
     Ok(())
 }
 
@@ -151,6 +163,7 @@ pub fn save_tools(data_dir: &Path, submitted: &Customization, builtin: &[String]
         }
     }
     next.tool_descriptions = submitted.tool_descriptions.clone();
+    next.tool_summaries = submitted.tool_summaries.clone();
     next.custom_tools = submitted.custom_tools.clone();
     // Both lists are folded, so a legacy name neither the page nor the file
     // mentions is never turned back on by accident. Names outside the catalog
@@ -248,10 +261,28 @@ impl Customization {
             .collect()
     }
 
+    /// The text the loadable-tool reminder shows for this tool. The user's
+    /// `tool_summaries` entry wins, then the user's `tool_descriptions` override,
+    /// then the tool's own `summary`, and finally its complete description. The
+    /// reminder collapses the result to one line without cutting it.
+    pub fn listing_text<'a>(&'a self, tool: &'a ToolDefinition) -> &'a str {
+        [
+            self.tool_summaries.get(&tool.name).map(String::as_str),
+            self.tool_descriptions.get(&tool.name).map(String::as_str),
+            tool.summary.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|text| !text.is_empty())
+        .unwrap_or(&tool.description)
+    }
+
     /// The advertised tools, then the user's own enabled ones.
     pub fn apply(&self, tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
         let mut tools = self.described(tools);
         tools.extend(self.custom_tools.iter().filter(|tool| tool.enabled).map(|tool| ToolDefinition {
+            summary: None,
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
@@ -319,7 +350,7 @@ mod tests {
     }
 
     fn definition(name: &str) -> ToolDefinition {
-        ToolDefinition { name: name.into(), description: "original".into(), input_schema: json!({"type":"object"}) }
+        ToolDefinition { summary: None, name: name.into(), description: "original".into(), input_schema: json!({"type":"object"}) }
     }
 
     #[test]
@@ -339,6 +370,25 @@ mod tests {
     }
 
     #[test]
+    fn listing_text_prefers_the_user_summary_then_the_tool_summary_then_the_description() {
+        let mut customization = Customization::default();
+        let mut written = definition("Read");
+        written.summary = Some("Read one file".into());
+        assert_eq!(customization.listing_text(&written), "Read one file");
+        // A description override stays visible in the listing, as before.
+        customization.tool_descriptions.insert("Read".into(), "Read the whole file".into());
+        assert_eq!(customization.listing_text(&written), "Read the whole file");
+        // The dedicated listing text wins over both.
+        customization.tool_summaries.insert("Read".into(), "Read a file for me".into());
+        assert_eq!(customization.listing_text(&written), "Read a file for me");
+        // A blank override never hides the fallback.
+        customization.tool_summaries.insert("Read".into(), "  ".into());
+        assert_eq!(customization.listing_text(&written), "Read the whole file");
+        // Without either, the complete description is the listing text.
+        assert_eq!(customization.listing_text(&definition("Grep")), "original");
+    }
+
+    #[test]
     fn only_core_tools_load_by_default_and_every_tool_stays_discoverable() {
         assert_eq!(
             CORE_TOOLS,
@@ -347,6 +397,7 @@ mod tests {
                 "Read",
                 "Write",
                 "Edit",
+                "MultiEdit",
                 "Grep",
                 "Glob",
                 "Skill",
@@ -354,13 +405,18 @@ mod tests {
                 "AskUserQuestion",
                 "EnterPlanMode",
                 "ExitPlanMode",
+                "TaskGet",
                 "TaskStop",
+                "TodoRead",
+                "TodoWrite",
+                "WebFetch",
+                "WebSearch",
             ]
         );
         for name in CORE_TOOLS {
             assert_eq!(default_loading(name), ToolLoading { enabled: true, on_demand: true }, "{name}");
         }
-        for name in ["ListDir", "MultiEdit", "WebFetch", "Agent", "Workflow", "memory_search", "computer_use", "ProposeGoal"] {
+        for name in ["ListDir", "Monitor", "NotebookEdit", "Agent", "Workflow", "computer_use", "ProposeGoal"] {
             assert!(!is_core_tool(name), "{name}");
             assert_eq!(default_loading(name), ToolLoading { enabled: false, on_demand: true }, "{name}");
         }
@@ -373,7 +429,7 @@ mod tests {
         let mut customization = Customization::default();
         let none = BTreeSet::new();
         assert!(customization.exposes("Grep", &none));
-        assert!(!customization.exposes("WebFetch", &none));
+        assert!(!customization.exposes("ListDir", &none));
         // Legacy "disabled" no longer blocks discovery.
         customization.disabled_tools.push("Grep".into());
         assert_eq!(customization.loading("Grep"), ToolLoading { enabled: false, on_demand: true });
@@ -384,9 +440,9 @@ mod tests {
         customization.tool_loading.insert("Grep".into(), ToolLoading { enabled: false, on_demand: false });
         assert!(!customization.exposes("Grep", &loaded));
         // Turning discovery off leaves a loaded tool in place.
-        customization.tool_loading.insert("WebFetch".into(), ToolLoading { enabled: true, on_demand: false });
-        assert_eq!(customization.loading("WebFetch"), ToolLoading { enabled: true, on_demand: false });
-        assert!(customization.exposes("WebFetch", &none));
+        customization.tool_loading.insert("ListDir".into(), ToolLoading { enabled: true, on_demand: false });
+        assert_eq!(customization.loading("ListDir"), ToolLoading { enabled: true, on_demand: false });
+        assert!(customization.exposes("ListDir", &none));
     }
 
     #[test]
@@ -397,7 +453,7 @@ mod tests {
             r#"{"tool_loading":{"Grep":{"enabled":"no","on_demand":true}}}"#,
             r#"{"tool_loading":{"Grep":true}}"#,
         ] {
-            std::fs::write(path(dir.path()), body).unwrap();
+            crate::data_layout::write_config_file(path(dir.path()), body).unwrap();
             assert!(load(dir.path()).is_err(), "{body}");
         }
     }
@@ -425,7 +481,7 @@ mod tests {
         let builtin = vec!["Write".to_owned(), "Glob".to_owned()];
         let legacy = json!({"disabled_tools":["Write","Glob","mcp__old__tool"],
             "tool_descriptions":{"Glob":"search with the old name"}});
-        std::fs::write(path(dir.path()), legacy.to_string()).unwrap();
+        crate::data_layout::write_config_file(path(dir.path()), legacy.to_string()).unwrap();
 
         let prompt = SystemPrompt { mode: PromptMode::Append, text: "Be brief".into() };
         let saved = save_prompt(dir.path(), &prompt, &builtin).unwrap();
@@ -441,7 +497,7 @@ mod tests {
         let builtin = vec!["Write".to_owned(), "Glob".to_owned()];
         let legacy = json!({"disabled_tools":["Write","Glob","mcp__old__tool"],
             "tool_descriptions":{"Glob":"search with the old name"}});
-        std::fs::write(path(dir.path()), legacy.to_string()).unwrap();
+        crate::data_layout::write_config_file(path(dir.path()), legacy.to_string()).unwrap();
 
         // The page only touched Glob and kept the old description.
         let submitted = Customization {

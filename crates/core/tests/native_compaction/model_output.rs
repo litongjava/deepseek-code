@@ -28,7 +28,7 @@ async fn pressure_request(messages: Vec<Value>, window: usize) -> Vec<Value> {
         root.path().to_str().unwrap().into(),
         ReasoningMode::Standard,
     )
-    .with_search_config_path(root.path().join("config.json"))
+    .with_search_config_path(root.path().join("config/config.json"))
     .with_conv_id("review".into());
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), runner.execute())
         .await
@@ -379,7 +379,8 @@ async fn base64_model_boundary_returned_window_and_replay() {
         assert!(items
             .iter()
             .any(|i| i["encrypted_content"] == "opaque exact content"));
-        let observed = (result.to_owned(), notice.to_owned());
+        let normalize = |text: String| text.replace(r"\\?\", "").replace('\\', "/");
+        let observed = (normalize(result.to_owned()), normalize(notice.to_owned()));
         if let Some(prior) = previous.replace(observed.clone()) {
             assert_eq!(prior, observed);
         }
@@ -653,6 +654,8 @@ async fn base64_reviewer_preview_three_results() {
         .split_once(", line ")
         .unwrap();
     let line: usize = rest.split_once(']').unwrap().0.parse().unwrap();
+    let path = serde_json::from_str::<String>(&format!("\"{path}\"")).unwrap();
+    let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
     assert!(std::fs::read_to_string(path)
         .unwrap()
         .lines()

@@ -94,8 +94,11 @@ impl LocalMemory {
 }
 
 // Latin words and CJK bigrams support both English and Chinese recall.
-fn search_terms(query: &str) -> HashSet<String> {
-    let stop_words = ["the", "a", "an", "is", "are", "i", "my", "what", "was", "do", "you", "to", "of", "and", "in", "for"];
+pub(crate) fn search_terms(query: &str) -> HashSet<String> {
+    let stop_words = [
+        "the", "a", "an", "is", "are", "i", "my", "what", "was", "do", "you", "to", "of", "and",
+        "in", "for",
+    ];
     let mut terms = HashSet::new();
     for word in query.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if word.is_empty() || stop_words.contains(&word) { continue; }

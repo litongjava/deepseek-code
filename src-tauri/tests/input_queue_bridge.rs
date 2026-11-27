@@ -49,7 +49,7 @@ async fn durable_queue_roundtrip() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let model = tokio::spawn(async move { axum::serve(listener, model).await.unwrap() });
-    std::fs::write(dir.path().join("config.json"),json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"context_window":64000,"supports_vision":true,"supports_tools":false,"supports_streaming":true}]}]}).to_string()).unwrap();
+    deepseek_code_core::data_layout::write_config_file(dir.path().join("config/config.json"),json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"context_window":64000,"supports_vision":true,"supports_tools":false,"supports_streaming":true}]}]}).to_string()).unwrap();
     let db = RuntimePaths::new(dir.path().into())
         .unwrap()
         .open_database()

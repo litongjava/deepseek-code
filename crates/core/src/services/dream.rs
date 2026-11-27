@@ -46,7 +46,7 @@ pub struct DreamReport {
 }
 
 pub fn client<D>(context: &ServiceContext<D>) -> MemExClient {
-    MemExClient::with_path(context.paths.data_dir.join("memory.sqlite3"), None)
+    MemExClient::with_path(context.paths.data_dir.join("data/memory.sqlite3"))
 }
 
 pub async fn run(
@@ -83,6 +83,12 @@ async fn run_inner(
             skipped: Some(reason.into()),
         })
     };
+    if context
+        .global_setting::<bool>(GlobalSetting::MachinePreference("memory.files.active"))?
+        .unwrap_or(false)
+    {
+        return skip("file memory mode: dream paused; legacy data and configuration preserved");
+    }
     if automatic {
         let config: DreamConfig = context.global_setting(GlobalSetting::MachinePreference("auto-dream"))?.unwrap_or_default();
         config.validate()?;
@@ -135,6 +141,12 @@ async fn run_inner(
         }
     };
     ensure!(lease.renew()?, "Dream cancelled or lease expired");
+    if context
+        .global_setting::<bool>(GlobalSetting::MachinePreference("memory.files.active"))?
+        .unwrap_or(false)
+    {
+        return skip("file memory activated during generation; dream paused");
+    }
     let summary_id = memory.commit_dream(&sources, &summary)?;
     lease.record(None)?;
     Ok(DreamReport {

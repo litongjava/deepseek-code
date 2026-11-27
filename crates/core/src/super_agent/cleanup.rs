@@ -104,7 +104,7 @@ fn run_cleanup(
     // checks. Repeated ticks only revisit this cheap persisted-shape gate.
     ensure!(task.repositories.len() == 1 && task.non_git_targets.is_empty(),
         "Only single Git repository cleanup is supported; multi-repository/non-Git cleanup is PENDING");
-    let directory = store.data_dir().join("super-agent").join(task_id);
+    let directory = store.data_dir().join("tasks/super-agent").join(task_id);
     fs::create_dir_all(&directory)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -680,7 +680,7 @@ fn descendants_stopped(
     let mut descendants = std::collections::BTreeMap::<_, Vec<_>>::new();
     let mut idle_children = std::collections::BTreeMap::<_, Vec<_>>::new();
     let mut records = Vec::new();
-    let jobs = context.paths.data_dir.join("background-tasks");
+    let jobs = context.paths.data_dir.join("tasks/background");
     if jobs.try_exists()? {
         for entry in fs::read_dir(&jobs)? {
             let entry = entry?;

@@ -11,7 +11,11 @@ use serde_json::{json, Value};
 pub struct DeliveredInput {
     pub text: String,
     pub content: Value,
+    /// Delivery correlation used by SDK and Bridge events.
     pub origin: String,
+    /// Provenance persisted by the producer of the model message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_origin: Option<String>,
     /// Identifies a user row already committed by a durable delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -44,10 +48,11 @@ impl DeliveredInput {
                 "user"
             }
             .into(),
+            prompt_origin: None,
         }
     }
 
-    pub(crate) fn model_content(self, root: Option<&std::path::Path>, session: &str) -> Value {
+    pub(crate) fn model_content(&self, root: Option<&std::path::Path>, session: &str) -> Value {
         if self.content.as_str() == Some(&self.text)
             && crate::native_engine::tool_loop::monitor_notification(&self.text)
         {
@@ -57,10 +62,19 @@ impl DeliveredInput {
                 return json!(view.text);
             }
         }
-        self.content
+        self.content.clone()
     }
     pub fn model_message(&self) -> Value {
-        json!({"role":"user", "content":self.content, "origin":self.origin})
+        let origin = self
+            .prompt_origin
+            .as_deref()
+            .unwrap_or(match self.origin.as_str() {
+                "user" => "typed",
+                other => other,
+            });
+        let mut message = json!({"role":"user", "content":self.content, "origin":origin});
+        if let Some(id) = &self.message_id { message["id"] = json!(id); }
+        message
     }
 }
 
@@ -74,6 +88,7 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<()> {
         ("content_json", "TEXT"),
         ("admission_json", "TEXT"),
         ("handoff_id", "TEXT"),
+        ("prompt_origin", "TEXT NOT NULL DEFAULT 'legacy_queue'"),
     ] {
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_input_queue') WHERE name=?1)",
@@ -243,9 +258,28 @@ pub enum QueueState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOrigin {
+    User,
+    TaskNotification,
+    Scheduled,
+}
+
+impl QueueOrigin {
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::User => "typed",
+            Self::TaskNotification => "task_notification",
+            Self::Scheduled => "scheduled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueItem {
+    #[serde(default = "legacy_origin")]
+    pub prompt_origin: String,
     pub id: i64,
     pub session_id: String,
     pub request_id: String,
@@ -273,7 +307,12 @@ impl std::fmt::Display for QueueError {
 }
 impl std::error::Error for QueueError {}
 
-const ITEM_COLUMNS: &str = "id,session_id,request_id,revision,content_json,mode,state,handoff_id";
+fn legacy_origin() -> String {
+    "legacy_queue".into()
+}
+
+const ITEM_COLUMNS: &str =
+    "id,session_id,request_id,revision,content_json,mode,state,handoff_id,prompt_origin";
 
 fn read_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueItem> {
     let content: String = row.get(4)?;
@@ -286,6 +325,7 @@ fn read_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueItem> {
     };
     let invalid = || rusqlite::Error::InvalidQuery;
     Ok(QueueItem {
+        prompt_origin: row.get(8)?,
         id: row.get(0)?,
         session_id: row.get(1)?,
         request_id: row.get(2)?,
@@ -324,8 +364,16 @@ fn text_only(content: &Value) -> bool {
 
 /// Content is stored in SQLite, including inline image bytes or already durable attachment references.
 /// Callers must materialize attachments before calling; transient blob URLs are rejected.
-pub fn enqueue(db:&impl SessionAccess,session:&str,request_id:&str,content:Value,mode:QueueMode)->Result<QueueItem>{
-    db.select_session(session)?.enqueue_input(request_id,content,mode)
+pub fn enqueue(
+    db: &impl SessionAccess,
+    session: &str,
+    request_id: &str,
+    content: Value,
+    mode: QueueMode,
+    origin: QueueOrigin,
+) -> Result<QueueItem> {
+    db.select_session(session)?
+        .enqueue_input(request_id, content, mode, origin)
 }
 pub(crate) fn shared_enqueue(
     db: &DbManager,
@@ -333,6 +381,7 @@ pub(crate) fn shared_enqueue(
     request_id: &str,
     content: Value,
     mode: QueueMode,
+    origin: QueueOrigin,
 ) -> Result<QueueItem> {
     fn transient(value: &Value) -> bool {
         match value {
@@ -352,15 +401,15 @@ pub(crate) fn shared_enqueue(
     db.with_conn(|conn| -> Result<QueueItem> {
         use rusqlite::OptionalExtension;
         let tx = crate::db::write_transaction(conn)?;
-        let existing: Option<(i64,String)> = tx.query_row(
-            "SELECT id,admission_json FROM session_input_queue WHERE session_id=?1 AND request_id=?2",
-            rusqlite::params![session,request_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((id, original)) = existing {
-            if original != admission { return Err(QueueError::Conflict.into()); }
+        let existing: Option<(i64,String,String)> = tx.query_row(
+            "SELECT id,admission_json,prompt_origin FROM session_input_queue WHERE session_id=?1 AND request_id=?2",
+            rusqlite::params![session,request_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((id, original, prior_origin)) = existing {
+            if original != admission || (prior_origin != "legacy_queue" && prior_origin != origin.tag()) { return Err(QueueError::Conflict.into()); }
             return get_item(&tx, session, id);
         }
-        tx.execute("INSERT INTO session_input_queue(session_id,content,created_at,request_id,content_json,admission_json,mode) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![session,content.as_str().unwrap_or(""),chrono::Utc::now().to_rfc3339(),request_id,serde_json::to_string(&content)?,admission,mode.as_str()])?;
+        tx.execute("INSERT INTO session_input_queue(session_id,content,created_at,request_id,content_json,admission_json,mode,prompt_origin) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![session,content.as_str().unwrap_or(""),chrono::Utc::now().to_rfc3339(),request_id,serde_json::to_string(&content)?,admission,mode.as_str(),origin.tag()])?;
         let item = get_item(&tx,session,tx.last_insert_rowid())?;
         tx.commit()?;
         Ok(item)
@@ -493,7 +542,15 @@ mod durable_tests {
     use super::*;
 
     fn queued(db: &DbManager, request: &str) -> QueueItem {
-        enqueue(db, "a", request, json!("hello"), QueueMode::NextTurn).unwrap()
+        enqueue(
+            db,
+            "a",
+            request,
+            json!("hello"),
+            QueueMode::NextTurn,
+            QueueOrigin::User,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -508,7 +565,15 @@ mod durable_tests {
         let first = queued(&db, "r1");
         assert_eq!(first, queued(&db, "r1"));
         assert_ne!(first.id, queued(&db, "r2").id);
-        assert!(enqueue(&db, "a", "r1", json!("changed"), QueueMode::NextTurn).is_err());
+        assert!(enqueue(
+            &db,
+            "a",
+            "r1",
+            json!("changed"),
+            QueueMode::NextTurn,
+            QueueOrigin::User
+        )
+        .is_err());
         assert_eq!(take(&db, "a").unwrap(), ["legacy"]);
         assert!(take_where(&db, "a", |_| true).unwrap().is_empty());
         assert!(!any(&db, "a", |_| true).unwrap());
@@ -539,8 +604,24 @@ mod durable_tests {
         let temp = tempfile::tempdir().unwrap();
         let db = DbManager::new(temp.path().join("db.sqlite")).unwrap();
         db.init().unwrap();
-        let first = enqueue(&db, "a", "one", json!("one"), QueueMode::Steer).unwrap();
-        let second = enqueue(&db, "a", "two", json!("two"), QueueMode::Steer).unwrap();
+        let first = enqueue(
+            &db,
+            "a",
+            "one",
+            json!("one"),
+            QueueMode::Steer,
+            QueueOrigin::User,
+        )
+        .unwrap();
+        let second = enqueue(
+            &db,
+            "a",
+            "two",
+            json!("two"),
+            QueueMode::Steer,
+            QueueOrigin::User,
+        )
+        .unwrap();
         let claimed = claim(&db, "a", first.id, first.revision).unwrap();
         handoff(&db, "a", claimed.id, claimed.revision, |_, _, _| Ok(())).unwrap();
         let undelivered = cancel_undelivered(&db, "a", &[first.id, second.id]).unwrap();
@@ -613,7 +694,15 @@ mod durable_tests {
         let db = DbManager::new(temp.path().join("db.sqlite")).unwrap();
         db.init().unwrap();
         let content = json!([{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]);
-        let item = enqueue(&db, "a", "image", content.clone(), QueueMode::NextTurn).unwrap();
+        let item = enqueue(
+            &db,
+            "a",
+            "image",
+            content.clone(),
+            QueueMode::NextTurn,
+            QueueOrigin::User,
+        )
+        .unwrap();
         let err = edit(&db, "a", item.id, item.revision, "changed").unwrap_err();
         assert_eq!(
             err.downcast_ref::<QueueError>(),
@@ -621,7 +710,15 @@ mod durable_tests {
         );
         let removed = remove(&db, "a", item.id, item.revision).unwrap();
         assert_eq!(
-            enqueue(&db, "a", "image", content, QueueMode::NextTurn).unwrap(),
+            enqueue(
+                &db,
+                "a",
+                "image",
+                content,
+                QueueMode::NextTurn,
+                QueueOrigin::User
+            )
+            .unwrap(),
             removed
         );
         assert!(claim(&db, "a", removed.id, removed.revision).is_err());
@@ -630,7 +727,8 @@ mod durable_tests {
             "a",
             "blob",
             json!([{"type":"image","url":"blob:temporary"}]),
-            QueueMode::NextTurn
+            QueueMode::NextTurn,
+            QueueOrigin::User
         )
         .is_err());
     }
@@ -675,7 +773,7 @@ fn pasted_images_file(data_dir: &std::path::Path, session: &str) -> Option<std::
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
         .then(|| {
             data_dir
-                .join("pasted-images")
+                .join("data/pasted-images")
                 .join(format!("{session}.json"))
         })
 }

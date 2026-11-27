@@ -185,7 +185,7 @@ async fn post_content_recovery_receiver_close_cancels_backoff_open_and_read() {
             let temp = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(temp.path().join("config")).unwrap();
             let settings = plan(branch);
-            std::fs::write(
+            deepseek_code_core::data_layout::write_config_file(
                 temp.path().join("config/orchestration.toml"),
                 config(settings.idle, settings.backoff),
             )

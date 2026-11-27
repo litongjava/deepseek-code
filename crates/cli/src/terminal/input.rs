@@ -16,6 +16,7 @@ pub(crate) mod editor;
 #[derive(Debug, PartialEq, Eq)]
 pub enum PromptEvent {
     Line(String),
+    Scheduled(String),
     CyclePermission,
     StepEffort(bool),
 }
@@ -138,7 +139,7 @@ enum Message {
     BackgroundCounter(Box<dyn Fn() -> (usize, usize) + Send>),
     Subagents(deepseek_code_core::services::ServiceContext, String),
     AgentDetails(Box<dyn Fn(&crate::background_commands::HistoryAddress) -> String + Send>),
-    AgentRows(Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>),
+    AgentRows(Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
@@ -377,10 +378,11 @@ impl TerminalInput {
             .unwrap_or_else(|error| error.into_inner()) = effort;
     }
 
-    /// Rows for running background agents, shown above the editor.
+    /// Rows for running agents, with the background count that drives the
+    /// terminal title; both feed the editor's idle panel.
     pub fn set_agent_rows(
         &self,
-        rows: Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>,
+        rows: Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>,
     ) {
         let _ = self.requests.send(Message::AgentRows(rows));
     }
@@ -433,6 +435,10 @@ impl TerminalInput {
     pub fn queue_prompt(&mut self, prompt: String) {
         self.queued.push_back(PromptEvent::Line(prompt));
     }
+    pub fn queue_scheduled(&mut self, prompt: String) {
+        self.queued.push_back(PromptEvent::Scheduled(prompt));
+    }
+
     /// Takes back waiting prompts the user can see, leaving everything else queued.
     pub fn take_prompts(&mut self, shown: &[String]) -> Vec<String> {
         let mut taken = Vec::new();
@@ -444,6 +450,13 @@ impl TerminalInput {
             _ => true,
         });
         taken
+    }
+    /// Drops prompts queued for the previous session. Returns whether anything
+    /// was discarded so the caller can explain the change.
+    pub fn discard_queued(&mut self) -> bool {
+        let had = !self.queued.is_empty();
+        self.queued.clear();
+        had
     }
     pub fn restore_draft(&self, draft: String) {
         let _ = self.requests.send(Message::Draft(draft));
@@ -537,9 +550,11 @@ impl TerminalInput {
         match self.read_with(prompt, false, true).await? {
             Some(PromptEvent::Line(line)) => Ok(Some(line)),
             None => Ok(None),
-            Some(PromptEvent::CyclePermission | PromptEvent::StepEffort(_)) => {
-                Err(io::Error::other("Shortcut is not a question answer"))
-            }
+            Some(
+                PromptEvent::CyclePermission
+                | PromptEvent::StepEffort(_)
+                | PromptEvent::Scheduled(_),
+            ) => Err(io::Error::other("Shortcut is not a question answer")),
         }
     }
 
@@ -547,9 +562,13 @@ impl TerminalInput {
         match self.read(prompt, false).await? {
             Some(PromptEvent::Line(line)) => Ok(Some(line)),
             None => Ok(None),
-            Some(PromptEvent::CyclePermission | PromptEvent::StepEffort(_)) => Err(
-                io::Error::other("Permission cycle is not a question answer"),
-            ),
+            Some(
+                PromptEvent::CyclePermission
+                | PromptEvent::StepEffort(_)
+                | PromptEvent::Scheduled(_),
+            ) => Err(io::Error::other(
+                "Permission cycle is not a question answer",
+            )),
         }
     }
 
@@ -621,6 +640,16 @@ mod recall_tests {
         assert!(
             matches!(input.queued.front(), Some(PromptEvent::Line(text)) if text == "/compact")
         );
+    }
+
+    #[test]
+    fn discarding_queued_prompts_reports_only_when_something_was_dropped() {
+        let mut input = TerminalInput::from(mpsc::unbounded_channel().1);
+        assert!(!input.discard_queued());
+        input.queue_prompt("old".into());
+        input.queue_scheduled("/loop".into());
+        assert!(input.discard_queued());
+        assert!(input.queued.is_empty());
     }
 }
 

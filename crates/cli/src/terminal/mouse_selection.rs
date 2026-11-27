@@ -42,6 +42,7 @@ pub(super) struct Selection {
     painted: std::cell::RefCell<Vec<String>>,
     viewport: Option<(usize, usize)>,
     viewport_offset: usize,
+    copy_feedback: Option<(usize, bool)>,
 }
 impl Selection {
     pub fn active(&self) -> bool {
@@ -62,6 +63,7 @@ impl Selection {
         self.held = false;
         self.viewport = None;
         self.viewport_offset = 0;
+        self.copy_feedback = None;
         Ok(())
     }
     /// Returns a click only after release without motion. A drag copies text.
@@ -69,6 +71,16 @@ impl Selection {
         &mut self,
         mouse: MouseEvent,
         rows: Vec<String>,
+    ) -> io::Result<Option<MouseEvent>> {
+        self.event_with(mouse, rows, |text| {
+            crate::extended_commands::copy_text(text).is_ok()
+        })
+    }
+    fn event_with(
+        &mut self,
+        mouse: MouseEvent,
+        rows: Vec<String>,
+        mut copy: impl FnMut(&str) -> bool,
     ) -> io::Result<Option<MouseEvent>> {
         let point = (
             self.viewport.map_or(mouse.row as usize, |view| {
@@ -83,6 +95,15 @@ impl Selection {
             // Passive mouse movement must not trigger a history redraw over
             // the retained highlight after the button has been released.
             MouseEventKind::Moved if self.retained() => Ok(None),
+            // Right-clicking a drag selection copies it, clears the highlight
+            // and reports the result to the footer.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if self.copy_selected(|text| copy(text))? {
+                    Ok(None)
+                } else {
+                    Ok(Some(mouse))
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 let viewport = self.viewport;
                 let offset = self.viewport_offset;
@@ -111,7 +132,7 @@ impl Selection {
                     self.paint(true)?;
                     self.held = false;
                     if !text.is_empty() {
-                        let _ = crate::extended_commands::copy_text(&text);
+                        copy(&text);
                     }
                     Ok(None)
                 } else {
@@ -125,6 +146,31 @@ impl Selection {
             }
             _ => Ok(Some(mouse)),
         }
+    }
+    fn selected_text(&self) -> Option<String> {
+        if !self.retained() {
+            return None;
+        }
+        let text = self.text();
+        (!text.is_empty()).then_some(text)
+    }
+    fn copy_selected(&mut self, copy: impl FnOnce(&str) -> bool) -> io::Result<bool> {
+        let Some(text) = self.selected_text() else {
+            return Ok(false);
+        };
+        let characters = text.chars().count();
+        let copied = copy(&text);
+        self.clear()?;
+        self.copy_feedback = Some((characters, copied));
+        Ok(true)
+    }
+    /// Copies the retained selection for a keyboard shortcut.
+    pub fn copy_retained(&mut self) -> io::Result<bool> {
+        self.copy_selected(|text| crate::extended_commands::copy_text(text).is_ok())
+    }
+    /// The latest right-click or keyboard copy result, consumed by the view footer.
+    pub fn take_copy_feedback(&mut self) -> Option<(usize, bool)> {
+        self.copy_feedback.take()
     }
     /// Selects one whole row, as a drag across it would, and copies its text.
     pub fn select_row(&mut self, row: u16, rows: Vec<String>) -> io::Result<()> {
@@ -167,7 +213,11 @@ impl Selection {
         mouse: MouseEvent,
         rows: Vec<String>,
     ) -> io::Result<Option<MouseEvent>> {
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+        // event() copies the retained selection on a right click; clearing it
+        // here first would leave nothing to copy.
+        if matches!(mouse.kind, MouseEventKind::Down(_))
+            && mouse.kind != MouseEventKind::Down(MouseButton::Right)
+        {
             self.clear()?;
         }
         self.event(mouse, rows)
@@ -336,6 +386,18 @@ impl Selection {
     }
 }
 
+/// Footer text for a selection copy, shared by the prompt and live views.
+pub(super) fn copy_message(characters: usize, copied: bool) -> String {
+    if copied {
+        format!(
+            "Copied {characters} character{} to clipboard",
+            if characters == 1 { "" } else { "s" }
+        )
+    } else {
+        "Copy failed; the clipboard is unavailable".to_owned()
+    }
+}
+
 /// Whether a screen row is a turn's closing status, `✻ Worked for 4s · done`.
 pub(super) fn is_status_row(rows: &[String], row: u16) -> bool {
     rows.get(row as usize)
@@ -492,6 +554,7 @@ mod tests {
             painted: Default::default(),
             viewport: None,
             viewport_offset: 0,
+            copy_feedback: None,
         };
         assert_eq!(selection.text(), "中文z\nxyz");
     }
@@ -506,6 +569,7 @@ mod tests {
             painted: Default::default(),
             viewport: None,
             viewport_offset: 0,
+            copy_feedback: None,
         };
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
@@ -525,6 +589,7 @@ mod tests {
             painted: Default::default(),
             viewport: None,
             viewport_offset: 0,
+            copy_feedback: None,
         };
         assert!(selection.retained());
         assert!(!selection.active());
@@ -542,6 +607,7 @@ mod tests {
             painted: Default::default(),
             viewport: None,
             viewport_offset: 0,
+            copy_feedback: None,
         };
         for column in [5, 20, 3] {
             assert!(selection.event(MouseEvent {
@@ -551,6 +617,103 @@ mod tests {
             assert!(selection.retained());
             assert_eq!(selection.text(), "text");
         }
+    }
+
+    #[test]
+    fn right_click_copies_and_clears_the_retained_selection() {
+        let mut selection = Selection {
+            start: Some((0, 0)),
+            end: (0, 4),
+            rows: vec!["text".into()],
+            dragged: true,
+            ..Default::default()
+        };
+        let mut copied = None;
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 4,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(selection
+            .event_with(mouse, vec![], |text| {
+                copied = Some(text.to_owned());
+                true
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(copied.as_deref(), Some("text"));
+        assert!(!selection.retained());
+        assert_eq!(selection.take_copy_feedback(), Some((4, true)));
+    }
+
+    #[test]
+    fn right_click_reports_a_failed_copy_and_still_clears_the_selection() {
+        let mut selection = Selection {
+            start: Some((0, 0)),
+            end: (0, 4),
+            rows: vec!["text".into()],
+            dragged: true,
+            ..Default::default()
+        };
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 4,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(selection
+            .event_with(mouse, vec![], |_| false)
+            .unwrap()
+            .is_none());
+        assert!(!selection.retained());
+        assert_eq!(selection.take_copy_feedback(), Some((4, false)));
+    }
+
+    #[test]
+    fn copy_feedback_uses_singular_and_plural_character_counts() {
+        assert_eq!(copy_message(1, true), "Copied 1 character to clipboard");
+        assert_eq!(copy_message(2, true), "Copied 2 characters to clipboard");
+        assert_eq!(
+            copy_message(2, false),
+            "Copy failed; the clipboard is unavailable"
+        );
+    }
+
+    #[test]
+    fn right_click_without_a_selection_keeps_the_event_for_the_terminal() {
+        let mut selection = Selection::default();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 4,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let passed = selection
+            .event_with(mouse, vec![], |_| panic!("nothing to copy"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(passed.kind, MouseEventKind::Down(MouseButton::Right));
+    }
+
+    #[test]
+    fn screen_event_does_not_clear_before_a_right_click_copy() {
+        let mut selection = Selection {
+            start: Some((0, 0)),
+            end: (0, 0),
+            rows: vec![String::new()],
+            ..Default::default()
+        };
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 4,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // Empty text has nothing to copy, so this checks the clearing rule
+        // without touching the real clipboard.
+        assert!(selection.screen_event(mouse, vec![]).unwrap().is_some());
+        assert!(selection.retained());
     }
 
     #[test]

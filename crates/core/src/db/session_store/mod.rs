@@ -8,7 +8,9 @@ pub use plugins::{PluginCatalog,PluginInstall};
 pub use agents::AgentCatalog;
 mod admission;
 mod binding;
+pub(crate) mod boundary;
 mod compaction;
+pub(crate) use compaction::CompactionWindow;
 mod directory;
 pub mod diagnostics;
 mod conversations;
@@ -46,6 +48,7 @@ mod mcp_control;
 pub use mcp_control::McpControl;
 mod global_format;
 mod history;
+
 mod im;
 pub use im::FeishuChatMapping;
 mod im_catalog;
@@ -67,6 +70,7 @@ mod repair;
 mod runtime;
 pub mod settings;
 mod state;
+pub(crate) use state::message_origin;
 pub(crate) mod suggestions;
 mod usage;
 mod task;
@@ -94,7 +98,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-const WRITE_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(30);
 
 type Fault = dyn Fn(Phase) -> Result<()> + Send + Sync;
 struct Root {
@@ -109,6 +113,12 @@ struct Root {
 }
 type RootSlot = Arc<Mutex<Weak<Root>>>;
 static ROOTS: LazyLock<Mutex<HashMap<PathBuf, RootSlot>>> = LazyLock::new(Default::default);
+
+impl Root {
+    fn layout(&self) -> crate::data_layout::DataLayout {
+        crate::data_layout::DataLayout::new(self.path.clone())
+    }
+}
 
 #[derive(Clone)]
 pub struct Stores {
@@ -142,6 +152,15 @@ impl Stores {
 
     fn open_existing(path: &Path, mode: OpenMode) -> Result<Self> {
         layout::allow_entry()?;
+        let outcome = crate::data_layout::DataLayout::from_root(&path).migrate_if_needed()?;
+        if !outcome.warnings.is_empty() {
+            tracing::warn!(
+                module = "SessionStore",
+                root = %path.display(),
+                entries = %outcome.warnings.join(", "),
+                "Legacy or unknown entries remain in the data directory root"
+            );
+        }
         ensure!(
             path.is_dir(),
             "Session store requires an existing data root"
@@ -221,6 +240,9 @@ impl Stores {
     pub fn data_dir(&self) -> &Path {
         &self.root.path
     }
+    pub fn layout(&self) -> crate::data_layout::DataLayout {
+        self.root.layout()
+    }
     #[doc(hidden)]
     pub fn with_fault_hook(
         &self,
@@ -243,10 +265,10 @@ impl Stores {
         &self.root.global
     }
     fn sessions(&self) -> PathBuf {
-        self.root.path.join("sessions")
+        self.root.layout().sessions()
     }
     fn namespace(&self) -> Result<std::fs::File> {
-        let dir = self.root.path.join("session-locks");
+        let dir = self.root.layout().lock_path("session");
         let guard = layout::lock_existing(&dir.join(".directory"), false)?;
         ensure!(
             std::fs::read_to_string(dir.join(".initialized"))? == self.global().uuid,
@@ -277,7 +299,7 @@ impl Stores {
         exclusive: bool,
         allocate: bool,
     ) -> Result<Option<Vec<std::fs::File>>> {
-        let dir = self.root.path.join("session-locks");
+        let dir = self.root.layout().lock_path("session");
         let path = dir.join(key);
         let namespace = self.namespace()?;
         if !path.try_exists()? {
@@ -452,6 +474,10 @@ pub(crate) struct TurnWal {
 }
 
 impl SessionDb {
+    pub fn memory_directory(&self) -> PathBuf {
+        self.stores.sessions().join(&self.key).join("memory")
+    }
+
     pub(crate) fn hold_turn_wal(
         &self,
         lease: Arc<crate::services::session_messages::ExecutionLease>,
@@ -709,12 +735,13 @@ impl SessionRead<'_> {
                         Some(_) => Some(row.get::<_, String>(9)?),
                         None => None,
                     };
-                    Ok((message.content, json))
+                    Ok((message.id, message.content, json))
                 },
             )
             .optional()?;
-        pair.map(|(text, json)| {
+        pair.map(|(id, text, json)| {
             Ok(FirstMessage {
+                origin: message_origin(self.0, &id)?.unwrap_or_else(|| "legacy".into()),
                 text,
                 typed: json.map(|value| serde_json::from_str(&value)).transpose()?,
             })
@@ -723,6 +750,7 @@ impl SessionRead<'_> {
     }
 }
 pub struct SessionWrite<'a>(&'a Connection, &'a str, std::cell::Cell<bool>, &'a binding::BindingControl);
+
 impl SessionWrite<'_> {
     #[doc(hidden)]
     pub fn synchronous_for_test(&self) -> Result<i32> {
@@ -806,8 +834,8 @@ mod tests {
     fn multi_key_locks_are_unique_and_in_storage_key_order() -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         let tmp = tempfile::tempdir()?;
-        let path = tmp.path().join("session-locks");
-        std::fs::create_dir(&path)?;
+        let path = tmp.path().join("state/locks/session");
+        std::fs::create_dir_all(&path)?;
         for name in ["a", "b"] {
             std::fs::File::create_new(path.join(name))?;
         }

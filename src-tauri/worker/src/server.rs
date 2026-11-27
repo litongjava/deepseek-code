@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::browser::BrowserEngine;
 use crate::desktop::DesktopEngine;
@@ -106,7 +104,7 @@ impl SidecarServer {
                 let start = std::time::Instant::now();
                 let mut result = Ok(());
                 if let Some(ref url) = url {
-                    result = self.browser.open_browser_app(url);
+                    result = self.browser.open_browser_app(url).await;
                 }
                 let duration = start.elapsed();
 
@@ -128,15 +126,13 @@ impl SidecarServer {
                 let screenshot = self.desktop.take_screenshot().await.ok();
                 let duration = start.elapsed();
 
+                let success = screenshot.is_some();
+                let error = (!success).then(|| "Screenshot failed".to_string());
                 SidecarResponse {
                     id: cmd.id,
-                    success: screenshot.is_some(),
+                    success,
                     screenshot,
-                    error: if screenshot.is_none() {
-                        Some("Screenshot failed".to_string())
-                    } else {
-                        None
-                    },
+                    error,
                     duration_ms: duration.as_millis() as u64,
                 }
             }
@@ -193,7 +189,6 @@ impl SidecarServer {
 
     #[cfg(windows)]
     pub async fn run_named_pipe(&self, pipe_name: &str) -> Result<()> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::windows::named_pipe::ServerOptions as PipeServerOptions;
 
         let server = PipeServerOptions::new()

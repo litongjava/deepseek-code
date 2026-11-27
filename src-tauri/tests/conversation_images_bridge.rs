@@ -61,7 +61,7 @@ async fn image_history_roundtrip() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let model_addr = listener.local_addr().unwrap();
     let model = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::fs::write(dir.path().join("config.json"), json!({"providers":[{
+    deepseek_code_core::data_layout::write_config_file(dir.path().join("config/config.json"), json!({"providers":[{
         "id":"fixture", "name":"Fixture", "provider_type":"openai", "api_key":"test",
         "base_url":format!("http://{model_addr}"), "enabled":true, "is_default":true, "settings":{},
         "supports_web_search":false, "models":[{"id":"fixture-model","name":"Fixture","enabled":true,
@@ -81,7 +81,12 @@ async fn image_history_roundtrip() {
     ]);
     let normalized = normalize_user_content(&mixed).unwrap();
     let cli_id = store
-        .append_user_content(&conversation, "[Image #3] first\n[Image #8] second", &mixed)
+        .append_user_content(
+            &conversation,
+            "[Image #3] first\n[Image #8] second",
+            &mixed,
+            "typed",
+        )
         .unwrap();
     let text_id = store
         .append(&conversation, "user", "ordinary text")
@@ -339,13 +344,25 @@ async fn image_history_roundtrip() {
 
     // A damaged image outside the manifest's first-row format check has a display fallback.
     let damaged_image = store
-        .append_user_content(&conversation, "damaged image", &mixed)
+        .append_user_content(&conversation, "damaged image", &mixed, "typed")
         .unwrap();
     let corrupt_content = |id: &str, malformed: &str| {
-        let damage=rusqlite::Connection::open(dir.path().join("sessions").join(&conversation).join("session.db")).unwrap();
-        assert_eq!(damage.execute(
-            "UPDATE message_user_content SET content_json=?1 WHERE message_id=?2", [malformed, id]
-        ).unwrap(), 1);
+        let damage = rusqlite::Connection::open(
+            dir.path()
+                .join("data/sessions")
+                .join(&conversation)
+                .join("session.db"),
+        )
+        .unwrap();
+        assert_eq!(
+            damage
+                .execute(
+                    "UPDATE message_user_content SET content_json=?1 WHERE message_id=?2",
+                    [malformed, id]
+                )
+                .unwrap(),
+            1
+        );
     };
     for malformed in [
         "not-json",

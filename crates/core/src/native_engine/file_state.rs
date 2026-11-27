@@ -27,7 +27,8 @@ pub(super) struct FileState {
 }
 
 pub(super) fn store(root: &Path, session: &str) -> PathBuf {
-    root.join("file-state").join(format!("{session}.json"))
+    root.join("cache/file-state")
+        .join(format!("{session}.json"))
 }
 
 impl FileState {

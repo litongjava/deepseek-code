@@ -84,7 +84,7 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, TeamLock)> {
 
 pub(super) fn definitions() -> Vec<super::ToolDefinition> {
     vec![
-        super::ToolDefinition{name:"team".into(),description:"Manage persistent project agent teams: create, get, list, delete, reset_task. Use run to execute pending tasks through the host's shared agent engine. Creation does not execute tasks.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","get","list","delete","run","reset_task"]},"team_id":{"type":"string"},"task_id":{"type":"string"},"name":{"type":"string"},"tasks":{"type":"array","items":{"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string"}},"required":["prompt"]}}},"required":["operation"]})}
+        super::ToolDefinition { summary: Some("Manage persistent project agent teams: create, get, list, delete, reset_task".into()),name:"team".into(),description:"Manage persistent project agent teams: create, get, list, delete, reset_task. Use run to execute pending tasks through the host's shared agent engine. Creation does not execute tasks.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","get","list","delete","run","reset_task"]},"team_id":{"type":"string"},"task_id":{"type":"string"},"name":{"type":"string"},"tasks":{"type":"array","items":{"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string"}},"required":["prompt"]}}},"required":["operation"]})}
     ]
 }
 

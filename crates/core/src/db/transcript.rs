@@ -135,7 +135,19 @@ pub fn replace_messages(
         let now = chrono::Utc::now().to_rfc3339();
         let content = msg.get("content").cloned().unwrap_or(serde_json::json!(""));
         if role == "user" {
+            let prior_content = previous
+                .as_ref()
+                .map(|row| super::message_repo::user_content_for_display(tx, row))
+                .transpose()?;
+            let (_, normalized) = super::message_repo::prepare_user_message(&content)?;
             super::message_repo::save_user_message(tx, &msg_id, id, &content, &now, idx as i64)?;
+            if prior_content.as_ref() != Some(&normalized) {
+                tx.execute(
+                    "INSERT INTO message_metadata VALUES(?1,?2) ON CONFLICT(message_id)
+                     DO UPDATE SET value=json_patch(message_metadata.value,excluded.value)",
+                    [&msg_id, r#"{"promptOrigin":"transcript"}"#],
+                )?;
+            }
         } else {
             let content = content
                 .as_str()

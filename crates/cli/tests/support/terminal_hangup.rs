@@ -60,8 +60,8 @@ async fn run(trigger: Trigger, controlling_terminal: bool, mid_turn: bool, scree
     let coordination = fixture.path().join("coord");
     fs::create_dir(&workspace).unwrap();
     write_settings(&data, true);
-    fs::write(
-        data.join("startup-prompts.json"),
+    deepseek_code_core::data_layout::write_config_file(
+        data.join("config/startup-prompts.json"),
         serde_json::json!({"trusted_folders": [&workspace]}).to_string(),
     )
     .unwrap();
@@ -176,8 +176,8 @@ async fn close_during_startup(ready: &[u8], trusted: bool, controlling_terminal:
     fs::create_dir(&workspace).unwrap();
     write_settings(&data, true);
     if trusted {
-        fs::write(
-            data.join("startup-prompts.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            data.join("config/startup-prompts.json"),
             serde_json::json!({"trusted_folders": [&workspace]}).to_string(),
         )
         .unwrap();

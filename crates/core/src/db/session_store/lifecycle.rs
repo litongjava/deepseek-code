@@ -1,5 +1,5 @@
 mod copy;
-mod sync;
+pub(super) mod sync;
 pub(super) use copy::workspace;
 pub use sync::SyncHeader;
 mod import;
@@ -46,6 +46,7 @@ pub enum Phase {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirstMessage {
+    pub origin: String,
     pub text: String,
     pub typed: Option<serde_json::Value>,
 }
@@ -271,7 +272,13 @@ enum Seed<'a> {
 impl FirstMessage {
     fn digest(&self) -> Result<String> {
         use sha2::{Digest, Sha256};
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(&self.text, &self.typed))?)))
+        // Typed first submissions retain their existing recovery identity.
+        let content = if self.origin == "typed" {
+            serde_json::to_vec(&(&self.text, &self.typed))?
+        } else {
+            serde_json::to_vec(&(&self.origin, &self.text, &self.typed))?
+        };
+        Ok(format!("{:x}", Sha256::digest(content)))
     }
 }
 
@@ -509,8 +516,34 @@ impl Stores {
     ) -> Result<()> {
         let id = &op.id;
         let created = &meta.created;
+        use crate::services::memory_files::prompt::Admission;
+        let roots: Vec<_> = match &meta.project {
+            Some(Project::Selected { folders, .. }) => folders.iter().map(PathBuf::from).collect(),
+            Some(Project::NewWorkspace(folder)) => vec![PathBuf::from(folder)],
+            None => Vec::new(),
+        };
         let stage = op.stage(self);
         fs::create_dir(&stage)?;
+        let session_dir = self.sessions().join(&op.key).join("memory");
+        let agent = match &seed {
+            Seed::Fork(source, kind, _) if !matches!(kind, Branch::Child | Branch::Clear) => {
+                crate::memory::files::copy_session_memory(
+                    self.data_dir(),
+                    &source.memory_directory(),
+                    &stage.join("memory"),
+                )?;
+                source.read(|r| r.setting(super::settings::MEMORY_AGENT))?
+            }
+            _ => None,
+        };
+        let memory = Admission::starting(
+            self,
+            &roots,
+            &op.incarnation,
+            session_dir.clone(),
+            agent.clone(),
+        )?
+        .staged_session(stage.join("memory"));
         sync_dir(stage.parent().unwrap())?;
         self.step(Phase::StageDirectory)?;
         {
@@ -521,20 +554,36 @@ impl Stores {
                     "INSERT INTO manifest VALUES(1,?1,?2,?3,?4,?5,?5,?6,?6,NULL)",
                     params![op.store, id, op.incarnation, op.operation, created, n],
                 )?;
+                if let Some(agent) = &agent {
+                    super::settings::MEMORY_AGENT.write(tx, agent)?;
+                }
                 if let Some(first) = first {
                     let content = first
                         .typed
                         .clone()
                         .unwrap_or_else(|| serde_json::Value::String(first.text.clone()));
-                    crate::services::permission_authority::record_conn(
-                        tx,
-                        id,
-                        crate::services::permission_authority::Source::User,
-                        &content,
-                    )?;
+                    if first.origin == "typed" {
+                        crate::services::permission_authority::record_conn(
+                            tx,
+                            id,
+                            crate::services::permission_authority::Source::User,
+                            &content,
+                        )?;
+                    }
                     let message = crate::db::transcript::MessageIds::new(&op.incarnation).issue();
                     tx.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,sort_order)
                         VALUES(?1,?2,'user',?3,?4,0)",params![message,id,first.text,created])?;
+                    tx.execute(
+                        "INSERT INTO message_metadata VALUES(?1,?2)",
+                        params![
+                            message,
+                            serde_json::json!({"promptOrigin": first.origin}).to_string()
+                        ],
+                    )?;
+                    memory.freeze(tx, None)?;
+                    if first.origin == "typed" {
+                        super::history::mark_input_pending(tx, &message)?;
+                    }
                     if let Some(typed) = &first.typed {
                         tx.execute(
                             "INSERT INTO message_user_content VALUES(?1,?2)",
@@ -556,12 +605,13 @@ impl Stores {
                         &op.id,
                         boundary,
                         configuration,
+                        &memory,
                         meta.source
                             .as_ref()
                             .is_some_and(|s| s.provider_selection.is_some()),
                     )?,
                     Seed::Import(session) => session.populate(tx)?,
-                    Seed::Sync(s) => s.populate(tx)?,
+                    Seed::Sync(s) => s.populate(tx, &memory)?,
                 }
                 self.step(Phase::BeforeSeal)
             })?;
@@ -918,9 +968,12 @@ impl Stores {
                     FROM conversations c LEFT JOIN conversation_private_workspace_bindings b ON b.child_id=c.id WHERE c.id=?2",[&op.id,source])?;
             }
             if saved.child {
-                tx.execute("INSERT INTO session_execution_parents(child_id,parent_id,parent_incarnation)
-                            SELECT ?1,id,incarnation FROM conversations WHERE id=?2",[&op.id,source])?;
-                let root = self.root.path.join("workspaces");
+                tx.execute(
+                    "INSERT INTO session_execution_parents(child_id,parent_id,parent_incarnation)
+                            SELECT ?1,id,incarnation FROM conversations WHERE id=?2",
+                    [&op.id, source],
+                )?;
+                let root = self.root.layout().workspaces();
                 let parent_path = copy::workspace(tx, &root, source)?;
                 let child_path = copy::workspace(tx, &root, &op.id)?;
                 let actual = parent_path.canonicalize()?;
@@ -1152,8 +1205,14 @@ impl Stores {
     }
 
     fn quarantine_orphans(&self) -> Result<()> {
-        let _sweep =
-            layout::lock_existing(&self.root.path.join("session-locks/.orphan-sweep"), true)?;
+        let _sweep = layout::lock_existing(
+            &self
+                .root
+                .layout()
+                .lock_path("session")
+                .join(".orphan-sweep"),
+            true,
+        )?;
         let quarantine = self.sessions().join(".quarantine");
         // The sweep lock also serializes cleanup after a killed WAL inspection.
         let mut has_quarantine = false;

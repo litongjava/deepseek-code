@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn a_tools_write_folds_legacy_entries_and_keeps_unknown_names() {
         let (_root, paths) = fixture();
-        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::create_dir_all(paths.layout().config_root()).unwrap();
         std::fs::write(customization::path(&paths.data_dir), r#"{"disabled_tools":["Write","mcp__fixture__tool"]}"#).unwrap();
         set(&paths, "Read", Switch::Enabled, false).unwrap();
         let saved = customization::load(&paths.data_dir).unwrap();
@@ -209,7 +209,7 @@ mod tests {
         assert!(core.iter().all(|row| row.enabled && row.on_demand));
         let list_dir = rows.iter().find(|row| row.name == "ListDir").unwrap();
         assert!(!list_dir.core && !list_dir.enabled && list_dir.on_demand);
-        let task_get = rows.iter().find(|row| row.name == "TaskGet").unwrap();
-        assert!(!task_get.core && task_get.on_demand);
+        let monitor = rows.iter().find(|row| row.name == "Monitor").unwrap();
+        assert!(!monitor.core && monitor.on_demand);
     }
 }

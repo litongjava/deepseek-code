@@ -116,10 +116,10 @@ fn repeated_folder_arguments_and_worker_rejection_preserve_scope() {
         "--folder",
         second.to_str().unwrap(),
     ];
-    std::fs::create_dir_all(paths.data_dir.join("background-tasks")).unwrap();
+    std::fs::create_dir_all(paths.data_dir.join("tasks/background")).unwrap();
     let claim = paths
         .data_dir
-        .join("background-tasks")
+        .join("tasks/background")
         .join(format!("session-{id}.claim"));
     std::fs::write(&claim, "active-worker-fixture").unwrap();
     let result = cli(&paths.data_dir, &arguments);
@@ -163,9 +163,13 @@ fn standalone_shutdown_refuses_owned_shells_and_explicit_stop_is_scoped() {
     let mut task = task.clone();
     task["metadata"] = serde_json::json!({"managed_shell":true});
     task["status"] = serde_json::json!("running");
-    let conn =
-        deepseek_code_core::db::DbManager::new(paths.data_dir.join("tasks").join(format!("{id}.sqlite3")))
-            .unwrap();
+    let conn = deepseek_code_core::db::DbManager::new(
+        paths
+            .data_dir
+            .join("data/session-tasks")
+            .join(format!("{id}.sqlite3")),
+    )
+    .unwrap();
     conn.with_conn(|c| {
         c.execute(
             "UPDATE tasks SET body=?1 WHERE id=?2",
@@ -174,7 +178,7 @@ fn standalone_shutdown_refuses_owned_shells_and_explicit_stop_is_scoped() {
     })
     .unwrap()
     .unwrap();
-    let shell = paths.data_dir.join("shell-tasks").join(&id).join(task_id);
+    let shell = paths.data_dir.join("tasks/shell").join(&id).join(task_id);
     std::fs::create_dir_all(&shell).unwrap();
     std::fs::write(shell.join("heartbeat"), "running").unwrap();
     let result = cli(&paths.data_dir, &["sessions", "shutdown-worker", &id]);

@@ -18,9 +18,13 @@ use std::process::Command;
 use std::sync::Arc;
 
 fn git(cwd: &Path, args: &[&str]) -> String {
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| crate::super_agent::test_git_text(arg))
+        .collect();
     let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+        .current_dir(crate::super_agent::test_git_path(cwd))
+        .args(&args)
         .env("LC_ALL", "C")
         .output()
         .unwrap();
@@ -221,12 +225,10 @@ async fn manual_plan_approval_launches_then_resumes_the_same_coder_once() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        conversation.workspace_path.as_deref(),
-        task.repositories[0]
-            .working_path
-            .to_str()
-            .map(str::to_owned)
-            .as_deref()
+        Path::new(conversation.workspace_path.as_deref().unwrap())
+            .canonicalize()
+            .unwrap(),
+        task.repositories[0].working_path.canonicalize().unwrap()
     );
     assert_eq!(fixture.launch_jobs(&task), 1);
 
@@ -394,7 +396,9 @@ async fn the_reviewer_gets_a_pinned_checkout_separate_from_the_coder() {
     assert_ne!(review_workspace, task.repositories[0].working_path);
     assert_eq!(git(&review_workspace, &["rev-parse", "HEAD"]), commit);
     assert_eq!(
-        std::fs::read_to_string(review_workspace.join("file.txt")).unwrap(),
+        std::fs::read_to_string(review_workspace.join("file.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "implemented\n"
     );
     // The Reviewer cannot write into the Coder's checkout: they are separate.
@@ -408,7 +412,13 @@ async fn the_reviewer_gets_a_pinned_checkout_separate_from_the_coder() {
 async fn an_unusable_target_blocks_the_task_without_creating_a_coder() {
     let fixture = Fixture::new();
     let mut spec = fixture.spec();
-    spec.targets = vec!["/definitely/outside/the/workspace".into()];
+    spec.targets = vec![std::env::temp_dir()
+        .join(format!(
+            "deepseek-code-unusable-target-{}",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()];
     let task = fixture
         .store()
         .create_task(&fixture.router, spec, "create")
@@ -504,7 +514,7 @@ async fn a_self_declared_external_workspace_is_rejected_before_any_mutation() {
     assert!(task.coder.session_id.is_none());
     assert!(!fixture
         .data
-        .join("super-agent")
+        .join("tasks/super-agent")
         .join(&task.task_id)
         .exists());
     assert_eq!(
@@ -518,8 +528,9 @@ async fn an_explicitly_granted_additional_directory_is_accepted() {
     let fixture = Fixture::new();
     let outside = tempfile::tempdir().unwrap();
     let repo = external_repository(&outside.path().join("repo"));
-    std::fs::write(
-        fixture.data.join("settings.json"),
+    std::fs::create_dir_all(fixture.data.join("config")).unwrap();
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&fixture.data).config_file("settings.json"),
         serde_json::to_vec(&json!({
             "permissions": {"additionalDirectories": [outside.path().to_string_lossy()]}
         }))
@@ -1567,7 +1578,7 @@ fn a_malformed_or_unreadable_delivery_job_blocks_without_binding() {
 
     // An unreadable state file is blocked too, and its bytes are preserved.
     let job_id = uuid::Uuid::new_v4().to_string();
-    let directory = fixture.data.join("background-tasks").join(&job_id);
+    let directory = fixture.data.join("tasks/background").join(&job_id);
     std::fs::create_dir_all(&directory).unwrap();
     let state = directory.join("state.json");
     let broken = b"{not-json";
@@ -1734,7 +1745,7 @@ fn legacy_operation(
 }
 
 fn binding_path(data: &Path, job_id: &str) -> PathBuf {
-    data.join("background-tasks")
+    data.join("tasks/background")
         .join(job_id)
         .join("delivery-identity.json")
 }
@@ -2195,7 +2206,9 @@ mod two_repository_delivery {
             let workspace = if count == 1 {
                 repos[0].worktree.clone()
             } else {
-                data.join("super-agent").join(&task.task_id).join("workspace")
+                data.join("tasks/super-agent")
+                    .join(&task.task_id)
+                    .join("workspace")
             };
             std::fs::create_dir_all(&workspace).unwrap();
             let sessions = SessionStore::new(context.db.clone());
@@ -4639,7 +4652,10 @@ mod two_repository_delivery {
 async fn router_pass_holds_selected_incarnation_during_launch_effects() {
     let fixture = Fixture::new();
     fixture.task();
-    let path = fixture.data.join("session-locks").join(&fixture.router);
+    let path = fixture
+        .data
+        .join("state/locks/session")
+        .join(&fixture.router);
     let inspected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = inspected.clone();
     let host = fixture.orchestrator(json!({})).with_gate(Arc::new(move |_| {

@@ -55,7 +55,7 @@ fn sync_reconciles_changed_user_display_and_preserves_unchanged_parts() -> Resul
     let stores = Stores::open(root.path())?;
     let shard = stores.create("typed", Default::default())?;
     let typed = json!([{"type":"text","text":"before"}]);
-    shard.write(|w| w.append_user("typed-user", &typed))?;
+    shard.admit_user("typed-user", &typed, "typed")?;
     let mut rows = stores.sync_messages("typed")?;
     stores.sync_conversation("typed", None, &rows)?;
     assert_eq!(stores.conversation_detail("typed")?.1[0]["content"], typed);
@@ -112,16 +112,22 @@ fn first_chat_retries_once_after_execution_lease_failure() -> Result<()> {
     let root = tempfile::tempdir()?;
     let stores = Stores::open(root.path())?;
     let id = uuid::Uuid::new_v4().to_string();
-    let directory = root.path().join("session-execution-locks");
-    if directory.is_dir() { std::fs::remove_dir(&directory)?; }
+    let directory = root.path().join("state/locks/session-execution");
+    if directory.is_dir() {
+        std::fs::remove_dir(&directory)?;
+    }
     std::fs::write(&directory, "unavailable")?;
     let content = json!("first turn");
-    assert!(stores.admit_chat_execution(&id, "m", Some(&content)).is_err());
+    assert!(stores
+        .admit_chat_execution(&id, "m", Some(&content), "typed")
+        .is_err());
     let (row, messages) = stores.conversation_detail(&id)?;
     assert!(row.is_none() && messages.is_empty());
     std::fs::remove_file(directory)?;
-    let (lease, sealed) = stores.admit_chat_execution(&id, "m", Some(&content))?;
-    if !sealed { stores.admit_chat_message(&id, "m", Some(&content))?; }
+    let (lease, sealed) = stores.admit_chat_execution(&id, "m", Some(&content), "typed")?;
+    if !sealed {
+        stores.admit_chat_message(&id, "m", Some(&content), "typed")?;
+    }
     drop(lease);
     assert_eq!(stores.conversation_detail(&id)?.1.len(), 1);
     Ok(())

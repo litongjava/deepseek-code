@@ -55,7 +55,9 @@ fn harness_with_hooks(
     )
     .with_conv_id("toolscript-fixture".into())
     .with_permission_manager(manager.clone())
-    .with_search_config_path(root.join("settings.json"));
+    .with_search_config_path(
+        crate::data_layout::DataLayout::from_root(&root).config_file("settings.json"),
+    );
     if let Some(hooks) = hooks {
         executor = executor.with_hooks(hooks);
     }
@@ -128,7 +130,7 @@ fn take_events(harness: &Harness) -> Vec<EngineEvent> {
 
 /// Persists through the shared writer the CLI uses, then returns ids.
 fn persist(root: &Path, parent: &str, events: &[EngineEvent]) -> (String, String) {
-    let context = crate::services::session_messages::context(&root.join("data")).unwrap();
+    let context = crate::services::session_messages::context(root).unwrap();
     let store = crate::runtime::SessionStore::new(context.db.clone());
     let session = store.create(root, "fixture", "fixture").unwrap();
     let assistant = store.append(&session, "assistant", "").unwrap();
@@ -257,7 +259,7 @@ async fn sequential_calls_execute_real_tools_and_persist_after_reopen() {
     assert!(!seen.dones[3].is_error);
 
     let (session, assistant) = persist(root, "parent-script", &events);
-    let reopened = crate::services::session_messages::context(&root.join("data")).unwrap();
+    let reopened = crate::services::session_messages::context(root).unwrap();
     let store = crate::runtime::SessionStore::new(reopened.db.clone());
     reopened
         .db
@@ -319,7 +321,7 @@ async fn repeated_calls_and_replayed_events_keep_distinct_rows() {
 
     // Replaying the same completion must not add a row.
     let (session, assistant) = persist(root, "parent-repeat", &events);
-    let context = crate::services::session_messages::context(&root.join("data")).unwrap();
+    let context = crate::services::session_messages::context(root).unwrap();
     let mut rows = Vec::new();
     let mut origins = ToolOrigins::new();
     let mut arguments = std::collections::HashMap::new();
@@ -445,7 +447,7 @@ async fn pre_hook_blocks_and_rewrites_nested_input() {
         .to_string(),
     )
     .unwrap();
-    let hooks = crate::services::tool_hooks::HookRunner::load(&root.join("data"), root).unwrap();
+    let hooks = crate::services::tool_hooks::HookRunner::load(root, root).unwrap();
     let mut h = harness_with_hooks(root, PermissionMode::BypassPermissions, Some(hooks));
 
     let outcome = run(
@@ -677,7 +679,7 @@ async fn a_permission_wait_aborts_when_the_script_settles_early() {
             .to_string(),
     )
     .unwrap();
-    let hooks = crate::services::tool_hooks::HookRunner::load(&root.join("data"), root).unwrap();
+    let hooks = crate::services::tool_hooks::HookRunner::load(root, root).unwrap();
     let mut h = harness_with_hooks(root, PermissionMode::AskPermissions, Some(hooks));
 
     // The Bash call is not awaited. It reaches the permission wait while the
@@ -858,7 +860,7 @@ async fn a_cancelled_first_batch_records_every_later_admitted_call() {
     // Persist through the shared writer and reopen: ids, origins and the
     // provider replay exclusion all hold for cancelled work too.
     let (session, _assistant) = persist(root, "parent-drain", &events);
-    let reopened = crate::services::session_messages::context(&root.join("data")).unwrap();
+    let reopened = crate::services::session_messages::context(root).unwrap();
     let store = crate::runtime::SessionStore::new(reopened.db.clone());
     let history =
         serde_json::to_string(&store.model_history(&session, &ApiFormat::OpenAI).unwrap()).unwrap();
@@ -892,7 +894,7 @@ async fn a_hook_rewritten_background_bash_is_refused_before_the_body() {
             .to_string(),
     )
     .unwrap();
-    let hooks = crate::services::tool_hooks::HookRunner::load(&root.join("data"), root).unwrap();
+    let hooks = crate::services::tool_hooks::HookRunner::load(root, root).unwrap();
     let mut h = harness_with_hooks(root, PermissionMode::BypassPermissions, Some(hooks));
 
     let outcome = run(
@@ -917,7 +919,7 @@ async fn a_hook_rewritten_background_bash_is_refused_before_the_body() {
         "the hook-rewritten command ran"
     );
     assert!(
-        !root.join("shell-tasks").exists(),
+        !root.join("tasks/shell").exists(),
         "a managed shell task directory was created"
     );
     let seen = observed(&take_events(&h));
@@ -1044,7 +1046,7 @@ esac
             .to_string(),
     )
     .unwrap();
-    let hooks = crate::services::tool_hooks::HookRunner::load(&root.join("data"), root).unwrap();
+    let hooks = crate::services::tool_hooks::HookRunner::load(root, root).unwrap();
     let mut h = harness_with_hooks(root, PermissionMode::BypassPermissions, Some(hooks));
     assert!(
         !h.executor.is_concurrency_safe(

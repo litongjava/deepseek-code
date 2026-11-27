@@ -24,7 +24,7 @@ fn check_view(label: &str, root: &Path, original: &str, view: &str, encoded: boo
         let (file, rest) = reference.split_once(", line ").unwrap();
         let line: usize = rest.split_once(']').unwrap().0.parse().unwrap();
         let path = Path::new(file);
-        assert!(path.starts_with(root.join("tool-outputs")));
+        assert!(path.starts_with(root.join("cache/tool-outputs")));
         assert_eq!(
             path.file_stem().unwrap().to_str().unwrap(),
             format!("{:x}", Sha256::digest(original))
@@ -54,7 +54,7 @@ fn check_raw_references(label: &str, root: &Path, raw: &str, view: &str) {
         let (file, rest) = reference.split_once(", line ").unwrap();
         let line: usize = rest.split_once(']').unwrap().0.parse().unwrap();
         let file = Path::new(file);
-        assert!(file.starts_with(root.join("tool-outputs")));
+        assert!(file.starts_with(root.join("cache/tool-outputs")));
         assert_eq!(file.file_stem().unwrap().to_str().unwrap(), hash);
         assert_eq!(std::fs::read_to_string(file).unwrap(), raw);
         assert!(
@@ -197,7 +197,7 @@ async fn base64_model_boundary_matrix() {
             &session,
         )
         .unwrap();
-        let logs = root.join("shell-tasks").join(&session).join(id);
+        let logs = root.join("tasks/shell").join(&session).join(id);
         std::fs::create_dir_all(&logs).unwrap();
         let mib = 1024 * 1024;
         let log = format!("{text}{}{text}", ".".repeat(mib - text.len()));
@@ -255,7 +255,7 @@ async fn base64_model_boundary_matrix() {
         .await
         .unwrap();
         let records = root
-            .join("shell-tasks")
+            .join("tasks/shell")
             .join(&session)
             .join(id)
             .join("events.jsonl");
