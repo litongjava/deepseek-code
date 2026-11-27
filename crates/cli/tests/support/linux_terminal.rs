@@ -98,12 +98,32 @@ pub(crate) struct Terminal {
 
 impl Terminal {
     pub(crate) fn command(
+        command: CommandBuilder,
+        workspace: &Path,
+        data: &Path,
+        coordination: &Path,
+        controlling_terminal: bool,
+        screen_reader: bool,
+    ) -> CommandBuilder {
+        Self::command_with_permission(
+            command,
+            workspace,
+            data,
+            coordination,
+            controlling_terminal,
+            screen_reader,
+            "accept-edits",
+        )
+    }
+
+    pub(crate) fn command_with_permission(
         mut command: CommandBuilder,
         workspace: &Path,
         data: &Path,
         coordination: &Path,
         controlling_terminal: bool,
         screen_reader: bool,
+        permission_mode: &str,
     ) -> CommandBuilder {
         command.env_clear();
         command.args([
@@ -112,7 +132,7 @@ impl Terminal {
             "--model",
             "fixture-model",
             "--permission-mode",
-            "accept-edits",
+            permission_mode,
         ]);
         command.arg("--data-dir");
         command.arg(data);

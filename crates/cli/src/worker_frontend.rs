@@ -866,6 +866,15 @@ async fn observe(
                 #[cfg(unix)]
                 if answer.is_err() { crate::signals::check_terminal_hangup(); }
                 if crate::signals::terminating() { continue; }
+                if answer.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted) {
+                    if !cancelled {
+                        cancel_job(session, id)?;
+                        cancelled = true;
+                        display.set_activity("Cancelling worker");
+                    }
+                    answered.insert(request);
+                    continue;
+                }
                 if let Some(answer) = answer? { answer_if_current(root, id, owner, &request, &answer)?; }
                 answered.insert(request);
                 display.set_activity("Working");

@@ -281,7 +281,8 @@ impl OwnerFixture {
                 post({
                     let held = held.clone();
                     let release = release.clone();
-                    move |state, body: Json<Value>| {
+                    move |state: State<(Arc<Mutex<Vec<Value>>>, std::path::PathBuf)>,
+                          body: Json<Value>| {
                         let held = held.clone();
                         let release = release.clone();
                         async move {
@@ -292,7 +293,12 @@ impl OwnerFixture {
                                 held.notify_one();
                                 release.notified().await;
                             }
-                            respond(state, body).await
+                            if let Some(reply) = plain::provider_reply(&body) {
+                                let State((requests, _)) = state;
+                                requests.lock().unwrap().push(body.0);
+                                return reply;
+                            }
+                            axum::response::IntoResponse::into_response(respond(state, body).await)
                         }
                     }
                 }),
@@ -903,3 +909,6 @@ async fn plain_tty_modes_render_worker_output() {
         tty.wait_success().await;
     }
 }
+
+#[path = "session_worker_plain_tty.rs"]
+mod plain;
