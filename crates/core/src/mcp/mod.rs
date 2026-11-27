@@ -751,6 +751,8 @@ impl McpServerManager {
         let enabled = enabled.unwrap_or(!state.config.enabled);
         if enabled {
             state.ensure_unfenced()?;
+            #[cfg(target_os = "linux")]
+            process::drain_predecessors(id)?;
         } else {
             state.retry_failed_stop().await?;
         }
@@ -855,6 +857,8 @@ impl McpConnector {
         if self.process.is_some() {
             self.stop().await?;
         }
+        #[cfg(target_os = "linux")]
+        process::drain_predecessors(&self.config.id)?;
         let url = || self.config.url.as_deref().filter(|url| !url.is_empty()).ok_or_else(|| anyhow!("MCP server {} needs a url for the {} transport", self.config.name, self.config.transport_name()));
         let channel = match self.config.transport_name() {
             "stdio" => {
@@ -870,7 +874,7 @@ impl McpConnector {
                 if let Some(cwd) = &self.config.cwd {
                     cmd.current_dir(cwd);
                 }
-                let mut child = process::ServerProcess::spawn(&mut cmd)?;
+                let mut child = process::ServerProcess::spawn(&mut cmd, &self.config.id)?;
                 let stdin = child.child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
                 let stdout = child.child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
                 self.process = Some(child);

@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod fences;
+pub(crate) use fences::drain_predecessors;
+
 const INSTANCE_ENV: &str = "DEEPSEEK_CODE_MCP_INSTANCE";
 const TERM_GRACE: Duration = Duration::from_millis(250);
 const STOP_BOUND: Duration = Duration::from_secs(3);
@@ -18,7 +21,7 @@ static OWNER: OnceLock<uuid::Uuid> = OnceLock::new();
 
 /// Run once in the worker before constructing any stdio connectors. Only the
 /// engine and its supervisor need the worker ID. Other hosts get a local UUID.
-pub fn init_worker_mcp(worker_id: &str) -> anyhow::Result<()> {
+pub fn init_worker_mcp(worker_id: &str, session_dir: &std::path::Path) -> anyhow::Result<()> {
     let id = uuid::Uuid::parse_str(worker_id)?;
     anyhow::ensure!(
         OWNER.set(id).is_ok(),
@@ -27,14 +30,32 @@ pub fn init_worker_mcp(worker_id: &str) -> anyhow::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
         return Err(io::Error::last_os_error().into());
     }
-    Ok(())
+    fences::initialize(session_dir)
 }
 
-pub(super) fn tag_command(command: &mut tokio::process::Command) -> String {
+pub(super) fn spawn(
+    command: &mut tokio::process::Command,
+    server: &str,
+) -> anyhow::Result<(tokio::process::Child, Tracker)> {
     let owner = OWNER.get_or_init(uuid::Uuid::new_v4);
-    let token = format!("{owner}:{}", uuid::Uuid::new_v4());
+    let instance = uuid::Uuid::new_v4();
+    let fence = fences::reserve(server, *owner, instance)?;
+    let token = format!("{owner}:{instance}");
     command.env(INSTANCE_ENV, &token);
-    format!("{INSTANCE_ENV}={token}")
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(fence) = fence {
+                fence.clear_reservation()?;
+            }
+            return Err(error.into());
+        }
+    };
+    let pid = child.id().expect("just spawned") as i32;
+    Ok((
+        child,
+        Tracker::new(pid, format!("{INSTANCE_ENV}={token}"), fence),
+    ))
 }
 
 #[derive(Debug)]
@@ -93,7 +114,7 @@ fn children(pid: i32, deadline: Instant) -> io::Result<Vec<i32>> {
     Ok(result)
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Members(HashMap<i32, u64>);
 
 impl Members {
@@ -298,12 +319,13 @@ fn check_deadline(deadline: Instant) -> io::Result<()> {
 enum Scope<'a> {
     Instance { entry: &'a str, launcher: i32 },
     Worker { prefix: &'a str },
+    Predecessor { entry: &'a str },
 }
 
 impl Scope<'_> {
     fn matches(&self, env: &[u8]) -> bool {
         match self {
-            Self::Instance { entry, .. } => env == entry.as_bytes(),
+            Self::Instance { entry, .. } | Self::Predecessor { entry } => env == entry.as_bytes(),
             Self::Worker { prefix } => env.starts_with(prefix.as_bytes()),
         }
     }
@@ -311,7 +333,7 @@ impl Scope<'_> {
     fn launcher(&self) -> Option<i32> {
         match self {
             Self::Instance { launcher, .. } => Some(*launcher),
-            Self::Worker { .. } => None,
+            Self::Worker { .. } | Self::Predecessor { .. } => None,
         }
     }
 }
@@ -388,6 +410,7 @@ fn drain(
 
 pub(super) struct Tracker {
     token: String,
+    fence: Option<fences::Fence>,
     launcher: i32,
     members: Arc<Mutex<Members>>,
     monitor: tokio::task::JoinHandle<()>,
@@ -396,7 +419,7 @@ pub(super) struct Tracker {
 }
 
 impl Tracker {
-    pub(super) fn new(pid: i32, token: String) -> Self {
+    fn new(pid: i32, token: String, fence: Option<fences::Fence>) -> Self {
         let mut initial = Members::default();
         if let Ok(s) = stat(pid) {
             initial.0.insert(pid, s.birth);
@@ -414,6 +437,7 @@ impl Tracker {
         });
         Self {
             token,
+            fence,
             launcher: pid,
             members,
             monitor,
@@ -422,10 +446,11 @@ impl Tracker {
         }
     }
 
-    pub(super) fn stop(&self, child: &mut tokio::process::Child) -> io::Result<()> {
+    pub(super) fn stop(&mut self, child: &mut tokio::process::Child) -> anyhow::Result<()> {
         self.monitor.abort();
-        drain(
-            &mut self.members.lock().unwrap(),
+        let mut members = self.members.lock().unwrap();
+        let result = drain(
+            &mut members,
             Scope::Instance {
                 entry: &self.token,
                 launcher: self.launcher,
@@ -435,16 +460,21 @@ impl Tracker {
             #[cfg(not(test))]
             &Kernel,
             |_| Ok(child.try_wait()?.is_some()),
-        )
+        );
+        if let Some(fence) = &mut self.fence {
+            fence.finish(&result, &members)?;
+        }
+        Ok(result?)
     }
 }
 
 /// After engine death the supervisor has no connector handles. Its worker UUID
 /// covers every instance, even one whose launcher exited before registration.
-pub(crate) fn drain_worker(worker_id: &str) -> io::Result<()> {
+pub(crate) fn drain_worker(worker_id: &str, session_dir: &std::path::Path) -> anyhow::Result<()> {
     let prefix = format!("{INSTANCE_ENV}={worker_id}:");
-    drain(
-        &mut Members::default(),
+    let mut members = Members::default();
+    let result = drain(
+        &mut members,
         Scope::Worker { prefix: &prefix },
         &Kernel,
         |deadline| {
@@ -465,7 +495,9 @@ pub(crate) fn drain_worker(worker_id: &str) -> io::Result<()> {
                 }
             }
         },
-    )
+    );
+    fences::supervisor_finished(session_dir, worker_id, &members, result.is_ok())?;
+    Ok(result?)
 }
 
 #[cfg(test)]
@@ -512,7 +544,7 @@ mod tests {
         for errno in [libc::EPERM, libc::ENOSYS, libc::EINVAL] {
             for deny_open in [true, false] {
                 let mut cmd = tokio::process::Command::new("/bin/sleep");
-                let mut server = ServerProcess::spawn(cmd.arg("60")).unwrap();
+                let mut server = ServerProcess::spawn(cmd.arg("60"), "w").unwrap();
                 let pid = server.tree.launcher;
                 let birth = stat(pid).unwrap().birth;
                 let scope = Scope::Instance {
@@ -554,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn refused_signals_return_pid_and_errno_within_the_drain_bound() {
         let mut cmd = tokio::process::Command::new("/bin/sleep");
-        let mut server = ServerProcess::spawn(cmd.arg("60")).unwrap();
+        let mut server = ServerProcess::spawn(cmd.arg("60"), "w").unwrap();
         let pid = server.tree.launcher;
         let denied = Denied {
             deny_open: true,
@@ -697,7 +729,7 @@ mod tests {
             "-c",
             "trap 'echo TERM > signal' TERM; touch ready; while :; do sleep 0.02; done",
         ]);
-        let mut server = ServerProcess::spawn(&mut command).unwrap();
+        let mut server = ServerProcess::spawn(&mut command, "w").unwrap();
         let token = server.tree.token.split_once('=').unwrap().1;
         // Both peers are outside the launcher's group and ancestry.
         let peer = std::process::Command::new("/bin/sleep")
@@ -745,7 +777,7 @@ mod tests {
             "-c",
             "setsid sleep 15 & echo $! > server.pid; while [ ! -e release ]; do sleep 0.02; done",
         ]);
-        let mut server = ServerProcess::spawn(&mut command).unwrap();
+        let mut server = ServerProcess::spawn(&mut command, "w").unwrap();
         let pid = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(pid) = fs::read_to_string(tmp.path().join("server.pid"))

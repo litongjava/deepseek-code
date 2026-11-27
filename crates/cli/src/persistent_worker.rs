@@ -165,7 +165,7 @@ pub async fn run_from_env() -> Result<bool> {
     .context("Supervisor did not publish the assigned worker job")??;
     let worker = service::read_worker(&dir)?;
     #[cfg(target_os = "linux")]
-    service::init_worker_mcp(&worker.id)?;
+    service::init_worker_mcp(&worker.id, dir.parent().context("Missing worker session directory")?)?;
     let selected = if worker.root.join("global.db").try_exists()? {
         Some(
             service::worker_session(&worker)?,

@@ -328,8 +328,13 @@ impl OwnerFixture {
     }
 
     async fn terminal(&self) -> Terminal {
+        self.launch(portable_pty::CommandBuilder::new(test_cli_executable()))
+            .await
+    }
+
+    async fn launch(&self, command: portable_pty::CommandBuilder) -> Terminal {
         let mut command = Terminal::command(
-            portable_pty::CommandBuilder::new(test_cli_executable()),
+            command,
             &self.temp.path().join("work"),
             &self.paths.data_dir,
             &self.temp.path().join("coord"),
@@ -478,9 +483,7 @@ fn worker_instances(worker: &worker::Worker) -> Vec<(u32, String)> {
     instances
 }
 
-#[tokio::test]
-async fn direct_setsid_disable_and_reenable_ten_times_then_worker_death_and_exit() {
-    let fixture = OwnerFixture::new().await;
+fn configure_direct_setsid(fixture: &OwnerFixture) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
     let log = fixture.temp.path().join("children.jsonl");
     fs::write(
@@ -490,7 +493,76 @@ async fn direct_setsid_disable_and_reenable_ten_times_then_worker_death_and_exit
         .to_string(),
     )
     .unwrap();
+}
 
+#[tokio::test]
+async fn refused_drain_survives_exit_and_same_session_resume() {
+    let fixture = OwnerFixture::new().await;
+    configure_direct_setsid(&fixture);
+    let mut restricted = portable_pty::CommandBuilder::new("python3");
+    restricted
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deny-mcp-signals.py"));
+    restricted.arg(test_cli_executable());
+    let mut tty = fixture.launch(restricted).await;
+    repl(&mut tty, "/mcp state w", b"w  user").await;
+    let host = fixture.worker();
+    let (pid, token) = worker_instances(&host).pop().unwrap();
+    assert_eq!(fixture.starts()[0].0, pid);
+    let error = format!(
+        "MCP server w could not be stopped: PIDs [{pid}]: Operation not permitted (os error 1)"
+    );
+    repl(&mut tty, "/mcp state w off", error.as_bytes()).await;
+    tty.submit("/exit", false).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while fixture.worker().status != "stopped" {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tty.wait_success().await;
+    assert_eq!(worker_instances(&host), [(pid, token.clone())]);
+    let record = fixture
+        .paths
+        .data_dir
+        .join("state/workers")
+        .join(&fixture.session)
+        .join("mcp-fences")
+        .join(format!("{token}.json"));
+    let fence: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let birth: u64 = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(fence["server"], "w");
+    assert_eq!(fence["owner"], host.id);
+    assert_eq!(fence["instance"], token);
+    assert_eq!(fence["members"][pid.to_string()], birth);
+
+    let mut resumed = fixture.terminal().await;
+    repl(&mut resumed, "/mcp state w", b"w  off").await;
+    assert_ne!(fixture.worker().id, host.id);
+    assert_eq!(worker_instances(&host).len(), 1);
+    repl(&mut resumed, "/mcp state w user", b"w  user").await;
+    assert!(worker_instances(&host).is_empty());
+    assert!(!record.exists());
+    let starts = fixture.starts(); // checks overlap at each actual launch
+    assert_eq!(starts.len(), 2);
+    assert_eq!(worker_instances(&fixture.worker())[0].0, starts[1].0);
+    resumed.submit("/exit", false).await;
+    resumed.wait_success().await;
+}
+
+#[tokio::test]
+async fn direct_setsid_disable_and_reenable_ten_times_then_worker_death_and_exit() {
+    let fixture = OwnerFixture::new().await;
+    configure_direct_setsid(&fixture);
     let mut tty = fixture.terminal().await;
     repl(&mut tty, "/mcp state w", b"w  user").await;
     repl(&mut tty, "start worker", b"worker result").await;

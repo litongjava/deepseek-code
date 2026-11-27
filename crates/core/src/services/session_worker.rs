@@ -1165,11 +1165,11 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
             #[cfg(target_os = "linux")]
-            if let Err(error) = crate::mcp::process::drain_worker(&self.1) {
+            if let Err(error) = crate::mcp::process::drain_worker(&self.1, self.2.parent().unwrap()) {
                 let message = format!("MCP worker {} could not be stopped: {error}", self.1);
                 tracing::error!("{message}");
                 // The detached supervisor has no stderr subscriber.
-                if let Ok(mut log) = fs::OpenOptions::new().append(true).open(&self.2) {
+                if let Ok(mut log) = fs::OpenOptions::new().append(true).open(self.2.join("stderr.log")) {
                     let _ = writeln!(log, "{message}");
                 }
                 return; // The engine itself may still be live; wait() would hang.
@@ -1207,7 +1207,7 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
         #[cfg(target_os = "linux")]
         worker.id.clone(),
         #[cfg(target_os = "linux")]
-        dir.join("stderr.log"),
+        dir.to_path_buf(),
         #[cfg(windows)]
         job,
     );

@@ -5,9 +5,9 @@ use tokio::process::{Child, Command};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::drain_worker;
-#[cfg(target_os = "linux")]
 pub use linux::init_worker_mcp;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{drain_predecessors, drain_worker};
 
 pub(super) struct ServerProcess {
     pub child: Child,
@@ -22,14 +22,16 @@ pub(super) struct ServerProcess {
 }
 
 impl ServerProcess {
-    pub fn spawn(command: &mut Command) -> Result<Self> {
+    pub fn spawn(command: &mut Command, _server: &str) -> Result<Self> {
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(windows)]
         command.creation_flags(0x00000004 | 0x00000200); // suspended, new process group
         #[cfg(target_os = "linux")]
-        let token = linux::tag_command(command);
+        let (child, tree) = linux::spawn(command, _server)?;
+        #[cfg(not(target_os = "linux"))]
         let child = command.spawn()?;
+        #[cfg(not(target_os = "linux"))]
         let pid = child.id().expect("just spawned");
         #[cfg(windows)]
         let job = {
@@ -40,7 +42,7 @@ impl ServerProcess {
         Ok(Self {
             child,
             #[cfg(target_os = "linux")]
-            tree: linux::Tracker::new(pid as i32, token),
+            tree,
             #[cfg(target_os = "linux")]
             stopped: false,
             #[cfg(all(unix, not(target_os = "linux")))]
