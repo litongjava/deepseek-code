@@ -3,6 +3,8 @@
 pub(crate) mod mcp_operations;
 pub use mcp_operations::{McpClient, McpReceipts};
 mod recovery;
+#[cfg(target_os = "linux")]
+pub use crate::mcp::process::init_worker_mcp;
 use super::background_sessions::{self as jobs, Job, SessionClaim};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1151,6 +1153,7 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     }
     struct Owner(
         std::process::Child,
+        #[cfg(target_os = "linux")] String,
         #[cfg(windows)] crate::terminal::TerminalJob,
     );
     impl Drop for Owner {
@@ -1160,7 +1163,9 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
                 tracing::error!(%error, "Waiting for worker job cleanup");
                 std::thread::sleep(Duration::from_secs(1));
             }
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
+            crate::mcp::process::drain_worker(&self.1);
+            #[cfg(all(unix, not(target_os = "linux")))]
             {
                 loop {
                     match crate::mcp::process::drain_worker_session(self.0.id() as i32) {
@@ -1190,6 +1195,8 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     };
     let mut child = Owner(
         child,
+        #[cfg(target_os = "linux")]
+        worker.id.clone(),
         #[cfg(windows)]
         job,
     );

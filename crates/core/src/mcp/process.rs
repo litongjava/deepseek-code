@@ -4,12 +4,16 @@ use tokio::process::{Child, Command};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::drain_worker;
+#[cfg(target_os = "linux")]
+pub use linux::init_worker_mcp;
 
 pub(super) struct ServerProcess {
     pub child: Child,
     #[cfg(target_os = "linux")]
     tree: linux::Tracker,
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     group: i32,
     #[cfg(windows)]
     job: crate::terminal::TerminalJob,
@@ -21,6 +25,8 @@ impl ServerProcess {
         command.process_group(0);
         #[cfg(windows)]
         command.creation_flags(0x00000004 | 0x00000200); // suspended, new process group
+        #[cfg(target_os = "linux")]
+        let token = linux::tag_command(command);
         let child = command.spawn()?;
         let pid = child.id().expect("just spawned");
         #[cfg(windows)]
@@ -32,8 +38,8 @@ impl ServerProcess {
         Ok(Self {
             child,
             #[cfg(target_os = "linux")]
-            tree: linux::Tracker::new(pid as i32),
-            #[cfg(unix)]
+            tree: linux::Tracker::new(pid as i32, token),
+            #[cfg(all(unix, not(target_os = "linux")))]
             group: pid as i32,
             #[cfg(windows)]
             job,
@@ -47,20 +53,15 @@ impl Drop for ServerProcess {
         if let Err(error) = self.job.terminate_and_wait() {
             tracing::error!(%error, "Terminating MCP server job");
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        self.tree.stop(&mut self.child);
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
-            #[cfg(target_os = "linux")]
-            self.tree.stop();
             unsafe { libc::kill(-self.group, libc::SIGKILL) };
             // Reap the launcher. Its children can briefly remain as zombies in
             // the supervisor (or init) but must no longer be executing at return.
             loop {
                 let _ = self.child.try_wait();
-                #[cfg(target_os = "linux")]
-                if !self.tree.stop() {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
                 if unsafe { libc::kill(-self.group, 0) } < 0 {
                     break;
                 }
@@ -82,7 +83,7 @@ impl Drop for ServerProcess {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn processes() -> Result<Vec<(i32, i32, bool)>> {
     let ps = std::process::Command::new("/bin/ps")
         .args(["-A", "-o", "pid=,pgid=,stat="])
@@ -100,11 +101,8 @@ fn processes() -> Result<Vec<(i32, i32, bool)>> {
 
 /// The worker starts a private Unix session. Its groups remain discoverable
 /// even if the engine dies between fork and the connector recording its PID.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn drain_worker_session(session: i32) -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    let mut empty = linux::drain_adopted()?;
-    #[cfg(not(target_os = "linux"))]
     let mut empty = true;
     for (pid, group, alive) in processes()? {
         if unsafe { libc::getsid(pid) } != session {

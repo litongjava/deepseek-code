@@ -456,6 +456,110 @@ async fn separate_session_server_stops_on_disable_worker_death_and_exit() {
     crash_takeover(false, true).await;
 }
 
+// Independent of the production scanner. Include every process readable by the
+// test and match a complete worker-ID boundary in NUL-separated environ bytes.
+fn worker_instances(worker: &worker::Worker) -> Vec<(u32, String)> {
+    let prefix = format!("DEEPSEEK_CODE_MCP_INSTANCE={}:", worker.id);
+    let mut instances = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap() {
+        let entry = entry.unwrap();
+        let Ok(pid) = entry.file_name().to_string_lossy().parse() else {
+            continue;
+        };
+        let Ok(env) = fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        for field in env.split(|&b| b == 0) {
+            if let Some(token) = field.strip_prefix(prefix.as_bytes()) {
+                instances.push((pid, std::str::from_utf8(token).unwrap().to_owned()));
+            }
+        }
+    }
+    instances
+}
+
+#[tokio::test]
+async fn direct_setsid_disable_and_reenable_ten_times_then_worker_death_and_exit() {
+    let fixture = OwnerFixture::new().await;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
+    let log = fixture.temp.path().join("children.jsonl");
+    fs::write(
+        fixture.paths.data_dir.join("mcp-servers.json"),
+        json!({"mcpServers":{"w":{"command":"/usr/bin/setsid",
+            "args":["node",script,log,"w","survive-eof"],"enabled":true}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "/mcp state w", b"w  user").await;
+    repl(&mut tty, "start worker", b"worker result").await;
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r["tools"].as_array().is_some_and(|tools| tools
+            .iter()
+            .any(|t| t["function"]["name"] == "mcp__w__probe"))));
+    let host = fixture.worker();
+    let mut seen = std::collections::HashSet::new();
+    let mut starts = fixture.starts();
+    for round in 1..=10 {
+        let (pid, parent) = *starts.last().unwrap();
+        assert_eq!(parent, host.child_pid.unwrap());
+        assert_eq!(unsafe { libc::getsid(pid as i32) }, pid as i32);
+        let live = worker_instances(&host);
+        assert_eq!(live.len(), 1, "before disable {round}: {live:?}");
+        assert_eq!(live[0].0, pid);
+        assert!(seen.insert(live[0].1.clone()), "reused instance token");
+        repl(&mut tty, "/mcp state w off", b"w  off").await;
+        assert!(
+            worker::process_exited(pid),
+            "round {round}: old server {pid} survived disable"
+        );
+        assert!(
+            worker_instances(&host).is_empty(),
+            "round {round}: worker still owns a server"
+        );
+        repl(&mut tty, "/mcp state w user", b"w  user").await;
+        let replacements = fixture.starts(); // checks the fixture's overlap flag on every start
+        assert_eq!(replacements.len(), starts.len() + 1);
+        eprintln!(
+            "cycle {round}: reaped {pid} at disable, replacement {} reported no overlap",
+            replacements.last().unwrap().0
+        );
+        starts = replacements;
+    }
+    let last_pid = starts.last().unwrap().0;
+    let live = worker_instances(&host);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].0, last_pid);
+    assert!(seen.insert(live[0].1.clone()));
+    assert_eq!(
+        unsafe { libc::kill(host.child_pid.unwrap() as i32, libc::SIGKILL) },
+        0
+    );
+    repl(&mut tty, "/mcp state w", b"w  user").await;
+    let replacement = fixture.worker();
+    assert_ne!(replacement.id, host.id);
+    assert!(worker::process_exited(last_pid));
+    assert!(worker_instances(&host).is_empty());
+    let final_starts = fixture.starts();
+    assert_eq!(final_starts.len(), starts.len() + 1);
+    let final_pid = final_starts.last().unwrap().0;
+    let live = worker_instances(&replacement);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].0, final_pid);
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+    assert!(worker::process_exited(final_pid));
+    assert!(worker_instances(&replacement).is_empty());
+    eprintln!(
+        "worker death reaped {last_pid}, /exit reaped {final_pid}, both worker token scans empty"
+    );
+}
+
 async fn refused_package_toggle(enabled: bool) {
     use deepseek_code_core::services::{plugins, EnvironmentCredentials, ServiceContext};
     let fixture = OwnerFixture::new().await;
