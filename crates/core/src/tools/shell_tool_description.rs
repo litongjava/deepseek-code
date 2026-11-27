@@ -15,7 +15,7 @@ Use `Read`, `Grep`, and `Glob` instead of `cat`/`sed`/`head`/`tail`/`grep`/`find
 
 Background tasks (`run_in_background: true`) and timed-out managed foreground commands notify and wake you automatically on completion. Never poll with foreground `sleep` loops or repeated TaskGet calls: continue other work or finish your turn, and call TaskGet only for intermediate output or `block: true`, or TaskStop to stop it. Without a managed session, a foreground timeout stops the process tree.
 
-When a call ends, every process it started is stopped, including background children. Start a server or daemon that must keep running after the call with `detach: true` (returns PID and log paths; stop it yourself when done).
+When a call ends, every process it started is stopped, including background children and auto-spawned helper daemons. To start a long-running service that must survive across calls—such as a frontend dev server (`vite`, `pnpm dev`), a backend/API server, or a local browser/database daemon—always set `detach: true` (returns PID and log paths; stop it explicitly when done). Use `run_in_background: true` only for finite tasks you expect to complete and notify you, not for persistent services.
 
 Ordinary capture keeps up to 1 MiB per stream; long results show head and tail within the preview budget (100 KiB per stream by default). Command permission checks also apply outside the sandbox.";
 
@@ -28,7 +28,7 @@ const FISH_NOTE: &str =
 const WSL_NOTE_PREFIX: &str = "The default is WSL";
 const WSL_NOTE_BODY: &str = ". Work with Linux paths inside the distribution. Drive C is normally mounted at /mnt/c, and launching Windows executables requires WSL interop.";
 const OTHER_SHELL_HINT: &str =
-    "If you override the default with shell, write the command for that interpreter.";
+    "To run a script for another interpreter listed in the `shell` parameter, pass `shell` directly instead of wrapping it inside the default shell, and write the command in that interpreter's syntax.";
 
 /// Shell-aware text for the Bash and Monitor tools.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -482,7 +482,11 @@ mod tests {
 
     #[test]
     fn description_matches_the_resolved_shell_and_host() {
-        assert!(BASH_DESCRIPTION.chars().count() <= 1500);
+        assert!(
+            BASH_DESCRIPTION.chars().count() <= 1700,
+            "BASH_DESCRIPTION length: {}",
+            BASH_DESCRIPTION.chars().count()
+        );
         for (label, host, shell) in [
             (
                 "Git Bash",
@@ -576,9 +580,17 @@ mod tests {
                 text.contains("every process it started is stopped"),
                 "{label}: {text}"
             );
+            assert!(
+                text.contains("auto-spawned helper daemons"),
+                "{label}: {text}"
+            );
             assert!(text.contains("`detach: true`"), "{label}: {text}");
             assert!(
-                text.contains("keep running after the call"),
+                text.contains("must survive across calls"),
+                "{label}: {text}"
+            );
+            assert!(
+                text.contains("Use `run_in_background: true` only for finite tasks"),
                 "{label}: {text}"
             );
         }

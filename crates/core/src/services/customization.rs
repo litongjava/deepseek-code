@@ -70,6 +70,8 @@ pub const CORE_TOOLS: &[&str] = &[
     "ExitPlanMode",
     "TaskGet",
     "TaskStop",
+    "TodoRead",
+    "TodoWrite",
     "WebFetch",
     "WebSearch",
 ];
@@ -405,6 +407,8 @@ mod tests {
                 "ExitPlanMode",
                 "TaskGet",
                 "TaskStop",
+                "TodoRead",
+                "TodoWrite",
                 "WebFetch",
                 "WebSearch",
             ]

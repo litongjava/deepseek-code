@@ -46,6 +46,7 @@ import MessageList, { draftsStore } from '../features/message-list/MessageList';
 import { handleSlashCommand, SLASH_COMMANDS } from '../features/slash-commands/registry';
 import SlashCommandSuggestions from '../features/slash-commands/SlashCommandSuggestions';
 import { createStreamCallbacks } from '../features/streaming/createStreamCallbacks';
+import { nextResourceAlertToast, type ResourceAlertToast } from '../features/streaming/resourceAlert';
 import { useStreamSession } from '../features/streaming/useStreamSession';
 import PanelsRenderer from '../features/panels/PanelsRenderer';
 import PlusMenu from '../features/plus-menu/PlusMenu';
@@ -450,6 +451,15 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
   const [projectToTrust, setProjectToTrust] = useState<Project | null>(null);
   const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
+  const [resourceAlertToast, setResourceAlertToast] = useState<ResourceAlertToast | null>(null);
+  const showResourceAlert = useCallback((alert: { summary?: string }) => {
+    setResourceAlertToast(current => nextResourceAlertToast(current, alert?.summary));
+  }, []);
+  useEffect(() => {
+    if (!resourceAlertToast) return;
+    const timer = setTimeout(() => setResourceAlertToast(null), 8000);
+    return () => clearTimeout(timer);
+  }, [resourceAlertToast?.id]);
   const [slashCommandFilter, setSlashCommandFilter] = useState<string | null>(null);
   const slashCommandAnchorRef = useRef<HTMLDivElement>(null);
   const slashCommandBoundaryRef = useRef<HTMLDivElement>(null);
@@ -751,6 +761,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 });
               },
               (event, message, data) => {
+                if (event === 'resource_alert') {
+                  showResourceAlert({ summary: data?.summary || message });
+                }
                 if (event === 'context_reset' && data?.boundary_id) {
                   setMessagesFor(convId, prev => prev.some(item => item.id === data.boundary_id) ? prev : [...prev, { id: data.boundary_id, role: 'user', content: data.content, is_compact_boundary: true }, { id: data.assistant_id, role: 'assistant', content: '' }]);
                   setPlanMode(false);
@@ -1420,6 +1433,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setPermissionApproval,
       setPlanMode,
       setConversationTitle,
+      onResourceAlert: showResourceAlert,
       loadConversation,
       activeId,
       pollTitle: true,
@@ -1612,6 +1626,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setPermissionApproval,
       setPlanMode,
       setConversationTitle,
+      onResourceAlert: showResourceAlert,
     });
     await sendMessage(
       conversationId,
@@ -1743,6 +1758,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setPermissionApproval,
       setPlanMode,
       setConversationTitle,
+      onResourceAlert: showResourceAlert,
     });
     await sendMessage(
       conversationId,
@@ -1895,10 +1911,20 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
         )
       )}
-      {webSearchToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
-          <IconWebSearch size={14} className="text-deepseek-textSecondary" />
-          {webSearchToast}
+      {(webSearchToast || resourceAlertToast) && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col items-center gap-2 max-w-[92vw]">
+          {resourceAlertToast && (
+            <div role="alert" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
+              <AlertTriangle size={14} className="shrink-0 text-amber-500" />
+              {resourceAlertToast.text}
+            </div>
+          )}
+          {webSearchToast && (
+            <div className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
+              <IconWebSearch size={14} className="text-deepseek-textSecondary" />
+              {webSearchToast}
+            </div>
+          )}
         </div>
       )}
     </>

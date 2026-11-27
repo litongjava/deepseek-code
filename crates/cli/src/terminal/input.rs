@@ -139,7 +139,7 @@ enum Message {
     BackgroundCounter(Box<dyn Fn() -> (usize, usize) + Send>),
     Subagents(deepseek_code_core::services::ServiceContext, String),
     AgentDetails(Box<dyn Fn(&crate::background_commands::HistoryAddress) -> String + Send>),
-    AgentRows(Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>),
+    AgentRows(Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
@@ -378,10 +378,11 @@ impl TerminalInput {
             .unwrap_or_else(|error| error.into_inner()) = effort;
     }
 
-    /// Rows for running background agents, shown above the editor.
+    /// Rows for running agents, with the background count that drives the
+    /// terminal title; both feed the editor's idle panel.
     pub fn set_agent_rows(
         &self,
-        rows: Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>,
+        rows: Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>,
     ) {
         let _ = self.requests.send(Message::AgentRows(rows));
     }

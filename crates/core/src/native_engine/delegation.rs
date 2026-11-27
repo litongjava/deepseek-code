@@ -1026,7 +1026,7 @@ impl ToolLoopExecutor {
             inline_skills: crate::prompt::inline_skills_for_session(
                 root,
                 id,
-                &crate::prompt::inline_skill_blocks(&skills),
+                &crate::prompt::inline_skill_blocks_for_workspace(&skills, Some(&workspace)),
             ),
             standalone_frontend: self.standalone_frontend,
             skills: crate::services::turn_context::invoked_skills_reminder(

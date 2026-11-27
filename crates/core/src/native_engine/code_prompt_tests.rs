@@ -645,7 +645,7 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
         git: Some("<system-reminder>\n# gitStatus\n</system-reminder>".into()),
         skills: None,
     });
-    assert_eq!(reminders.len(), 9);
+    assert_eq!(reminders.len(), 10);
     let body = capture_instruction_request("responses", reminders).await;
     assert!(body["instructions"]
         .as_str()
@@ -658,7 +658,7 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
         .find(|message| message["role"] == "user")
         .expect("the request carries the user message");
     let parts = first["content"].as_array().unwrap();
-    assert_eq!(parts.len(), 10, "{parts:?}");
+    assert_eq!(parts.len(), 11, "{parts:?}");
     assert!(
         parts.iter().all(|part| part["type"] == "input_text"),
         "{parts:?}"
@@ -676,8 +676,9 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
     assert!(text(6).contains(" - Platform: "));
     assert_eq!(text(7), crate::prompt::date_reminder("2026-11-19"));
     assert!(text(8).starts_with("<system-reminder>\n# gitStatus"));
-    assert_eq!(text(9), "hello");
-    for index in 0..9 {
+    assert_eq!(text(9), crate::prompt::session_tips_reminder());
+    assert_eq!(text(10), "hello");
+    for index in 0..10 {
         assert_eq!(
             text(index).matches("<system-reminder>").count(),
             1,
@@ -687,7 +688,7 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
     }
     println!(
         "first message parts: {:?}",
-        (0..9)
+        (0..10)
             .map(|index| text(index).chars().take(150).collect::<String>())
             .collect::<Vec<_>>()
     );
@@ -1105,7 +1106,7 @@ async fn memory_live_replay_bytes_after_clear_compression_and_steering() -> Resu
         shard: &SessionDb,
     ) -> Result<(ToolLoopExecutor, mpsc::Receiver<EngineEvent>)> {
         let mut provider = provider(base, "openai");
-        provider.model.context_window = Some(6500);
+        provider.model.context_window = Some(6800);
         provider.model.supports_vision = true;
         let (messages, boundary) = shard.read(|r| r.model_history(&ApiFormat::OpenAI))?;
         let (index, entries) = turn_context::replay(shard, boundary.as_deref(), &messages)?;

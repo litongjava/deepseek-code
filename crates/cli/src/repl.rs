@@ -44,6 +44,10 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     }
     eprint!("{out}");
     recorded.save();
+    if let Some(notice) = session.missing_workspace_banner_notice() {
+        command_eprintln!("{notice}");
+        return Ok(());
+    }
     if session.waiting_for_continue() {
         let active = crate::worker_frontend::settle_session(session)
             .ok()

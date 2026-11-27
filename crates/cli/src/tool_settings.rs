@@ -209,7 +209,7 @@ mod tests {
         assert!(core.iter().all(|row| row.enabled && row.on_demand));
         let list_dir = rows.iter().find(|row| row.name == "ListDir").unwrap();
         assert!(!list_dir.core && !list_dir.enabled && list_dir.on_demand);
-        let task_get = rows.iter().find(|row| row.name == "TaskGet").unwrap();
-        assert!(!task_get.core && task_get.on_demand);
+        let monitor = rows.iter().find(|row| row.name == "Monitor").unwrap();
+        assert!(!monitor.core && monitor.on_demand);
     }
 }

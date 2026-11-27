@@ -19,6 +19,9 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
         matches!(argument.trim(), "" | "--check"),
         "Usage: /status [--check]"
     );
+    if session.is_missing_workspace() {
+        return read_only_text(session);
+    }
     let provider = session.selected_provider().await?;
     let (worker, probe) = tokio::join!(
         session_worker::runtime_status(&session.paths.data_dir, &session.id),
@@ -356,6 +359,51 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
     if let Some(tools) = tools {
         output.push_str(&render_tools(&tools, scope));
     }
+    Ok(output)
+}
+
+/// `/status` for a session whose saved directory is gone. It reads only the
+/// saved conversation and never probes workers, tools or the workspace.
+fn read_only_text(session: &Session) -> Result<String> {
+    let title = session
+        .store
+        .db
+        .conversation_metadata(&session.id)
+        .ok()
+        .flatten()
+        .and_then(|row| row.title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "(unnamed)".into());
+    let messages = session
+        .selected_session()
+        .and_then(|shard| shard.read(|read| Ok(read.messages()?.len())))
+        .unwrap_or(0);
+    let missing = session.missing_workspace();
+    let mut output = String::from("Status\n\n");
+    output.push_str(&format!("  Session:      {title} ({})\n", session.id));
+    // A multi-folder project can keep its primary workspace while another
+    // required folder is gone; report the folder that makes this read-only.
+    let workspace = missing
+        .map(|missing| missing.missing_path.as_path())
+        .unwrap_or(session.workspace.as_path());
+    output.push_str(&format!(
+        "  Workspace:    {} (missing \u{b7} read-only)\n",
+        crate::session::terminal_safe(&workspace.to_string_lossy())
+    ));
+    if let Some(missing) = missing {
+        output.push_str(&format!(
+            "  Reason:       {}\n",
+            crate::session::terminal_safe(&missing.reason)
+        ));
+    }
+    output.push_str(&format!(
+        "  Model:        {} \u{b7} {} (display only)\n",
+        session.binding_state().provider_id,
+        session.binding_state().model
+    ));
+    output.push_str(&format!("  Messages:     {messages}\n"));
+    output.push_str("  Permissions:  read-only; prompts, tools and hooks are disabled\n");
+    output.push_str("  History:      Ctrl+O, /history, /export, /copy\n");
     Ok(output)
 }
 fn token_count(value: u64) -> String {

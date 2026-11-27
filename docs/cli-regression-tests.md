@@ -131,6 +131,12 @@ cargo test --locked -p deepseek-code-cli --test session_worker
 
 ## 场景
 
+### I50：父轮次转入后台后的子代理树
+
+- `cargo test --locked -p deepseek-code-cli --bin dcl -- idle_panel_`：同一父会话下的前台、后台子代理各占一行；没有独立后台任务的前台子代理也按子会话身份区分，重复的启动事件不增加行，失去执行租约后移除对应行。
+- 在真实终端用本地模拟模型一次返回两个 `Agent` 调用（同类型，描述分别为 A、B），分别阻塞两个子请求。两个后台调用、或先后台后前台时，应同时看到 A、B；依次放行后应只剩 B、再无子行。混合模式下另起一轮，在两个请求均阻塞时按 Ctrl+B 返回输入框，重复检查这三个状态。
+- 两个前台调用即便在同一模型响应中也会串行执行：先仅有 A，放行 A 后仅有 B。再测一次在 A 运行时按 Ctrl+B，返回输入框后仍应依次看到 A、B，而不是空树。用实际抵达模拟端点的请求核对屏幕，不把两个调用声明当作并发执行。
+
 ### 文件锁的平台一致性
 
 共用引擎的文件锁通过 `fs::try_lock_file`、`fs::lock_file` 获取，短暂竞争使用 `fs::try_lock_briefly`，逻辑结束时用 `fs::unlock_file` 显式释放。Android 使用系统 `flock`，其他平台沿用标准库。
@@ -303,6 +309,26 @@ cargo test --locked -p deepseek-code-core --lib current_rejects_a_worker_record
 ```
 
 第 1、2、4 条及 banner 的终端渲染需要真实 pty。2026-11-26 已在 macOS 用 tmux + 本地 mock SSE 跑通：owner 为 `dcl --resume ID --print`，observer 在 40×140 tmux 面板中 `dcl --resume ID`；banner、已发布文本、未提交提示、owner 结束后的输入恢复均通过，且观察期间没有模型请求。脚本和日志见 `dev-support/deepseek-code/session-occupancy-20261126/`（`dcl_occupancy_tmux.py`、`pty-run.log`）。Windows ConPTY 尚未运行。第 5 条由 `worker_frontend::failure_tests::losing_the_goal_proposal_frontend_keeps_the_task_view_and_its_output` 覆盖：running job 的 proposal presence 被另一 live frontend 接管后，观察只记录失败、禁用提案 UI，任务完成且无 cancel/detach。banner 去重由 `observe::tests::a_caller_banner_suppresses_the_first_running_notice` 覆盖；`/loop stop-*` 边界由 `turn_command_tests` 覆盖。`read_prompt` 期间被另一进程接管的 tick 门禁尚未用真实 pty 重跑。
+
+#### D10. 已删除目录的只读恢复
+
+保存的工程目录或绑定的会话 worktree 被删除后，历史仍在 `global.db` 与 `data/sessions/<id>/session.db`。交互式 REPL 必须能只读打开，严格执行路径仍必须失败。
+
+1. **严格路径不变**：`dcl --print --resume <id> …`、`--input-format stream-json`、`--fork-session`、`--init-only`、SDK、worker、Desktop 和 `--continue` 仍返回缺失目录错误（工程目录为 `Folder must be an existing absolute directory` / `Project folder is unavailable`，绑定 worktree 为 `Conversation worktree is unavailable; restore it before continuing`）。不得把这些入口降级为只读。
+2. **交互式 `dcl --resume <id>`**：不改变启动 cwd，不写目标会话库，不设置权限模式，不运行 SessionStart/Setup hooks，不注册协调行；显示 banner、完整历史与 `✻ Read-only mode: directory no longer exists (<path>).`。普通提示、多行提示、skill 提示、remote 提示、`!命令` 与 `# 记忆` 都提示未提交；`Shift+Tab` 与 effort 键提示只读；`/history`、`/export`、`/copy`、`/context`、`/cost`、`/status`、`/sessions`、`/tasks list|show|sessions|records`、主题/颜色/输出样式的无参数查看、`/help`、`/exit` 可用；`/clear`、`/branch`、`/compact`、`/model`、`/effort`、`/permissions`、`/rename`、`/config`、`/tasks cancel|answer|stop-session|attach` 等起始回合或修改会话/工作区的命令被拒绝。
+3. **切换**：在有效会话中输入 `/resume <缺失会话>` 进入只读；缺失目录不得显示为可写。`/resume` 选择器按 `Ctrl+A` 显示所有项目时，缺失目录的详情行带 ` · [missing]`。再次 `/resume <有效会话>` 恢复可写、权限模式和宿主 lifecycle hooks；重建缺失目录后 `/resume <原会话>` 也恢复可写。
+4. **保存的 provider/model 已从 `config.json` 删除**：仍以 observation-only 的显示绑定打开，状态行和 `/status` 显示保存的 provider/model 与 `read-only (directory missing)`，`/status` 不探测 worker、工具或语言服务器，状态行外部脚本不执行。
+5. **数据安全**：只读打开前后目标会话的 `updated_at`、`message_count` 与权限模式行不变；`turn()`、`clear()`、`branch_saved()`、`set_permission_mode()`、`cycle_permission_mode()` 均被门禁拒绝；`sync_workspace()` 无操作。信任、归档、非 Code、现有目录 canonical 路径变化等错误仍与严格 resume 一致，缺失目录不是信任绕过。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib inspection_tests
+cargo test --locked -p deepseek-code-cli --bin dcl missing_workspace_tests
+cargo test --locked -p deepseek-code-cli --bin dcl resume_tests
+```
+
+`inspection_tests` 覆盖缺失工程目录、缺失绑定 worktree、未信任、现有目录路径漂移、归档会话/工程、非 Code 会话与 projectless 私有目录；`missing_workspace_tests` 覆盖有效→缺失→有效、重建目录、缺失 provider、状态/模型标签、命令白名单与只读 footer；`resume_tests` 覆盖 `[missing]` 标记。macOS 默认 soft fd limit（256）会让 core 全量测试出现 `Too many open files`，先 `ulimit -n 8192`；该全量套件另有与本次改动无关的并行 cwd/超时失败，单独重跑通过。真实交互需要隔离数据目录与 PTY：先创建一个有历史的会话并删除其目录，再在另一目录运行 `dcl --resume <id>` 或 `/resume <id>`，确认只读 banner、历史、拒绝输入、`/history`/`/status`、`/resume <有效>` 恢复；在 `--resume` 选择器中按 `Ctrl+A` 选择带 `[missing]` 的条目。Windows ConPTY、Desktop WebView 和真实 provider 未在本轮验证。
 
 ### F. /tasks
 
@@ -1014,6 +1040,7 @@ SDK 用例通过真实 CLI、本地 OpenAI mock、ToolLoad 与私有 worker 验�
 - `native_engine/tool_call_ids.rs`（发给模型的请求体）：E1、E6；确认只改写超长调用 ID，未提供 `tool_calls`、`content` 等字段的消息不会被补成 `null`
 - `extended_commands.rs` 的复制（`/copy`、`/copy-session-id`、鼠标选择；右击复制后会取消选中并提示结果）：在没有 `xclip`、`wl-copy` 的 tmux 中执行 `/copy-session-id`，显示 `Copied session ID to clipboard`，`tmux show-buffer` 内容为会话 ID；在有 `xclip` 的桌面终端中复制后能粘贴。再跑 E
 - `skills/discovery.rs`、`native_engine/skill_tool.rs`、`native_engine/engine_core.rs` 的技能发现与模型列表、`cli/skill_commands.rs`：N
+- `services/resource_monitor.rs`、`native_engine/{engine_core,tool_loop}.rs` 的资源告警注入、`crates/cli/src/session.rs` 的监控启动与工作区同步：I43
 - 其他范围：至少跑 E
 
 ## 长命令输出摘要
@@ -1773,3 +1800,29 @@ cargo test --locked -p deepseek-code-cli --bin dcl shell_configuration_is_shared
 - 手工终端：在含 `.agents/experience/` 的临时工作区连本地 mock，确认首条消息顺序、`/config` 开关、恢复同一会话和压缩后只有一份块。Windows 与 Desktop WebView 未在本机验证。
 
 已知平台问题：macOS 上 `cargo check -p deepseek-code-cli --all-targets` 会在 `local_coordination_registry` 失败（`private_root` 使用 `#[cfg(unix)]`，CoordinationPaths 导入使用 `#[cfg(target_os = "linux")]`）。这是既有问题，与本次改动无关；本次用 `--bin dcl --test experience --test peripheral` 检查。
+
+### I43. 内置资源监控（CLI 与 Desktop 接入）
+
+改动范围：`services/resource_monitor.rs`、`native_engine/engine_core.rs` 与 `native_engine/tool_loop.rs` 的告警注入、`crates/cli/src/session.rs` 的监控启动与工作区同步、`src-tauri/src/lib.rs`、`src-tauri/src/bridge/mod.rs`、`src-tauri/src/bridge/routes/chat.rs`、`src-tauri/src/commands/mod.rs` 的 Desktop 接入。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib services::resource_monitor
+cargo test --locked -p deepseek-code-core --test resource_monitor
+cargo test --locked -p deepseek-code-core --lib native_engine::engine_core::resource_monitor_tests
+cargo test --locked -p deepseek-code-cli --bin dcl resource_alert_renders
+cargo test --locked -p deepseek-code-cli --bin dcl resource_alerts_serialize
+cargo test --locked -p deepseek-code-cli --test resource_monitor
+cargo check --locked -p deepseek-code-desktop --all-targets
+```
+
+`resource_alert_renders` 覆盖 `worker_frontend` 的 `● System resource warning: ...` 提示；`resource_alerts_serialize` 覆盖 stream-json 的 `kind/summary/details`。核心用例 `stale_undrained_alerts_expire_after_ttl` 与 `preparing_a_turn_updates_the_monitor_workspace` 分别覆盖恢复后陈旧告警清理，以及 EnterWorktree/ExitWorktree 后监控的磁盘目标跟随新工作区。
+
+手工终端（必须人为压低阈值；真实主机负载触发无法在自动用例中稳定复现）：
+
+1. 在隔离数据目录的 `<data>/config/settings.json` 写入 `{"resourceMonitor":{"enabled":true,"intervalSecs":2,"memoryAvailablePercentThreshold":99.9,"memoryAvailableMinBytes":1099511627776,"memoryConsecutive":1,"cooldownSecs":0}}`，启动 `dcl --data-dir <data>` 并发送普通消息。下一轮请求必须包含 `<kind>system_resource</kind>`、实际摘要和可执行的 `details`，终端显示 `● System resource warning: ...`；冷却期内同一资源只注入一次。
+2. 同一场景加 `--print` 或 `--output-format stream-json`：出现 `{"type":"resource_alert","kind":"memory","summary":...,"details":...}`，其他事件顺序不变。
+3. 空闲 REPL 等待数个采样周期：不得发起请求、不得显示提示；随后发送消息，告警只在该回合注入。两个同时空闲的 `dcl` 进程都不能被资源告警唤醒。
+4. 将 `enabled` 设为 false 或设置 `DEEPSEEK_CODE_RESOURCE_MONITOR=0` 后不再采样。恢复会话（resume）和 EnterWorktree/ExitWorktree 后，监控的磁盘目标应跟随新的工作区。
+5. Desktop 用同一配置对话时，Bridge SSE 应出现 `resource_alert`。本次未运行真实 Desktop 窗口，Windows 亦未验证。

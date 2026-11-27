@@ -541,6 +541,32 @@ pub(super) fn store_tool_call(
     Ok(())
 }
 
+/// Associates a stored tool call row with the originating `model_requests.id`
+/// and provider-emitted tool call ID (`provider_call_id`).
+///
+/// Only writes `request_id` when the referenced `model_requests` row already
+/// exists in this database, so live-stream flushes that precede snapshot
+/// persistence never trigger a foreign-key violation.
+pub fn set_tool_call_request_link(
+    conn: &Connection,
+    tool_call_id: &str,
+    request_id: Option<&str>,
+    provider_call_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tool_calls
+         SET request_id = CASE
+                 WHEN ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM model_requests WHERE id = ?2)
+                 THEN ?2
+                 ELSE request_id
+             END,
+             provider_call_id = COALESCE(?3, provider_call_id)
+         WHERE id = ?1",
+        params![tool_call_id, request_id, provider_call_id],
+    )?;
+    Ok(())
+}
+
 /// Records that `tool_call_id` was made by a nested ToolScript call whose parent
 /// is `parent_tool_call_id`, at the script's internal `sequence`.
 ///

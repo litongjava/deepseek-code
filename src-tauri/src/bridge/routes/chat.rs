@@ -327,6 +327,7 @@ pub(super) async fn start_authorized_chat(
         let mut full_text = String::new();
         let mut tools = Vec::new();
         let mut origins = deepseek_code_core::services::tool_history::ToolOrigins::new();
+        let mut request_links = deepseek_code_core::services::tool_history::ToolRequestLinks::new();
         let mut arguments = std::collections::HashMap::new();
 
         loop {
@@ -371,6 +372,9 @@ pub(super) async fn start_authorized_chat(
             };
             use crate::native_engine::tool_loop::EngineEvent;
             deepseek_code_core::services::tool_history::apply_event(&mut tools,&mut origins,&mut arguments,&event);
+            if let EngineEvent::ToolCallRequestLink { tool_use_id, request_id, provider_call_id } = &event {
+                request_links.insert(tool_use_id.clone(), (request_id.clone(), Some(provider_call_id.clone())));
+            }
             if let EngineEvent::ToolUseDone {tool_use_id,..} | EngineEvent::PipelineToolResult {tool_use_id,..}
                 | EngineEvent::NestedToolCall {tool_use_id,..} = &event {
                 if let Some(tool)=tools.iter().find(|t| t.id==*tool_use_id).cloned() {
@@ -378,8 +382,9 @@ pub(super) async fn start_authorized_chat(
                     let message=assistant_id.clone();
                     let content=full_text.clone();
                     let origin=origins.get(tool_use_id).map(|o|(tool_use_id.clone(),o.clone())).into_iter().collect();
+                    let link=request_links.get(tool_use_id).map(|l|(tool_use_id.clone(),l.clone())).into_iter().collect();
                     let saved=tokio::task::spawn_blocking(move || writer.save_segment(&message,SegmentUpdate {
-                        text:Some(&content),tools:std::slice::from_ref(&tool),origins:Some(&origin),..Default::default()
+                        text:Some(&content),tools:std::slice::from_ref(&tool),origins:Some(&origin),request_links:Some(&link),..Default::default()
                     })).await;
                     if !matches!(saved,Ok(Ok(()))) {tracing::error!("Could not persist tool result: {saved:?}");}
                 }
@@ -388,11 +393,19 @@ pub(super) async fn start_authorized_chat(
                 crate::native_engine::tool_loop::EngineEvent::CompactionNotice(message) => {
                     Some(serde_json::json!({"type":"compaction_notice","message":message}))
                 }
+                crate::native_engine::tool_loop::EngineEvent::ResourceAlert(alert) => {
+                    Some(serde_json::json!({
+                        "type":"resource_alert",
+                        "kind":alert.kind.as_str(),
+                        "summary":alert.summary(),
+                        "details":alert.details,
+                    }))
+                }
                 crate::native_engine::tool_loop::EngineEvent::ContextReset { session_id, boundary_id, assistant_id: reserved, reason } => {
                     if session_id == conv_id {
                         if let Err(error) = history.save_segment(&assistant_id, SegmentUpdate {
                             placement: SegmentPlacement::Before(&boundary_id), text: Some(&full_text), thinking: Some(""),
-                            tools: &tools, origins:Some(&origins), snapshots:Some(&serde_json::json!(request_snapshots)), ..Default::default()
+                            tools: &tools, origins:Some(&origins), request_links:Some(&request_links), snapshots:Some(&serde_json::json!(request_snapshots)), ..Default::default()
                         }) {
                             terminal_event = Some(serde_json::json!({"type":"error","error":format!("Cannot archive planning context: {error:#}")}));
                             break;
@@ -404,7 +417,7 @@ pub(super) async fn start_authorized_chat(
                                 break;
                             }
                         };
-                        full_text.clear(); tools.clear(); origins.clear(); arguments.clear(); request_snapshots.clear();
+                        full_text.clear(); tools.clear(); origins.clear(); request_links.clear(); arguments.clear(); request_snapshots.clear();
                         run.reset_progress();
                         run.set_turn(turn.record(), &assistant_id);
                         if matches!(reason, crate::native_engine::tool_loop::ContextResetReason::PlanApproval) {
@@ -597,6 +610,8 @@ pub(super) async fn start_authorized_chat(
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::RequestAttempt(event) => Some(event),
+                // Consumed into request_links above; it is not a client event.
+                crate::native_engine::tool_loop::EngineEvent::ToolCallRequestLink { .. } => None,
                 crate::native_engine::tool_loop::EngineEvent::BudgetWarning { message, usage, limit } => {
                     Some(serde_json::json!({
                         "type": "budget_warning",
@@ -657,7 +672,7 @@ pub(super) async fn start_authorized_chat(
             let saved = tokio::task::spawn_blocking(move || {
                 history.save_segment(&assistant_id,SegmentUpdate {
                     placement: SegmentPlacement::Final {observed_boundary:observed_plan_boundary.as_deref()},
-                    text: Some(&full_text),tools:&tools,origins:Some(&origins),snapshots:Some(&serde_json::json!(request_snapshots)),..Default::default()
+                    text: Some(&full_text),tools:&tools,origins:Some(&origins),request_links:Some(&request_links),snapshots:Some(&serde_json::json!(request_snapshots)),..Default::default()
                 })
             }).await;
             let persisted=matches!(saved,Ok(Ok(())));

@@ -92,8 +92,12 @@ impl DbManager {
 
 impl SessionDb {
     fn saved_invocations(&self) -> Result<Vec<(String, Invocation)>> {
+        self.read_invocations("SELECT attempt_key,child_incarnation,invocation FROM child_invocations ORDER BY rowid")
+    }
+
+    fn read_invocations(&self, query: &str) -> Result<Vec<(String, Invocation)>> {
         self.read(|r|{
-            let mut q=r.0.prepare("SELECT attempt_key,child_incarnation,invocation FROM child_invocations ORDER BY rowid")?;
+            let mut q=r.0.prepare(query)?;
             let mut rows=q.query([])?;
             let mut out=Vec::new();
             while let Some(row)=rows.next()? {
@@ -103,6 +107,39 @@ impl SessionDb {
             }
             Ok(out)
         })
+    }
+
+    /// Foreground children have no supervisor job. Resolve the latest attempt
+    /// per incarnation and confirm its running progress against the execution lease.
+    pub fn running_foreground_children(&self) -> Result<Vec<(super::HistoryAddress, String)>> {
+        let candidates = self.read_invocations(
+            "SELECT attempt_key,child_incarnation,invocation FROM child_invocations
+             WHERE rowid IN (SELECT max(rowid) FROM child_invocations GROUP BY child_incarnation)
+               AND json_extract(invocation,'$.mode')='foreground'
+               AND json_extract(invocation,'$.status') IN ('starting','running') ORDER BY rowid",
+        )?;
+        let mut running = Vec::new();
+        for (inc, inv) in candidates {
+            let Some(child) = self.stores.selected_child(&inv.child_session_id, &inc)? else {
+                continue;
+            };
+            let Some(progress) = child.read(|r| r.setting(super::settings::CHILD_PROGRESS))? else {
+                continue;
+            };
+            let progress = Value::Object(progress);
+            if subagents::status_with_progress(
+                self.stores.data_dir(),
+                &inv,
+                Some(&progress),
+                self.incarnation(),
+                child.incarnation(),
+            )? == "running"
+            {
+                let kind = progress["agent_type"].as_str().unwrap_or("general");
+                running.push((child.address(), kind.to_owned()));
+            }
+        }
+        Ok(running)
     }
 }
 

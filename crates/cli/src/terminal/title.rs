@@ -76,6 +76,12 @@ pub(crate) fn background(running: bool) {
     }
 }
 
+/// Whether the busy marker is set, for consumers that own the count.
+#[cfg(test)]
+pub(crate) fn background_active() -> bool {
+    CURRENT.lock().unwrap_or_else(|error| error.into_inner()).background
+}
+
 pub fn start() {
     set("\u{2733} DeepSeek Code");
 }

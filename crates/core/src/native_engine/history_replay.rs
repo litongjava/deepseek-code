@@ -55,6 +55,7 @@ impl ToolLoopExecutor {
         input: &Value,
         output: &str,
         is_error: bool,
+        request_id: Option<&str>,
     ) {
         let (Some(ExecutorHistory::Session(_)), Some(segment)) =
             (&self.executor_history, &self.parent_message_id)
@@ -72,6 +73,12 @@ impl ToolLoopExecutor {
         };
         self.tool_order += 1;
         self.replay_tools.push(row);
+        if let Some(request_id) = request_id {
+            self.replay_request_links.insert(
+                call.id.clone(),
+                (request_id.to_owned(), Some(call.provider_id.clone())),
+            );
+        }
     }
 
     fn flush_replay_segment(
@@ -91,10 +98,12 @@ impl ToolLoopExecutor {
             crate::db::session_store::SegmentUpdate {
                 text,
                 tools: &self.replay_tools,
+                request_links: Some(&self.replay_request_links),
                 ..Default::default()
             },
         )?;
         self.replay_tools.clear();
+        self.replay_request_links.clear();
         Ok(())
     }
 
@@ -592,6 +601,7 @@ impl ToolLoopExecutor {
             .await?;
         self.tool_order = 0;
         self.replay_tools.clear();
+        self.replay_request_links.clear();
         self.stop_hook_active = false;
         self.last_reported_input_tokens = None;
         self.last_request_message_tokens = None;

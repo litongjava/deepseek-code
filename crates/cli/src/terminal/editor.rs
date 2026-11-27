@@ -175,7 +175,8 @@ pub struct PromptEditor {
     /// Rows for running background agents at a width, shown above the editor.
     subagent_context: Option<(deepseek_code_core::services::ServiceContext, String)>,
     agent_details: Option<Box<dyn Fn(&crate::background_commands::HistoryAddress) -> String + Send>>,
-    agent_rows: Option<Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>>,
+    /// Background count and rows for running agents, shown above the editor.
+    agent_rows: Option<Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>>,
     /// The model and reasoning effort, at the right of the footer.
     effort: Option<String>,
     effort_control: Option<(
@@ -1449,9 +1450,22 @@ impl PromptEditor {
 
     pub fn set_agent_rows(
         &mut self,
-        rows: Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>,
+        rows: Box<dyn Fn() -> (usize, Vec<crate::background_commands::Agent>) + Send>,
     ) {
         self.agent_rows = Some(rows);
+    }
+
+    /// One poll of the idle row callback: the background count drives the
+    /// terminal title, while every row (background jobs and foreground
+    /// children) fills the panel above the editor.
+    fn poll_agent_rows(
+        &self,
+        width: usize,
+    ) -> Option<(bool, Vec<crate::background_commands::Agent>, Vec<String>)> {
+        let (background, records) = self.agent_rows.as_ref()?();
+        crate::terminal::title::background(background > 0);
+        let lines = crate::background_commands::agent_rows(&records, width);
+        Some((background > 0, records, lines))
     }
     pub fn set_effort_control(
         &mut self,
@@ -1667,10 +1681,9 @@ impl PromptEditor {
             let width = cols.saturating_sub(1).max(4) as usize;
             if last_agents.elapsed() >= std::time::Duration::from_secs(1) {
                 last_agents = std::time::Instant::now();
-                if let Some(rows) = &self.agent_rows {
-                    agent_records = rows();
-                    crate::terminal::title::background(!agent_records.is_empty());
-                    agents = crate::background_commands::agent_rows(&agent_records, width);
+                if let Some((_background, records, lines)) = self.poll_agent_rows(width) {
+                    agent_records = records;
+                    agents = lines;
                     if let (Some(id), Some(details)) = (&agent_detail, &self.agent_details) {
                         agent_preview = details(id);
                     }
@@ -4196,6 +4209,56 @@ mod tests {
         assert_eq!(clipped("中文abc", 5), "中文a");
         assert_eq!(clipped("e\u{301}x", 1), "e\u{301}");
         assert_eq!(clipped("\u{1b}hi", 2), "hi");
+    }
+
+    /// The idle panel consumes the callback's background count and rows
+    /// separately: foreground children show up without marking the title.
+    #[test]
+    fn idle_panel_title_uses_background_count_and_rows_fill_the_panel() {
+        fn agent(session: &str, description: &str) -> crate::background_commands::Agent {
+            crate::background_commands::Agent {
+                address: crate::background_commands::HistoryAddress {
+                    session: session.into(),
+                    store: String::new(),
+                    incarnation: String::new(),
+                },
+                agent_type: "general".into(),
+                description: description.into(),
+                started_ms: 0,
+                output_tokens: 0,
+                tokens_estimated: false,
+            }
+        }
+
+        let mut editor = PromptEditor::default();
+        // A detached turn's foreground child is a panel row, not background work.
+        editor.set_agent_rows(Box::new(|| (0, vec![agent("child-b", "foreground B")])));
+        let (background, records, lines) = editor.poll_agent_rows(80).unwrap();
+        assert!(!background, "a foreground child must not mark the title busy");
+        assert!(!crate::terminal::title::background_active());
+        assert_eq!(records.len(), 1);
+        let panel = lines.join("\n");
+        assert!(panel.contains("foreground B"), "{panel}");
+
+        // One background job plus the foreground child: both rows show and the
+        // background count alone sets the title marker.
+        editor.set_agent_rows(Box::new(|| {
+            (
+                1,
+                vec![
+                    agent("child-a", "background A"),
+                    agent("child-b", "foreground B"),
+                ],
+            )
+        }));
+        let (background, records, lines) = editor.poll_agent_rows(80).unwrap();
+        assert!(background, "a background job must mark the title busy");
+        assert!(crate::terminal::title::background_active());
+        assert_eq!(records.len(), 2);
+        let panel = lines.join("\n");
+        assert!(panel.contains("background A"), "{panel}");
+        assert!(panel.contains("foreground B"), "{panel}");
+        crate::terminal::title::background(false);
     }
 }
 

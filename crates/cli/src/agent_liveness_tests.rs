@@ -1,6 +1,7 @@
+use super::*;
 #[cfg(test)]
 use crate::fixture_sql::FixtureSql;
-use super::*;
+use deepseek_code_core::services::session_messages::ExecutionLease;
 use serde_json::json;
 
 struct Fixture {
@@ -73,6 +74,100 @@ impl Fixture {
             &self.job.parent_session_id,
         )
     }
+
+    fn foreground(&self, parent: &SessionDb) -> (HistoryAddress, ExecutionLease) {
+        use deepseek_code_core::db::session_store::settings::{AGENT_DESCRIPTION, CHILD_PROGRESS};
+        use deepseek_code_core::services::subagents::Invocation;
+
+        let db = &self.context.db;
+        let store = deepseek_code_core::runtime::SessionStore::new(db.clone());
+        let id = store
+            .create(self._dir.path(), "test", "cli-runtime")
+            .unwrap();
+        let child = db.open_session(&id).unwrap();
+        let lease = ExecutionLease::acquire(&self.context.paths.data_dir, child.incarnation())
+            .unwrap()
+            .unwrap();
+        let description = "ACTIVE_AGENT_SENTINEL";
+        let progress = json!({"session_id":id,"parent_session_id":parent.id(),"status":"running",
+            "agent_type":"general","started_at":chrono::Utc::now().to_rfc3339()});
+        db.seed_preference(&id, CHILD_PROGRESS, &progress).unwrap();
+        db.seed_preference(&id, AGENT_DESCRIPTION, &json!(description))
+            .unwrap();
+        parent
+            .write(|w| {
+                w.child_invocation(
+                    &child.address(),
+                    &Invocation {
+                        parent_session_id: parent.id().into(),
+                        parent_message_id: w.append("assistant", "")?,
+                        tool_use_id: format!("call-{id}"),
+                        child_session_id: id.clone(),
+                        attempt_id: id.clone(),
+                        mode: "foreground".into(),
+                        status: "starting".into(),
+                        description: description.into(),
+                    },
+                )
+            })
+            .unwrap();
+        (child.address(), lease)
+    }
+}
+
+#[test]
+fn idle_panel_keeps_foreground_sibling_after_parent_detaches() {
+    let fixture = Fixture::new();
+    let context = &fixture.context;
+    let parent = context
+        .db
+        .open_session(&fixture.job.parent_session_id)
+        .unwrap();
+    let (child, lease) = fixture.foreground(&parent);
+
+    // The idle tree gets no live events; both rows even have identical display labels.
+    let rows = || panel_agents(context, &parent, &[]).1;
+    let agents = rows();
+    assert_eq!(agents.len(), 2);
+    assert!(agents
+        .iter()
+        .all(|a| a.agent_type == "general" && a.description == "ACTIVE_AGENT_SENTINEL"));
+    assert!(agents
+        .iter()
+        .any(|a| a.address.session == fixture.job.session_id));
+    assert!(agents.iter().any(|a| a.address == child));
+    drop(lease); // A lost worker must not leave a stale running row.
+    let agents = rows();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].address.session, fixture.job.session_id);
+}
+
+#[test]
+fn idle_panel_tracks_foreground_children_without_supervisor_jobs() {
+    let mut fixture = Fixture::new();
+    fixture.job.status = "completed".into();
+    fixture.save();
+    let context = &fixture.context;
+    let parent = context
+        .db
+        .open_session(&fixture.job.parent_session_id)
+        .unwrap();
+    let (a, first) = fixture.foreground(&parent);
+    let (b, second) = fixture.foreground(&parent);
+    let addresses = |live: &[(HistoryAddress, String)]| {
+        let (background, agents) = panel_agents(context, &parent, live);
+        assert_eq!(background, 0);
+        agents
+            .into_iter()
+            .map(|agent| agent.address)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(addresses(&[]), [a.clone(), b.clone()]);
+    assert_eq!(addresses(&[(a.clone(), "general".into())]), [a, b.clone()]);
+    drop(first);
+    assert_eq!(addresses(&[]), [b]);
+    drop(second);
+    assert!(addresses(&[]).is_empty());
 }
 
 #[test]
@@ -196,7 +291,8 @@ fn agent_lifecycle_terminal_fixture() {
     let parent = fixture.job.parent_session_id.clone();
     let mut editor = crate::terminal::input::editor::PromptEditor::default();
     editor.set_agent_rows(Box::new(move || {
-        running_agents(&context.paths, &context.db, &parent)
+        let rows = running_agents(&context.paths, &context.db, &parent);
+        (rows.len(), rows)
     }));
     println!("LIVENESS_IDLE_READY");
     loop {

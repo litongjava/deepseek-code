@@ -631,11 +631,7 @@ fn hook_journal(path: &std::path::Path) -> Vec<Value> {
 fn write_hooks(workspace: &std::path::Path, settings: &Value) {
     let directory = workspace.join(".claude");
     std::fs::create_dir_all(&directory).unwrap();
-    deepseek_code_core::data_layout::write_config_file(
-        directory.join("config/settings.json"),
-        settings.to_string(),
-    )
-    .unwrap();
+    std::fs::write(directory.join("settings.json"), settings.to_string()).unwrap();
 }
 
 #[derive(Debug)]

@@ -128,6 +128,22 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 2. 对同一数据目录运行 `dcl --data-dir <目录> sessions export <id> --output <file>`。逐行解析 JSONL，核对头部会话 ID、incarnation、消息顺序、审批、附件路径和轨迹中的请求。归档后重复导出。流式回答期间导出时，核对已提交片段和运行状态；随后收到的片段应出现在下一次导出。
 3. 运行 `cargo test --locked -p deepseek-code-desktop --test conversation_generation_bridge --test input_queue_bridge --test trajectory_persistence` 覆盖 Bridge 的生成、排队和轨迹。运行 `cargo test --locked -p deepseek-code-cli --test session_export` 校验导出末行计数、SHA-256、文件名冲突和旧库三个文件的哨兵。
 
+### D5a. 内置资源监控（resource_alert）
+
+Desktop 与 CLI 共用 `crates/core` 的监控服务。Bridge 在 `src-tauri/src/bridge/routes/chat.rs` 把引擎事件转成 SSE：`{"type":"resource_alert","kind":"cpu|memory|disk","summary":"...","details":"..."}`。前端由 `src/api.ts`、`src/api/chat.ts`、`src/api/conversations.ts` 转发到 `onSystem('resource_alert', summary, parsed)`；`src/features/streaming/createStreamCallbacks.ts` 的 `onSystemEvents` 与 `onSystemEventsLight` 调用 `onResourceAlert`，`MainContent` 以底部警告 toast 显示 `System resource warning: <summary>`（8 秒后自动消失），不改写流式正文、工具步骤或加载状态。
+
+1. 在隔离数据目录压低阈值（配置见 `cli-regression-tests.md` 的 I43），用真实 Desktop 窗口发送消息：Bridge SSE 出现 `resource_alert`，界面显示非阻塞警告；连续告警不打断回答，空或缺失 `summary` 不显示。
+2. 恢复会话、EnterWorktree/ExitWorktree 后再次触发磁盘告警：`details` 中的目标工作区跟随当前工作区，恢复前已过期的告警不再显示。
+3. 自动检查：
+
+   ```bash
+   npx tsc --noEmit
+   npm run test:run
+   cargo check --locked -p deepseek-code-desktop --all-targets
+   ```
+
+   `src/features/streaming/resourceAlert.test.ts` 覆盖两条 `onSystemEvents` 路径的告警分发、空/缺失 `summary`、非活动会话，以及流式正文和工具状态保持不变。本轮的 Desktop/WebView 手工场景未运行。
+
 ### E. 浏览器和手机（dcd-server）
 
 用独立数据目录启动：`DEEPSEEK_CODE_DATA_DIR=<测试目录>/data target/debug/dcd-server --port 30185 --web-dir dist`（先 `npm run build`）。
@@ -175,6 +191,7 @@ Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的�
 - `AgentCustomization`、`api/customization`、`routes/customization.rs`、`services/customization.rs`、`prompt/`：B
 - `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、Desktop 入口 `main.rs` 的调度部分：C
 - `CustomizePage`：B、D5
+- 内置资源监控（`services/resource_monitor.rs`、`bridge/routes/chat.rs`、`api.ts`/`api/chat.ts`/`api/conversations.ts`、`features/streaming/`、`MainContent`）：I43、D5a
 - `services/bridgeConnection.ts`、`features/server/`、`platform/native.ts`、`bridge/server_mode.rs`、`bin/dcd-server.rs`、`lib.rs` 的移动端入口、`gen/android/`：E、D1
 - `features/project/FolderPicker.tsx`、`FolderFields.tsx`、`routes/filesystem.rs`、core 的 `fs/directories.rs`、`components/ui/Modal.tsx`：E3、D3
 - 轮询与请求合并（`QueueDock`、`PlanApprovalController`、`useVisiblePolling`、`utils/inflight.ts`）、压缩与缓存（`bridge/mod.rs` 的静态文件）、`routes/conversations.rs` 的快照共享：E11、E13、D1、D2

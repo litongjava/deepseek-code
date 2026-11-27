@@ -3,7 +3,7 @@ use super::ExecutorHistory;
 use crate::db::message_repo::{self as messages, ToolCallRow};
 use crate::services::{
     input_queue::{self, DeliveredInput},
-    tool_history::ToolOrigins,
+    tool_history::{ToolOrigins, ToolRequestLinks},
 };
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection};
@@ -27,6 +27,7 @@ pub struct SegmentUpdate<'a> {
     pub thinking: Option<&'a str>,
     pub tools: &'a [ToolCallRow],
     pub origins: Option<&'a ToolOrigins>,
+    pub request_links: Option<&'a ToolRequestLinks>,
     pub durations: Option<&'a HashMap<String, u64>>,
     pub notes: Option<&'a HashMap<String, Vec<String>>>,
     pub inputs: Option<&'a HashMap<String, Vec<DeliveredInput>>>,
@@ -112,6 +113,24 @@ impl SegmentUpdate<'_> {
         }
         Ok(())
     }
+
+    fn persist_request_links(&self, c: &Connection, message: &str) -> Result<()> {
+        let Some(links) = self.request_links else {
+            return Ok(());
+        };
+        for tool in self.tools {
+            if let Some((request_id, provider_call_id)) = links.get(&tool.id) {
+                let occurrence = format!("{message}:{}", tool.id);
+                messages::set_tool_call_request_link(
+                    c,
+                    &occurrence,
+                    Some(request_id.as_str()),
+                    provider_call_id.as_deref(),
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ExecutorHistory {
@@ -190,6 +209,7 @@ impl ExecutorHistory {
                     if let Some(requests) = update.snapshots {
                         w.snapshots(message, requests)?;
                     }
+                    update.persist_request_links(w.0, message)?;
                     Ok(())
                 })
             }
@@ -199,6 +219,7 @@ impl ExecutorHistory {
                     if let Some(requests) = update.snapshots {
                         messages::save_request_snapshots(tx, message, requests)?;
                     }
+                    update.persist_request_links(tx, message)?;
                     Ok(())
                 })
             })?,

@@ -4,8 +4,10 @@ use crate::fixture_sql::FixtureSql;
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::{
+    db::session_store::SessionDb,
     runtime::RuntimePaths,
     services::background_sessions::{self, Launch},
+    services::ServiceContext,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,7 +651,7 @@ pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, St
 
 pub(crate) use deepseek_code_core::db::session_store::HistoryAddress;
 
-/// One background agent started by this session.
+/// One running agent started by this session.
 #[derive(Clone)]
 pub(crate) struct Agent {
     pub address: HistoryAddress,
@@ -671,7 +673,11 @@ pub(crate) fn running_agents(
     };
     let Ok(parent) = db.select_session(session).and_then(|r| context.db.open_recorded(session, r.observation_identity())) else { return Vec::new(); };
     let Ok(_parent) = parent.hold_incarnation() else { return Vec::new(); };
-    let Ok(jobs) = background_sessions::owned_jobs(&paths.data_dir, session) else {
+    background_agent_rows(&context, &parent)
+}
+
+fn background_agent_rows(context: &ServiceContext, parent: &SessionDb) -> Vec<Agent> {
+    let Ok(jobs) = background_sessions::owned_jobs(&context.paths.data_dir, parent.id()) else {
         return Vec::new();
     };
     jobs.into_iter()
@@ -681,7 +687,7 @@ pub(crate) fn running_agents(
                 .db.background_agent(&job.id)
                 .ok()
                 .flatten()?;
-            let child = background_sessions::owned_execution(&paths.data_dir, &parent, &job).ok()?;
+            let child = background_sessions::owned_execution(&context.paths.data_dir, parent, &job).ok()?;
             let output_tokens = child.read(|r| r.output_tokens()).ok()?;
             Some(Agent {
                 address: child.address(),
@@ -693,6 +699,27 @@ pub(crate) fn running_agents(
             })
         })
         .collect()
+}
+
+/// Return the background count (for the title) and one panel row per child.
+/// Detached turns still own foreground children, but the idle editor has no event stream.
+pub(crate) fn panel_agents(
+    context: &ServiceContext,
+    parent: &SessionDb,
+    live: &[(HistoryAddress, String)],
+) -> (usize, Vec<Agent>) {
+    let Ok(_guard) = parent.hold_incarnation() else {
+        return (0, Vec::new());
+    };
+    let mut agents = background_agent_rows(context, parent);
+    let background = agents.len();
+    let persisted = parent.running_foreground_children().unwrap_or_default();
+    for (address, kind) in persisted.iter().chain(live) {
+        if !agents.iter().any(|row| &row.address == address) {
+            agents.extend(foreground_agent(context, address, kind));
+        }
+    }
+    (background, agents)
 }
 
 /// Agent questions already answered here; one stays pending until its
@@ -1202,13 +1229,23 @@ fn monitor_notifications(session: &Session) -> Result<Vec<String>> {
     Ok(notices)
 }
 
+/// A detached turn still owns execution. Leave input queued for its owner
+/// rather than yielding the idle editor to start a competing turn.
+pub(crate) fn next_idle_input(session: &Session) -> Result<Option<deepseek_code_core::services::input_queue::QueueItem>> {
+    if session.waiting_for_continue() {
+        return Ok(None);
+    }
+    let item = session.store.db.next_desktop_input(&session.id)?;
+    if item.is_some() && crate::observe::execution_lease_active(session)? {
+        return Ok(None);
+    }
+    Ok(item)
+}
+
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
-    if session.waiting_for_continue() {
-        return Ok(false);
-    }
-    let Some(item)=session.store.db.next_desktop_input(&session.id)? else { return Ok(false); };
+    let Some(item) = next_idle_input(session)? else { return Ok(false); };
     // Another process may own the session even when this terminal was not
     // resumed. Leave the notification queued instead of racing its lease.
     if crate::worker_frontend::occupancy(session)?.is_some() {
@@ -1586,6 +1623,12 @@ mod worker_config_tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        let lease = session.selected_session().unwrap().acquire_execution().unwrap();
+        assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        assert!(requests.lock().unwrap().is_empty());
+        drop(lease);
         assert!(wake_for_notifications(&cli, &mut session, &mut None)
             .await
             .unwrap());

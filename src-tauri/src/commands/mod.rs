@@ -285,12 +285,16 @@ pub async fn native_engine_init(
             .lock().await.clone()
             .ok_or_else(|| "PermissionManager not initialized".to_string())?;
         let engine = crate::runtime::create_engine(
-            &crate::runtime::RuntimePaths { data_dir },
+            &crate::runtime::RuntimePaths { data_dir: data_dir.clone() },
             db_manager,
             provider_manager,
             permission_manager,
             Arc::new(crate::cache::FileCache::new()),
-        );
+        )
+        .with_resource_monitor(crate::start_resource_monitor(
+            &data_dir,
+            data_dir.clone(),
+        ));
         *engine_guard = Some(engine);
     }
     Ok(())

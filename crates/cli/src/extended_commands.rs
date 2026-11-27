@@ -87,7 +87,9 @@ pub async fn handle(
                 // searchable picker, newest first; Ctrl+A shows every project,
                 // Space previews and Ctrl+R renames.
                 use crate::terminal::picker::{Entry, Key, Picked, Picker};
-                let mut all = false;
+                // Inside a read-only missing-directory session, show every
+                // project first so switching back to a valid session is one step.
+                let mut all = session.is_missing_workspace();
                 let mut this_branch = false;
                 let current_branch = git_branch(&session.workspace);
                 let mut selected = 0;
@@ -98,9 +100,14 @@ pub async fn handle(
                     }
                     let entries: Vec<_> = found.iter().map(|(_, entry)| Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
                     let project = format!("{}   {}", if all { "cwd  [all]" } else { "[cwd]  all" }, session.workspace.display());
-                    let hint = format!("Tab: cwd/all · Ctrl+A: cwd/all · Ctrl+B: {} · Space: preview · Ctrl+R: rename · Type to search · Esc: cancel", if this_branch { "all branches" } else { "current branch" });
+                    let rename = if session.is_missing_workspace() { "" } else { "Ctrl+R: rename · " };
+                    let hint = format!("Tab: cwd/all · Ctrl+A: cwd/all · Ctrl+B: {} · Space: preview · {rename}Type to search · Esc: cancel", if this_branch { "all branches" } else { "current branch" });
                     let picker = Picker { heading: "Resume session", subtitle: Some(&project), entries: &entries, search: true, hint: &hint, selected };
-                    match picker.run_keys(&[Key::Tab, Key::Ctrl('a'), Key::Ctrl('b'), Key::Space, Key::Ctrl('r')])? {
+                    let mut keys = vec![Key::Tab, Key::Ctrl('a'), Key::Ctrl('b'), Key::Space];
+                    if !session.is_missing_workspace() {
+                        keys.push(Key::Ctrl('r'));
+                    }
+                    match picker.run_keys(&keys)? {
                         Picked::Entry(index) => {
                             session.resume_saved(paths, &found[index].0).await?;
                             crate::repl::show_resumed(session, true)?;
@@ -118,7 +125,9 @@ pub async fn handle(
                             selected = index;
                             crate::terminal::transcript_pager::view(&crate::repl::transcript_of(session, &found[index].0)?)?;
                         }
-                        Picked::Key(Key::Ctrl('r'), Some(index)) => {
+                        Picked::Key(Key::Ctrl('r'), Some(index))
+                            if !session.is_missing_workspace() =>
+                        {
                             selected = index;
                             if let Some(title) = crate::terminal::picker::text_input("Rename session:", &found[index].1.title)?.filter(|title| !title.is_empty()) {
                                 let title: String = title.chars().take(200).collect();
@@ -813,8 +822,13 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
         let row = entry.conversation;
         let title = resume_title(row.title.as_deref().filter(|s| !s.trim().is_empty() && *s!="CLI session").unwrap_or("(no prompt)"),entry.latest.as_deref());
         let mut detail = format!("{} · {} · {}",ago(&row.updated_at),entry.branch.as_deref().unwrap_or("HEAD"),short_size(entry.bytes));
-        if let Some(path)=row.workspace_path.filter(|_| all) {
-            detail.push_str(&format!(" · {path}"));
+        if all {
+            if let Some(path) = row.workspace_path.as_deref() {
+                detail.push_str(&format!(" · {path}"));
+                if !Path::new(path).is_dir() {
+                    detail.push_str(" · [missing]");
+                }
+            }
         }
         (row.id,Resumable {title,detail,branch:entry.branch})
     }).collect())
@@ -829,6 +843,56 @@ mod resume_tests {
         assert_eq!(base64(b"hello"), "aGVsbG8=");
         assert_eq!(base64(b"hi"), "aGk=");
         assert_eq!(base64("中".as_bytes()), "5Lit");
+    }
+
+    #[tokio::test]
+    async fn the_all_projects_picker_marks_missing_directories() {
+        use deepseek_code_core::runtime::SessionStore;
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let first_id = store.create(&first, "fixture", "fixture").unwrap();
+        let second_id = store.create(&second, "fixture", "fixture").unwrap();
+        store.append(&second_id, "user", "saved history").unwrap();
+        let provider = serde_json::from_value(serde_json::json!({
+            "id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1",
+            "api_key":"unused","api_format":"openai","enabled":true,
+            "models":[{"id":"fixture","name":"Fixture","enabled":true,
+                "supports_vision":false,"supports_web_search":false}]
+        }))
+        .unwrap();
+        let cli = crate::args::Cli::try_parse_with_mode_source(["dcl"]).unwrap();
+        let session = Session::open(
+            &cli,
+            &paths,
+            crate::config::Selection {
+                providers: vec![provider],
+                provider_id: "fixture".into(),
+                model: "fixture".into(),
+            },
+            Some(&first_id),
+        )
+        .await
+        .unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
+        let entries = resumable(&session, true).unwrap();
+        let entry = entries
+            .iter()
+            .find(|(id, _)| id == &second_id)
+            .map(|(_, entry)| entry)
+            .expect("missing session listed");
+        assert!(entry.detail.contains("[missing]"), "{}", entry.detail);
+        assert!(
+            entry.detail.contains(&second.canonicalize().unwrap_or(second.clone()).to_string_lossy().to_string())
+                || entry.detail.contains(&second.to_string_lossy().to_string()),
+            "{}",
+            entry.detail
+        );
+        session.close().await.unwrap();
     }
 
     #[test]

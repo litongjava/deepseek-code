@@ -88,6 +88,7 @@ fn the_request_carries_only_the_core_tools_by_default() {
     let temp = tempfile::tempdir().unwrap();
     let executor = executor(temp.path());
     let names = names(&executor);
+    let reminder = loadable_reminder(&executor).expect("on-demand tools");
     for name in [
         "Bash",
         "Read",
@@ -103,6 +104,8 @@ fn the_request_carries_only_the_core_tools_by_default() {
         "ExitPlanMode",
         "TaskGet",
         "TaskStop",
+        "TodoRead",
+        "TodoWrite",
         "WebFetch",
         "WebSearch",
     ] {
@@ -110,6 +113,9 @@ fn the_request_carries_only_the_core_tools_by_default() {
             names.contains(&name.to_owned()),
             "{name} missing: {names:?}"
         );
+    }
+    for name in ["TodoRead", "TodoWrite"] {
+        assert!(!reminder.contains(name), "resident {name} in {reminder}");
     }
     for name in [
         "ListDir",
@@ -1352,10 +1358,11 @@ fn on_demand_mcp_tool_not_loaded_is_refused() {
 fn a_restricted_agent_without_discovery_still_receives_its_granted_tools() {
     let temp = tempfile::tempdir().unwrap();
     let mut executor = executor(temp.path());
-    executor.allowed_tools = Some(vec!["Read".into(), "ListDir".into()]);
+    executor.allowed_tools = Some(vec!["TodoRead".into(), "ListDir".into()]);
     let visible = names(&executor);
     assert!(visible.contains(&"ListDir".to_owned()), "{visible:?}");
-    assert!(visible.contains(&"Read".to_owned()), "{visible:?}");
+    assert!(visible.contains(&"TodoRead".to_owned()), "{visible:?}");
+    assert!(!visible.contains(&"TodoWrite".to_owned()), "{visible:?}");
 
     // With ToolLoad granted the agent keeps the normal on-demand rule.
     executor.allowed_tools = Some(vec!["Read".into(), "ListDir".into(), "ToolLoad".into()]);

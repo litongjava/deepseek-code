@@ -435,6 +435,11 @@ impl Copier<'_> {
                     values[i] = Value::Text(metadata.to_string());
                 }
             }
+            if table == "tool_calls" {
+                if let Ok(i) = idx("request_id") {
+                    values[i] = Value::Null;
+                }
+            }
             if table == "session_permission_authority" {
                 values[idx("id")?] = Value::Null
             }
@@ -570,6 +575,25 @@ impl Copier<'_> {
             self.rows(table, message, Some(("id", table)), &[])?
         }
         self.rows("model_requests", message, Some(("id", "request")), &[])?;
+        if let Ok(mut q) = self
+            .src
+            .prepare("SELECT id, request_id FROM tool_calls WHERE request_id IS NOT NULL")
+        {
+            let mut rows = q.query([])?;
+            while let Some(row) = rows.next()? {
+                let old_tool: String = row.get(0)?;
+                let old_req: String = row.get(1)?;
+                if let (Some(new_tool), Some(new_req)) = (
+                    self.mapped("tool", &old_tool)?,
+                    self.mapped("request", &old_req)?,
+                ) {
+                    self.dst.execute(
+                        "UPDATE tool_calls SET request_id=?1 WHERE id=?2",
+                        [&new_req, &new_tool],
+                    )?;
+                }
+            }
+        }
         self.rows(
             "request_metadata",
             Some(("request_id", "request")),

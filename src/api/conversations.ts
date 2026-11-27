@@ -598,6 +598,9 @@ export async function reconnectStream(
               onSystem(parsed.type, '', parsed);
             }
             if ((parsed.type === 'request_snapshot' || parsed.type === 'turn_timing') && onSystem) onSystem(parsed.type, '', parsed);
+            if (parsed.type === 'resource_alert' && onSystem) {
+              onSystem('resource_alert', parsed.summary || '', parsed);
+            }
             if (parsed.type === 'message_start' && onSystem) {
               onSystem('message_start', '', parsed);
             }

@@ -416,6 +416,8 @@ export async function sendMessageNative(
             } else if (event.type === 'tool_use_done') {
               onToolUse?.({ type: 'done', tool_use_id: event.tool_use_id || '', tool_name: event.tool_name || 'unknown', tool_input: event.tool_input || {}, content: event.output || event.content || '', is_error: event.is_error === true });
             } else if (event.type === 'tool_arg_delta') {
+            } else if (event.type === 'resource_alert') {
+              onSystem?.('resource_alert', event.summary || '', event);
             } else if (event.type === 'message_start') {
               onSystem?.('message_start', '', { model: event.message?.model });
             } else if (event.type === 'message_delta') {
@@ -942,6 +944,11 @@ export async function sendMessage(
               if (onSystem) {
                 try { onSystem('ask_user', '', parsed); } catch (err) { console.error('[API] onSystem ask_user callback error:', err); }
               }
+              continue;
+            }
+
+            if (parsed.type === 'resource_alert') {
+              onSystem?.('resource_alert', parsed.summary || '', parsed);
               continue;
             }
 

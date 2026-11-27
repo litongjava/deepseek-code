@@ -61,6 +61,10 @@ pub(crate) struct ModelCall {
     pub text: Option<String>,
     pub is_error: bool,
     pub sort_order: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_call_id: Option<String>,
 }
 
 pub(crate) fn calls(conn: &Connection, message: &str, session: &str) -> Result<Vec<ModelCall>> {
@@ -83,12 +87,27 @@ fn read_calls(
     session: &str,
     replay: bool,
 ) -> Result<Vec<ModelCall>> {
-    let mut query = conn.prepare_cached(
+    let (mut query, has_request_links) = match conn.prepare_cached(
         "SELECT t.id,t.message_id,t.name,t.input,coalesce(s.display_text,t.model_output,t.output),
-                t.is_error,t.sort_order,t.model_checked=0 AND t.model_output IS NULL AND s.tool_use_id IS NULL
+                t.is_error,t.sort_order,t.model_checked=0 AND t.model_output IS NULL AND s.tool_use_id IS NULL,
+                t.request_id,t.provider_call_id
          FROM tool_calls t LEFT JOIN mcp_tool_outputs s
            ON ?3 AND s.conversation_id=?2 AND s.tool_use_id=t.id AND s.display_text=t.output
-         WHERE t.message_id=?1 ORDER BY t.sort_order,t.rowid")?;
+         WHERE t.message_id=?1 ORDER BY t.sort_order,t.rowid",
+    ) {
+        Ok(stmt) => (stmt, true),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such column") => {
+            let stmt = conn.prepare_cached(
+                "SELECT t.id,t.message_id,t.name,t.input,coalesce(s.display_text,t.model_output,t.output),
+                        t.is_error,t.sort_order,t.model_checked=0 AND t.model_output IS NULL AND s.tool_use_id IS NULL
+                 FROM tool_calls t LEFT JOIN mcp_tool_outputs s
+                   ON ?3 AND s.conversation_id=?2 AND s.tool_use_id=t.id AND s.display_text=t.output
+                 WHERE t.message_id=?1 ORDER BY t.sort_order,t.rowid",
+            )?;
+            (stmt, false)
+        }
+        Err(err) => return Err(err.into()),
+    };
     let mut rows = query.query(rusqlite::params![message, session, replay])?;
     let mut calls = Vec::new();
     while let Some(row) = rows.next()? {
@@ -109,6 +128,11 @@ fn read_calls(
                 }
             }
         }
+        let (request_id, provider_call_id) = if has_request_links {
+            (row.get(8)?, row.get(9)?)
+        } else {
+            (None, None)
+        };
         calls.push(ModelCall {
             id,
             message_id: row.get(1)?,
@@ -117,6 +141,8 @@ fn read_calls(
             text,
             is_error: row.get(5)?,
             sort_order: row.get(6)?,
+            request_id,
+            provider_call_id,
         });
     }
     Ok(calls)

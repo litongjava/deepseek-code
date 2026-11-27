@@ -270,7 +270,11 @@ impl BridgeServer {
             permission_manager.clone(),
             file_cache.clone(),
         ).with_skills_manager(skill_manager.clone())
-         .with_mcp_registry(Arc::new(crate::mcp::McpToolRegistry::new(mcp_server_manager.clone()))))));
+         .with_mcp_registry(Arc::new(crate::mcp::McpToolRegistry::new(mcp_server_manager.clone())))
+         .with_resource_monitor(crate::start_resource_monitor(
+             &data_dir,
+             data_dir.clone(),
+         )))));
         tracing::info!(module = "Bridge", "NativeEngine initialized");
 
         let orchestrator_config =

@@ -68,6 +68,7 @@ mod worktrees;
 pub use projects::{ProjectEdit,Projects};
 mod repair;
 mod runtime;
+pub use runtime::ResumedWorkspace;
 pub mod settings;
 mod state;
 pub(crate) use state::message_origin;

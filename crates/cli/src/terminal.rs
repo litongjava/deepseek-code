@@ -148,6 +148,56 @@ pub fn banner(model: &str, workspace: &std::path::Path) -> String {
     )
 }
 
+/// Startup reminder message shown when independent web search is missing any
+/// required field (`base_url`, `model`, or `api_key`).
+pub const WEB_SEARCH_STARTUP_REMINDER: &str =
+    "Web search not configured \u{b7} run /search-config to set up DeepSeek, OpenAI, or Anthropic";
+
+/// Formats one or more startup `System Reminder` bullet lines printed below
+/// the interactive welcome banner.
+pub fn startup_system_reminder(items: &[&str]) -> Option<String> {
+    let items: Vec<&str> = items
+        .iter()
+        .copied()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    if screen_reader() || std::env::var_os("NO_COLOR").is_some() {
+        let mut out = String::from("System Reminder\n");
+        for item in items {
+            out.push_str("- ");
+            out.push_str(item);
+            out.push('\n');
+        }
+        return Some(out);
+    }
+    use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
+    let accent = SetForegroundColor(style::accent());
+    let muted = SetForegroundColor(style::muted());
+    let mut out = format!(
+        " {accent}{}System Reminder{}{ResetColor}\n",
+        SetAttribute(Attribute::Bold),
+        SetAttribute(Attribute::Reset),
+    );
+    for item in items {
+        out.push_str(&format!(" {muted}- {item}{ResetColor}\n"));
+    }
+    Some(out)
+}
+
+/// Returns the startup `System Reminder` block when web search is missing any
+/// of `base_url`, `model`, or `api_key`.
+pub fn web_search_startup_reminder(
+    search: &deepseek_code_core::config::DeepSeekSearchConfig,
+) -> Option<String> {
+    (!search.is_configured())
+        .then(|| startup_system_reminder(&[WEB_SEARCH_STARTUP_REMINDER]))
+        .flatten()
+}
+
 /// The input prompt marker: the reference CLI's `❯`, or `>` for screen
 /// readers and dumb terminals.
 pub fn prompt_glyph() -> &'static str {
@@ -467,5 +517,34 @@ mod command_output_tests {
         }
         assert_eq!(String::from_utf8(output).unwrap(), history.all().join("\r\n") + "\r\n");
         assert_eq!(history.all().len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod startup_reminder_tests {
+    use super::{web_search_startup_reminder, WEB_SEARCH_STARTUP_REMINDER};
+    use deepseek_code_core::config::DeepSeekSearchConfig;
+
+    #[test]
+    fn web_search_reminder_triggers_when_url_model_or_key_is_missing() {
+        let default = DeepSeekSearchConfig::default();
+        let reminder = web_search_startup_reminder(&default).expect("missing api_key");
+        assert!(reminder.contains("System Reminder"), "{reminder}");
+        assert!(
+            reminder.contains(&format!("- {WEB_SEARCH_STARTUP_REMINDER}")),
+            "{reminder}"
+        );
+
+        let mut complete = default.clone();
+        complete.api_key = "sk-search".into();
+        assert!(web_search_startup_reminder(&complete).is_none());
+
+        let mut missing_url = complete.clone();
+        missing_url.base_url = "  ".into();
+        assert!(web_search_startup_reminder(&missing_url).is_some());
+
+        let mut missing_model = complete.clone();
+        missing_model.model.clear();
+        assert!(web_search_startup_reminder(&missing_model).is_some());
     }
 }

@@ -1180,11 +1180,37 @@ fn plan_worker_events_only_apply_successful_transitions() {
     }
 }
 
+#[test]
+fn resource_alert_renders_a_system_resource_warning_notice() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut display =
+        TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
+    render(
+        &mut display,
+        &serde_json::json!({
+            "type": "resource_alert",
+            "kind": "memory",
+            "summary": "Low memory: 1.0 GiB available",
+            "details": "Reduce parallel jobs and command output."
+        }),
+    );
+    assert_eq!(
+        display.take_notices(),
+        vec!["● System resource warning: Low memory: 1.0 GiB available".to_string()]
+    );
+}
+
 fn render(display: &mut TurnDisplay, event: &Value) {
     let text = |name: &str| event[name].as_str().unwrap_or("");
     match text("type") {
         "hook_progress" => display.hook_progress(text("hook_id"), event["status_message"].as_str()),
         "notice" => display.notice(text("message")),
+        "resource_alert" => {
+            let summary = text("summary");
+            if !summary.is_empty() {
+                display.notice(&format!("● System resource warning: {summary}"));
+            }
+        }
         "request_attempt" => { if let Some(message) = event["message"].as_str() { display.notice(message); } },
         "text" => display.before_text(text("delta")),
         "queued_input" => display.queued_delivered(text("text")),

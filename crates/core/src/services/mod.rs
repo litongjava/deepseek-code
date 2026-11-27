@@ -48,6 +48,7 @@ pub mod magic_docs;
 pub mod agents;
 pub mod agent_import;
 pub mod diagnostics;
+pub mod resource_monitor;
 pub mod runtime_status;
 pub mod doctor;
 pub mod feedback;

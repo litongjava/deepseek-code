@@ -55,6 +55,7 @@ interface StreamContext {
   setPermissionApproval: (approval: any) => void;
   setPlanMode: (mode: boolean) => void;
   setConversationTitle: (title: string) => void;
+  onResourceAlert?: (alert: { kind: string; summary: string; details?: string }) => void;
   loadConversation?: (id: string) => Promise<void>;
   activeId?: string | null;
   pollTitle?: boolean;
@@ -151,7 +152,14 @@ export function createStreamCallbacks(ctx: StreamContext) {
     isCreatingRef, setLoading, setCompactStatus, setContextInfo, setTokenUsage,
     setActiveTasks, setAskUserDialog, setToolPermissionDialog, setPermissionApproval,
     setPlanMode, setConversationTitle, loadConversation, activeId, pollTitle,
+    onResourceAlert,
   } = ctx;
+
+  function reportResourceAlert(message: string, data: any) {
+    const summary = (typeof data?.summary === 'string' ? data.summary : message || '').trim();
+    if (!summary) return;
+    onResourceAlert?.({ kind: data?.kind || '', summary, details: data?.details });
+  }
 
   function cleanup() {
     removeStreaming(conversationId);
@@ -304,6 +312,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
 
   const onSystemEvents = (event: string, message: string, data: any) => {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'resource_alert') { reportResourceAlert(message, data); return; }
     if (event === 'queued_input' && data?.queueItem) {
       useBusySendStore.getState().accept(conversationId, data.queueItem);
       return;
@@ -608,6 +617,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
   const onSystemEventsLight = (event: string, message: string, data: any) => {
     if (event === 'context_reset') { onSystemEvents(event, message, data); return; }
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'resource_alert') { reportResourceAlert(message, data); return; }
     if (event === 'queued_input' && data?.queueItem) {
       useBusySendStore.getState().accept(conversationId, data.queueItem);
       return;
