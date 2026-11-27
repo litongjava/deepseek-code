@@ -76,7 +76,7 @@ fn requests_preserve_protocol_and_reasoning_replay() {
 }
 
 #[test]
-fn foreign_reasoning_keeps_summary_and_drops_opaque_state() {
+fn foreign_reasoning_drops_the_entire_item() {
     let p = provider("openai", "openai-responses", "http://localhost/v1");
     let mut assistant = user();
     assistant.role = "assistant".into();
@@ -99,10 +99,8 @@ fn foreign_reasoning_keeps_summary_and_drops_opaque_state() {
     )
     .unwrap();
     let input = body["input"].as_array().unwrap();
-    assert_eq!(input.len(), 3);
-    assert!(input[1].get("encrypted_content").is_none());
-    assert_eq!(input[1]["summary"][0]["text"], "kept");
-    assert_eq!(input[2]["content"][0]["text"], "answer");
+    assert_eq!(input.len(), 2);
+    assert_eq!(input[1]["content"][0]["text"], "answer");
 }
 
 #[test]
@@ -127,8 +125,8 @@ fn legacy_reasoning_without_an_issuer_is_treated_as_foreign() {
         100,
     )
     .unwrap();
-    assert!(body["input"][0].get("encrypted_content").is_none());
-    assert_eq!(body["input"][0]["summary"][0]["text"], "old");
+    assert_eq!(body["input"].as_array().unwrap().len(), 1);
+    assert_eq!(body["input"][0]["content"][0]["text"], "answer");
 }
 
 #[test]
@@ -153,8 +151,8 @@ fn a_different_model_on_the_same_provider_is_foreign_too() {
         100,
     )
     .unwrap();
-    assert!(body["input"][0].get("encrypted_content").is_none());
-    assert_eq!(body["input"][0]["summary"][0]["text"], "kept");
+    assert_eq!(body["input"].as_array().unwrap().len(), 1);
+    assert_eq!(body["input"][0]["content"][0]["text"], "answer");
 }
 
 #[test]
@@ -185,7 +183,7 @@ fn foreign_anthropic_thinking_is_dropped_with_its_signature() {
 }
 
 #[test]
-fn responses_replays_plain_thinking_into_an_empty_native_item() {
+fn responses_replays_only_self_contained_native_reasoning_verbatim() {
     let p = provider("openai", "openai-responses", "http://localhost/v1");
     let mut assistant = user();
     assistant.role = "assistant".into();
@@ -193,6 +191,7 @@ fn responses_replays_plain_thinking_into_an_empty_native_item() {
     assistant.provider_content = Some(json!({
         "api":"openai-responses","provider":"test","model":"fixture-model",
         "items":[
+            {"type":"reasoning","id":"rs_summary_only","summary":[]},
             {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"},
             {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}
         ]
@@ -208,32 +207,60 @@ fn responses_replays_plain_thinking_into_an_empty_native_item() {
     )
     .unwrap();
     let input = body["input"].as_array().unwrap();
-    let reasoning: Vec<_> = input.iter().filter(|item| item["type"] == "reasoning").collect();
+    let reasoning: Vec<_> = input
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect();
     assert_eq!(reasoning.len(), 1);
-    assert_eq!(reasoning[0]["summary"][0]["text"], "prior plan");
-    assert_eq!(reasoning[0]["encrypted_content"], "opaque");
+    assert_eq!(
+        reasoning[0],
+        &json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"})
+    );
 }
 
 #[test]
-fn responses_adds_plain_thinking_without_native_items() {
+fn responses_and_compact_preserve_mixed_history_without_synthesizing_reasoning() {
     let p = provider("openai", "openai-responses", "http://localhost/v1");
     let mut assistant = user();
     assistant.role = "assistant".into();
     assistant.reasoning_content = Some("prior plan".into());
+    assistant.tool_calls = Some(
+        serde_json::from_value(
+            json!([{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]),
+        )
+        .unwrap(),
+    );
+    let mut result = user();
+    result.role = "tool".into();
+    result.tool_call_id = Some("call_1".into());
+    let reasoning =
+        json!({"type":"reasoning","id":"rs_native","summary":[],"encrypted_content":"opaque"});
+    let mut gpt = user();
+    gpt.role = "assistant".into();
+    gpt.provider_content = Some(
+        json!({"api":"openai-responses","provider":"test","model":"fixture-model","items":[reasoning]}),
+    );
+    let history = vec![user(), assistant, result, gpt];
     let body = messages::request(
         "openai-responses",
         &p,
         &Value::Null,
-        vec![assistant],
+        history.clone(),
         None,
         vec![],
         100,
     )
     .unwrap();
-    let input = body["input"].as_array().unwrap();
-    assert_eq!(input[0]["type"], "reasoning");
-    assert_eq!(input[0]["summary"][0]["text"], "prior plan");
-    assert_eq!(input[1]["role"], "assistant");
+    let compact = compaction_request(&p, history, "compact", None).unwrap();
+    let expected = json!([
+        {"role":"user","content":[{"type":"input_text","text":"hello"}]},
+        {"role":"assistant","content":[{"type":"output_text","text":"hello"}]},
+        {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"},
+        {"type":"function_call_output","call_id":"call_1","output":"hello"},
+        reasoning
+    ]);
+    assert_eq!(body["input"], expected);
+    assert_eq!(compact["input"], expected);
 }
 
 #[test]
@@ -2065,7 +2092,9 @@ fn compaction_cache_options_follow_the_gpt_model_version() {
 fn matching_opaque_history_remains_readable_after_a_non_gpt_model_switches_to_summary_compaction() {
     use crate::services::compaction::native;
     let fixture = provider("openai", "openai-responses", "http://localhost");
-    let history = [json!({"role":"user","provider_content":{"compaction":true,"provider":"test","base_url":"http://localhost","model":"fixture-model"}})];
+    let history = [
+        json!({"role":"user","provider_content":{"compaction":true,"provider":"test","base_url":"http://localhost","model":"fixture-model"}}),
+    ];
     assert!(!native::supports(&fixture));
     native::validate_history(&history, &fixture).unwrap();
     let mut different = fixture;
