@@ -39,7 +39,9 @@ fn registry() -> &'static Mutex<HashMap<String, Vec<Task>>> {
 fn directory(root: &std::path::Path, session: &str) -> std::path::PathBuf {
     let digest = ring::digest::digest(&ring::digest::SHA256, session.as_bytes());
     let key: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    root.join("hook-async").join(key)
+    crate::data_layout::DataLayout::from_root(root)
+        .state_dir("hook-async")
+        .join(key)
 }
 
 pub(crate) fn register(

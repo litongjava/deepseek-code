@@ -74,9 +74,7 @@ impl HookRunner {
         {
             let task = prepare_command(hook, &self.workspace, input, env_file.as_deref())?;
             super::super::async_hooks::register(
-                self.once_directory
-                    .parent()
-                    .context("Async hook state directory is missing")?,
+                &self.data_dir,
                 session,
                 task,
                 hook.async_rewake.then(|| {

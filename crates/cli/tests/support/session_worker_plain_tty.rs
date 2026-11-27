@@ -168,3 +168,109 @@ async fn failed_request_prints_one_diagnostic_in_plain_modes() {
         eprintln!("{mode:?}: one HTTP 401 diagnostic, one failed job and a successful follow-up");
     }
 }
+
+#[tokio::test]
+async fn frontend_session_start_delivers_once_and_rewakes_the_idle_worker() {
+    const ORDINARY: &str = "frontend-ordinary-marker";
+    const REWAKE: &str = "frontend-rewake-marker";
+    for mode in MODES {
+        let fixture = OwnerFixture::new().await;
+        let work = fixture.temp.path().join("work");
+        fs::write(
+            work.join("ordinary.sh"),
+            format!("echo '{{\"systemMessage\":\"{ORDINARY}\"}}'"),
+        )
+        .unwrap();
+        fs::write(
+            work.join("rewake.sh"),
+            format!("while [ ! -e release ]; do sleep 0.05; done\necho {REWAKE} >&2\nexit 2"),
+        )
+        .unwrap();
+        deepseek_code_core::data_layout::write_config_file(fixture.paths.layout().config_file("settings.json"),
+            json!({"hooks":{"SessionStart":[{"hooks":[
+                {"type":"command","command":"sh ordinary.sh","async":true,"once":true},
+                {"type":"command","command":"sh rewake.sh","asyncRewake":true,"once":true,"timeout":45}
+            ]}]}}).to_string()).unwrap();
+        let mut tty = mode.terminal(&fixture).await;
+        // Observe the actual result next to an owner lease still held by the
+        // frontend process, before the worker receives its first chat request.
+        let root = fixture.paths.data_dir.join("state/hook-async");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut owners = 0;
+                let mut published = false;
+                for entry in fs::read_dir(format!("/proc/{}/fd", tty.pid()))
+                    .unwrap()
+                    .flatten()
+                {
+                    let Ok(path) = fs::read_link(entry.path()) else {
+                        continue;
+                    };
+                    if path.starts_with(&root)
+                        && path.file_name().is_some_and(|name| name == "owner")
+                    {
+                        owners += 1;
+                        published |= fs::read_to_string(path.with_file_name("result"))
+                            .is_ok_and(|s| s.contains(ORDINARY));
+                    }
+                }
+                if owners == 2 && published {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("frontend hook leases and published ordinary result");
+        mode.successful_turn(&mut tty, "first explicit turn").await;
+        mode.successful_turn(&mut tty, "second explicit turn").await;
+        fs::write(work.join("release"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                tty.pump(true);
+                let jobs = jobs::list(&fixture.paths.data_dir, Some(&fixture.session)).unwrap();
+                if jobs.len() >= 3 && jobs.iter().all(|j| j.status == "completed") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("idle hook job did not finish");
+        // Allow another idle poll to expose a replay.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        {
+            let requests = fixture.requests.lock().unwrap();
+            let wire: Vec<_> = requests
+                .iter()
+                .filter(|r| r["stream"] == true)
+                .map(|r| r["messages"].to_string())
+                .collect();
+            assert_eq!(wire.len(), 3, "{mode:?}");
+            assert!(wire[0].contains("first explicit turn"));
+            assert!(wire[1].contains("second explicit turn"));
+            assert_eq!(wire[0].matches(ORDINARY).count(), 1);
+            assert_eq!(wire.join("").matches(ORDINARY).count(), 1);
+            assert_eq!(wire[2].matches(REWAKE).count(), 1);
+            assert_eq!(wire.join("").matches(REWAKE).count(), 1);
+            assert!(wire[2].contains("Stop hook blocking error from command"));
+        }
+        let db = fixture.paths.open_database().unwrap();
+        let authority = deepseek_code_core::services::permission_authority::history(
+            &db,
+            &fixture.session,
+            10000,
+        )
+        .unwrap();
+        assert_eq!(
+            authority,
+            [
+                json!({"role":"user","content":"first explicit turn"}),
+                json!({"role":"user","content":"second explicit turn"})
+            ]
+        );
+        tty.submit("/exit", mode.line_editor()).await;
+        tty.wait_success().await;
+        eprintln!("{mode:?}: frontend published before first turn, ordinary result delivered once, one idle hook request and two human authority entries");
+    }
+}
