@@ -207,3 +207,35 @@ async fn html_pages_keep_readable_text_instead_of_raw_markup() {
     assert!(f.model_requests().is_empty());
     f.stop().await;
 }
+
+#[tokio::test]
+async fn a_roomy_context_keeps_the_configured_summary_budget() {
+    let f = Fixture::start().await;
+    let result = f
+        .fetch("long", 0, "what is on the page?", 128_000, 8_192)
+        .await;
+    assert_eq!(result["result"], "model answer");
+    assert_eq!(result["summarized"], true);
+    let requests = f.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["max_tokens"], 8_192);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_tight_context_reserves_only_the_output_room_that_fits() {
+    let f = Fixture::start().await;
+    let result = f
+        .fetch("long", 0, "what is on the page?", 8_192, 8_192)
+        .await;
+    assert_eq!(result["result"], "model answer");
+    assert_eq!(result["summarized"], true);
+    let requests = f.model_requests();
+    assert_eq!(requests.len(), 1);
+    let budget = requests[0]["max_tokens"].as_u64().unwrap();
+    assert!(
+        budget > 0 && budget < 8_192,
+        "a tight context must reserve only the remaining room: {budget}"
+    );
+    f.stop().await;
+}
