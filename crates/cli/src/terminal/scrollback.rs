@@ -110,11 +110,23 @@ impl CompactMode {
     }
 }
 static COMPACT: CompactMode = CompactMode(AtomicUsize::new(0));
+#[cfg(test)]
+thread_local! {
+    static COMPACT_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+}
 pub(crate) fn compact() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = COMPACT_OVERRIDE.with(|value| value.get()) {
+        return enabled;
+    }
     COMPACT.enabled()
 }
 pub(crate) fn toggle_compact() {
     COMPACT.toggle();
+}
+#[cfg(test)]
+pub(crate) fn set_compact(enabled: Option<bool>) {
+    COMPACT_OVERRIDE.with(|value| value.set(enabled));
 }
 
 struct CompactRow {

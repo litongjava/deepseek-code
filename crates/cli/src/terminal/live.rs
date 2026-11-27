@@ -1631,7 +1631,28 @@ impl Frame {
             && preview.is_empty()
             && state.group.is_none()
             && !state.activity.starts_with("Running Bash");
-        let (running, _) = running_lines(state, width, content_budget(self.size.1), false, usize::MAX, adjacent);
+        // The compact transcript opens at its tail. Give the running calls only
+        // the rows that stay visible, so gaps and hints never push a header off
+        // the top while its status remains; whole calls are omitted if needed.
+        let room = if super::scrollback::compact() {
+            let page = (self.size.1 as usize).saturating_sub(self.composer_height);
+            let trailing = state
+                .notices
+                .iter()
+                .map(|notice| {
+                    1 + notice
+                        .lines()
+                        .map(|line| super::markdown::wrap_styled(line, "", "", width.max(1)).len())
+                        .sum::<usize>()
+                })
+                .sum::<usize>()
+                + usize::from(adjacent);
+            page.saturating_sub(self.history_view.header_rows(page))
+                .saturating_sub(trailing)
+        } else {
+            usize::MAX
+        };
+        let (running, _) = running_lines(state, width, content_budget(self.size.1), false, room, adjacent);
         if !running.is_empty() {
             let gap = if adjacent { "" } else { "\n" };
             self.history_view.append(&format!("{gap}{}", running.join("\n")), width);

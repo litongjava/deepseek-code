@@ -139,3 +139,95 @@ fn two_parallel_calls_after_thought() {
 fn three_parallel_calls_after_thought() {
     mock_turn(3, 24);
 }
+
+fn compact_visible_rows(count: usize, height: u16) -> Vec<String> {
+    struct CompactReset;
+    impl Drop for CompactReset {
+        fn drop(&mut self) {
+            crate::terminal::scrollback::set_compact(None);
+        }
+    }
+    let _reset = CompactReset;
+    crate::terminal::scrollback::set_compact(Some(true));
+    let tmp = tempfile::tempdir().unwrap();
+    let mut display = TurnDisplay::new(false, "ask", &tmp.path().join("keys"), vec![]).unwrap();
+    let (updates, receive) = mpsc::channel();
+    let (_, actions) = async_mpsc::unbounded_channel();
+    display.live = Some(LiveTurn {
+        updates,
+        actions,
+        worker: None,
+    });
+    display.record_thinking(&["Checking"; 11].join("\n"));
+    let calls = [
+        ("Read", serde_json::json!({"file_path":"fixture"})),
+        (
+            "WebFetch",
+            serde_json::json!({"url":"https://example.invalid"}),
+        ),
+        ("Bash", serde_json::json!({"command":"echo fixture"})),
+    ];
+    for (i, (name, input)) in calls[3 - count..].iter().enumerate() {
+        display.tool_started(&i.to_string(), name, input);
+    }
+    let size = (80, height);
+    let mut frame = Frame {
+        size,
+        top: Some(0),
+        aligned: true,
+        ..Frame::default()
+    };
+    frame.pinned.text = "Inspect the fixture".into();
+    let mut state = State::new("ask".into());
+    dispatch(&receive, &mut frame, &mut state);
+    for call in &mut state.running {
+        call.started = Instant::now() - Duration::from_secs(3);
+    }
+    frame.draw_at(&mut state, size).unwrap();
+    frame
+        .history_view
+        .screen_rows(height as usize, &frame.lines)
+        .iter()
+        .map(|row| super::super::markdown::plain_rendered(row))
+        .collect()
+}
+
+fn assert_visible_pairs(rows: &[String], count: usize) {
+    let headers: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("\u{25cf} #"))
+        .map(|(index, _)| index)
+        .collect();
+    let statuses: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("\u{23bf}  Running"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(headers.len(), count, "missing call headers: {rows:#?}");
+    assert_eq!(statuses.len(), count, "missing running statuses: {rows:#?}");
+    for status in statuses {
+        assert!(
+            status > 0 && rows[status - 1].contains("\u{25cf} #"),
+            "detached status: {rows:#?}"
+        );
+    }
+    for header in headers {
+        assert!(
+            header + 1 < rows.len() && rows[header + 1].contains("\u{23bf}  Running"),
+            "header without status: {rows:#?}"
+        );
+    }
+    assert_eq!(rows[0], "\u{276f} Inspect the fixture");
+}
+
+#[test]
+fn compact_tail_keeps_two_running_statuses_with_headers_at_80x14() {
+    assert_visible_pairs(&compact_visible_rows(2, 14), 2);
+}
+
+#[test]
+fn compact_tail_keeps_three_running_statuses_with_headers_at_80x17() {
+    assert_visible_pairs(&compact_visible_rows(3, 17), 3);
+}
