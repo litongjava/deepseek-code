@@ -1,6 +1,7 @@
 //! Stdio ownership follows an inherited environment entry across fork, exec and
 //! setsid. Parentage and the original process group also cover observed children
 //! that subsequently exec with a clean environment.
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
@@ -9,6 +10,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 mod fences;
 pub(crate) use fences::drain_predecessors;
@@ -17,14 +19,39 @@ const INSTANCE_ENV: &str = "DEEPSEEK_CODE_MCP_INSTANCE";
 const TERM_GRACE: Duration = Duration::from_millis(250);
 const STOP_BOUND: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(10);
-static OWNER: OnceLock<uuid::Uuid> = OnceLock::new();
+static OWNER: OnceLock<Uuid> = OnceLock::new();
+
+fn owner_uuid(worker_id: &str) -> Uuid {
+    if let Some(id) = Uuid::parse_str(worker_id)
+        .ok()
+        .filter(|id| id.to_string() == worker_id)
+    {
+        return id;
+    }
+
+    // The namespace and hash must stay stable across engine and supervisor restarts.
+    let digest = Sha256::new()
+        .chain_update(b"deepseek-code:mcp:worker-owner\0")
+        .chain_update(worker_id.as_bytes())
+        .finalize();
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
+fn instance_token(owner: Uuid, instance: Uuid) -> String {
+    format!("{owner}:{instance}")
+}
+
+fn worker_prefix(owner: Uuid) -> String {
+    format!("{INSTANCE_ENV}={owner}:")
+}
 
 /// Run once in the worker before constructing any stdio connectors. Only the
 /// engine and its supervisor need the worker ID. Other hosts get a local UUID.
 pub fn init_worker_mcp(worker_id: &str, session_dir: &std::path::Path) -> anyhow::Result<()> {
-    let id = uuid::Uuid::parse_str(worker_id)?;
     anyhow::ensure!(
-        OWNER.set(id).is_ok(),
+        OWNER.set(owner_uuid(worker_id)).is_ok(),
         "MCP process owner already initialized"
     );
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
@@ -37,10 +64,10 @@ pub(super) fn spawn(
     command: &mut tokio::process::Command,
     server: &str,
 ) -> anyhow::Result<(tokio::process::Child, Tracker)> {
-    let owner = OWNER.get_or_init(uuid::Uuid::new_v4);
-    let instance = uuid::Uuid::new_v4();
-    let fence = fences::reserve(server, *owner, instance)?;
-    let token = format!("{owner}:{instance}");
+    let owner = *OWNER.get_or_init(Uuid::new_v4);
+    let instance = Uuid::new_v4();
+    let fence = fences::reserve(server, owner, instance)?;
+    let token = instance_token(owner, instance);
     command.env(INSTANCE_ENV, &token);
     let child = match command.spawn() {
         Ok(child) => child,
@@ -471,7 +498,8 @@ impl Tracker {
 /// After engine death the supervisor has no connector handles. Its worker UUID
 /// covers every instance, even one whose launcher exited before registration.
 pub(crate) fn drain_worker(worker_id: &str, session_dir: &std::path::Path) -> anyhow::Result<()> {
-    let prefix = format!("{INSTANCE_ENV}={worker_id}:");
+    let owner = owner_uuid(worker_id);
+    let prefix = worker_prefix(owner);
     let mut members = Members::default();
     let result = drain(
         &mut members,
@@ -496,7 +524,7 @@ pub(crate) fn drain_worker(worker_id: &str, session_dir: &std::path::Path) -> an
             }
         },
     );
-    fences::supervisor_finished(session_dir, worker_id, &members, result.is_ok())?;
+    fences::supervisor_finished(session_dir, owner, &members, result.is_ok())?;
     Ok(result?)
 }
 
@@ -506,6 +534,33 @@ mod tests {
     use crate::mcp::process::ServerProcess;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn worker_owner_preserves_canonical_uuids_and_maps_free_form_ids_stably() {
+        let canonical = "01234567-89ab-4def-8123-456789abcdef";
+        let id = Uuid::parse_str(canonical).unwrap();
+        assert_eq!(owner_uuid(canonical), id);
+        assert_ne!(owner_uuid(&id.simple().to_string()), id);
+        assert_ne!(owner_uuid(&canonical.to_uppercase()), id);
+
+        let worker = "sentinel-free-form-worker-id";
+        assert_eq!(
+            owner_uuid(worker).to_string(),
+            "8f17e8bd-5743-8b59-ad91-dffccf748660"
+        );
+        assert_ne!(owner_uuid(worker), owner_uuid("another-free-form-worker"));
+    }
+
+    #[test]
+    fn supervisor_prefix_matches_the_free_form_workers_instance_token() {
+        let worker = "sentinel-free-form-worker-id";
+        let token = instance_token(owner_uuid(worker), Uuid::new_v4());
+        let entry = format!("{INSTANCE_ENV}={token}");
+        let prefix = worker_prefix(owner_uuid(worker));
+        assert!(Scope::Worker { prefix: &prefix }.matches(entry.as_bytes()));
+        let other = worker_prefix(owner_uuid("another-free-form-worker"));
+        assert!(!Scope::Worker { prefix: &other }.matches(entry.as_bytes()));
+    }
 
     struct Denied {
         deny_open: bool,

@@ -142,7 +142,7 @@ impl Fence {
 /// the supervisor's observations with the original reservations by exact token.
 pub(super) fn supervisor_finished(
     session_dir: &Path,
-    owner: &str,
+    owner: Uuid,
     members: &Members,
     drained: bool,
 ) -> Result<()> {
@@ -150,7 +150,6 @@ pub(super) fn supervisor_finished(
     if !directory.try_exists()? {
         return Ok(());
     }
-    let owner = Uuid::parse_str(owner)?;
     for mut fence in load(&directory)?.into_iter().filter(|f| f.owner == owner) {
         // An instance drain can know tokenless members that a supervisor pass
         // never saw. Leave those records to be checked on admission.
