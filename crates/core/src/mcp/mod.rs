@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 
@@ -704,9 +704,42 @@ impl Default for RetryConfig {
     }
 }
 
+/// How much of a stdio server's stderr to retain for startup diagnostics.
+const STDERR_TAIL_LIMIT: usize = 4 * 1024;
+
+/// Drain a stdio server's stderr. A server that logs enough to fill the pipe
+/// would otherwise block, and a server that exits before `initialize` would
+/// leave no explanation besides the closed-pipe write error.
+fn drain_stderr(mut stderr: tokio::process::ChildStderr) -> Arc<std::sync::Mutex<String>> {
+    let tail = Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = Arc::clone(&tail);
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let mut tail = sink.lock().unwrap_or_else(|error| error.into_inner());
+                    tail.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                    if tail.len() > STDERR_TAIL_LIMIT {
+                        let mut cut = tail.len() - STDERR_TAIL_LIMIT;
+                        while !tail.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        tail.drain(..cut);
+                    }
+                }
+            }
+        }
+    });
+    tail
+}
+
 pub struct McpConnector {
     config: McpServerConfig,
     process: Option<Child>,
+    /// The bounded tail of a stdio server's stderr, kept for startup errors.
+    stderr_tail: Option<Arc<std::sync::Mutex<String>>>,
     request_id: Mutex<u64>,
     channel: Mutex<Option<transport::Channel>>,
     retry_config: RetryConfig,
@@ -719,6 +752,7 @@ impl McpConnector {
         Self {
             config,
             process: None,
+            stderr_tail: None,
             request_id: Mutex::new(0),
             channel: Mutex::new(None),
             retry_config: RetryConfig::default(),
@@ -733,6 +767,7 @@ impl McpConnector {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        self.stderr_tail = None;
         let url = || self.config.url.as_deref().filter(|url| !url.is_empty()).ok_or_else(|| anyhow!("MCP server {} needs a url for the {} transport", self.config.name, self.config.transport_name()));
         let channel = match self.config.transport_name() {
             "stdio" => {
@@ -751,6 +786,9 @@ impl McpConnector {
                 let mut child = cmd.spawn()?;
                 let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
                 let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
+                if let Some(stderr) = child.stderr.take() {
+                    self.stderr_tail = Some(drain_stderr(stderr));
+                }
                 self.process = Some(child);
                 transport::Channel::Stdio { stdin, stdout: BufReader::new(stdout) }
             }
@@ -760,8 +798,56 @@ impl McpConnector {
             other => return Err(anyhow!("Unsupported MCP transport: {other}")),
         };
         self.channel = Mutex::new(Some(channel));
-        self.initialize().await?;
+        if let Err(error) = self.initialize().await {
+            return Err(self.startup_error(error).await);
+        }
         Ok(())
+    }
+
+    /// Explain why a server failed to initialize. A server that exits before
+    /// reading `initialize` otherwise surfaces only the closed-pipe write
+    /// error (Windows: "The pipe is being closed.").
+    async fn startup_error(&mut self, error: anyhow::Error) -> anyhow::Error {
+        let status = match self.process.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(status),
+                Ok(None) => {
+                    // The write error races process exit; give it a moment so
+                    // the report can include the real status.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(250),
+                        child.wait(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(status)) => Some(status),
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let stderr = self.captured_stderr();
+        match (status, stderr) {
+            (Some(status), Some(stderr)) => {
+                anyhow!("server exited during startup ({status}): {stderr}")
+            }
+            (Some(status), None) => {
+                anyhow!("server exited during startup ({status}): {error}")
+            }
+            (None, Some(stderr)) => {
+                error.context(format!("server did not initialize; stderr: {stderr}"))
+            }
+            (None, None) => error,
+        }
+    }
+
+    fn captured_stderr(&self) -> Option<String> {
+        let tail = self.stderr_tail.as_ref()?;
+        let tail = tail.lock().unwrap_or_else(|error| error.into_inner());
+        let text = tail.trim();
+        (!text.is_empty()).then(|| text.to_owned())
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -993,7 +1079,12 @@ impl McpConnector {
                     return Ok(response);
                 },
                 Err(e) => {
-                    if attempt < max_retries {
+                    // Client/protocol errors are definitive; server errors may be transient.
+                    let retryable = match e.downcast_ref::<JsonRpcResponseError>() {
+                        Some(error) => !matches!(error.code, -32600 | -32601 | -32602),
+                        None => true,
+                    };
+                    if retryable && attempt < max_retries {
                         let delay_ms = self.calculate_backoff(attempt);
                         tracing::warn!(module = "MCP", "Retry attempt {}/{} for {}: {} (retrying in {}ms)",
                             attempt + 1,
@@ -1037,7 +1128,10 @@ impl McpConnector {
         };
 
         if let Some(error) = &response.error {
-            return Err(anyhow!("MCP error [{}]: {}", error.code, error.message));
+            return Err(anyhow::Error::new(JsonRpcResponseError {
+                code: error.code,
+                message: error.message.clone(),
+            }));
         }
 
         Ok(response)
@@ -1086,6 +1180,7 @@ impl McpConnector {
         if let Some(mut child) = self.process.take() {
             child.kill().await?;
         }
+        self.stderr_tail = None;
         Ok(())
     }
 }
@@ -1095,6 +1190,9 @@ pub struct McpJsonRpcRequest {
     pub jsonrpc: String,
     pub id: u64,
     pub method: String,
+    /// JSON-RPC requires params to be an object or array when present. A
+    /// parameterless request must omit the member, not send `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
 }
 
@@ -1115,6 +1213,22 @@ pub struct McpJsonRpcError {
     pub message: String,
     pub data: Option<serde_json::Value>,
 }
+
+/// A JSON-RPC error response, kept distinct from transport failures so the
+/// retry loop can recognize definitive client/protocol errors.
+#[derive(Debug)]
+struct JsonRpcResponseError {
+    code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for JsonRpcResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "MCP error [{}]: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for JsonRpcResponseError {}
 
 #[derive(Default)]
 pub struct McpConfigManager {
