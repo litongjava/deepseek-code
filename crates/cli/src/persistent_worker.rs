@@ -19,6 +19,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+type McpTarget = Arc<std::sync::Mutex<Option<crate::session::WorkerMcp>>>;
 type StatusTarget =
     Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
 struct ModeControl {
@@ -175,6 +176,7 @@ pub async fn run_from_env() -> Result<bool> {
         .unwrap_or(None);
     let mut coordination_active = false;
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
+    let mcp_target: McpTarget = Arc::default();
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
     let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
     let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
@@ -268,26 +270,33 @@ pub async fn run_from_env() -> Result<bool> {
                             let _ = service::reply(stream, &response).await;
                         },
                         Request::Mcp(op) => {
-                            // The worker host owns the only manager for this
-                            // session. Reconcile first, then run the operation on
-                            // that manager.
-                            let guard = session.lock().await;
-                            let result = match guard.as_ref() {
-                                Some(session) => session.mcp_call(op).await,
-                                None => Err(anyhow::anyhow!(
-                                    "MCP commands are available after this session's first turn"
-                                )),
-                            };
-                            drop(guard);
-                            let response = match result {
-                                Ok(mcp) => {
-                                    let mut response = Reply::ok(None);
-                                    response.mcp = Some(mcp);
-                                    response
-                                }
-                                Err(error) => Reply::error(error),
-                            };
-                            let _ = service::reply(stream, &response).await;
+                            let target = mcp_target.lock().unwrap().clone();
+                            let busy = active.load(Ordering::Acquire);
+                            let admission = target.as_ref().and_then(|target| target.try_admit());
+                            tokio::spawn(async move {
+                                use service::{McpOp, McpResult};
+                                let result = if busy {
+                                    Ok(McpResult::Busy)
+                                } else if let Some(target) = target {
+                                    match admission {
+                                        Some(guard) => target.call(guard, op).await,
+                                        None => Ok(McpResult::Busy),
+                                    }
+                                } else if matches!(op, McpOp::StopAll) {
+                                    Ok(McpResult::Stopped)
+                                } else {
+                                    Ok(McpResult::Unavailable)
+                                };
+                                let response = match result {
+                                    Ok(mcp) => {
+                                        let mut reply = Reply::ok(None);
+                                        reply.mcp = Some(mcp);
+                                        reply
+                                    }
+                                    Err(error) => Reply::error(error),
+                                };
+                                let _ = service::reply(stream, &response).await;
+                            });
                         },
                         Request::RuntimeStatus => {
                             let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
@@ -373,10 +382,11 @@ pub async fn run_from_env() -> Result<bool> {
                                 guard.set_activity(deepseek_code_core::services::local_coordination::Activity::Active);
                             }
                             coordination_active = true;
+                            let mcp_target = mcp_target.clone();
                             let binding=binding.clone();let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();let bash_target=bash_target.clone();let current_turn=current_turn.clone();let admission_released=admission_released.clone();
                             tokio::spawn(async move {
                                 let task_worker=worker.clone();let task_id=turn_id.clone();let task_mode_target=mode_target.clone();
-                                let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,binding,sessions,task_mode_target,status_target,bash_target).await}).await;
+                                let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,binding,sessions,task_mode_target,status_target,bash_target,mcp_target).await}).await;
                                 let error=match result {Ok(result)=>result.err().map(|error|format!("{error:#}")),Err(error)=>{fatal.store(true,Ordering::Release);Some(format!("Session turn panicked: {error}"))}};
                                 if let Some(error)=&error {let _=service::emit_event(&serde_json::json!({"type":"error","error":error}));}
                                 if service::finish_job(&worker,&turn_id,error).await.is_err() {fatal.store(true,Ordering::Release);}
@@ -432,6 +442,7 @@ async fn execute(
     mode_target: ModeTarget,
     status_target: StatusTarget,
     bash_target: BashTarget,
+    mcp_target: McpTarget,
 ) -> Result<()> {
     let dir = worker.root.join("tasks/background").join(id);
     service::set_event_sink(Some(dir.join("output.jsonl")));
@@ -533,6 +544,7 @@ async fn execute(
     }
     let prompt = cli.prompt.as_deref().context("Worker prompt missing")?;
     let session = current.as_mut().unwrap();
+    *mcp_target.lock().unwrap() = Some(session.worker_mcp());
     *bash_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.permissions.clone());
     session
         .engine

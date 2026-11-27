@@ -1,5 +1,5 @@
 mod mcp_owner;
-pub(crate) use mcp_owner::McpOwner;
+pub(crate) use mcp_owner::{McpOwner, WorkerMcp};
 #[cfg(test)]
 use crate::fixture_sql::FixtureSql;
 use deepseek_code_core::db::session_store::{ExecutorHistory, SegmentPlacement, SegmentUpdate};
@@ -187,7 +187,8 @@ pub struct Session {
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
-    mcp_owner: Mutex<McpOwner>,
+    mcp_owner: Arc<Mutex<McpOwner>>,
+    mcp_lease: Arc<std::sync::Mutex<Option<deepseek_code_core::fs::OwnedFileLock>>>,
     pub(crate) observe_mcp_worker: bool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
@@ -1280,7 +1281,8 @@ impl Session {
             engine,
             mcp,
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
-            mcp_owner: Mutex::new(McpOwner::None),
+            mcp_owner: Arc::new(Mutex::new(McpOwner::None)),
+            mcp_lease: Arc::default(),
             observe_mcp_worker: false,
             extension_watch: Mutex::new(None),
             startup_provider,
@@ -2009,7 +2011,7 @@ impl Session {
         self.engine.cancel_turn(&self.id).await;
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
-        self.mcp.shutdown_all().await
+        self.detach_mcp_owner().await
     }
 
     /// Close this session's registry incarnation, if any.

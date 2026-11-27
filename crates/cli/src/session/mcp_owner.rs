@@ -1,7 +1,43 @@
 //! Ownership changes are serialized with MCP commands so the old process
 //! finishes releasing its children before the new process can start any.
 use super::Session;
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, Context, Result};
+use deepseek_code_core::{fs::OwnedFileLock, mcp::McpServerManager, runtime::RuntimePaths};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::Mutex;
+
+const BUSY: &str = "MCP is busy, try after this turn";
+
+fn acquire_lease(paths: &RuntimePaths, session: &str) -> Result<OwnedFileLock> {
+    let id = uuid::Uuid::parse_str(session)?;
+    let dir = paths.layout().state_dir("locks/mcp-owner");
+    std::fs::create_dir_all(&dir)?;
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(format!("{id}.lock")))?;
+    OwnedFileLock::try_acquire(file)?.context("Another process owns MCP for this session")
+}
+
+type Lease = Arc<std::sync::Mutex<Option<OwnedFileLock>>>;
+
+async fn release_local(
+    manager: &McpServerManager,
+    lease: &Lease,
+    owner: &mut McpOwner,
+) -> Result<()> {
+    manager.shutdown_all().await?;
+    lease.lock().unwrap().take();
+    *owner = McpOwner::None;
+    Ok(())
+}
+
 use deepseek_code_core::services::session_worker::{self as worker, McpOp, McpResult, Request};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,24 +71,30 @@ impl Session {
             return Ok(());
         }
         match *owner {
-            McpOwner::Frontend => self.mcp.shutdown_all().await?,
+            McpOwner::Frontend => release_local(&self.mcp, &self.mcp_lease, owner).await?,
             McpOwner::Worker => {
                 if let Some(host) = self.running_mcp_worker()? {
                     let reply = worker::call(&host, &Request::Mcp(McpOp::StopAll)).await?;
-                    ensure!(
-                        matches!(
-                            reply.mcp.context("Missing StopAll reply")?,
-                            McpResult::Stopped
-                        ),
-                        "Unexpected StopAll reply"
-                    );
+                    match reply.mcp.context("Missing StopAll reply")? {
+                        McpResult::Stopped => {}
+                        McpResult::Busy => bail!(BUSY),
+                        _ => bail!("Unexpected StopAll reply"),
+                    }
                 }
             }
             McpOwner::None => {}
         }
         *owner = McpOwner::None;
         if target == McpOwner::Frontend {
+            let lease = if self.observe_mcp_worker
+                || self.coordination_mode == crate::local_coordination::RegistrationMode::HostOwned
+            {
+                Some(acquire_lease(&self.paths, &self.id)?)
+            } else {
+                None
+            };
             self.mcp.initialize().await?;
+            *self.mcp_lease.lock().unwrap() = lease;
             let _ = self.mcp_ready.set(());
             *owner = target;
             for server in self.mcp.list_servers().await {
@@ -105,10 +147,15 @@ impl Session {
         self.discover_mcp_owner(&mut owner)?;
         if *owner == McpOwner::Worker {
             if let Some(host) = self.running_mcp_worker()? {
-                return worker::call(&host, &Request::Mcp(op))
+                match worker::call(&host, &Request::Mcp(op.clone()))
                     .await?
                     .mcp
-                    .context("Missing MCP reply");
+                    .context("Missing MCP reply")?
+                {
+                    McpResult::Busy => bail!(BUSY),
+                    McpResult::Unavailable => *owner = McpOwner::None,
+                    result => return Ok(result),
+                }
             }
         }
         self.transition_mcp_owner(&mut owner, McpOwner::Frontend)
@@ -117,11 +164,7 @@ impl Session {
     }
 }
 
-async fn reconcile(
-    manager: &deepseek_code_core::mcp::McpServerManager,
-    paths: &deepseek_code_core::runtime::RuntimePaths,
-    session: &str,
-) -> Result<()> {
+async fn reconcile(manager: &McpServerManager, paths: &RuntimePaths, session: &str) -> Result<()> {
     match manager.reconcile_config().await {
         Ok(changes) => {
             deepseek_code_core::mcp::invalidate_snapshots(&paths.data_dir, session, &changes)?;
@@ -135,10 +178,10 @@ async fn reconcile(
 }
 
 pub(crate) async fn local_operation(
-    paths: &deepseek_code_core::runtime::RuntimePaths,
-    workspace: &std::path::Path,
+    paths: &RuntimePaths,
+    workspace: &Path,
     session: &str,
-    manager: &deepseek_code_core::mcp::McpServerManager,
+    manager: &McpServerManager,
     op: McpOp,
 ) -> Result<McpResult> {
     reconcile(manager, paths, session).await?;
@@ -153,4 +196,65 @@ pub(crate) async fn local_operation(
         return Ok(McpResult::Reloaded { notices });
     }
     crate::mcp_commands::execute(paths, manager, op, true).await
+}
+
+/// A handle to the worker Session's actual manager, published before a turn.
+/// Ownership and manager operations share the same gate as the local turn.
+#[derive(Clone)]
+pub(crate) struct WorkerMcp {
+    manager: Arc<McpServerManager>,
+    owner: Arc<Mutex<McpOwner>>,
+    lease: Lease,
+    paths: RuntimePaths,
+    workspace: PathBuf,
+    session: String,
+}
+
+impl Session {
+    pub(crate) fn worker_mcp(&self) -> WorkerMcp {
+        WorkerMcp {
+            manager: self.mcp.clone(),
+            owner: self.mcp_owner.clone(),
+            lease: self.mcp_lease.clone(),
+            paths: self.paths.clone(),
+            workspace: self.workspace.clone(),
+            session: self.id.clone(),
+        }
+    }
+
+    pub(crate) fn mcp_released(&self) -> bool {
+        self.mcp_owner
+            .try_lock()
+            .map_or(true, |owner| *owner == McpOwner::None)
+    }
+}
+
+impl WorkerMcp {
+    pub(crate) fn try_admit(&self) -> Option<tokio::sync::OwnedMutexGuard<McpOwner>> {
+        self.owner.clone().try_lock_owned().ok()
+    }
+
+    pub(crate) async fn call(
+        &self,
+        mut owner: tokio::sync::OwnedMutexGuard<McpOwner>,
+        op: McpOp,
+    ) -> Result<McpResult> {
+        if matches!(op, McpOp::StopAll) {
+            if *owner == McpOwner::Frontend {
+                release_local(&self.manager, &self.lease, &mut owner).await?;
+            }
+            return Ok(McpResult::Stopped);
+        }
+        if *owner != McpOwner::Frontend {
+            return Ok(McpResult::Unavailable);
+        }
+        local_operation(
+            &self.paths,
+            &self.workspace,
+            &self.session,
+            &self.manager,
+            op,
+        )
+        .await
+    }
 }

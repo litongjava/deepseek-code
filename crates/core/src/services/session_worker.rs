@@ -94,6 +94,8 @@ pub enum McpOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpResult {
+    Busy,
+    Unavailable,
     Reloaded { notices: Vec<(String, String)> },
     Json { value: serde_json::Value },
     Message { text: String },
