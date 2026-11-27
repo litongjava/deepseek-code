@@ -177,6 +177,38 @@ impl McpServerManager {
         } else {
             self.create_default_config().await?;
         }
+        self.start_control()
+    }
+
+    /// Resume an orderly ownership handoff. A valid edit wins, and a malformed
+    /// hot edit leaves the previous definitions and their persistence CAS intact.
+    pub async fn initialize_handoff(&self, previous: Vec<u8>) -> Result<()> {
+        match tokio::fs::read(&self.config_path).await {
+            Ok(bytes) => match Self::parse_reload_config(&bytes) {
+                Ok(servers) => self.install_config(servers, Some(bytes)).await,
+                Err(_) => {
+                    let servers = Self::parse_config(&previous)?;
+                    self.install_config(servers, Some(previous)).await;
+                    // The next reconciliation reports the invalid live edit.
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.install_config(HashMap::new(), None).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.start_control()
+    }
+
+    pub fn handoff_config(&self) -> Vec<u8> {
+        self.revision
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| b"{}".to_vec())
+    }
+
+    fn start_control(&self) -> Result<()> {
         let mut control=self.control.lock().unwrap();
         if control.is_none() {
             let worker = Self {
@@ -194,10 +226,19 @@ impl McpServerManager {
 
     async fn load_config(&self) -> Result<()> {
         let content = tokio::fs::read(&self.config_path).await?;
-        *self.servers.write().await = Self::parse_config(&content)?;
-        *self.revision.lock().unwrap() = Some(content.clone());
-        *self.applied.lock().unwrap() = Some(content);
+        let servers = Self::parse_config(&content)?;
+        self.install_config(servers, Some(content)).await;
         Ok(())
+    }
+
+    async fn install_config(
+        &self,
+        servers: HashMap<String, McpServerState>,
+        bytes: Option<Vec<u8>>,
+    ) {
+        *self.servers.write().await = servers;
+        *self.revision.lock().unwrap() = bytes.clone();
+        *self.applied.lock().unwrap() = bytes;
     }
 
     fn parse_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {

@@ -565,3 +565,64 @@ async fn slow_mutations_and_disconnected_handoff_report_the_admitted_outcome() {
     tty.submit("/exit", false).await;
     tty.wait_success().await;
 }
+
+#[tokio::test]
+async fn malformed_hot_edit_keeps_provider_tools_across_both_handoffs() {
+    let fixture = OwnerFixture::new().await;
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "/mcp state w", b"w  user").await;
+    let config = fixture.paths.data_dir.join("mcp-servers.json");
+    fs::write(&config, "{").unwrap();
+    repl(
+        &mut tty,
+        "worker with last good definitions",
+        b"worker result",
+    )
+    .await;
+    let host = fixture.worker();
+    let job = jobs::list(&fixture.paths.data_dir, Some(&fixture.session))
+        .unwrap()
+        .into_iter()
+        .find(|j| j.title == "worker with last good definitions")
+        .unwrap();
+    let (_, _, events) =
+        jobs::events_since(&fixture.paths.data_dir, &job.id, &fixture.session, 0).unwrap();
+    assert!(events.iter().any(|e| e["message"]
+        .as_str()
+        .is_some_and(|s| s.contains("MCP reload:"))));
+    repl(&mut tty, "/focus on", b"focus updated").await;
+    repl(
+        &mut tty,
+        "local with last good definitions",
+        b"worker result",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&tty.transcript).contains("MCP reload:"));
+    assert_eq!(
+        fixture.starts().iter().map(|p| p.1).collect::<Vec<_>>(),
+        [tty.pid(), host.child_pid.unwrap(), tty.pid()]
+    );
+    let requests = fixture.requests.lock().unwrap();
+    for prompt in [
+        "worker with last good definitions",
+        "local with last good definitions",
+    ] {
+        assert!(
+            requests.iter().any(|r| {
+                r["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .to_string()
+                    .contains(prompt)
+                    && r["tools"].as_array().is_some_and(|tools| {
+                        tools
+                            .iter()
+                            .any(|t| t["function"]["name"] == "mcp__w__probe")
+                    })
+            }),
+            "provider did not receive mcp__w__probe on {prompt}"
+        );
+    }
+    drop(requests);
+    assert_eq!(fs::read_to_string(config).unwrap(), "{");
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+}

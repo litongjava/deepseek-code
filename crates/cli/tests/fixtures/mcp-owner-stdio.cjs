@@ -25,7 +25,7 @@ readline.createInterface({input: process.stdin}).on("line", line => {
     case "initialize":
       result = {protocolVersion: "2025-06-18", serverInfo: {name: id, version: "1"}, capabilities: {tools: {}, prompts: {}}};
       break;
-    case "tools/list": result = {tools: []}; break;
+    case "tools/list": result = {tools: [{name: "probe", description: "owner witness", inputSchema: {type: "object"}}]}; break;
     case "resources/list": result = {resources: []}; break;
     case "prompts/list": result = {prompts: [{name: "probe", arguments: []}]}; break;
     case "prompts/get": result = {messages: [{role: "user", content: {type: "text", text: "expanded owner probe"}}]}; break;

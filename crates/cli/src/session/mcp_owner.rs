@@ -28,6 +28,25 @@ fn acquire_lease(paths: &RuntimePaths, session: &str) -> Result<OwnedFileLock> {
 
 type Lease = Arc<std::sync::Mutex<Option<OwnedFileLock>>>;
 
+fn handoff_path(paths: &RuntimePaths, session: &str) -> Result<PathBuf> {
+    let id = uuid::Uuid::parse_str(session)?;
+    Ok(paths
+        .layout()
+        .lock_path("mcp-owner")
+        .join(format!("{id}.handoff")))
+}
+
+// Publish while the predecessor still holds the lease. The successor consumes
+// this private file under the same lease, including when the IPC reply is lost.
+fn save_handoff(manager: &McpServerManager, path: &Path) -> Result<()> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().context("Missing lease directory")?)?;
+    file.write_all(&manager.handoff_config())?;
+    file.persist(path)?;
+    Ok(())
+}
+
 async fn release_local(
     manager: &McpServerManager,
     lease: &Lease,
@@ -64,6 +83,14 @@ impl Session {
             McpOwner::None => McpOwner::Frontend,
             current => current,
         });
+        // An explicit release to None also hands off to a one-shot worker.
+        // Session detach goes directly to transition_mcp_owner and discards its manager.
+        if *owner == McpOwner::Frontend
+            && *owner != target
+            && self.mcp_lease.lock().unwrap().is_some()
+        {
+            save_handoff(&self.mcp, &handoff_path(&self.paths, &self.id)?)?;
+        }
         self.transition_mcp_owner(&mut owner, target).await?;
         Ok(owner)
     }
@@ -105,7 +132,15 @@ impl Session {
             } else {
                 None
             };
-            self.mcp.initialize().await?;
+            let handoff = handoff_path(&self.paths, &self.id)?;
+            if lease.is_some() && handoff.try_exists()? {
+                self.mcp
+                    .initialize_handoff(std::fs::read(&handoff)?)
+                    .await?;
+                std::fs::remove_file(handoff)?;
+            } else {
+                self.mcp.initialize().await?;
+            }
             *self.mcp_lease.lock().unwrap() = lease;
             let _ = self.mcp_ready.set(());
             *owner = target;
@@ -269,6 +304,7 @@ impl WorkerMcp {
     ) -> Result<McpResult> {
         if matches!(op, McpOp::StopAll) {
             if *owner == McpOwner::Frontend {
+                save_handoff(&self.manager, &handoff_path(&self.paths, &self.session)?)?;
                 release_local(&self.manager, &self.lease, &mut owner).await?;
             }
             return Ok(McpResult::Stopped);
