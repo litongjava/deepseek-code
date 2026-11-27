@@ -2653,7 +2653,13 @@ pub(super) fn skill_listing_line(
     let mut line = if name_only {
         format!("- {name}")
     } else {
-        format!("- {name}: {}", one_line(description))
+        format!(
+            "- {name}: {}",
+            crate::prompt::one_line_bounded(
+                description,
+                crate::prompt::LISTING_DESCRIPTION_MAX_CHARS,
+            )
+        )
     };
     if let Some(context) = context {
         line.push_str(&format!(" (context: {})", one_line(context)));

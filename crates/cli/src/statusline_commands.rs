@@ -167,10 +167,20 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
 pub async fn payload(session: &Session) -> Result<Value> {
     let usage = crate::display_commands::usage(session)?;
     let selected = session.selected_provider().await?;
-    let title = session.store.resume(&session.id)?.title;
+    let title = session
+        .store
+        .db
+        .conversation_metadata(&session.id)?
+        .and_then(|conversation| conversation.title);
     let history = session.selected_session()?.repository();
     let current = history.current_usage()?;
-    let project = history.workspace_project()?;
+    // A missing directory cannot pass trusted project resolution; the payload
+    // still identifies the recorded workspace without probing it.
+    let project = if session.is_missing_workspace() {
+        None
+    } else {
+        history.workspace_project()?
+    };
         let project_dir = project
             .as_ref()
             .and_then(|p| p.workspace_path.clone())

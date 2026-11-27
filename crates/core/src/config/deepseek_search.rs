@@ -36,6 +36,14 @@ impl Default for DeepSeekSearchConfig {
 }
 
 impl DeepSeekSearchConfig {
+    /// Whether the search provider has all required fields configured
+    /// (non-empty `base_url`, `model`, and `api_key`).
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.model.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+    }
+
     /// The configured provider, or the one implied by the endpoint. A custom
     /// gateway stays on DeepSeek, which keeps configurations without
     /// `provider` working exactly as before.
@@ -185,6 +193,27 @@ mod tests {
         assert_eq!(resolved.model.id, "chosen-search-model");
         assert!(resolved.provider.builtin_id.is_none());
         assert!(!format!("{search:?}").contains("independent-search-key"));
+    }
+
+    #[test]
+    fn is_configured_requires_url_model_and_api_key() {
+        let mut search = super::DeepSeekSearchConfig::default();
+        assert!(!search.is_configured(), "default has empty api_key");
+
+        search.api_key = "sk-search".into();
+        assert!(search.is_configured());
+
+        let mut missing_url = search.clone();
+        missing_url.base_url = "   ".into();
+        assert!(!missing_url.is_configured());
+
+        let mut missing_model = search.clone();
+        missing_model.model = "".into();
+        assert!(!missing_model.is_configured());
+
+        let mut missing_key = search.clone();
+        missing_key.api_key = "\t".into();
+        assert!(!missing_key.is_configured());
     }
 
     #[test]

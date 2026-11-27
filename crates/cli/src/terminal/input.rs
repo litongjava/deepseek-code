@@ -21,6 +21,18 @@ pub enum PromptEvent {
     StepEffort(bool),
 }
 
+/// Rich read-only observation delivered to the prompt editor. Unlike notices,
+/// these updates keep styles, tool blocks and Markdown intact.
+pub enum ObservationMessage {
+    Updates(Vec<crate::observe::Update>),
+    /// Pinned status shown directly above the composer.
+    Status(Option<String>),
+    /// A different session starts without the previous Markdown block.
+    Reset,
+    /// Ctrl+O must already include progress that just landed in the store.
+    Transcript(Vec<super::change_view::Line>),
+}
+
 /// Whether a prompt can be edited in place and keys reach us before Enter.
 fn interactive_terminal() -> bool {
     !crate::terminal::screen_reader()
@@ -163,6 +175,7 @@ struct PendingRead {
 
 pub struct TerminalInput {
     notices: std::sync::mpsc::Sender<String>,
+    observations: std::sync::mpsc::Sender<ObservationMessage>,
     suggestions: std::sync::mpsc::Sender<Option<crate::prompt_suggestion::Ghost>>,
     requests: std::sync::mpsc::Sender<Message>,
     pending: Option<PendingRead>,
@@ -178,6 +191,7 @@ impl TerminalInput {
     pub fn new() -> Self {
         let (requests, rx) = std::sync::mpsc::channel::<Message>();
         let (notices, notice_rx) = std::sync::mpsc::channel();
+        let (observations, observation_rx) = std::sync::mpsc::channel();
         let (suggestions, suggestion_rx) = std::sync::mpsc::channel();
         let effort = Arc::new(std::sync::Mutex::new(None));
         let editor_effort = effort.clone();
@@ -190,6 +204,7 @@ impl TerminalInput {
             let mut editor = editor::PromptEditor::default();
             editor.set_effort_control(editor_effort, step_tx);
             editor.set_notices(notice_rx);
+            editor.set_observations(observation_rx);
             editor.set_suggestions(suggestion_rx);
             let mut plain = io::BufReader::new(io::stdin());
             for message in rx {
@@ -299,6 +314,7 @@ impl TerminalInput {
         });
         Self {
             notices,
+            observations,
             suggestions,
             requests,
             pending: None,
@@ -312,6 +328,31 @@ impl TerminalInput {
 
     pub fn notice(&self, text: String) {
         let _ = self.notices.send(text);
+    }
+
+    /// Completed observation work for the current prompt's rich renderer.
+    pub fn observe(&self, updates: Vec<crate::observe::Update>) {
+        if !updates.is_empty() {
+            let _ = self.observations.send(ObservationMessage::Updates(updates));
+        }
+    }
+
+    /// The persistent read-only line above the composer; `None` restores the
+    /// ordinary idle layout.
+    pub fn set_observation_status(&self, status: Option<String>) {
+        let _ = self.observations.send(ObservationMessage::Status(status));
+    }
+
+    pub fn reset_observation(&self) {
+        let _ = self.observations.send(ObservationMessage::Reset);
+    }
+
+    /// Refreshes Ctrl+O while the prompt is active; an ordinary transcript
+    /// message only reaches the editor after the prompt returns.
+    pub fn set_observation_transcript(&self, lines: Vec<super::change_view::Line>) {
+        let _ = self
+            .observations
+            .send(ObservationMessage::Transcript(lines));
     }
 
     /// The existing input thread owns modal keys as well as ordinary prompts.
@@ -659,6 +700,7 @@ impl From<mpsc::UnboundedReceiver<String>> for TerminalInput {
         let (requests, _) = std::sync::mpsc::channel();
         Self {
             notices: std::sync::mpsc::channel().0,
+            observations: std::sync::mpsc::channel().0,
             suggestions: std::sync::mpsc::channel().0,
             requests,
             pending: None,
@@ -712,6 +754,7 @@ mod tests {
         let mut input = TerminalInput {
             requests,
             notices: std::sync::mpsc::channel().0,
+            observations: std::sync::mpsc::channel().0,
             suggestions: std::sync::mpsc::channel().0,
             pending: None,
             fixture: None,
@@ -821,6 +864,7 @@ mod tests {
         let mut input = TerminalInput {
             requests,
             notices,
+            observations: std::sync::mpsc::channel().0,
             suggestions,
             pending: None,
             fixture: None,

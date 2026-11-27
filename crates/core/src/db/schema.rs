@@ -162,8 +162,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     model_preview TEXT,
     model_recovery TEXT,
     model_search TEXT,
+    request_id TEXT REFERENCES model_requests(id) ON DELETE SET NULL,
+    provider_call_id TEXT,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
 
 -- Nested calls made by an embedded ToolScript run. The parent is the script's
 -- own occurrence; `sequence` is the script's internal admission order. The

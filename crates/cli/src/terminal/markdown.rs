@@ -78,6 +78,62 @@ impl MarkdownStream {
         self.committed = 0;
         lines
     }
+    /// Whether the uncommitted tail is inside an unclosed fenced code block or
+    /// a table that can still receive rows. A caller that commits after every
+    /// poll keeps such a block open until its closing fence or terminating
+    /// line arrives; finishing now would render a truncated block and lose the
+    /// continuation's context.
+    pub fn has_open_multiline_block(&self) -> bool {
+        let tail = self
+            .source
+            .get(self.committed.min(self.source.len())..)
+            .unwrap_or_default();
+        if tail.is_empty() {
+            return false;
+        }
+        if has_unclosed_fence(tail) {
+            return true;
+        }
+        self.tail_may_grow_table(tail)
+    }
+    fn tail_may_grow_table(&self, tail: &str) -> bool {
+        // A blank line closes a table; anything after it is a new block.
+        if ends_with_blank_line(tail) {
+            return false;
+        }
+        let options =
+            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let mut depth = 0usize;
+        let mut last: Option<(usize, BlockKind)> = None;
+        for (event, range) in Parser::new_ext(tail, options).into_offset_iter() {
+            if depth == 0 {
+                let kind = match &event {
+                    Event::Start(Tag::Table(_)) => BlockKind::Table,
+                    Event::Start(Tag::Paragraph) => BlockKind::Paragraph,
+                    _ => BlockKind::Other,
+                };
+                last = Some((range.start, kind));
+            }
+            match &event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        match last {
+            // A recognized table is still the last block: more body rows may
+            // arrive until a blank or non-table line terminates it.
+            Some((_, BlockKind::Table)) => true,
+            // Before the delimiter row arrives the parser sees a one-line
+            // paragraph; hold a potential table header for the next poll.
+            Some((start, BlockKind::Paragraph)) => {
+                let paragraph = tail.get(start..).unwrap_or_default();
+                let line = paragraph.trim_end_matches(['\r', '\n']);
+                !line.contains('\n') && has_unescaped_pipe(line)
+            }
+            _ => false,
+        }
+    }
     fn blocks(&self, source: &str) -> Vec<(usize, Vec<String>)> {
         let options =
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -306,6 +362,71 @@ impl MarkdownStream {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Paragraph,
+    Table,
+    Other,
+}
+
+/// A fenced block is closed only by a fence of the same character, at least as
+/// long, with nothing but spaces after it.
+fn has_unclosed_fence(source: &str) -> bool {
+    let mut open: Option<(char, usize)> = None;
+    for line in source.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent > 3 {
+            continue;
+        }
+        let rest = &line[indent..];
+        let Some(fence @ ('`' | '~')) = rest.chars().next() else {
+            continue;
+        };
+        let run = rest.chars().take_while(|ch| *ch == fence).count();
+        if run < 3 {
+            continue;
+        }
+        let after = &rest[run..];
+        match open {
+            None => {
+                // A backtick fence's info string cannot contain a backtick, so
+                // a one-line ```code``` stays an ordinary paragraph.
+                if fence == '`' && after.contains('`') {
+                    continue;
+                }
+                open = Some((fence, run));
+            }
+            Some((opened, length)) => {
+                if fence == opened && run >= length && after.trim().is_empty() {
+                    open = None;
+                }
+            }
+        }
+    }
+    open.is_some()
+}
+
+fn ends_with_blank_line(source: &str) -> bool {
+    let mut lines = source.split('\n').rev();
+    matches!(lines.next(), Some(line) if line.trim().is_empty())
+        && matches!(lines.next(), Some(line) if line.trim().is_empty())
+}
+
+fn has_unescaped_pipe(line: &str) -> bool {
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '|' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Wraps one rendered line to `width` cells at spaces, as the reference CLI
 /// does. Style escapes count as zero width; styles open at a break are reset
 /// at the end of the row and reopened after `indent` on the next. Words longer
@@ -504,6 +625,43 @@ mod tests {
         assert_eq!(plain(&["**Files read** and `main.rs`, *really* [docs](https://x.y)"]), ["Files read and main.rs, really docs (https://x.y)"]);
         assert_eq!(plain(&["2 * 3 = 6 and a_b_c stays"]), ["2 * 3 = 6 and a_b_c stays"]);
         assert_eq!(plain(&["## Summary", "> quoted", "---"]), ["Summary", "\u{258e} quoted", &"\u{2500}".repeat(40)]);
+    }
+
+    #[test]
+    fn fenced_blocks_and_tables_stay_open_across_poll_boundaries() {
+        let mut stream = MarkdownStream::new(false);
+        assert!(stream.line("```rust").is_empty());
+        assert!(stream.line("fn main() {}").is_empty());
+        assert!(stream.has_open_multiline_block(), "an open fence was committed early");
+        assert!(stream.line("```").is_empty());
+        assert!(!stream.has_open_multiline_block());
+        assert_eq!(stream.finish(), ["  fn main() {}"]);
+
+        let mut stream = MarkdownStream::new(false);
+        assert!(stream.line("| Name | Lines |").is_empty());
+        assert!(
+            stream.has_open_multiline_block(),
+            "a table header must wait for its delimiter row"
+        );
+        assert!(stream.line("|---|---:|").is_empty());
+        assert!(stream.has_open_multiline_block(), "body rows may still arrive");
+        assert!(stream.line("| a.rs | 3 |").is_empty());
+        assert!(stream.has_open_multiline_block());
+        assert!(stream.line("").is_empty());
+        assert!(!stream.has_open_multiline_block(), "a blank line closes the table");
+        let table = stream.finish();
+        assert!(table.iter().any(|row| row.contains("Name") && row.contains("Lines")));
+        assert!(table.iter().any(|row| row.contains("a.rs") && row.contains("3")));
+        assert!(!table.join("\n").contains('|'), "the table was rendered as text: {table:?}");
+    }
+
+    #[test]
+    fn ordinary_multiline_paragraphs_do_not_hold_the_stream() {
+        let mut stream = MarkdownStream::new(false);
+        assert!(stream.line("first line").is_empty());
+        assert!(stream.line("second line").is_empty());
+        assert!(!stream.has_open_multiline_block());
+        assert_eq!(stream.finish(), ["first line", "second line"]);
     }
 
     #[test]

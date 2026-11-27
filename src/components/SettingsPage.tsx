@@ -2,7 +2,7 @@ import { getErrorMessage } from '../utils/errorHelpers';
 import { loginEnabled } from '../utils/login';
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, ChevronRight, Smartphone, MonitorIcon, LogOut, MoreHorizontal, Check, X, Puzzle, Globe, Clock, Settings, Cpu, UserRound, Info, BarChart3 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getUserProfile, updateUserProfile, getUserUsage, getGatewayUsage, getSessions, deleteSession, logoutOtherSessions, changePassword, deleteAccount, logout, getProviderModels } from '../api';
 import ProviderSettings from './ProviderSettings';
 import SearchSettings from './SearchSettings';
@@ -27,10 +27,21 @@ const WORK_OPTIONS = [
 
 type Tab = 'about' | 'general' | 'account' | 'usage' | 'models' | 'search' | 'customize' | 'tasks';
 
+const VALID_TABS: Tab[] = ['about', 'general', 'account', 'usage', 'models', 'search', 'customize', 'tasks'];
+
 const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => void }) => {
   const { t, locale } = useI18n();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<Tab>('general');
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab') as Tab | null;
+  const [tab, setTab] = useState<Tab>(
+    requestedTab && VALID_TABS.includes(requestedTab) ? requestedTab : 'general'
+  );
+  useEffect(() => {
+    if (requestedTab && VALID_TABS.includes(requestedTab)) {
+      setTab(requestedTab);
+    }
+  }, [requestedTab]);
   const [profile, setProfile] = useState<any>(null);
   const [usage, setUsage] = useState<any>(null);
   const [saving, setSaving] = useState(false);

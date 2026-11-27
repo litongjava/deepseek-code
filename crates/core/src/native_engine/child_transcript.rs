@@ -13,8 +13,10 @@ pub(super) struct ChildTranscript {
     pub(super) assistant_id: String,
     text: String,
     thinking: String,
+    separate_thinking: bool,
     saw_text: bool,
     tools: HashMap<String, ToolCallRow>,
+    request_links: HashMap<String, (String, Option<String>)>,
     arguments: HashMap<String, String>,
     evidence_ids: HashSet<String>,
     collect_web_evidence: bool,
@@ -36,8 +38,10 @@ impl ChildTranscript {
             assistant_id,
             text: String::new(),
             thinking: String::new(),
+            separate_thinking: false,
             saw_text: false,
             tools: HashMap::new(),
+            request_links: HashMap::new(),
             arguments: HashMap::new(),
             evidence_ids: HashSet::new(),
             last_preview: Instant::now(),
@@ -55,7 +59,15 @@ impl ChildTranscript {
     fn save_tool(&self, row: &ToolCallRow) -> Result<()> {
         self.state
             .history
-            .child_stream_tool(&self.assistant_id, &self.text, row)
+            .child_stream_tool(&self.assistant_id, &self.text, row)?;
+        if let Some((request_id, provider_call_id)) = self.request_links.get(&row.id) {
+            self.state.history.child_tool_request_link(
+                &row.id,
+                Some(request_id.as_str()),
+                provider_call_id.as_deref(),
+            )?;
+        }
+        Ok(())
     }
 
     fn tool(&self, id: &str, name: &str) -> ToolCallRow {
@@ -101,9 +113,30 @@ impl ChildTranscript {
                 self.assistant_id = assistant_id.unwrap_or_else(|| self.state.history.new_message_id());
                 self.text.clear();
                 self.thinking.clear();
+                self.separate_thinking = false;
                 self.tools.clear();
+                self.request_links.clear();
                 self.arguments.clear();
                 self.persist()?;
+            }
+            EngineEvent::MessageStart { .. } => {
+                self.separate_thinking = true;
+            }
+            EngineEvent::ToolCallRequestLink {
+                tool_use_id,
+                request_id,
+                provider_call_id,
+            } => {
+                let id = format!("{}:{tool_use_id}", self.assistant_id);
+                self.request_links
+                    .insert(id.clone(), (request_id.clone(), Some(provider_call_id.clone())));
+                if self.tools.contains_key(&id) {
+                    self.state.history.child_tool_request_link(
+                        &id,
+                        Some(request_id.as_str()),
+                        Some(provider_call_id.as_str()),
+                    )?;
+                }
             }
             event @ (EngineEvent::AskUser { .. }
             | EngineEvent::ToolPermission { .. }
@@ -113,7 +146,18 @@ impl ChildTranscript {
                 self.state.history.save_child_state(&self.state.value)?;
             }
             EngineEvent::RequestSnapshot(snapshot) => {
-                self.state.snapshot(&snapshot, &self.assistant_id)?
+                self.state.snapshot(&snapshot, &self.assistant_id)?;
+                if let Some(req_id) = snapshot["id"].as_str() {
+                    for (tool_id, (linked_req, provider_call_id)) in &self.request_links {
+                        if linked_req == req_id && self.tools.contains_key(tool_id) {
+                            self.state.history.child_tool_request_link(
+                                tool_id,
+                                Some(linked_req.as_str()),
+                                provider_call_id.as_deref(),
+                            )?;
+                        }
+                    }
+                }
             }
             event @ (EngineEvent::Text(_) | EngineEvent::Thinking(_)) => {
                 let text = match event {
@@ -123,7 +167,15 @@ impl ChildTranscript {
                         text
                     }
                     EngineEvent::Thinking(text) => {
-                        self.thinking.push_str(&text);
+                        if !text.is_empty() {
+                            if std::mem::take(&mut self.separate_thinking)
+                                && !self.thinking.is_empty()
+                                && !self.thinking.ends_with('\n')
+                            {
+                                self.thinking.push_str("\n\n");
+                            }
+                            self.thinking.push_str(&text);
+                        }
                         text
                     }
                     _ => unreachable!(),
@@ -160,6 +212,7 @@ impl ChildTranscript {
                 tool_input,
                 ..
             } => {
+                self.separate_thinking = true;
                 let id = format!("{}:{tool_use_id}", self.assistant_id);
                 let mut row = self.tool(&id, &tool_name);
                 row.name = tool_name.clone();
@@ -371,6 +424,42 @@ mod tests {
                 let tools = r.tools(&messages[1].id)?;
                 assert_eq!(tools[0].input.as_deref(), Some("{\"path\":"));
                 assert!(tools[0].output.is_none());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_step_thinking_separates_steps_without_splitting_intra_step_deltas() {
+        let (_temp, mut transcript, tx) = fixture();
+        tx.try_send(EngineEvent::MessageStart { model: "m".into() }).unwrap();
+        tx.try_send(EngineEvent::Thinking("Inspecting the ".into())).unwrap();
+        tx.try_send(EngineEvent::Thinking("structure.".into())).unwrap();
+        tx.try_send(EngineEvent::ToolUseStart {
+            tool_use_id: "call-1".into(),
+            tool_name: "Bash".into(),
+            tool_input: json!({}),
+            text_before: String::new(),
+            display_title: None,
+        })
+        .unwrap();
+        tx.try_send(EngineEvent::MessageStart { model: "m".into() }).unwrap();
+        tx.try_send(EngineEvent::Thinking("That's ".into())).unwrap();
+        tx.try_send(EngineEvent::Thinking("clear.".into())).unwrap();
+        transcript.drain().await.unwrap();
+
+        let crate::db::session_store::ExecutorHistory::Session(shard) = &transcript.state.history
+        else {
+            unreachable!()
+        };
+        shard
+            .read(|r| {
+                let messages = r.messages()?;
+                assert_eq!(messages.len(), 1);
+                assert_eq!(
+                    messages[0].thinking.as_deref(),
+                    Some("Inspecting the structure.\n\nThat's clear.")
+                );
                 Ok(())
             })
             .unwrap();

@@ -225,15 +225,45 @@ pub(crate) fn observation_banner(session: &Session, occupancy: &Occupancy) -> St
                     })
                     .unwrap_or_else(|| "an earlier time".into());
             format!(
-                "✻ Task {} is executing this session since {since}. Read-only observation: ordinary prompts are not submitted. /continue returns to it, /tasks attach {} opens the full view, Esc exits.",
+                "✻ Task {} is executing this session since {since}. This terminal is read-only because another worker is running the session. Ordinary prompts are not submitted and commands that start a turn are disabled; only local read-only features are available. /continue returns to it, /tasks attach {} opens the full view, and /exit or Ctrl+C leaves this read-only view without stopping the other worker.",
                 job.id, job.id
             )
         }
         Occupancy::Lease => format!(
-            "{} Ordinary prompts are not submitted; /continue shows the running turn. Esc exits.",
+            "{} Another worker is running this session, so this terminal is read-only. Ordinary prompts are not submitted and only local read-only features are available. /continue shows the running turn; /exit or Ctrl+C leaves this read-only view without stopping the other worker.",
             occupancy_message(session, occupancy)
         ),
     }
+}
+
+/// The pinned status above the composer. It names the owner and the features
+/// that still work, and carries the currently executing tool when one is known.
+pub(crate) fn observation_status(
+    occupancy: Option<&Occupancy>,
+    observing: bool,
+    activity: Option<&str>,
+) -> Option<String> {
+    if !observing {
+        return None;
+    }
+    let base = match occupancy {
+        Some(Occupancy::Job(job)) => format!(
+            "\u{25cf} Read-only · occupied by Task {} (partial features: observe, /status, /tasks, /resume, /clear, /exit; prompts disabled)",
+            job.id
+        ),
+        Some(Occupancy::Lease) | None => "\u{25cf} Read-only · occupied by another worker (partial features: observe, /status, /tasks, /resume, /clear, /exit; prompts disabled)".into(),
+    };
+    Some(match activity.filter(|activity| !activity.trim().is_empty()) {
+        Some(activity) => {
+            // The pinned line is single-line terminal text, never a second layout.
+            let activity: String = crate::terminal::tool_view::plain_terminal_text(activity)
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
+            format!("{base} · {activity}")
+        }
+        None => base,
+    })
 }
 
 async fn single_turn(
@@ -2453,5 +2483,41 @@ mod failure_tests {
             "the observer helper did not exit after the job ended"
         );
         let _ = drain.join();
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn the_pinned_read_only_status_names_the_owner_and_live_activity() {
+        assert_eq!(observation_status(None, false, Some("Running Read(a)")), None);
+        let lease = observation_status(Some(&Occupancy::Lease), true, Some("Running Bash(ls)"))
+            .expect("observing shows a status");
+        assert!(lease.contains("Read-only"), "{lease}");
+        assert!(lease.contains("occupied by another worker"), "{lease}");
+        assert!(lease.contains("prompts disabled"), "{lease}");
+        assert!(lease.contains("Running Bash(ls)"), "{lease}");
+
+        let job = jobs::Job {
+            id: "job-1".into(),
+            foreground: false,
+            parent_session_id: "parent".into(),
+            session_id: "child".into(),
+            title: "fixture".into(),
+            status: "running".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            started_ms: 1,
+            heartbeat_ms: 1,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        let task = observation_status(Some(&Occupancy::Job(job)), true, None).unwrap();
+        assert!(task.contains("occupied by Task job-1"), "{task}");
+        assert!(!task.contains("Running"), "{task}");
     }
 }

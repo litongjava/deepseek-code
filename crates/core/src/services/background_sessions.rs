@@ -1239,6 +1239,33 @@ pub(crate) fn possible_executions(root: &Path, session: &str) -> Result<Vec<Job>
     list_matching(root, |job| job.session_id == session)
 }
 
+/// Read-only set of sessions whose managed task may still be executing. This
+/// never settles or rewrites job state: it only applies the same stale-heartbeat
+/// observation as `list` and skips jobs whose processes have positively exited.
+/// A missing PID counts as possibly alive, as in `settle_session`.
+pub fn active_session_ids(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+    let jobs = list_matching(root, |job| {
+        job.finished_ms.is_none()
+            && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")
+    })?;
+    Ok(jobs
+        .into_iter()
+        .filter(|job| job_process_may_be_alive(job))
+        .map(|job| job.session_id)
+        .collect())
+}
+
+fn job_process_may_be_alive(job: &Job) -> bool {
+    let pids: Vec<u32> = [job.supervisor_pid, job.child_pid]
+        .into_iter()
+        .flatten()
+        .collect();
+    pids.is_empty()
+        || pids
+            .iter()
+            .any(|pid| !super::session_worker::process_exited(*pid))
+}
+
 /// Jobs whose parent and execution targets still match this CLI view.
 pub fn owned_jobs(root: &Path, parent: &str) -> Result<Vec<Job>> {
     list_matching(root, |job| authorize_owned_attachment(root, job, parent).is_ok())
@@ -2684,5 +2711,91 @@ mod tests {
         run_worker(&dir).unwrap();
         assert_eq!(output(root.path(), &id).unwrap().0, "");
         assert!(dir.join("worker.claim").exists());
+    }
+
+    fn exited_pid() -> u32 {
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    /// Writes a state record under a fresh UUID; the label only names the
+    /// session for assertions.
+    fn write_job(
+        root: &Path,
+        label: &str,
+        status: &str,
+        supervisor: Option<u32>,
+        child: Option<u32>,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = directory(root, &id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let now = now();
+        let job = Job {
+            id: id.clone(),
+            foreground: false,
+            parent_session_id: "parent".into(),
+            session_id: format!("session-{label}"),
+            title: "fixture".into(),
+            status: status.into(),
+            supervisor_pid: supervisor,
+            child_pid: child,
+            started_ms: now,
+            heartbeat_ms: now,
+            finished_ms: matches!(status, "completed" | "failed" | "cancelled").then_some(now),
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        save(&dir.join("state.json"), &job).unwrap();
+        id
+    }
+
+    #[test]
+    fn active_session_ids_is_read_only_and_skips_exited_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let current = std::process::id();
+        let dead = exited_pid();
+        write_job(root.path(), "running-unknown-pids", "running", None, None);
+        write_job(root.path(), "running-live-child", "running", None, Some(current));
+        write_job(root.path(), "starting-live-supervisor", "starting", Some(current), None);
+        write_job(root.path(), "unresponsive-live", "unresponsive", Some(dead), Some(current));
+        let dead_job = write_job(root.path(), "running-dead", "running", Some(dead), Some(dead));
+        write_job(root.path(), "completed", "completed", Some(current), None);
+        write_job(root.path(), "cancelled", "cancelled", Some(current), None);
+        write_job(root.path(), "failed", "failed", Some(current), None);
+
+        let active = active_session_ids(root.path()).unwrap();
+        assert_eq!(
+            active,
+            [
+                "session-running-unknown-pids",
+                "session-running-live-child",
+                "session-starting-live-supervisor",
+                "session-unresponsive-live",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        // The scan never rewrites the records it reads.
+        assert_eq!(
+            read_job(&directory(root.path(), &dead_job).unwrap())
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!directory(root.path(), &dead_job)
+            .unwrap()
+            .join("cancel")
+            .exists());
     }
 }

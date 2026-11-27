@@ -180,8 +180,16 @@ pub fn mode_indicator(mode: &str) -> Option<(String, Color)> {
         "bypass" => ("\u{23f5}\u{23f5}", "bypass permissions", red),
         "dont-ask" => ("\u{23f5}\u{23f5}", "don't ask", red),
         "auto" => ("\u{23f5}\u{23f5}", "auto mode", Color::Yellow),
+        "read-only" => (
+            "\u{25a0}",
+            "read-only \u{b7} directory missing",
+            Color::Rgb { r: 175, g: 135, b: 255 },
+        ),
         _ => return None,
     };
+    if mode == "read-only" {
+        return Some((format!("{symbol} {title}"), color));
+    }
     Some((format!("{symbol} {title} on (shift+tab to cycle)"), color))
 }
 
@@ -233,6 +241,7 @@ pub fn status_mode(mode: &str) -> &str {
         "plan" => "plan mode on",
         "dont-ask" => "don't ask on",
         "auto" => "auto mode on",
+        "read-only" => "read-only \u{b7} directory missing",
         _ => "ask permissions on",
     }
 }

@@ -10,6 +10,7 @@ import { updateConversation, deleteConversation, exportConversation, getUnreadAn
 import GitBashRequiredModal from './components/GitBashRequiredModal';
 import Auth from './components/Auth';
 import SettingsPage from './components/SettingsPage';
+import SearchStartupReminder from './components/SearchStartupReminder';
 import AgentPanel from './components/AgentPanel';
 import { useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import AnalyticsPanel from './components/AnalyticsPanel';
@@ -433,6 +434,7 @@ const Layout = () => {
           )}
           <div className="flex-1 flex overflow-hidden relative" ref={contentContainerRef}>
             <div className="flex-1 flex flex-col h-full min-w-0">
+              <SearchStartupReminder />
               {showUpgrade ? (
                 <UpgradePlan onClose={() => setShowUpgrade(false)} />
               ) : location.pathname === '/settings' ? (

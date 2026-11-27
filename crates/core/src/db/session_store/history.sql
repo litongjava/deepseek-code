@@ -102,10 +102,13 @@ CREATE TABLE tool_calls (
     output TEXT,
     is_error INTEGER DEFAULT 0,
     sort_order INTEGER NOT NULL,
+    request_id TEXT REFERENCES model_requests(id) ON DELETE SET NULL,
+    provider_call_id TEXT,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_tool_calls_message_id ON tool_calls(message_id);
+CREATE INDEX idx_tool_calls_request_id ON tool_calls(request_id);
 
 CREATE TABLE tool_call_origins (
     tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,

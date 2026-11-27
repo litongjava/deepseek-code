@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, HashSet};
 /// `tool_use_id -> (parent_tool_use_id, sequence)` for nested ToolScript calls.
 pub type ToolOrigins = BTreeMap<String, (String, u64)>;
 
+/// `tool_use_id -> (model_request_id, provider_call_id)` linking each tool
+/// invocation to the exact `model_requests` step that requested it.
+pub type ToolRequestLinks = BTreeMap<String, (String, Option<String>)>;
+
 /// Applies one event to the in-memory turn state. Returns whether anything
 /// changed and therefore needs a flush.
 ///

@@ -20,6 +20,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
                 "model_preview",
                 "model_recovery",
                 "model_search",
+                "request_id",
+                "provider_call_id",
             ][..],
         ),
     ] {
@@ -29,10 +31,16 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
                 params![table, column],
                 |r| r.get::<_, bool>(0),
             )? {
-                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+                let ddl = if table == "tool_calls" && *column == "request_id" {
+                    "ALTER TABLE tool_calls ADD COLUMN request_id TEXT REFERENCES model_requests(id) ON DELETE SET NULL".to_owned()
+                } else {
+                    format!("ALTER TABLE {table} ADD COLUMN {column} TEXT")
+                };
+                conn.execute_batch(&ddl)?;
             }
         }
     }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);")?;
     let installed:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('context_search_sources') WHERE name='materialized')",[],|r|r.get(0))?;
     let checked: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tool_calls') WHERE name='model_checked')",

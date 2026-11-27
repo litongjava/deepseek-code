@@ -358,6 +358,62 @@ fn observing_session(
         || worker_frontend::occupancy(session)?.is_some())
 }
 
+/// A session that may still own the turn must be left without stopping it.
+/// An unreadable occupancy probe is treated as owned: uncertainty never kills
+/// another process's work.
+fn leaving_observing_session(
+    session: &session::Session,
+    announced: bool,
+    state: observe::State,
+) -> bool {
+    !matches!(observing_session(session, announced, state), Ok(false))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitAction {
+    /// Leave the read-only view; the other worker keeps the session.
+    LeaveObserver,
+    /// No other owner was proven absent; the worker may be stopped.
+    StopOwner,
+}
+
+fn exit_action(observing: Result<bool>) -> ExitAction {
+    match observing {
+        Ok(false) => ExitAction::StopOwner,
+        // `Ok(true)` is observing; `Err` cannot prove the session is idle.
+        _ => ExitAction::LeaveObserver,
+    }
+}
+
+/// Read-only sessions must not enter multiline composition: a pending
+/// composer would swallow `/exit` and `/resume`. Scheduled prompts are already
+/// complete and skip composition too.
+fn prompt_submission(
+    scheduled: bool,
+    read_only_missing: bool,
+    composer: &mut terminal::prompt::Composer,
+    line: String,
+) -> terminal::prompt::Input {
+    if scheduled || read_only_missing {
+        terminal::prompt::Input::Command(line)
+    } else {
+        composer.push(line)
+    }
+}
+
+/// A `-C`/`--path` launch must name the resumed project, not another cwd. A
+/// missing primary folder can never match the existing launch directory.
+fn launch_directory_matches(path: &std::path::Path, cwd: &std::path::Path) -> Result<()> {
+    if path.is_dir() {
+        ensure!(
+            std::fs::canonicalize(path)? == std::fs::canonicalize(cwd)?,
+            "--path differs from the resumed session's project"
+        );
+    } else {
+        anyhow::bail!("--path differs from the resumed session's project");
+    }
+    Ok(())
+}
 async fn run(cli: &mut Cli) -> Result<()> {
     if let Some(Commands::Help { topic, command }) = &cli.command {
         return help::show(topic.as_deref(), command);
@@ -889,13 +945,37 @@ async fn run(cli: &mut Cli) -> Result<()> {
         }
     }
 
+    // Only an interactive REPL may open a saved session whose directory is
+    // gone. Print, SDK, forked and init-only runs keep the strict resume.
+    let interactive_resume = !single && !sdk_stream && !cli.fork_session && !cli.init_only;
+    let mut resumed_missing: Option<session::MissingWorkspace> = None;
     let resumed = if let Some(id) = &cli.resume {
         let store = SessionStore::new(paths.open_database()?);
-        Some(
-            store
-                .resume(id)
-                .map_err(|error| session_trust::diagnose(&store.db, &paths, id, error))?,
-        )
+        if interactive_resume {
+            let (_, row, workspace) = store
+                .db
+                .resume_code_for_inspection(id)
+                .map_err(|error| session_trust::diagnose(&store.db, &paths, id, error))?;
+            if let deepseek_code_core::db::session_store::ResumedWorkspace::Missing {
+                path,
+                missing_path,
+                reason,
+            } = workspace
+            {
+                resumed_missing = Some(session::MissingWorkspace {
+                    path,
+                    missing_path,
+                    reason,
+                });
+            }
+            Some(row)
+        } else {
+            Some(
+                store
+                    .resume(id)
+                    .map_err(|error| session_trust::diagnose(&store.db, &paths, id, error))?,
+            )
+        }
     } else if cli.continue_session {
         Some(
             SessionStore::new(paths.open_database()?)
@@ -906,16 +986,26 @@ async fn run(cli: &mut Cli) -> Result<()> {
         None
     };
     if let Some(resumed) = &resumed {
-        let db = paths.open_database()?;
-        let workspace = db.open_session(&resumed.id)?.workspace()?;
-        if cli.path.is_some() {
-            ensure!(
-                std::fs::canonicalize(&workspace)?
-                    == std::fs::canonicalize(std::env::current_dir()?)?,
-                "--path differs from the resumed session's project"
-            );
+        if let Some(missing) = &resumed_missing {
+            // Keep the launch directory. A `-C` that points elsewhere must not
+            // silently attach a read-only session to another project. A
+            // multi-folder project can leave its primary folder in place, so
+            // compare against it; an absent folder already differs from cwd.
+            if cli.path.is_some() {
+                launch_directory_matches(&missing.path, &std::env::current_dir()?)?;
+            }
+        } else {
+            let db = paths.open_database()?;
+            let workspace = db.open_session(&resumed.id)?.workspace()?;
+            if cli.path.is_some() {
+                ensure!(
+                    std::fs::canonicalize(&workspace)?
+                        == std::fs::canonicalize(std::env::current_dir()?)?,
+                    "--path differs from the resumed session's project"
+                );
+            }
+            std::env::set_current_dir(workspace)?;
         }
-        std::env::set_current_dir(workspace)?;
     }
     if cli.init_only {
         ensure!(
@@ -1034,6 +1124,35 @@ async fn run(cli: &mut Cli) -> Result<()> {
     let startup_selected = selection.is_ok();
     let selection = match selection {
         Ok(selection) => selection,
+        Err(_) if resumed_missing.is_some() => {
+            // A read-only viewer must still open when the saved provider or
+            // model was removed from config.json. The display binding is
+            // observation-only and can never send a request.
+            let providers = paths.providers().unwrap_or_default();
+            let provider_id = observed
+                .as_ref()
+                .map(|row| row.provider.clone())
+                .filter(|value| !value.is_empty())
+                .or_else(|| providers.iter().find(|p| p.enabled).map(|p| p.id.clone()))
+                .unwrap_or_default();
+            let model = observed
+                .as_ref()
+                .map(|row| row.model.clone())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    providers
+                        .iter()
+                        .find(|p| p.enabled && p.id == provider_id)
+                        .and_then(|p| p.models.iter().find(|m| m.enabled))
+                        .map(|m| m.id.clone())
+                })
+                .unwrap_or_default();
+            config::Selection {
+                providers,
+                provider_id,
+                model,
+            }
+        }
         Err(error) if !single => {
             // A first start has nothing configured: the onboarding explains
             // itself. Otherwise show what is wrong with the saved setup.
@@ -1048,7 +1167,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
         Err(error) => return Err(error),
     };
     startup_options::validate(cli, &std::env::current_dir()?)?;
-    if !single && !sdk_stream {
+    if !single && !sdk_stream && resumed_missing.is_none() {
         // As in the reference CLI, before project settings and hooks load.
         let folder = std::env::current_dir()?;
         startup_prompts::confirm(
@@ -1066,37 +1185,58 @@ async fn run(cli: &mut Cli) -> Result<()> {
     // known host child inherits that absolute native root.
     let prepared = local_coordination::prepare_startup(cli, &paths, launch_cwd.as_deref()).await;
     local_coordination::export_child_root(&prepared);
-    let mut session = session::Session::open(
-        cli,
-        &paths,
-        selection,
-        resumed.as_ref().map(|s| s.id.as_str()),
-    )
-    .await?;
+    let mut session = if interactive_resume && resumed.is_some() {
+        session::Session::open_interactive(
+            cli,
+            &paths,
+            selection,
+            resumed.as_ref().map(|s| s.id.as_str()),
+        )
+        .await?
+    } else {
+        session::Session::open(
+            cli,
+            &paths,
+            selection,
+            resumed.as_ref().map(|s| s.id.as_str()),
+        )
+        .await?
+    };
     if normal_frontend && resumed.is_some() && session.startup_provider.is_none() {
         // After observation or a rejected selection, raw startup options have no authority.
         cli.discard_binding_options();
     }
     if !startup_selected { session.startup_provider=None; }
-    resource_sampling::session(&session.id);
+    if !session.is_missing_workspace() {
+        resource_sampling::session(&session.id);
+    }
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
     // Set by /restart; the replacement starts after this session is closed.
     let mut restart_launch = None;
+    let mut observing_exit = false;
     let result = async {
         session.admit_launch_prompt(&mut prompt, single)?;
         // Applied inside the cleanup scope so a startup failure reaches teardown
-        // and publishes no incarnation.
-        startup_options::apply(cli, &mut session).await?;
-        if !sdk_stream { session.start_hooks(if resumed.is_some() { "resume" } else { "startup" }).await?; }
-        if cli.init || cli.init_only || cli.maintenance {
-            anyhow::ensure!(!sdk_stream, "Setup flags with stream-json input are not supported");
-            let trigger = if cli.maintenance { "maintenance" } else { "init" };
-            let context = session.hook_service_context();
-            let outcome = tokio::select! {
-                result = hook_progress::during(&session.id, true, deepseek_code_core::services::lifecycle_events::setup(&context, &session.workspace, &session.id, trigger, false)) => result,
-                _ = crate::signals::interrupted() => anyhow::bail!("Setup hooks interrupted"),
-            }?;
-            for warning in outcome { eprintln!("Setup hook: {warning}"); }
+        // and publishes no incarnation. A missing directory is read-only: no
+        // settings, hooks or workspace options may touch it.
+        if !session.is_missing_workspace() {
+            startup_options::apply(cli, &mut session).await?;
+            if !sdk_stream { session.start_hooks(if resumed.is_some() { "resume" } else { "startup" }).await?; }
+            if cli.init || cli.init_only || cli.maintenance {
+                anyhow::ensure!(!sdk_stream, "Setup flags with stream-json input are not supported");
+                let trigger = if cli.maintenance { "maintenance" } else { "init" };
+                let context = session.hook_service_context();
+                let outcome = tokio::select! {
+                    result = hook_progress::during(&session.id, true, deepseek_code_core::services::lifecycle_events::setup(&context, &session.workspace, &session.id, trigger, false)) => result,
+                    _ = crate::signals::interrupted() => anyhow::bail!("Setup hooks interrupted"),
+                }?;
+                for warning in outcome { eprintln!("Setup hook: {warning}"); }
+            }
+        } else if !sdk_stream {
+            // A non-SDK interactive host still owns the session lifecycle while
+            // it inspects a missing directory, so a later writable resume runs
+            // SessionStart. No hook runs against the missing folder itself.
+            session.remember_lifecycle_host();
         }
         // Startup succeeded and the final workspace is known: publish now, so a
         // failed startup never leaves a registry row or owner lease behind.
@@ -1111,15 +1251,28 @@ async fn run(cli: &mut Cli) -> Result<()> {
         if !single {
             if std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
                 let banner = terminal::banner(&session.binding_state().model, &session.workspace);
-                eprintln!("{banner}");
+                let search_reminder = terminal::web_search_startup_reminder(
+                    &deepseek_code_core::config::ConfigManager::new(paths.data_dir.clone())
+                        .get_config()
+                        .deepseek_search,
+                );
+                let welcome = match search_reminder {
+                    Some(reminder) => format!("{banner}\n{reminder}"),
+                    None => banner,
+                };
+                eprintln!("{welcome}");
                 if resumed.is_none() {
                     let mut history = terminal::scrollback::Scrollback::take();
-                    history.set_welcome(format!("{banner}\n"));
+                    history.set_welcome(format!("{welcome}\n"));
                     history.save();
                 }
             }
             // --resume and --continue show the conversation so far, as in the reference CLI.
             if resumed.is_some() && std::env::var_os(remote_host::HANDOFF_ENV).is_none() { repl::show_resumed(&session, false)?; }
+        }
+        if session.is_missing_workspace() && !prompt.trim().is_empty() {
+            command_eprintln!("{}", session.missing_workspace_notice("the prompt"));
+            prompt.clear();
         }
         if !sdk_stream {
             let initial = session.initial_hook_message.take();
@@ -1175,20 +1328,28 @@ async fn run(cli: &mut Cli) -> Result<()> {
         let mut loops: Vec<(std::time::Duration, String, std::time::Instant)> = Vec::new();
         background_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote = remote_commands::Remote::default();
-        remote.attach_host().await;
-        // As in the reference CLI, remoteControlAtStartup connects every session.
-        if remote_commands::at_startup(&paths.data_dir) {
-            if let Err(error) = remote.command("", &paths, &session, &mut input).await { command_eprintln!("Remote Control: {error:#}"); }
+        if !session.is_missing_workspace() {
+            remote.attach_host().await;
+            // As in the reference CLI, remoteControlAtStartup connects every session.
+            if remote_commands::at_startup(&paths.data_dir) {
+                if let Err(error) = remote.command("", &paths, &session, &mut input).await { command_eprintln!("Remote Control: {error:#}"); }
+            }
         }
         let mut last_config_error = String::new();
         let mut reported_binding_failures = std::collections::HashMap::new();
         // Read-only view of a turn a direct print/json owner still executes.
         let mut execution_observer = observe::Observer::default();
+        // A resume already rendered the conversation; the observer continues
+        // from those cursors instead of replaying the running turn.
+        if let Some(view) = repl::take_resumed_view(&session.id) {
+            execution_observer.seed_from_resumed(view);
+        }
         // Cross-session state is reset when /resume, /branch or /clear changes
         // session.id; observation state follows the same boundary.
         let mut active_session = session.id.clone();
         let mut observe_announced = false;
         let mut observe_state = observe::State::Idle;
+        let mut last_observation_status: Option<String> = None;
         let mut last_occupancy_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.
@@ -1200,6 +1361,8 @@ async fn run(cli: &mut Cli) -> Result<()> {
         }
         'repl: loop {
             if crate::signals::terminating() {
+                observing_exit |=
+                    leaving_observing_session(&session, observe_announced, observe_state);
                 break 'repl;
             }
             if active_session != session.id {
@@ -1228,29 +1391,42 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     command_eprintln!("Draft or queued prompts from the previous session were discarded.");
                 }
                 execution_observer = observe::Observer::default();
+                if let Some(view) = repl::take_resumed_view(&session.id) {
+                    execution_observer.seed_from_resumed(view);
+                }
+                if let Some(reader) = input.as_ref() {
+                    reader.reset_observation();
+                }
+                last_observation_status = None;
                 observe_announced = false;
                 observe_state = observe::State::Idle;
             }
-            let occupancy = match worker_frontend::occupancy(&session) {
-                Ok(occupancy) => {
-                    last_occupancy_error.clear();
-                    occupancy
-                }
-                Err(error) => {
-                    let text = format!("{error:#}");
-                    if text != last_occupancy_error {
-                        command_eprintln!("Session occupancy: {text}");
-                        last_occupancy_error = text;
+            let read_only_missing = session.is_missing_workspace();
+            let occupancy = if read_only_missing {
+                None
+            } else {
+                match worker_frontend::occupancy(&session) {
+                    Ok(occupancy) => {
+                        last_occupancy_error.clear();
+                        occupancy
                     }
-                    None
+                    Err(error) => {
+                        let text = format!("{error:#}");
+                        if text != last_occupancy_error {
+                            command_eprintln!("Session occupancy: {text}");
+                            last_occupancy_error = text;
+                        }
+                        None
+                    }
                 }
             };
             let occupied = occupancy.is_some();
             let observing =
                 occupied || (observe_announced && observe_state == observe::State::Running);
-            if observing {
+            if observing || read_only_missing {
                 // Keep automatic notifications and remote prompts from opening
-                // a turn while another process owns the session.
+                // a turn while another process owns the session, or while the
+                // saved directory is read-only.
                 session.hold_automatic_wake();
             }
             if observing && !observe_announced {
@@ -1269,41 +1445,63 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 observe_announced = false;
                 command_eprintln!("✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.");
             }
+            let status = worker_frontend::observation_status(
+                occupancy.as_ref(),
+                observing,
+                execution_observer.activity(),
+            );
+            if status != last_observation_status {
+                if let Some(reader) = input.as_ref() {
+                    reader.set_observation_status(status.clone());
+                }
+                last_observation_status = status;
+            }
             // A committed transition may have resolved a root this launch deferred,
             // so children of this iteration inherit the current native value.
-            local_coordination::export_session_child_root(session.coordination_child_root());
-            resource_sampling::session(&session.id);
+            if !read_only_missing {
+                local_coordination::export_session_child_root(session.coordination_child_root());
+                resource_sampling::session(&session.id);
+            }
             // Router sessions advance their tasks between turns. Normal Agent
-            // sessions pay only one setting read.
-            if let Err(error) = super_agent_tick::tick(&session).await {
-                command_eprintln!("Super Agent: {error:#}");
+            // sessions pay only one setting read. A read-only history view never
+            // advances tasks or starts hooks.
+            if !read_only_missing {
+                if let Err(error) = super_agent_tick::tick(&session).await {
+                    command_eprintln!("Super Agent: {error:#}");
+                }
             }
             terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
-            for notice in background_commands::collect_completed(&session)? { command_eprintln!("{notice}"); }
-            // A background command that finished meanwhile starts a turn, as in
-            // the reference CLI.
-            if last_occupancy_error.is_empty() && !composer.is_pending() && !observing {
-                match background_commands::wake_for_notifications(cli, &mut session, &mut input).await {
-                    Ok(true) => continue 'repl,
-                    Ok(false) => {},
-                    Err(error) => report_error(error)?,
+            if !read_only_missing {
+                for notice in background_commands::collect_completed(&session)? { command_eprintln!("{notice}"); }
+                // A background command that finished meanwhile starts a turn, as in
+                // the reference CLI.
+                if last_occupancy_error.is_empty() && !composer.is_pending() && !observing {
+                    match background_commands::wake_for_notifications(cli, &mut session, &mut input).await {
+                        Ok(true) => continue 'repl,
+                        Ok(false) => {},
+                        Err(error) => report_error(error)?,
+                    }
                 }
-            }
-            if last_occupancy_error.is_empty() && !session.waiting_for_continue() && !observing {
-                if let Some(prompt) = remote.take_deferred() {
-                    if let Err(error) = session.turn(cli, &prompt, &mut input, TurnOrigin::User(&prompt)).await { report_error(error)?; }
+                if last_occupancy_error.is_empty() && !session.waiting_for_continue() && !observing {
+                    if let Some(prompt) = remote.take_deferred() {
+                        if let Err(error) = session.turn(cli, &prompt, &mut input, TurnOrigin::User(&prompt)).await { report_error(error)?; }
+                    }
                 }
-            }
-            if let Err(error) = remote.sync(&session) { command_eprintln!("Remote Control: {error:#}"); }
-            if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
+                if let Err(error) = remote.sync(&session) { command_eprintln!("Remote Control: {error:#}"); }
+                if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
+                    drop(presence.take());
+                    presence = session.store.db.acquire_presence(&session.id)
+                        .ok()
+                        .map(|lease| (session.id.clone(), lease));
+                }
+            } else {
+                // No active presence or notification registration for a session
+                // that cannot be executed.
                 drop(presence.take());
-                presence = session.store.db.acquire_presence(&session.id)
-                    .ok()
-                    .map(|lease| (session.id.clone(), lease));
             }
-            let suggestions_enabled = prompt_suggestion::enabled(&paths.data_dir);
+            let suggestions_enabled = !read_only_missing && prompt_suggestion::enabled(&paths.data_dir);
             let reader = input.as_ref().expect("interactive reader");
             let ghost = suggestions_enabled.then(|| prompt_suggestion::Ghost::load(&session)).flatten();
             let mut shown_suggestion = ghost.as_ref().map(|ghost| ghost.saved.clone());
@@ -1330,7 +1528,11 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 .unwrap()
                 .set_provider_ids(interactive_config::provider_ids(&paths));
             input.as_ref().unwrap().set_workspace(&session.workspace);
-            input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
+            if read_only_missing {
+                input.as_ref().unwrap().set_context_note(None);
+            } else {
+                input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
+            }
             input.as_ref().unwrap().set_background(
                 background_commands::running_shells(&paths, &session.id),
                 background_commands::running_monitors(&paths, &session.id),
@@ -1350,7 +1552,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
             let (todo_paths, todo_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_todos(Box::new(move || background_commands::todo_items(&todo_paths, &todo_session)));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));
-            if display.diff_panel && !display.focus {
+            if display.diff_panel && !display.focus && !read_only_missing {
                 match deepseek_code_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {
                     Ok(diff) => input.as_mut().unwrap().set_panel(vec![(if display.diff_staged { "Staged diff" } else { "Uncommitted changes (untracked files listed by name)" }.into(), diff)], true),
                     Err(error) => { command_eprintln!("Diff: {error:#}"); input.as_mut().unwrap().set_details(vec![]); },
@@ -1366,10 +1568,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
             }
             input.as_ref().expect("interactive reader").set_permission_mode(session.permission_mode());
             let idle_prompt = format!("\n{} ", terminal::prompt_glyph());
-            let prompt = if composer.is_pending() {
+            let prompt = if read_only_missing {
+                "\n\u{2026} "
+            } else if composer.is_pending() {
                 "... "
-            } else if observing {
-                "\n… "
             } else {
                 idle_prompt.as_str()
             };
@@ -1378,6 +1580,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     Ok(Some(terminal::input::PromptEvent::Line(line))) => (line, false),
                     Ok(Some(terminal::input::PromptEvent::Scheduled(line))) => (line, true),
                     Ok(Some(terminal::input::PromptEvent::StepEffort(up))) => {
+                        if read_only_missing {
+                            input.as_ref().unwrap().notice(session.missing_workspace_notice("changing reasoning effort"));
+                            continue 'read;
+                        }
                         if let Err(error) = session_commands::step_effort(&session, up).await {
                             input.as_ref().unwrap().notice(format!("Reasoning effort: {error:#}"));
                         }
@@ -1385,16 +1591,24 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         continue 'read;
                     },
                     Ok(Some(terminal::input::PromptEvent::CyclePermission)) => {
+                        if read_only_missing {
+                            input.as_ref().unwrap().notice(session.missing_workspace_notice("changing permission modes"));
+                            continue 'read;
+                        }
                         if let Err(error) = session.cycle_permission_mode().await { command_eprintln!("Permission mode: {error:#}"); }
                         continue 'repl;
                     },
-                    Err(_) if signals::terminating() => break 'repl,
+                    Err(_) if signals::terminating() => {
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                        break 'repl
+                    },
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                         if composer.is_pending() {
                             composer.cancel();
                             command_eprintln!("Prompt discarded.");
                             continue 'repl;
                         }
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                         break 'repl;
                     },
                     Err(error) => return Err(error.into()),
@@ -1402,10 +1616,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         #[cfg(unix)]
                         signals::check_terminal_hangup();
                         if composer.is_pending() { command_eprintln!("Unfinished prompt discarded."); }
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                         break 'repl;
                     }
                 },
                 _ = background_refresh.tick() => {
+                    if read_only_missing {
+                        // No binding refresh, hook wake, cron, loop, wakeup,
+                        // agent question, desktop input or workspace sync may
+                        // run against a directory that no longer exists.
+                        continue 'read;
+                    }
                     let failure = session.store.db.binding_notice(&session.id,&session.binding_requester)?;
                     if let Some((generation, requested, restored, needs_ack)) = failure {
                         let seen = reported_binding_failures.entry(session.id.clone()).or_insert(0);
@@ -1479,18 +1700,38 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         match execution_observer.poll(&session) {
                             // Observing never opens the automatic-wake path: a
                             // queued notification waits for explicit input.
-                            Ok((state, lines)) => {
-                                observe_state = state;
+                            Ok(result) => {
+                                observe_state = result.state;
+                                let refresh_transcript = result.state == observe::State::Finished
+                                    || result
+                                        .updates
+                                        .iter()
+                                        .any(|update| matches!(update, observe::Update::Tool(_)));
                                 if let Some(reader) = input.as_ref() {
-                                    for line in lines { reader.notice(line); }
+                                    reader.observe(result.updates);
                                 }
-                                if observe_announced && state != observe::State::Running {
-                                    let occupied = worker_frontend::occupancy(&session).ok().flatten().is_some();
-                                    if state == observe::State::Finished || !occupied {
+                                if refresh_transcript {
+                                    if let (Some(reader), Ok(lines)) =
+                                        (input.as_ref(), repl::transcript(&session))
+                                    {
+                                        reader.set_observation_transcript(lines);
+                                    }
+                                }
+                                if observe_announced && result.state != observe::State::Running {
+                                    let occupied = worker_frontend::occupancy(&session)
+                                        .ok()
+                                        .flatten()
+                                        .is_some();
+                                    if result.state == observe::State::Finished || !occupied {
                                         observe_announced = false;
                                         observe_state = observe::State::Idle;
                                         if let Some(reader) = input.as_ref() {
-                                            reader.notice("✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.".into());
+                                            reader.observe(vec![observe::Update::Notice(
+                                                "✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.".into(),
+                                            )]);
+                                            if last_observation_status.take().is_some() {
+                                                reader.set_observation_status(None);
+                                            }
                                         }
                                         // The current prompt still shows the
                                         // read-only marker; redraw it as idle.
@@ -1503,6 +1744,20 @@ async fn run(cli: &mut Cli) -> Result<()> {
                                             continue 'repl;
                                         }
                                     }
+                                }
+                                let observing_now = occupancy.is_some()
+                                    || (observe_announced
+                                        && observe_state == observe::State::Running);
+                                let status = worker_frontend::observation_status(
+                                    occupancy.as_ref(),
+                                    observing_now,
+                                    result.activity.as_deref(),
+                                );
+                                if status != last_observation_status {
+                                    if let Some(reader) = input.as_ref() {
+                                        reader.set_observation_status(status.clone());
+                                    }
+                                    last_observation_status = status;
                                 }
                             }
                             Err(error) => {
@@ -1594,6 +1849,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     let reader = input.as_ref().expect("interactive reader");
                     match remote.handle(update, &mut session, |line| reader.notice(line)).await {
                         Ok(remote_commands::Action::Prompt(prompt)) => {
+                            if read_only_missing {
+                                command_eprintln!("{}", session.missing_workspace_notice("the remote prompt"));
+                                continue 'repl;
+                            }
                             match observing_session(&session, observe_announced, observe_state) {
                                 Ok(true) => {
                                     command_eprintln!("Remote prompt not submitted: this session is executing in another process. It was not queued.");
@@ -1631,19 +1890,27 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         command_eprintln!("Prompt discarded.");
                         continue 'repl;
                     }
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                     break 'repl;
                 },
-                _ = crate::signals::termination() => break 'repl,
+                _ = crate::signals::termination() => {
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                    break 'repl
+                },
             } };
             fn input_origin(scheduled: bool, text: &str) -> TurnOrigin<'_> {
                 if scheduled { TurnOrigin::Scheduled } else { TurnOrigin::User(text) }
             }
-            let submission = if scheduled { terminal::prompt::Input::Command(line) } else { composer.push(line) };
+            let submission = prompt_submission(scheduled, read_only_missing, &mut composer, line);
             let line = match submission {
                 terminal::prompt::Input::Pending => continue,
                 terminal::prompt::Input::Cancelled => { command_eprintln!("Prompt discarded."); continue; },
                 terminal::prompt::Input::Prompt(prompt) => {
                     if !prompt.trim().is_empty() {
+                        if read_only_missing {
+                            command_eprintln!("{}", session.missing_workspace_notice("the prompt"));
+                            continue;
+                        }
                         match observing_session(&session, observe_announced, observe_state) {
                             Ok(true) => {
                                 command_eprintln!("The session is executing in another process; the prompt was not submitted. Use /continue to return to it, /tasks to inspect it, or wait for it to finish.");
@@ -1661,6 +1928,18 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 },
                 terminal::prompt::Input::Command(line) => line,
             };
+            let mut line = line;
+            if read_only_missing {
+                if let Some(action) = session::missing_workspace_rejected_action(&line) {
+                    command_eprintln!("{}", session.missing_workspace_notice(&action));
+                    continue;
+                }
+                // The bare picker can offer mutating task actions; use its
+                // read-only listing form instead.
+                if line.trim() == "/tasks" {
+                    line = "/tasks list".to_owned();
+                }
+            }
             if line.trim() == "/vim" {
                 let on = !terminal::vim::enabled(&paths.data_dir);
                 match terminal::vim::set_enabled(&paths.data_dir, on) {
@@ -1797,7 +2076,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
             }
             match background_commands::handle(cli, command, argument, input_origin(scheduled, argument.trim()), &paths, &mut session, &mut input).await {
                 Ok(background_commands::Outcome::Handled) => continue,
-                Ok(background_commands::Outcome::Exit) => break,
+                Ok(background_commands::Outcome::Exit) => {
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                    break;
+                },
                 Err(error) => { report_error(error)?; continue; },
                 Ok(background_commands::Outcome::NotHandled) => {},
             }
@@ -1918,6 +2200,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     continue;
                 }
                 if let Err(error) = worker_binding::retain_for_transfer(&session).await { command_eprintln!("Relaunch did not apply: {error:#}"); continue; }
+                observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                 let launch = restart::resume(cli, &session)?;
                 restart_launch = Some(launch);
                 break;
@@ -1925,7 +2208,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
             match line.trim() {
                 "" => continue,
                 "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => {
-                    session_trust::quit_worker(&session.paths, &session.id).await?;
+                    if !session.is_missing_workspace() {
+                        match exit_action(observing_session(&session, observe_announced, observe_state)) {
+                            ExitAction::LeaveObserver => {
+                                command_eprintln!("Leaving read-only view; the session continues running in another worker.");
+                                observing_exit = true;
+                            }
+                            ExitAction::StopOwner => {
+                                session_trust::quit_worker(&session.paths, &session.id).await?;
+                            }
+                        }
+                    }
                     break;
                 },
                 "/" | "/help" | "help" | ".help" | ":h" => {
@@ -1979,13 +2272,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
     if !single {
         terminal::title::clear();
     }
-    session
-        .end_hooks(if result.is_ok() && !single && !signals::terminating() {
-            "prompt_input_exit"
-        } else {
-            "other"
-        })
-        .await;
+    // A read-only view leaves the session running in the other worker: the
+    // conversation did not end and this process must not cancel its hooks.
+    if !observing_exit {
+        session
+            .end_hooks(if result.is_ok() && !single && !signals::terminating() {
+                "prompt_input_exit"
+            } else {
+                "other"
+            })
+            .await;
+    }
     let resume_hint = restart_launch.is_none()
         && !single
         && !sdk_stream
@@ -1993,7 +2290,11 @@ async fn run(cli: &mut Cli) -> Result<()> {
             .store
             .history(&session.id)
             .is_ok_and(|rows| !rows.is_empty());
-    let shutdown = session.close_owned().await;
+    let shutdown = if observing_exit {
+        session.close_owned_local().await
+    } else {
+        session.close_owned().await
+    };
     // Restore the shell before printing the one message that must survive cleanup.
     drop(input);
     drop(screen_mode);
@@ -2186,6 +2487,26 @@ fn read_piped_stdin<R: Read + Send + 'static>(
 }
 
 #[cfg(test)]
+mod exit_tests {
+    use super::{exit_action, ExitAction};
+
+    #[test]
+    fn only_a_proven_idle_session_may_stop_the_worker_on_exit() {
+        assert_eq!(exit_action(Ok(false)), ExitAction::StopOwner);
+        assert_eq!(
+            exit_action(Ok(true)),
+            ExitAction::LeaveObserver,
+            "an occupied session is never stopped by the observer"
+        );
+        assert_eq!(
+            exit_action(Err(anyhow::anyhow!("lock probe unavailable"))),
+            ExitAction::LeaveObserver,
+            "an unreadable probe must not kill another process's work"
+        );
+    }
+}
+
+#[cfg(test)]
 mod turn_command_tests {
     use super::starts_turn_command;
 
@@ -2236,6 +2557,62 @@ mod turn_command_tests {
         ] {
             assert!(!starts_turn_command(command, argument), "{command}");
         }
+    }
+}
+
+#[cfg(test)]
+mod read_only_submission_tests {
+    use super::prompt_submission;
+    use crate::terminal::prompt::{Composer, Input};
+
+    #[test]
+    fn read_only_lines_bypass_multiline_composition() {
+        let mut composer = Composer::default();
+        for line in ["/multiline", "foo\\"] {
+            assert_eq!(
+                prompt_submission(false, true, &mut composer, line.into()),
+                Input::Command(line.into())
+            );
+            assert!(!composer.is_pending(), "{line} left the composer pending");
+        }
+        // A writable session still enters multiline mode.
+        assert_eq!(
+            prompt_submission(false, false, &mut composer, "/multiline".into()),
+            Input::Pending
+        );
+        assert!(composer.is_pending());
+        composer.cancel();
+    }
+}
+
+#[cfg(test)]
+mod launch_directory_tests {
+    use super::launch_directory_matches;
+
+    #[test]
+    fn missing_project_primary_must_match_the_launch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let other = root.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+
+        assert!(launch_directory_matches(&project, &project).is_ok());
+        // A non-canonical spelling of the same existing folder still matches.
+        assert!(launch_directory_matches(&project.join("."), &project).is_ok());
+        let error = launch_directory_matches(&project, &other).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--path differs"),
+            "{error:#}"
+        );
+
+        // The primary folder is gone, so no existing launch directory can match.
+        let gone = root.path().join("gone");
+        let error = launch_directory_matches(&gone, &other).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--path differs"),
+            "{error:#}"
+        );
     }
 }
 

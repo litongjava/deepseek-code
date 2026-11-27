@@ -729,7 +729,7 @@ pub(crate) fn start(
         };
         completion.finish(status, output);
     });
-    let mut result = json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolLoad (names: [\"TaskGet\"]); TaskStop stops it.")});
+    let mut result = json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. Continue other work or end your turn (call no more tools) — you will be automatically notified when it finishes. Do NOT call TaskGet to wait or poll; only load/call TaskGet (non-blocking) if you need intermediate output or suspect it is stalled, and use TaskStop to cancel it.")});
     if interaction == Interaction::StdinPipe {
         result["interaction"] = json!("pipe");
         result["stdin_available"] = json!(true);
@@ -1002,11 +1002,11 @@ pub(super) async fn run_foreground(
             "timeout_ms":millis,
             "stdout":stdout,
             "stderr":stderr,
-            "message":format!("The command was still running after {millis} ms, so it moved to the background and keeps running. Its output so far is in stdout/stderr. To wait for it or read more output, load TaskGet with ToolLoad (names: [\"TaskGet\"]), then call TaskGet with block:true to wait; TaskStop stops it. You will be notified when it finishes.")
+            "message":format!("The command was still running after {millis} ms, so it moved to the background and keeps running. Its output so far is in stdout/stderr. Continue other work or end your turn (call no more tools) — you will be automatically notified when it finishes. Do NOT call TaskGet(block: true) to wait; only load/call TaskGet (non-blocking) if you need intermediate output or suspect it is stalled, and use TaskStop to cancel it.")
         }));
     }
     Ok(
-        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. You will be notified when it finishes. To read its output earlier, load TaskGet with ToolLoad (names: [\"TaskGet\"]); TaskStop stops it."}),
+        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Continue other work or end your turn (call no more tools) — you will be automatically notified when it finishes. Do NOT call TaskGet to wait or poll; only load/call TaskGet (non-blocking) if you need intermediate output or suspect it is stalled, and use TaskStop to cancel it."}),
     )
 }
 

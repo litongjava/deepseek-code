@@ -147,6 +147,11 @@ fn keeps_overlay_in_place(
 
 pub struct PromptEditor {
     notices: Option<std::sync::mpsc::Receiver<String>>,
+    observations: Option<std::sync::mpsc::Receiver<super::ObservationMessage>>,
+    /// Persistent read-only line shown directly above the composer.
+    observation_status: Option<String>,
+    /// One Markdown stream per observed assistant segment, in arrival order.
+    observed_text: Vec<ObservedMarkdown>,
     history: Vec<String>,
     pending_draft: String,
     pending_cursor: Option<usize>,
@@ -193,6 +198,9 @@ impl Default for PromptEditor {
     fn default() -> Self {
         Self {
             notices: None,
+            observations: None,
+            observation_status: None,
+            observed_text: Vec::new(),
             history: Vec::new(),
             pending_draft: String::new(),
             pending_cursor: None,
@@ -1279,6 +1287,121 @@ fn write_notice(
     Ok(())
 }
 
+struct ObservedMarkdown {
+    segment: String,
+    markdown: crate::terminal::markdown::MarkdownStream,
+    started: bool,
+}
+
+impl ObservedMarkdown {
+    fn new(segment: String) -> Self {
+        Self {
+            segment,
+            markdown: crate::terminal::markdown::MarkdownStream::new(
+                std::env::var_os("NO_COLOR").is_none(),
+            ),
+            started: false,
+        }
+    }
+}
+
+/// Writes one rendered answer line like a live turn: the first non-empty row
+/// carries `●`, later rows keep the answer's hanging indent. Blank rows are
+/// separators, not the start of the answer.
+fn write_observed_answer_row(
+    out: &mut impl Write,
+    above: &mut crate::terminal::scrollback::Scrollback,
+    stream: &mut ObservedMarkdown,
+    rendered: &str,
+    width: usize,
+) -> io::Result<()> {
+    if rendered.is_empty() {
+        above.push(String::new(), None);
+        write!(out, "\r\n")?;
+        return Ok(());
+    }
+    if !stream.started && above.needs_separator() {
+        above.push(String::new(), None);
+        write!(out, "\r\n")?;
+    }
+    let first = if stream.started { "  " } else { "\u{25cf} " };
+    stream.started = true;
+    let indent = " ".repeat(2 + crate::terminal::markdown::hanging_indent(rendered));
+    for row in above.push_flow(rendered, first, &indent, width.max(1)) {
+        write!(out, "{row}\r\n")?;
+    }
+    Ok(())
+}
+
+/// A finished observed call becomes the same clickable block a foreground turn
+/// writes: numbered header, diff preview or `⎿` summary, full form for Ctrl+O,
+/// and copy bindings.
+fn write_observed_tool(
+    out: &mut impl Write,
+    above: &mut crate::terminal::scrollback::Scrollback,
+    tool: &crate::observe::ToolUpdate,
+    workspace: Option<&std::path::Path>,
+) -> io::Result<()> {
+    use crate::terminal::{change_view, tool_view};
+    let input: serde_json::Value = tool
+        .input
+        .as_deref()
+        .and_then(|input| serde_json::from_str(input).ok())
+        .unwrap_or_default();
+    let change = matches!(
+        tool.name.as_str(),
+        "Write" | "Edit" | "MultiEdit" | "ApplyPatch"
+    )
+    .then(|| change_view::change_in_workspace(&tool.output, tool.is_error, workspace))
+    .flatten()
+    .filter(|lines| lines.len() > 1);
+    let (short, full) = if let Some(lines) = change {
+        let short = change_view::collapsed_change(&lines);
+        let mut full = lines;
+        full.push(change_view::muted(tool_view::COLLAPSE_HINT));
+        (short, full)
+    } else {
+        (
+            tool_view::finished(
+                &tool.name,
+                &input,
+                &tool.output,
+                tool.is_error,
+                None,
+                workspace,
+            ),
+            tool_view::expanded_block(
+                &tool.name,
+                &input,
+                &tool.output,
+                tool.is_error,
+                tool.elapsed,
+                workspace,
+            ),
+        )
+    };
+    if above.needs_separator() {
+        above.push(String::new(), None);
+        write!(out, "\r\n")?;
+    }
+    let (id, rows) = above.tool_block(
+        &tool_view::compact_label(&tool.name, &input),
+        tool.is_error,
+        tool_view::numbered(short, Some(tool.number)),
+        tool_view::numbered(full, Some(tool.number)),
+    );
+    above.bind_copy(
+        id,
+        tool_view::copy_command(&tool.name, &input),
+        tool_view::result_text(&tool.output),
+    );
+    for row in rows {
+        write!(out, "{row}\r\n")?;
+        above.push(row, Some(id));
+    }
+    Ok(())
+}
+
 fn move_screen_row(out: &mut impl Write, current: &mut usize, target: usize) -> io::Result<()> {
     if target < *current {
         queue!(out, MoveUp((*current - target) as u16))?;
@@ -1365,6 +1488,15 @@ fn status_footer(status: &str, effort: &str, label: Option<&str>, width: usize) 
     format!("{status} {shortened}\u{2026}{suffix}")
 }
 
+/// Whether applying a batch writes rows above the composer. Status changes,
+/// transcript refreshes and resets only update in-frame state, so they must not
+/// close an open slash menu or history pager.
+fn observations_write_scrollback(messages: &[super::ObservationMessage]) -> bool {
+    messages.iter().any(|message| {
+        matches!(message, super::ObservationMessage::Updates(updates) if !updates.is_empty())
+    })
+}
+
 impl PromptEditor {
     pub fn set_permission_mode(&mut self, mode: String) {
         self.permission_mode = mode;
@@ -1394,6 +1526,131 @@ impl PromptEditor {
 
     pub fn set_notices(&mut self, notices: std::sync::mpsc::Receiver<String>) {
         self.notices = Some(notices);
+    }
+    pub fn set_observations(
+        &mut self,
+        observations: std::sync::mpsc::Receiver<super::ObservationMessage>,
+    ) {
+        self.observations = Some(observations);
+    }
+    /// Commits the open Markdown block before a tool result joins the
+    /// transcript, matching the live turn's text/tool handoff. The segment's
+    /// `started` flag survives, so later text never gets a second `●`.
+    fn finish_observed_stream(
+        &mut self,
+        segment: &str,
+        out: &mut impl Write,
+        above: &mut crate::terminal::scrollback::Scrollback,
+        width: usize,
+    ) -> io::Result<()> {
+        let Some(stream) = self
+            .observed_text
+            .iter_mut()
+            .find(|stream| stream.segment == segment)
+        else {
+            return Ok(());
+        };
+        for rendered in stream.markdown.finish() {
+            write_observed_answer_row(out, above, stream, &rendered, width)?;
+        }
+        Ok(())
+    }
+
+    /// Applies already-finished read-only updates in publication order.
+    fn apply_observation(
+        &mut self,
+        message: super::ObservationMessage,
+        out: &mut impl Write,
+        above: &mut crate::terminal::scrollback::Scrollback,
+        width: usize,
+    ) -> io::Result<()> {
+        use crate::observe::Update;
+        let mut out = out;
+        match message {
+            super::ObservationMessage::Status(status) => self.observation_status = status,
+            super::ObservationMessage::Reset => {
+                self.observed_text.clear();
+                self.observation_status = None;
+            }
+            super::ObservationMessage::Transcript(lines) => {
+                self.transcript = lines;
+                self.transcript_printed = false;
+            }
+            super::ObservationMessage::Updates(updates) => {
+                for update in updates {
+                    match update {
+                        Update::Text { segment, lines } => {
+                            let index = match self
+                                .observed_text
+                                .iter()
+                                .position(|stream| stream.segment == segment)
+                            {
+                                Some(index) => index,
+                                None => {
+                                    self.observed_text.push(ObservedMarkdown::new(segment));
+                                    self.observed_text.len() - 1
+                                }
+                            };
+                            let stream = &mut self.observed_text[index];
+                            stream.markdown.set_width(width.saturating_sub(2));
+                            for raw in lines {
+                                for rendered in stream.markdown.line(&raw) {
+                                    write_observed_answer_row(
+                                        &mut out,
+                                        above,
+                                        stream,
+                                        &rendered,
+                                        width,
+                                    )?;
+                                }
+                            }
+                            // A fenced code block or table may continue in the
+                            // next poll; committing it now would close it early
+                            // and drop the continuation's context. Anything else
+                            // streams immediately so a paragraph that arrives one
+                            // line per poll still reads as progress.
+                            if !stream.markdown.has_open_multiline_block() {
+                                for rendered in stream.markdown.finish() {
+                                    write_observed_answer_row(
+                                        &mut out,
+                                        above,
+                                        stream,
+                                        &rendered,
+                                        width,
+                                    )?;
+                                }
+                            }
+                        }
+                        Update::Tool(tool) => {
+                            self.finish_observed_stream(&tool.segment, &mut out, above, width)?;
+                            write_observed_tool(
+                                &mut out,
+                                above,
+                                &tool,
+                                self.workspace.as_deref(),
+                            )?;
+                        }
+                        Update::Notice(text) => {
+                            write_notice(&mut out, above, &text, width)?;
+                        }
+                        Update::Finish => {
+                            for mut stream in std::mem::take(&mut self.observed_text) {
+                                for rendered in stream.markdown.finish() {
+                                    write_observed_answer_row(
+                                        &mut out,
+                                        above,
+                                        &mut stream,
+                                        &rendered,
+                                        width,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     pub fn set_workspace(&mut self, workspace: std::path::PathBuf) {
         if self.workspace.as_ref() != Some(&workspace) {
@@ -1658,6 +1915,42 @@ impl PromptEditor {
                     screen.align_transcript = !above.has_welcome();
                 }
             }
+            let observations: Vec<_> = self
+                .observations
+                .as_ref()
+                .map(|observations| {
+                    let mut messages = Vec::new();
+                    while let Ok(message) = observations.try_recv() {
+                        messages.push(message);
+                    }
+                    messages
+                })
+                .unwrap_or_default();
+            if !observations.is_empty() {
+                let width = crate::terminal::size().0.saturating_sub(1).max(4) as usize;
+                // Only new conversation rows require tearing down the pinned
+                // frame. A status or Ctrl+O refresh must leave the menu, the
+                // history pager and the scrollback exactly as they are.
+                let writes_scrollback = observations_write_scrollback(&observations);
+                if writes_scrollback {
+                    command_overlay.clear_to(&mut crate::terminal_output::stderr_locked())?;
+                    history_view.close()?;
+                    screen.finish("", "", &mut above)?;
+                }
+                for message in observations {
+                    self.apply_observation(
+                        message,
+                        &mut crate::terminal_output::stderr(),
+                        &mut above,
+                        width,
+                    )?;
+                }
+                if writes_scrollback {
+                    crate::terminal_output::stderr().flush()?;
+                    screen = Screen::pinned();
+                    screen.align_transcript = !above.has_welcome();
+                }
+            }
             if let Some(suggestions) = &self.suggestions {
                 while let Ok(suggestion) = suggestions.try_recv() {
                     self.suggestion = suggestion;
@@ -1770,7 +2063,9 @@ impl PromptEditor {
             // before the first prompt and sits above the input box so the bottom
             // composer rows match the live turn layout without shifting.
             let show_tip = search.is_none() && rows >= 12 && self.history.is_empty();
-            let hint_rows = usize::from(show_tip) + usize::from(!self.details.entries.is_empty());
+            let hint_rows = usize::from(show_tip)
+                + usize::from(!self.details.entries.is_empty())
+                + usize::from(self.observation_status.is_some());
             let first = cursor_row.saturating_sub(max_input - 1);
             let input_height = input_lines.len().saturating_sub(first).min(max_input);
             let panel_budget = (rows as usize)
@@ -1875,6 +2170,11 @@ impl PromptEditor {
                     clipped(tips[self.history.len() % tips.len()], width),
                     TextStyle::Muted,
                 ));
+            }
+            // The read-only owner stays directly above the box, so scrolling
+            // output cannot hide the fact that prompts are disabled.
+            if let Some(status) = &self.observation_status {
+                lines.push((clipped(status, width), TextStyle::Accent));
             }
             // Reserved composer spacing, even for new or resumed sessions.
             lines.push((String::new(), TextStyle::Plain));
@@ -3426,6 +3726,385 @@ mod tests {
             polled + std::time::Duration::from_millis(500)
         ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn observed_completed_tool_uses_the_rich_numbered_block_once() {
+        use crate::observe::ToolUpdate;
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        let tool = ToolUpdate {
+            segment: "segment".into(),
+            number: 3,
+            name: "Read".into(),
+            input: Some(r#"{"file_path":"src/main.rs"}"#.into()),
+            output: "1\tline one\n".into(),
+            is_error: false,
+            elapsed: Some(std::time::Duration::from_millis(2050)),
+        };
+        write_observed_tool(&mut out, &mut above, &tool, None).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let text = crate::terminal::tool_view::plain_terminal_text(&text);
+        assert!(text.contains("\u{25cf} #3 Read(src/main.rs)"), "{text:?}");
+        assert!(text.contains("\u{23bf}"), "fixture result summary: {text:?}");
+        assert!(!text.contains("\u{2713} Read"), "old plain result: {text:?}");
+        assert!(
+            !text.contains("\r\n\r\n"),
+            "a completed block must not insert double spacing: {text:?}"
+        );
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|line| crate::terminal::tool_view::plain_terminal_text(line))
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("#3 Read(src/main.rs)")));
+        assert!(rows.iter().any(|row| row.contains("line one")));
+    }
+
+    #[test]
+    fn observed_edit_preview_uses_the_same_collapsed_change() {
+        use crate::observe::ToolUpdate;
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        let output = serde_json::json!({
+            "success": true,
+            "file_change": {
+                "version": 1,
+                "verified": true,
+                "path": "src/main.rs",
+                "added": 1,
+                "removed": 1,
+                "rows": [
+                    {"kind":"removed","old_line":1,"text":"old"},
+                    {"kind":"added","new_line":1,"text":"new"}
+                ]
+            }
+        })
+        .to_string();
+        let tool = ToolUpdate {
+            segment: "segment".into(),
+            number: 1,
+            name: "Edit".into(),
+            input: Some(r#"{"file_path":"src/main.rs"}"#.into()),
+            output,
+            is_error: false,
+            elapsed: None,
+        };
+        write_observed_tool(&mut out, &mut above, &tool, None).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let text = crate::terminal::tool_view::plain_terminal_text(&text);
+        assert!(text.contains("#1 Updated src/main.rs (+1 -1)"), "{text:?}");
+        assert!(text.contains("(click to expand)"), "{text:?}");
+        assert!(!text.contains("(click to collapse)"), "{text:?}");
+    }
+
+    #[test]
+    fn observed_consecutive_text_batches_do_not_insert_blank_rows() {
+        use crate::observe::Update;
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        for text in ["PART_ONE", "PART_TWO", "PART_THREE"] {
+            editor
+                .apply_observation(
+                    super::super::ObservationMessage::Updates(vec![Update::Text {
+                        segment: "segment".into(),
+                        lines: vec![text.into()],
+                    }]),
+                    &mut out,
+                    &mut above,
+                    80,
+                )
+                .unwrap();
+        }
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|line| crate::terminal::tool_view::plain_terminal_text(line))
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(rows.len(), 3, "no blank separators between parts: {rows:?}");
+        assert!(rows[0].starts_with("\u{25cf} PART_ONE"), "{rows:?}");
+        assert!(rows[1].starts_with("  PART_TWO"), "{rows:?}");
+        assert!(rows[2].starts_with("  PART_THREE"), "{rows:?}");
+    }
+
+    #[test]
+    fn observed_text_after_a_tool_keeps_the_single_answer_prefix() {
+        use crate::observe::{ToolUpdate, Update};
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        for message in [
+            Update::Text { segment: "segment".into(), lines: vec!["before tool".into()] },
+            Update::Tool(ToolUpdate {
+                segment: "segment".into(),
+                number: 1,
+                name: "Read".into(),
+                input: Some(r#"{"file_path":"fixture.txt"}"#.into()),
+                output: "contents".into(),
+                is_error: false,
+                elapsed: None,
+            }),
+            Update::Text { segment: "segment".into(), lines: vec!["after tool".into()] },
+        ] {
+            editor
+                .apply_observation(
+                    super::super::ObservationMessage::Updates(vec![message]),
+                    &mut out,
+                    &mut above,
+                    80,
+                )
+                .unwrap();
+        }
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|line| crate::terminal::tool_view::plain_terminal_text(line))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.starts_with("\u{25cf} before tool")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.starts_with("  after tool")),
+            "no second glyph: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.starts_with("\u{25cf} after tool")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn observed_markdown_gets_one_answer_prefix_and_hanging_indent() {
+        use crate::observe::Update;
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![
+                    Update::Text {
+                        segment: "segment".into(),
+                        lines: vec!["# Heading".into(), "body line".into()],
+                    },
+                    Update::Finish,
+                ]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|line| crate::terminal::tool_view::plain_terminal_text(line))
+            .collect();
+        let heading = rows
+            .iter()
+            .position(|row| row.contains("Heading"))
+            .expect("heading row");
+        assert!(
+            rows[heading].starts_with("\u{25cf} "),
+            "first answer row keeps the glyph: {rows:?}"
+        );
+        let body = rows
+            .iter()
+            .position(|row| row.contains("body line"))
+            .expect("body row");
+        assert!(
+            rows[body].starts_with("  "),
+            "later rows hang under the answer: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn observation_state_updates_do_not_write_or_close_the_scrollback() {
+        use crate::observe::Update;
+        assert!(!observations_write_scrollback(&[
+            super::super::ObservationMessage::Status(Some("● Read-only".into())),
+            super::super::ObservationMessage::Transcript(Vec::new()),
+            super::super::ObservationMessage::Reset,
+            super::super::ObservationMessage::Updates(Vec::new()),
+        ]));
+        assert!(observations_write_scrollback(&[
+            super::super::ObservationMessage::Status(None),
+            super::super::ObservationMessage::Updates(vec![Update::Finish]),
+        ]));
+
+        let mut editor = PromptEditor::default();
+        editor.observation_status = Some("● Read-only".into());
+        editor
+            .observed_text
+            .push(ObservedMarkdown::new("segment".into()));
+        editor.transcript_printed = true;
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        above.push("already visible".into(), None);
+        let before = above.all();
+        let mut out = Vec::new();
+        for message in [
+            super::super::ObservationMessage::Status(Some("● Read-only · occupied".into())),
+            super::super::ObservationMessage::Transcript(Vec::new()),
+            super::super::ObservationMessage::Reset,
+        ] {
+            editor
+                .apply_observation(message, &mut out, &mut above, 80)
+                .unwrap();
+        }
+        assert!(
+            out.is_empty(),
+            "state-only updates wrote to the terminal: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert_eq!(above.all(), before, "state-only updates changed scrollback");
+        assert!(editor.observation_status.is_none());
+        assert!(editor.observed_text.is_empty());
+        assert!(!editor.transcript_printed);
+
+        // A real update still writes the conversation row it carries.
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["streamed".into()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        assert!(!out.is_empty());
+        assert!(above
+            .all()
+            .iter()
+            .any(|row| crate::terminal::tool_view::plain_terminal_text(row).contains("streamed")));
+    }
+
+    #[test]
+    fn observed_fenced_block_split_across_polls_renders_once_without_the_fence() {
+        use crate::observe::Update;
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["```rust".into(), "fn main() {}".into()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        assert!(
+            above.all().is_empty(),
+            "the open fence was rendered early: {:?}",
+            above.all()
+        );
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["```".into()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|row| crate::terminal::tool_view::plain_terminal_text(row))
+            .collect();
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("fn main() {}")).count(),
+            1,
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| !row.contains("```")), "{rows:?}");
+    }
+
+    #[test]
+    fn observed_table_split_across_polls_keeps_header_and_rows_together() {
+        use crate::observe::Update;
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["| Name | Lines |".into()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        assert!(
+            above.all().is_empty(),
+            "a header was committed before its delimiter row: {:?}",
+            above.all()
+        );
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["|---|---:|".into(), "| a.rs | 3 |".into(), String::new()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|row| crate::terminal::tool_view::plain_terminal_text(row))
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Name") && row.contains("Lines")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("a.rs") && row.contains("3")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("| Name")),
+            "the table header stayed plain text: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn observed_plain_paragraph_streams_within_one_poll() {
+        use crate::observe::Update;
+        let mut editor = PromptEditor::default();
+        let mut above = crate::terminal::scrollback::Scrollback::default();
+        let mut out = Vec::new();
+        editor
+            .apply_observation(
+                super::super::ObservationMessage::Updates(vec![Update::Text {
+                    segment: "segment".into(),
+                    lines: vec!["first part".into(), "second part".into()],
+                }]),
+                &mut out,
+                &mut above,
+                80,
+            )
+            .unwrap();
+        let rows: Vec<String> = above
+            .all()
+            .iter()
+            .map(|row| crate::terminal::tool_view::plain_terminal_text(row))
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("first part")), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("second part")), "{rows:?}");
     }
 
     fn frame_lines() -> Vec<DisplayLine> {

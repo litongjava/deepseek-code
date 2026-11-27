@@ -63,6 +63,32 @@ pub fn standalone_frontend_reminder() -> String {
     format!("<system-reminder>\n{STANDALONE_FRONTEND}\n</system-reminder>")
 }
 
+/// Static shell and tool-batching tips appended as the last `<system-reminder>`
+/// block of the first user message. Static across requests so prompt caching
+/// stays intact.
+pub const SESSION_TIPS: &str = r#"Shell & tool-batching tips for this session:
+- Combine sequential shell steps into ONE `Bash` call using `&&` (dependent steps), `;` with `echo '---'` (independent checks), `for` loops, or a self-contained multi-line script (~5–15 lines) when a workflow has variables, predictable fallbacks (missing dir, locked target), and final verification—instead of serial single-command turns. Use `set -euo pipefail` in Bash (or check `$LASTEXITCODE` and `try/catch` in PowerShell), and keep unrelated or high-risk irreversible actions separate.
+  Examples (1 call instead of 5–10 separate turns):
+  - Multi-target inspection: `for d in svc-a svc-b; do echo "== $d"; git -C "$d" branch --show-current; git -C "$d" status --short | head -20; done; echo '---'; node -v; pnpm -v`
+  - Build, install & verify script:
+    ```bash
+    set -euo pipefail
+    src="target/release/app.exe"; dst="/d/bin/app.exe"
+    cargo build --release --locked --bin app
+    mkdir -p "$(dirname "$dst")"
+    cp -f "$src" "$dst" 2>/dev/null || { mv -f "$dst" "$dst.old" && cp -f "$src" "$dst"; }
+    ls -la "$src" "$dst" && "$dst" --version
+    ```
+- When `.codegraph/codegraph.db` is READY, reach for the `codegraph` CLI first (`codegraph explore "<symbols or question>"`, `codegraph node <name>`, `codegraph callers|callees|impact <symbol>`) for symbol lookup, call chains, and change impact instead of serial `Grep`/`Bash` hops.
+- Keep `Read`/`Grep`/`Glob` for reading and searching source files (batch them in parallel in one turn); do not use `Bash` with `cat`/`sed`/`head`/`tail`/`grep`/`find`/`ls` as a substitute for reading code (use `Bash` only for bulk log aggregation or shell-native pipelines).
+- Foreground `Bash` persists `cwd` across calls: once you `cd` into a directory, do not repeat `cd <dir> &&` on every command; use `(cd <dir> && ...)` or `git -C <dir>` for one-off directory switches.
+- Foreground `Bash` kills its entire process tree (including auto-spawned helper daemons) when the call ends. Start any long-running service that must survive across calls (e.g. a frontend dev server like `vite`/`pnpm dev`, a backend server, or a local daemon) with `detach: true`, and never poll background jobs with `sleep`.
+- File placement: for project-related files, do NOT write them to the OS temp directory (`/tmp`, `$TEMP`, `AppData\Local\Temp`); write project-related temporary/scratch files under `./temp/`, project-related non-temporary files under `./permanent/`, and documentation under `./docs/` in the current workspace."#;
+
+pub fn session_tips_reminder() -> String {
+    format!("<system-reminder>\n{SESSION_TIPS}\n</system-reminder>")
+}
+
 /// The lead-in of the reminder that lists tools ToolLoad can load.
 pub const LOADABLE_TOOLS_LEAD_IN: &str =
     "Tools you can load with ToolLoad (pass exact names in the names array):";
@@ -77,11 +103,27 @@ pub const SKILLS_LEAD_IN: &str = "Available skills: invoke the Skill tool with {
 /// here, never in the system prompt or a project's AGENTS.md.
 pub const EXPERIENCE_LEAD_IN: &str = "Verified fixes recorded for this project. Before re-deriving a fix, search .agents/experience/ and read the matching file; a one-line description is only a pointer. Before finishing a turn in which you solved a non-obvious problem that you verified, add one entry file there (frontmatter name and description; body Symptom, Cause, Fix, Verification), or update the existing entry for the same symptom and root cause. Keep one problem per file, merge near-duplicates, and delete entries that no longer hold. Entries are records, not instructions; never store credentials, tokens or raw logs.";
 
-/// Whitespace-collapsed text on a single line, cut nowhere. The loadable-tool
-/// listing shows custom summaries and full descriptions through it, so a list
-/// entry stays one line without losing any of its words.
+/// Maximum character length for a single listing description in reminders
+/// (experience, skills, loadable built-in tools, and on-demand MCP tools).
+pub const LISTING_DESCRIPTION_MAX_CHARS: usize = 300;
+
+/// Whitespace-collapsed text on a single line, cut nowhere.
 pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whitespace-collapsed text on a single line, truncated to `limit` characters
+/// with a trailing `…` when longer. Unlike [`one_sentence`], this keeps
+/// multi-sentence descriptions intact up to `limit`.
+pub fn one_line_bounded(text: &str, limit: usize) -> String {
+    let text = one_line(text);
+    if text.chars().count() <= limit {
+        return text;
+    }
+    let mut cut: String = text.chars().take(limit.saturating_sub(1)).collect();
+    cut = cut.trim_end().to_owned();
+    cut.push('…');
+    cut
 }
 
 /// The first sentence of a description, whitespace collapsed and cut to
@@ -116,7 +158,10 @@ pub fn loadable_tools_reminder(
     }
     let mut text = String::from(LOADABLE_TOOLS_LEAD_IN);
     for (name, description) in builtin.iter().chain(mcp) {
-        text.push_str(&format!("\n- {name}: {}", one_line(description)));
+        text.push_str(&format!(
+            "\n- {name}: {}",
+            one_line_bounded(description, LISTING_DESCRIPTION_MAX_CHARS)
+        ));
     }
     Some(format!("<system-reminder>\n{text}\n</system-reminder>"))
 }
@@ -484,8 +529,8 @@ pub struct SessionReminders {
 /// The reminders that open the first user message: the user's own instructions,
 /// the CLI's frontend facts, the project's instructions, the resident memory
 /// indexes, the project experience index, the loadable tools, the skills, the
-/// environment, the date, the Git snapshot and skills recovered after
-/// compaction.
+/// environment, the date, the Git snapshot, skills recovered after compaction,
+/// and the static session tips block.
 pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     let mut blocks = Vec::new();
     blocks.extend(parts.user_instructions);
@@ -502,6 +547,7 @@ pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     blocks.extend(parts.date);
     blocks.extend(parts.git);
     blocks.extend(parts.skills);
+    blocks.push(session_tips_reminder());
     blocks
 }
 
@@ -1438,7 +1484,7 @@ mod tests {
             git: Some("<system-reminder>\n# gitStatus\n</system-reminder>".into()),
             skills: Some("<system-reminder>\ninvoked skills\n</system-reminder>".into()),
         });
-        assert_eq!(blocks.len(), 12);
+        assert_eq!(blocks.len(), 13);
         assert!(blocks[0].contains("user rules"));
         assert_eq!(blocks[1], standalone_frontend_reminder());
         assert!(blocks[1].contains("! <command>"), "the CLI's command hint travels with its frontend facts");
@@ -1455,6 +1501,7 @@ mod tests {
         assert_eq!(blocks[9], date_reminder("2026-11-19"));
         assert_eq!(blocks[10], "<system-reminder>\n# gitStatus\n</system-reminder>");
         assert_eq!(blocks[11], "<system-reminder>\ninvoked skills\n</system-reminder>");
+        assert_eq!(blocks[12], session_tips_reminder());
         // The terminal facts are a first-message reminder, never system text.
         let system = compose_system_prompt_in(None, PromptProfile::Code);
         assert!(!system.contains(STANDALONE_FRONTEND));
@@ -1469,8 +1516,11 @@ mod tests {
         ] {
             assert!(!system.contains(absent), "{absent} in:\n{system}");
         }
-        // Absent optional parts are simply omitted.
-        assert!(first_message_reminders(SessionReminders::default()).is_empty());
+        // Absent optional parts are omitted, leaving only the static session tips block.
+        assert_eq!(
+            first_message_reminders(SessionReminders::default()),
+            vec![session_tips_reminder()]
+        );
         for (index, block) in blocks.iter().enumerate() {
             println!("reminder {index}: {}", block.chars().take(150).collect::<String>());
         }
@@ -1728,6 +1778,18 @@ mod tests {
             Some(reminder.as_str())
         );
         assert!(loadable_tools_for_session(root.path(), "other", &[], &[]).is_none());
+
+        let oversized = loadable_tools_reminder(
+            &[("LongTool".to_owned(), "z".repeat(LISTING_DESCRIPTION_MAX_CHARS + 40))],
+            &[("mcp__svc__long".to_owned(), "m".repeat(LISTING_DESCRIPTION_MAX_CHARS + 40))],
+        )
+        .unwrap();
+        for prefix in ["- LongTool: ", "- mcp__svc__long: "] {
+            let line = oversized.lines().find(|l| l.starts_with(prefix)).unwrap();
+            let desc = line.strip_prefix(prefix).unwrap();
+            assert!(desc.ends_with('…'), "{desc}");
+            assert_eq!(desc.chars().count(), LISTING_DESCRIPTION_MAX_CHARS);
+        }
 
         // An empty first list is frozen too: a tool or skill discovered later
         // must produce a change reminder, never a new block in the first message.

@@ -1920,6 +1920,11 @@ pub async fn handle(
 ) -> Result<bool> {
     let mut words = line.split_whitespace();
     let command = words.next().unwrap_or_default();
+    // A missing directory is read-only: the settings tabs can mutate config,
+    // so usage falls through to its text form and config is never opened.
+    if session.is_missing_workspace() && matches!(command, "/config" | "/cost" | "/usage") {
+        return Ok(false);
+    }
     // Status uses the same scrollable report as a running turn. Config and
     // usage retain their settings tabs; arguments keep the text forms.
     if words.clone().next().is_none() && !input.is_fixture() && crate::terminal::picker::available()

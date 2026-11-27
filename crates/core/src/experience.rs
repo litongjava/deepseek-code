@@ -205,13 +205,16 @@ fn field<'a>(
     Ok(value)
 }
 
-/// One index line: `- {relative_path} | {name}: {one_sentence(description, 120)}`.
+/// One index line: `- {relative_path} | {name}: {one_line_bounded(description, LISTING_DESCRIPTION_MAX_CHARS)}`.
 pub fn index_line(entry: &Entry) -> String {
     format!(
         "- {} | {}: {}",
         entry.relative_path,
         entry.name,
-        crate::prompt::one_sentence(&entry.description, 120)
+        crate::prompt::one_line_bounded(
+            &entry.description,
+            crate::prompt::LISTING_DESCRIPTION_MAX_CHARS,
+        )
     )
 }
 
@@ -452,6 +455,37 @@ mod tests {
             index_line(&entry),
             "- docs/.agents/experience/a.md | alpha: symptom and keywords"
         );
+    }
+
+    #[test]
+    fn preserves_medium_description_and_truncates_beyond_limit() {
+        let medium_description = "Build fails with ERESOLVE due to missing development peer dependencies when running pnpm install inside a clean worktree. Re-run with --frozen-lockfile after syncing the workspace catalog so all packages resolve cleanly.";
+        assert!(medium_description.chars().count() > 200);
+        assert!(medium_description.chars().count() <= crate::prompt::LISTING_DESCRIPTION_MAX_CHARS);
+        let entry = Entry {
+            name: "pnpm-peer-deps".into(),
+            description: medium_description.into(),
+            relative_path: ".agents/experience/pnpm-peer-deps.md".into(),
+        };
+        let line = index_line(&entry);
+        assert_eq!(
+            line,
+            format!("- .agents/experience/pnpm-peer-deps.md | pnpm-peer-deps: {medium_description}")
+        );
+        assert!(!line.contains('…'));
+        let lines = index_lines(&[entry]);
+        assert_eq!(lines, vec![line]);
+
+        let oversized = "x".repeat(crate::prompt::LISTING_DESCRIPTION_MAX_CHARS + 50);
+        let oversized_entry = Entry {
+            name: "oversized".into(),
+            description: oversized,
+            relative_path: ".agents/experience/oversized.md".into(),
+        };
+        let cut = index_line(&oversized_entry);
+        let desc = cut.split_once(": ").unwrap().1;
+        assert!(desc.ends_with('…'), "{desc}");
+        assert_eq!(desc.chars().count(), crate::prompt::LISTING_DESCRIPTION_MAX_CHARS);
     }
 
     #[test]

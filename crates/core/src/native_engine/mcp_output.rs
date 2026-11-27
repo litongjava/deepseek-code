@@ -363,6 +363,13 @@ fn repair_images(content: &mut Value) -> bool {
     changed
 }
 
+fn has_restored_tool_image(blocks: &[Value], id: &str) -> bool {
+    let marker = format!("Image content from tool result {id}:");
+    blocks
+        .iter()
+        .any(|part| part["type"] == "text" && part["text"].as_str() == Some(marker.as_str()))
+}
+
 /// Restore typed content from durable sidecars while leaving ordinary/native
 /// output strings alone. The display match prevents stale tool-ID reuse.
 pub(crate) fn restore_history(
@@ -371,10 +378,23 @@ pub(crate) fn restore_history(
     session: &str,
 ) -> Result<()> {
     let mut restored = Vec::with_capacity(history.len());
-    let mut images = Vec::new();
+    let mut images: Vec<(String, Vec<Value>)> = Vec::new();
     for mut message in std::mem::take(history) {
         if message["role"] != "tool" && !images.is_empty() {
-            restored.push(json!({"role":"user","content":std::mem::take(&mut images)}));
+            let pending = std::mem::take(&mut images);
+            let existing = (message["role"] == "user")
+                .then(|| message["content"].as_array())
+                .flatten();
+            let missing: Vec<Value> = pending
+                .into_iter()
+                .filter(|(id, _)| {
+                    existing.is_none_or(|blocks| !has_restored_tool_image(blocks, id))
+                })
+                .flat_map(|(_, parts)| parts)
+                .collect();
+            if !missing.is_empty() {
+                restored.push(json!({"role":"user","content":missing}));
+            }
         }
         if message["role"] == "tool" {
             if let (Some(id), Some(display)) = (
@@ -382,7 +402,10 @@ pub(crate) fn restore_history(
                 message["content"].as_str(),
             ) {
                 if let Some(content) = McpOutput::load(conn, session, id, display)? {
-                    images.extend(content.openai_images(id));
+                    let parts = content.openai_images(id);
+                    if !parts.is_empty() {
+                        images.push((id.to_owned(), parts));
+                    }
                     message["content"] = json!(content.openai_text());
                 }
             }
@@ -403,7 +426,8 @@ pub(crate) fn restore_history(
         restored.push(message);
     }
     if !images.is_empty() {
-        restored.push(json!({"role":"user","content":images}));
+        let parts: Vec<Value> = images.into_iter().flat_map(|(_, parts)| parts).collect();
+        restored.push(json!({"role":"user","content":parts}));
     }
     *history = restored;
     Ok(())
@@ -524,5 +548,115 @@ mod tests {
         output.replace(&json!([{"type":"tool_use","name":"Bash","input":{"command":"wrong"}}]));
         assert_eq!(output.content[0]["type"], "text");
         assert!(output.display().contains("Bash"));
+    }
+
+    fn setup_sidecar_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mcp_tool_outputs (conversation_id TEXT, tool_use_id TEXT, content_json TEXT,
+                metadata_json TEXT, display_text TEXT, is_error INTEGER, model_content_json TEXT);
+             CREATE TABLE tool_calls (id TEXT, message_id TEXT, name TEXT, output TEXT, model_output TEXT);
+             CREATE TABLE messages (id TEXT, conversation_id TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn restore_history_is_idempotent_for_openai_tool_images() {
+        let conn = setup_sidecar_db();
+        let content_1 = json!([
+            {"type":"text","text":"Read screenshot-1.png"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG}}
+        ])
+        .to_string();
+        let content_2 = json!([
+            {"type":"text","text":"Read screenshot-2.webp"},
+            {"type":"image","source":{"type":"base64","media_type":"image/webp","data":WEBP}}
+        ])
+        .to_string();
+        conn.execute(
+            "INSERT INTO mcp_tool_outputs VALUES ('session','call-1',?1,'{}','Read screenshot-1.png',0,?1)",
+            [&content_1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mcp_tool_outputs VALUES ('session','call-2',?1,'{}','Read screenshot-2.webp',0,?1)",
+            [&content_2],
+        )
+        .unwrap();
+
+        let mut history = vec![
+            json!({"role":"tool","tool_call_id":"call-1","content":"Read screenshot-1.png"}),
+            json!({"role":"assistant","content":"I see screenshot 1."}),
+            json!({"role":"tool","tool_call_id":"call-2","content":"Read screenshot-2.webp"}),
+        ];
+
+        restore_history(&mut history, &conn, "session").unwrap();
+        let after_first = history.clone();
+
+        let image_user_msgs: Vec<&Value> = after_first
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .collect();
+        assert_eq!(image_user_msgs.len(), 2);
+        assert_eq!(
+            image_user_msgs[0]["content"][0]["text"],
+            "Image content from tool result call-1:"
+        );
+        assert_eq!(
+            image_user_msgs[1]["content"][0]["text"],
+            "Image content from tool result call-2:"
+        );
+
+        restore_history(&mut history, &conn, "session").unwrap();
+        assert_eq!(
+            history, after_first,
+            "second restore_history call must not duplicate image user messages"
+        );
+        assert_eq!(
+            history.iter().filter(|m| m["role"] == "user").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn restore_history_preserves_genuine_user_images_after_tool_images() {
+        let conn = setup_sidecar_db();
+        let content = json!([
+            {"type":"text","text":"Read screenshot.png"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG}}
+        ])
+        .to_string();
+        conn.execute(
+            "INSERT INTO mcp_tool_outputs VALUES ('session','call-1',?1,'{}','Read screenshot.png',0,?1)",
+            [&content],
+        )
+        .unwrap();
+
+        let genuine_user_msg = json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Here is my own screenshot"},
+                {"type": "image_url", "image_url": {"url": format!("data:image/webp;base64,{WEBP}")}}
+            ]
+        });
+        let mut history = vec![
+            json!({"role":"tool","tool_call_id":"call-1","content":"Read screenshot.png"}),
+            genuine_user_msg.clone(),
+        ];
+
+        restore_history(&mut history, &conn, "session").unwrap();
+        let after_first = history.clone();
+        assert_eq!(after_first.len(), 3);
+        assert_eq!(after_first[1]["role"], "user");
+        assert_eq!(
+            after_first[1]["content"][0]["text"],
+            "Image content from tool result call-1:"
+        );
+        assert_eq!(after_first[2], genuine_user_msg);
+
+        restore_history(&mut history, &conn, "session").unwrap();
+        assert_eq!(history, after_first);
     }
 }

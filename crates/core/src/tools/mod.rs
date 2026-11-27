@@ -353,7 +353,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             summary: Some("Control the computer: move the mouse, click, type text, press keys and take screenshots".into()),
             name: "computer_use".to_string(),
-            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally; results contain screenshot_path (absolute path) and mime_type, not Base64 image data.".to_string(),
+            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally (screenshot_path and mime_type are returned) and automatically attached as image content in the tool result, so you do not need to call Read on screenshot_path to view them.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -716,12 +716,56 @@ fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {
     false
 }
 
+/// Workspace allowlist check exposed for session-level shell cwd snapshotting.
+pub(crate) fn is_shell_cwd_allowed(resolved_path: &Path, cwd: &str) -> bool {
+    is_path_allowed(resolved_path, cwd)
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let stripped = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let bytes = stripped.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn git_bash_drive_path_to_windows(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'/' || !bytes[1].is_ascii_alphabetic() {
+        return None;
+    }
+    let drive = (bytes[1] as char).to_ascii_uppercase();
+    if bytes.len() == 2 {
+        Some(format!("{drive}:/"))
+    } else if bytes[2] == b'/' {
+        Some(format!("{drive}:{}", &path[2..]))
+    } else {
+        None
+    }
+}
+
+fn normalize_path_for_compare(path: &str) -> String {
+    let stripped = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let mut normalized = stripped.replace('\\', "/");
+    if is_windows_drive_path(&normalized) {
+        while normalized.len() > 3 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        return normalized.to_ascii_lowercase();
+    }
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
 /// Whether two working directories name the same place; the shell footer
 /// writes canonical paths while the engine may have started from a symlink.
 fn same_directory(a: &str, b: &str) -> bool {
     match (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
-        _ => Path::new(a) == Path::new(b),
+        _ => normalize_path_for_compare(a) == normalize_path_for_compare(b),
     }
 }
 
@@ -824,6 +868,19 @@ pub(crate) fn has_redundant_leading_cd(command: &str, current_cwd: &str) -> bool
             rest = after_dash.trim_start_matches([' ', '\t']);
         }
     }
+    if let Some(after_d) = rest.strip_prefix("/d").or_else(|| rest.strip_prefix("/D")) {
+        if after_d.starts_with([' ', '\t']) {
+            let next = after_d.trim_start_matches([' ', '\t']);
+            if !next.is_empty()
+                && !next.starts_with("&&")
+                && !next.starts_with(';')
+                && !next.starts_with('\n')
+                && !next.starts_with('\r')
+            {
+                rest = next;
+            }
+        }
+    }
     if rest.is_empty() || rest.starts_with('-') {
         return false;
     }
@@ -841,7 +898,8 @@ pub(crate) fn has_redundant_leading_cd(command: &str, current_cwd: &str) -> bool
                 return false;
             };
             let candidate = &inner[..end];
-            if candidate.contains(['$', '`', '\\']) {
+            let allow_backslash = is_windows_drive_path(candidate);
+            if candidate.contains(['$', '`']) || (!allow_backslash && candidate.contains('\\')) {
                 return false;
             }
             (candidate, &inner[end + 1..])
@@ -851,7 +909,16 @@ pub(crate) fn has_redundant_leading_cd(command: &str, current_cwd: &str) -> bool
                 .find(|c: char| c.is_ascii_whitespace() || matches!(c, '&' | ';' | '|' | '>' | '<'))
                 .unwrap_or(rest.len());
             let candidate = &rest[..end];
-            if candidate.is_empty() || candidate.contains(['$', '`', '\\', '~', '*', '?']) {
+            let allow_backslash = is_windows_drive_path(candidate);
+            let check_chars = if allow_backslash {
+                candidate.strip_prefix(r"\\?\").unwrap_or(candidate)
+            } else {
+                candidate
+            };
+            if candidate.is_empty()
+                || check_chars.contains(['$', '`', '~', '*', '?'])
+                || (!allow_backslash && candidate.contains('\\'))
+            {
                 return false;
             }
             (candidate, &rest[end..])
@@ -869,18 +936,30 @@ pub(crate) fn has_redundant_leading_cd(command: &str, current_cwd: &str) -> bool
     {
         return false;
     }
-    if target == "." || target == "./" {
+    if target == "." || target == "./" || target == ".\\" {
         return true;
     }
-    let resolved = if Path::new(target).is_absolute() {
-        PathBuf::from(target)
+    let normalized_current = if cfg!(windows) || is_windows_drive_path(current_cwd) {
+        git_bash_drive_path_to_windows(current_cwd).unwrap_or_else(|| current_cwd.to_owned())
     } else {
-        Path::new(current_cwd).join(target)
+        current_cwd.to_owned()
     };
+    let normalized_target = if cfg!(windows) || is_windows_drive_path(&normalized_current) {
+        git_bash_drive_path_to_windows(target).unwrap_or_else(|| target.to_owned())
+    } else {
+        target.to_owned()
+    };
+    let resolved =
+        if Path::new(&normalized_target).is_absolute() || is_windows_drive_path(&normalized_target)
+        {
+            PathBuf::from(&normalized_target)
+        } else {
+            Path::new(&normalized_current).join(&normalized_target)
+        };
     let Some(resolved) = resolved.to_str() else {
         return false;
     };
-    same_directory(resolved, current_cwd)
+    same_directory(resolved, &normalized_current)
 }
 
 #[cfg(test)]
@@ -918,6 +997,194 @@ fn redundant_leading_cd_detection_cases() {
     assert!(!has_redundant_leading_cd(&format!("git status && cd {cwd}"), cwd));
     assert!(!has_redundant_leading_cd(&format!("echo 'cd {cwd}'"), cwd));
     assert!(!has_redundant_leading_cd(&format!("cd {cwd} || exit 1"), cwd));
+}
+
+#[cfg(test)]
+#[test]
+fn redundant_leading_cd_windows_and_git_bash_variants() {
+    let win_backslash = r"D:\code\project\HuLaSpark\HuLa";
+    let win_slash = "D:/code/project/HuLaSpark/HuLa";
+
+    // Git Bash /d/... and Windows D:/... or D:\... variants all match current sub-repo cwd.
+    assert!(has_redundant_leading_cd(
+        "cd /d/code/project/HuLaSpark/HuLa && git status",
+        win_backslash
+    ));
+    assert!(has_redundant_leading_cd(
+        "cd /D/code/project/HuLaSpark/HuLa/ && git status",
+        win_backslash
+    ));
+    assert!(has_redundant_leading_cd(
+        "cd '/d/code/project/HuLaSpark/HuLa' && cargo check",
+        win_slash
+    ));
+    assert!(has_redundant_leading_cd(
+        "cd \"/d/code/project/HuLaSpark/HuLa\" && cargo check",
+        win_backslash
+    ));
+    assert!(has_redundant_leading_cd(
+        "cd D:/code/project/HuLaSpark/HuLa && git status",
+        win_backslash
+    ));
+    assert!(has_redundant_leading_cd(
+        r"cd D:\code\project\HuLaSpark\HuLa && git status",
+        win_slash
+    ));
+    assert!(has_redundant_leading_cd(
+        r#"cd "D:\code\project\HuLaSpark\HuLa" && git status"#,
+        win_backslash
+    ));
+    assert!(has_redundant_leading_cd(
+        r"cd /d D:\code\project\HuLaSpark\HuLa && git status",
+        win_backslash
+    ));
+
+    // Different sub-repo or parent directory must not match.
+    assert!(!has_redundant_leading_cd(
+        "cd /d/code/project/HuLaSpark && git status",
+        win_backslash
+    ));
+    assert!(!has_redundant_leading_cd(
+        "cd /d/code/project/HuLaSpark/Other && git status",
+        win_backslash
+    ));
+    assert!(!has_redundant_leading_cd(
+        "cd D:/code/project/HuLaSpark/Other && git status",
+        win_slash
+    ));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn bash_subrepo_redundant_cd_emits_note_even_without_hint_flag() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let subrepo = workspace.join("HuLa");
+    std::fs::create_dir_all(&subrepo).unwrap();
+    let workspace_str = workspace.to_str().unwrap();
+    let subrepo_str = subrepo.to_str().unwrap();
+    let state = workspace.join("cwd-state");
+
+    // At workspace root without __hint_redundant_cd, redundant cd stays quiet.
+    let at_root = tool_bash_async(
+        serde_json::json!({
+            "command": "cd . && echo ok",
+            "shell": "bash",
+            "__cwd_state": state.to_string_lossy()
+        }),
+        workspace_str,
+    )
+    .await
+    .unwrap();
+    assert!(at_root.get("note").is_none(), "{at_root}");
+
+    // Move into sub-repo `HuLa` so persisted shell-cwd != workspace_root.
+    let moved = tool_bash_async(
+        serde_json::json!({
+            "command": "cd HuLa && echo entered",
+            "shell": "bash",
+            "__cwd_state": state.to_string_lossy()
+        }),
+        workspace_str,
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved["success"], true, "{moved}");
+    assert!(
+        same_directory(moved["cwd"].as_str().unwrap_or_default(), subrepo_str),
+        "expected cwd in subrepo, got: {moved}"
+    );
+
+    // Inside sub-repo (shell-cwd != workspace_root), a redundant leading cd
+    // emits the explicit hint even without __hint_redundant_cd.
+    let subrepo_bash_path = if cfg!(windows) {
+        let stripped = subrepo_str.strip_prefix(r"\\?\").unwrap_or(subrepo_str);
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let drive = (bytes[0] as char).to_ascii_lowercase();
+            format!("/{drive}{}", stripped[2..].replace('\\', "/"))
+        } else {
+            stripped.replace('\\', "/")
+        }
+    } else {
+        subrepo_str.to_owned()
+    };
+    let redundant = tool_bash_async(
+        serde_json::json!({
+            "command": format!("cd '{subrepo_bash_path}' && echo still-here"),
+            "shell": "bash",
+            "__cwd_state": state.to_string_lossy()
+        }),
+        workspace_str,
+    )
+    .await
+    .unwrap();
+    let note = redundant["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with(REDUNDANT_CD_NOTE_PREFIX) && note.contains("HuLa"),
+        "expected explicit redundant-cd hint for sub-repo shell-cwd, got: {redundant}"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn bash_defer_cwd_persist_freezes_batch_start_cwd() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let subrepo = workspace.join("HuLa");
+    std::fs::create_dir_all(&subrepo).unwrap();
+    let workspace_str = workspace.to_str().unwrap();
+    let subrepo_str = subrepo.to_str().unwrap();
+    let state = workspace.join("cwd-state");
+
+    // Two sibling foreground Bash calls in the same turn both run `cd HuLa && ...`
+    // starting from the frozen `batch_start_cwd` (`workspace_str`) with deferred persist.
+    let first = tool_bash_async(
+        serde_json::json!({
+            "command": "cd HuLa && echo first",
+            "shell": "bash",
+            "__cwd_state": state.to_string_lossy(),
+            "__cwd_start": workspace_str,
+            "__cwd_defer_persist": true
+        }),
+        workspace_str,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["success"], true, "{first}");
+    assert!(
+        !state.exists(),
+        "deferred persist must not write state mid-batch"
+    );
+    assert_eq!(first["__cwd_commit"]["changed"], true, "{first}");
+    assert_eq!(first["__cwd_commit"]["success"], true, "{first}");
+    assert!(
+        same_directory(
+            first["__cwd_commit"]["cwd"].as_str().unwrap_or_default(),
+            subrepo_str
+        ),
+        "{first}"
+    );
+
+    let second = tool_bash_async(
+        serde_json::json!({
+            "command": "cd HuLa && echo second",
+            "shell": "bash",
+            "__cwd_state": state.to_string_lossy(),
+            "__cwd_start": workspace_str,
+            "__cwd_defer_persist": true
+        }),
+        workspace_str,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        second["success"], true,
+        "second sibling `cd HuLa` must succeed from frozen batch_start_cwd: {second}"
+    );
+    assert!(!state.exists());
 }
 
 #[cfg(test)]
@@ -1755,12 +2022,26 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             .ok()
             .map(|text| text.trim_start_matches('\u{feff}').trim().to_owned())
     };
+    let defer_cwd_persist = input["__cwd_defer_persist"].as_bool().unwrap_or(false);
+    let batch_start_cwd = if resolved.wsl.is_none() {
+        input["__cwd_start"]
+            .as_str()
+            .map(str::trim)
+            .filter(|saved| {
+                !saved.is_empty()
+                    && Path::new(saved).is_dir()
+                    && is_path_allowed(Path::new(saved), cwd)
+            })
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let saved_before = cwd_state.as_ref().and_then(saved_cwd);
     let report_initial = cwd_state.is_some()
         && !saved_before.as_deref().is_some_and(|saved| {
             Path::new(saved).is_dir() && is_path_allowed(Path::new(saved), cwd)
         });
-    let safe_cwd = match saved_before.as_deref() {
+    let safe_cwd = match batch_start_cwd.as_deref().or(saved_before.as_deref()) {
         Some(saved) if Path::new(saved).is_dir() && is_path_allowed(Path::new(saved), cwd) => {
             saved.to_owned()
         }
@@ -1967,27 +2248,57 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             }
         }
         let force_report_cwd = input["__report_cwd"].as_bool().unwrap_or(false);
+        let command_succeeded = result["success"].as_bool().unwrap_or(false);
         if let (Some(state), Some(capture)) = (&cwd_state, &cwd_capture) {
             let moved = saved_cwd(&capture.0).filter(|dir| !dir.is_empty());
             let reset = moved
                 .as_deref()
                 .is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd));
             if reset {
-                let _ = fs::remove_file(state);
+                if !defer_cwd_persist {
+                    let _ = fs::remove_file(state);
+                }
                 if let Some(object) = result.as_object_mut() {
                     object.insert(
                         "note".into(),
                         serde_json::json!(format!("Shell cwd was reset to {cwd}")),
                     );
                     object.insert("cwd".into(), serde_json::json!(cwd));
+                    if defer_cwd_persist {
+                        object.insert(
+                            "__cwd_commit".into(),
+                            serde_json::json!({
+                                "state": state.to_string_lossy(),
+                                "reset": true,
+                                "changed": true,
+                                "success": command_succeeded,
+                            }),
+                        );
+                    }
                 }
             } else if let Some(moved) = moved {
-                let changed = report_initial || !same_directory(&moved, &safe_cwd);
-                if changed || !state.exists() {
-                    // Atomically promote the per-call capture file so concurrent
-                    // readers never observe a truncated state file.
-                    if fs::rename(&capture.0, state).is_err() {
-                        let _ = fs::write(state, format!("{moved}\n"));
+                let moved_changed = !same_directory(&moved, &safe_cwd);
+                let changed = report_initial || moved_changed;
+                if !defer_cwd_persist {
+                    if changed || !state.exists() {
+                        // Atomically promote the per-call capture file so concurrent
+                        // readers never observe a truncated state file.
+                        if fs::rename(&capture.0, state).is_err() {
+                            let _ = fs::write(state, format!("{moved}\n"));
+                        }
+                    }
+                } else if moved_changed || !state.exists() {
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert(
+                            "__cwd_commit".into(),
+                            serde_json::json!({
+                                "state": state.to_string_lossy(),
+                                "cwd": moved,
+                                "reset": false,
+                                "changed": moved_changed,
+                                "success": command_succeeded,
+                            }),
+                        );
                     }
                 }
                 if changed || force_report_cwd {
@@ -2000,25 +2311,38 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             {
                 if let Some(object) = result.as_object_mut() {
                     object.insert("cwd".into(), serde_json::json!(safe_cwd));
+                    if defer_cwd_persist && !state.exists() {
+                        object.insert(
+                            "__cwd_commit".into(),
+                            serde_json::json!({
+                                "state": state.to_string_lossy(),
+                                "cwd": safe_cwd,
+                                "reset": false,
+                                "changed": false,
+                                "success": command_succeeded,
+                            }),
+                        );
+                    }
                 }
             }
         }
         let hint_redundant_cd = input["__hint_redundant_cd"].as_bool().unwrap_or(false);
         let hint_batch_bash = input["__hint_batch_bash"].as_bool().unwrap_or(false);
         let hint_serial_bash = input["__hint_serial_bash"].as_bool().unwrap_or(false);
-        if hint_redundant_cd || hint_batch_bash || hint_serial_bash {
+        let non_root_shell_cwd = cwd_state.is_some() && !same_directory(&safe_cwd, cwd);
+        let redundant_leading_cd = (hint_redundant_cd || non_root_shell_cwd)
+            && has_redundant_leading_cd(&raw_command, &safe_cwd);
+        if redundant_leading_cd || hint_redundant_cd || hint_batch_bash || hint_serial_bash {
             let mut notes = Vec::new();
-            if hint_redundant_cd {
-                if has_redundant_leading_cd(&raw_command, &safe_cwd) {
-                    notes.push(format!(
-                        "{REDUNDANT_CD_NOTE_PREFIX}{safe_cwd}; omit redundant leading 'cd'."
-                    ));
-                }
-                if is_pure_shell_read_or_search(&raw_command) {
-                    notes.push(format!(
-                        "{SHELL_READ_SEARCH_NOTE_PREFIX} tools in parallel instead of Bash cat/sed/grep."
-                    ));
-                }
+            if redundant_leading_cd {
+                notes.push(format!(
+                    "{REDUNDANT_CD_NOTE_PREFIX}{safe_cwd}; omit redundant leading 'cd'."
+                ));
+            }
+            if hint_redundant_cd && is_pure_shell_read_or_search(&raw_command) {
+                notes.push(format!(
+                    "{SHELL_READ_SEARCH_NOTE_PREFIX} tools in parallel instead of Bash cat/sed/grep."
+                ));
             }
             if hint_batch_bash {
                 notes.push(format!(

@@ -439,6 +439,10 @@ pub(crate) async fn edit_file(path: &Path, initial: &str) -> Result<()> {
 }
 
 pub async fn statusline(session: &Session, settings: &Settings) -> Result<Option<String>> {
+    // An external command must never run against a directory that is gone.
+    if session.is_missing_workspace() {
+        return Ok(None);
+    }
     let Some(script) = settings.statusline.as_ref() else {
         return Ok(None);
     };

@@ -107,6 +107,16 @@ impl ExecutorHistory {
             }
         }
     }
+    pub(crate) fn child_tool_request_link(
+        &self,
+        tool_call_id: &str,
+        request_id: Option<&str>,
+        provider_call_id: Option<&str>,
+    ) -> Result<()> {
+        self.child_repo().write("link child tool request", |c, _| {
+            message_repo::set_tool_call_request_link(c, tool_call_id, request_id, provider_call_id)
+        })
+    }
     pub(crate) fn child_request(&self, message: &str, snapshot: &Value) -> Result<u64> {
         self.child_repo().write("save child request",|c,id|{
             c.execute("INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at,sort_order)

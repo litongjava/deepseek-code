@@ -96,6 +96,63 @@ fn capture(builtin: Option<&str>) -> Environment {
         .collect()
 }
 
+/// A display-only snapshot for a session whose saved directory is gone.
+///
+/// It is observation-only, so no request can be sent with it. The saved
+/// provider/model is retained when the catalog still knows it; otherwise a
+/// placeholder provider/model keeps `binding_state()` displayable.
+pub(crate) fn display_snapshot(
+    mut providers: Vec<deepseek_code_core::native_engine::provider_manager::Provider>,
+    provider_id: &str,
+    model: &str,
+) -> BindingSnapshot {
+    use deepseek_code_core::native_engine::provider_manager::{
+        ApiFormat, ModelConfig, Provider,
+    };
+    let display_model = |id: &str| ModelConfig {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        enabled: true,
+        max_tokens: None,
+        supports_vision: false,
+        supports_web_search: false,
+        context_window: None,
+        supports_text: true,
+        api: None,
+        effort: None,
+        fast: false,
+    };
+    match providers.iter_mut().find(|entry| entry.id == provider_id) {
+        Some(provider) => {
+            provider.enabled = true;
+            match provider.models.iter_mut().find(|entry| entry.id == model) {
+                Some(entry) => entry.enabled = true,
+                None => provider.models.push(display_model(model)),
+            }
+        }
+        None => providers.push(Provider {
+            lease: None,
+            id: provider_id.to_owned(),
+            name: provider_id.to_owned(),
+            base_url: String::new(),
+            api_key: String::new(),
+            api_format: ApiFormat::OpenAI,
+            builtin_id: None,
+            models: vec![display_model(model)],
+            enabled: true,
+            web_search_strategy: None,
+        }),
+    }
+    BindingSnapshot {
+        generation: 0,
+        observation_only: true,
+        provider_id: provider_id.to_owned(),
+        model: model.to_owned(),
+        providers,
+        environment: BTreeMap::new(),
+    }
+}
+
 pub fn snapshot(
     paths: &RuntimePaths,
     selection: crate::config::Selection,
@@ -580,6 +637,31 @@ pub fn identity(selection: &ResolvedProvider) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_snapshot_keeps_the_saved_provider_and_model_displayable() {
+        let provider: deepseek_code_core::native_engine::provider_manager::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "saved", "name": "Saved", "base_url": "http://127.0.0.1:1",
+                "api_key": "fixture", "api_format": "openai", "enabled": false,
+                "models": [{"id": "saved-model", "name": "Saved Model", "enabled": false,
+                    "supports_vision": false, "supports_web_search": false}]
+            }))
+            .unwrap();
+        let snapshot = display_snapshot(vec![provider], "saved", "saved-model");
+        assert!(snapshot.observation_only);
+        assert_eq!(snapshot.provider_id, "saved");
+        assert_eq!(snapshot.model, "saved-model");
+        assert!(snapshot.active().is_ok());
+        assert!(snapshot.resolve("saved", "saved-model").is_some());
+
+        // A provider that is no longer in the catalog is still displayable.
+        let snapshot = display_snapshot(Vec::new(), "deleted", "gone-model");
+        assert!(snapshot.observation_only);
+        assert_eq!(snapshot.provider_id, "deleted");
+        assert_eq!(snapshot.model, "gone-model");
+        assert!(snapshot.active().is_ok());
+    }
 
     #[test]
     fn worker_cloud_binding_replaces_and_removes_only_adapter_inputs() {

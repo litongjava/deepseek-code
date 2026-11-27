@@ -348,7 +348,20 @@ fn raw_result_text(output: &str) -> String {
     if let Some(instructions) = fields.get("instructions").and_then(Value::as_str) {
         return instructions.trim_end().into();
     }
-    if let Some(files) = fields.get("files").and_then(Value::as_array).filter(|files| files.iter().all(|file| file["status"].is_string() && file["file"].is_string())) {
+    let has_non_collection_text_fields = || {
+        ["content", "count", "truncated", "error", "message", "result"]
+            .iter()
+            .any(|key| fields.contains_key(*key))
+    };
+    if let Some(files) = fields.get("files").and_then(Value::as_array).filter(|files| {
+        if files.is_empty() {
+            !has_non_collection_text_fields()
+        } else {
+            files
+                .iter()
+                .all(|file| file["status"].is_string() && file["file"].is_string())
+        }
+    }) {
         if files.is_empty() { return "(Working tree clean)".into(); }
         return files.iter().map(|file| {
             let status = match file["status"].as_str().unwrap().trim() {
@@ -395,9 +408,13 @@ fn raw_result_text(output: &str) -> String {
         .get("entries")
         .and_then(Value::as_array)
         .filter(|entries| {
-            entries
-                .iter()
-                .all(|entry| entry["name"].is_string() && entry["is_dir"].is_boolean())
+            if entries.is_empty() {
+                !has_non_collection_text_fields()
+            } else {
+                entries
+                    .iter()
+                    .all(|entry| entry["name"].is_string() && entry["is_dir"].is_boolean())
+            }
         })
     {
         if entries.is_empty() {
@@ -1536,6 +1553,20 @@ mod result_regressions {
             Some("Reading background task output")
         );
         assert_eq!(task_output_activity("Bash", &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn glob_empty_output_renders_content_not_git_clean() {
+        let glob_empty =
+            r#"{"content":"No files found","count":0,"files":[],"truncated":false}"#;
+        assert_eq!(result_text(glob_empty), "No files found");
+        assert_eq!(named_result_text("Glob", glob_empty), "No files found");
+        assert_eq!(summary("Glob", glob_empty, false), (vec!["No files found".into()], 0));
+        assert_eq!(result_text(r#"{"files":[]}"#), "(Working tree clean)");
+        assert_eq!(
+            result_text(r#"{"content":"No entries found","entries":[]}"#),
+            "No entries found"
+        );
     }
 
     #[test]

@@ -122,11 +122,28 @@ pub(crate) fn session_effort(session: &Session) -> Result<Option<String>> {
 pub(crate) async fn model_label(session: &Session) -> String {
     let effort = match session_effort(session) {
         Ok(Some(effort)) => Some(effort),
+        _ if session.is_missing_workspace() => None,
         _ => session.selected_provider().await.ok().and_then(|provider| provider.model.effort),
     };
     let effort = effort.filter(|value| !value.is_empty()).unwrap_or_else(|| "default".into());
-    let title = session.store.resume(&session.id).ok().and_then(|conversation| conversation.title)
-        .filter(|title| !title.trim().is_empty()).unwrap_or_else(|| "Untitled".into());
+    let title = session
+        .store
+        .db
+        .conversation_metadata(&session.id)
+        .ok()
+        .flatten()
+        .and_then(|conversation| conversation.title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "Untitled".into());
+    if session.is_missing_workspace() {
+        return format!(
+            "{} {} \u{b7} {} \u{b7} {} \u{b7} read-only (directory missing)",
+            session.binding_state().model,
+            effort,
+            session.workspace.display(),
+            title.replace(['\r', '\n'], " ")
+        );
+    }
     let branch = status_branch(&session.workspace).await;
     format!("{} {} · {} · {} · {}", session.binding_state().model, effort, session.workspace.display(), title.replace(['\r', '\n'], " "), branch)
 }
