@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const TEMP_NAME: &str = "mcp-states.json.tmp";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpState {
@@ -94,23 +92,51 @@ pub fn load(data_dir: &Path) -> BTreeMap<String, McpState> {
 /// Store one server's state, keeping the other entries. The file is replaced
 /// atomically so a concurrent reader never sees a partial document.
 pub fn set(data_dir: &Path, server: &str, state: McpState) -> Result<()> {
-    let mut states = load(data_dir);
-    states.insert(server.to_owned(), state);
+    let _lock = super::transfer::config_lock(&data_dir.join("mcp-servers.json"))?;
+    set_then(data_dir, server, state, || Ok(()))
+}
+
+/// The caller holds the server configuration lock through both publications.
+/// Publish the mode before enabling so readers can only start in the requested
+/// mode. A rejected enable restores even an absent or noncanonical mode file.
+pub(super) fn set_then(
+    data_dir: &Path,
+    server: &str,
+    state: McpState,
+    enable: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let layout = crate::data_layout::DataLayout::from_root(data_dir);
-    std::fs::create_dir_all(layout.config_root())
-        .with_context(|| format!("Creating {}", layout.config_root().display()))?;
-    let file = McpStatesFile {
-        servers: states
-            .into_iter()
-            .map(|(name, state)| (name, state.label().to_owned()))
-            .collect(),
-    };
     let path = layout.mcp_states();
-    let temp = layout.config_file(TEMP_NAME);
-    let mut text = serde_json::to_string_pretty(&file)?;
-    text.push('\n');
-    std::fs::write(&temp, text).with_context(|| format!("Writing {}", temp.display()))?;
-    std::fs::rename(&temp, &path).with_context(|| format!("Replacing {}", path.display()))?;
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut file: McpStatesFile = previous
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+    file.servers.insert(server.into(), state.label().into());
+    let mut bytes = serde_json::to_vec_pretty(&file)?;
+    bytes.push(b'\n');
+    std::fs::create_dir_all(layout.config_root())?;
+    let replace = |bytes: &[u8]| -> Result<()> {
+        use std::io::Write;
+        let mut staged = tempfile::NamedTempFile::new_in(layout.config_root())?;
+        staged.write_all(bytes)?;
+        staged.as_file().sync_all()?;
+        staged.persist(&path)?;
+        Ok(())
+    };
+    replace(&bytes).with_context(|| format!("Writing {}", path.display()))?;
+    if let Err(error) = enable() {
+        match previous {
+            Some(bytes) => replace(&bytes),
+            None => std::fs::remove_file(&path).map_err(Into::into),
+        }
+        .with_context(|| format!("Restoring {} after enable failed: {error}", path.display()))?;
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -191,7 +217,35 @@ mod tests {
         let text = std::fs::read_to_string(config.mcp_states()).unwrap();
         assert!(text.contains("\"github\": \"user-only\""), "{text}");
         assert!(text.contains("\"servers\""), "{text}");
-        assert!(!config.config_file(TEMP_NAME).exists());
+        assert_eq!(std::fs::read_dir(config.config_root()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn refused_enable_restores_exact_mode_file_or_its_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::data_layout::DataLayout::from_root(dir.path());
+        std::fs::create_dir_all(layout.config_root()).unwrap();
+        for previous in [
+            None,
+            Some(br#"{"servers":{"w":"user-only","other":"future"}}"#.as_slice()),
+        ] {
+            if let Some(bytes) = previous {
+                std::fs::write(layout.mcp_states(), bytes).unwrap();
+            }
+            let _lock =
+                super::super::transfer::config_lock(&dir.path().join("mcp-servers.json")).unwrap();
+            let err = set_then(dir.path(), "w", McpState::OnDemand, || {
+                assert_eq!(load(dir.path())["w"], McpState::OnDemand);
+                anyhow::bail!("enable refused")
+            })
+            .unwrap_err();
+            assert_eq!(err.to_string(), "enable refused");
+            if let Some(bytes) = previous {
+                assert_eq!(std::fs::read(layout.mcp_states()).unwrap(), bytes);
+            } else {
+                assert!(!layout.mcp_states().exists());
+            }
+        }
     }
 
     #[test]

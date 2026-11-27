@@ -24,25 +24,6 @@ fn line(states: &BTreeMap<String, McpState>, server: &McpServerStatus) -> String
     )
 }
 
-/// Apply one state through `manager`: `off` disables and stops the server and
-/// is not written to the states file, so the previous state comes back when it
-/// is enabled again. Every other state is stored and enables the server when
-/// it was disabled. The interactive session starts the server separately.
-pub(crate) async fn apply(
-    paths: &RuntimePaths,
-    manager: &McpServerManager,
-    server: &McpServerStatus,
-    state: McpState,
-) -> Result<()> {
-    if state == McpState::Off {
-        manager.set_server_enabled(&server.id, false).await?;
-    } else {
-        manager.set_server_enabled(&server.id, true).await?;
-        states::set(&paths.data_dir, &server.id, state)?;
-    }
-    Ok(())
-}
-
 /// Shared by `dcl mcp state` and `/mcp state`. No server: every `NAME  STATE`
 /// line (configured servers without untouched presets, sorted by name).
 /// Server only: its line. Server and state: apply it and return its line.
@@ -51,7 +32,7 @@ pub async fn state_command(
     manager: &McpServerManager,
     server: Option<&str>,
     state: Option<&str>,
-) -> anyhow::Result<String> {
+) -> Result<String> {
     let servers = manager.list_servers().await;
     let stored = states::load(&paths.data_dir);
     match (server, state) {
@@ -77,7 +58,7 @@ pub async fn state_command(
                 .ok_or_else(|| anyhow::anyhow!("Unknown MCP server {query}"))?
                 .clone();
             let update: McpState = label.parse()?;
-            apply(paths, manager, &found, update).await?;
+            manager.set_server_state(&found.id, update).await?;
             let stored = states::load(&paths.data_dir);
             Ok(format!(
                 "{}  {}",

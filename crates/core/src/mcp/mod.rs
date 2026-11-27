@@ -737,14 +737,25 @@ impl McpServerManager {
     }
 
     pub async fn toggle_server(&self, id: &str) -> Result<()> {
-        self.change_server_enabled(id, None).await
+        self.change_server_enabled(id, None, None).await
     }
 
     pub async fn set_server_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.change_server_enabled(id, Some(enabled)).await
+        self.change_server_enabled(id, Some(enabled), None).await
     }
 
-    async fn change_server_enabled(&self, id: &str, enabled: Option<bool>) -> Result<()> {
+    pub async fn set_server_state(&self, id: &str, state: states::McpState) -> Result<()> {
+        let enabled = state != states::McpState::Off;
+        self.change_server_enabled(id, Some(enabled), enabled.then_some(state))
+            .await
+    }
+
+    async fn change_server_enabled(
+        &self,
+        id: &str,
+        enabled: Option<bool>,
+        mode: Option<states::McpState>,
+    ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let mut servers = self.servers.write().await;
         let state = servers.get_mut(id).ok_or_else(|| anyhow!("Server not found: {id}"))?;
@@ -756,15 +767,25 @@ impl McpServerManager {
         } else {
             state.retry_failed_stop().await?;
         }
+        let data_dir = self.config_path.parent()
+            .ok_or_else(|| anyhow!("MCP config needs a parent directory"))?;
         if state.config.enabled != enabled {
             let mut configs: HashMap<_, _> = servers.iter()
                 .map(|(id, s)| (id.clone(), s.config.clone()))
                 .collect();
             configs.get_mut(id).unwrap().enabled = enabled;
-            transfer::persist(&self.config_path, &self.revision, &configs, false)?;
+            let edit = transfer::prepare(&self.config_path, &self.revision, &configs, false)?;
+            if let Some(mode) = mode {
+                edit.enable_with_mode(data_dir, id, mode)?;
+            } else {
+                edit.publish(|| Ok(()))?;
+            }
             let state = servers.get_mut(id).unwrap();
             state.config.enabled = enabled;
             state.plugin_start_failed = false;
+        } else if let Some(mode) = mode {
+            let (_lock, _) = transfer::lock_revision(&self.config_path, &self.revision)?;
+            states::set_then(data_dir, id, mode, || Ok(()))?;
         }
         let state = servers.get_mut(id).unwrap();
         if !enabled {

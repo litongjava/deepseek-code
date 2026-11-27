@@ -291,6 +291,63 @@ async fn plugins_diagnostics_and_topic_help_are_standalone() {
     assert!(!output(dir.path(),&["mcp","restart","missing"]).await.status.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn read_only_mcp_mode_directory_preserves_disabled_server() {
+    use std::{
+        fs,
+        os::unix::fs::{chown, PermissionsExt},
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    // Root bypasses directory write bits. Run the command as an ordinary UID
+    // in that case so the same chmod fixture exercises a real EACCES.
+    let run = |args: &[&str]| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcl"));
+        if unsafe { libc::geteuid() } == 0 {
+            use std::os::unix::process::CommandExt;
+            chown(root, Some(65534), Some(65534)).unwrap();
+            cmd.gid(65534).uid(65534);
+        }
+        cmd.arg("--data-dir").arg(root).args(args).output().unwrap()
+    };
+    assert!(run(&["mcp", "list"]).status.success());
+    let servers = root.join("mcp-servers.json");
+    let config = root.join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        &servers,
+        r#"{"mcpServers":{"w":{"command":"unused","enabled":false}}}"#,
+    )
+    .unwrap();
+    let mode_file = config.join("mcp-states.json");
+    for previous in [None, Some(br#"{"servers":{"w":"user-only"}}"#.as_slice())] {
+        if let Some(bytes) = previous {
+            fs::write(&mode_file, bytes).unwrap();
+        }
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = run(&["mcp", "state", "w", "on-demand"]);
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{error}");
+        assert!(
+            error.contains("mcp-states.json") && error.contains("Permission denied"),
+            "{error}"
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(&servers).unwrap()).unwrap();
+        assert_eq!(saved["mcpServers"]["w"]["enabled"], false);
+        if let Some(bytes) = previous {
+            assert_eq!(fs::read(&mode_file).unwrap(), bytes);
+        } else {
+            assert!(!mode_file.exists());
+        }
+        let query = run(&["mcp", "state", "w"]);
+        assert!(query.status.success());
+        assert_eq!(String::from_utf8_lossy(&query.stdout).trim(), "w  off");
+    }
+}
+
 #[tokio::test]
 async fn empty_mcp_config_lists_zero_servers_on_cold_start() {
     let dir = tempfile::tempdir().unwrap();

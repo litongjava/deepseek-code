@@ -59,12 +59,7 @@ pub(super) struct PreparedConfig<'a> {
     backup: Option<PathBuf>,
 }
 
-pub(super) fn prepare<'a>(
-    path: &'a Path,
-    revision: &'a Mutex<Option<Vec<u8>>>,
-    configs: &HashMap<String, McpServerConfig>,
-    backup: bool,
-) -> Result<PreparedConfig<'a>> {
+pub(super) fn config_lock(path: &Path) -> Result<std::fs::File> {
     let parent = path
         .parent()
         .context("MCP config needs a parent directory")?;
@@ -76,6 +71,14 @@ pub(super) fn prepare<'a>(
         .write(true)
         .open(path.with_extension("lock"))?;
     crate::fs::try_lock_briefly(&lock).context("MCP configuration is being edited; retry")?;
+    Ok(lock)
+}
+
+pub(super) fn lock_revision(
+    path: &Path,
+    revision: &Mutex<Option<Vec<u8>>>,
+) -> Result<(std::fs::File, Option<Vec<u8>>)> {
+    let lock = config_lock(path)?;
     let current = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -85,6 +88,19 @@ pub(super) fn prepare<'a>(
         *revision.lock().unwrap() == current,
         "MCP configuration changed in another process; reopen this host before editing"
     );
+    Ok((lock, current))
+}
+
+pub(super) fn prepare<'a>(
+    path: &'a Path,
+    revision: &'a Mutex<Option<Vec<u8>>>,
+    configs: &HashMap<String, McpServerConfig>,
+    backup: bool,
+) -> Result<PreparedConfig<'a>> {
+    let (lock, current) = lock_revision(path, revision)?;
+    let parent = path
+        .parent()
+        .context("MCP config needs a parent directory")?;
     let backup = if backup {
         if let Some(bytes) = &current {
             let directory = parent.join("backups");
@@ -119,6 +135,22 @@ pub(super) fn prepare<'a>(
 }
 
 impl PreparedConfig<'_> {
+    pub(super) fn enable_with_mode(
+        self,
+        data_dir: &Path,
+        server: &str,
+        mode: super::states::McpState,
+    ) -> Result<()> {
+        // Retain ownership of the lock here, including while set_then rolls
+        // back the mode if the config rename fails.
+        let _lock = self._lock;
+        super::states::set_then(data_dir, server, mode, || {
+            self.file.persist(self.path)?;
+            *self.revision.lock().unwrap() = Some(self.bytes);
+            Ok(())
+        })
+    }
+
     pub(super) fn publish(self, commit: impl FnOnce() -> Result<()>) -> Result<Option<PathBuf>> {
         self.file.persist(self.path)?;
         // Keep the file lock through the catalog commit. A rejected CAS/rename
