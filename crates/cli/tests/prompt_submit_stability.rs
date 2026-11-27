@@ -130,7 +130,6 @@ impl PtySession {
             "DEEPSEEK_CODE_CHILD_API_KEY",
             "DEEPSEEK_CODE_COORDINATION_DIR",
             "DEEPSEEK_CODE_SESSION_HOST",
-            "DEEPSEEK_CODE_SINGLE_TURN_WORKER",
         ] {
             cmd.env_remove(key);
         }

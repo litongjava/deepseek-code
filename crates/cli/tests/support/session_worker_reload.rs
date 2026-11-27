@@ -196,12 +196,12 @@ async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
         .unwrap();
     let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
 
-    let uninitialized = worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
+    let before_first_turn = worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
         .await
         .unwrap();
     assert!(matches!(
-        uninitialized.mcp,
-        Some(worker::McpResult::Unavailable)
+        before_first_turn.mcp,
+        Some(worker::McpResult::Servers { servers, .. }) if servers.iter().any(|s| s.id == "stub" && s.running)
     ));
     let job = submit(&host, &endpoint, "stub turn one", "fixture", 128).await;
     assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");

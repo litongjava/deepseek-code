@@ -21,6 +21,10 @@ async fn command(tty: &mut Terminal, command: &str, expected: &[u8]) {
 // type the next command once the terminal has re-entered bracketed paste mode.
 async fn repl(tty: &mut Terminal, line: &str, result: &[u8]) {
     command(tty, line, result).await;
+    wait_for_editor_after(tty, result).await;
+}
+
+async fn wait_for_editor_after(tty: &mut Terminal, result: &[u8]) {
     let after = tty
         .transcript
         .windows(result.len())
@@ -47,6 +51,12 @@ fn starts(log: &Path, id: &str) -> Vec<(u32, u32)> {
         .collect()
 }
 
+fn definition(log: &Path, id: &str, enabled: bool) -> Value {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    json!({"command":"/bin/sh", "args":[fixtures.join("mcp-owner-launcher.sh"),
+        fixtures.join("mcp-owner-stdio.cjs"), log, id, "survive-eof"], "enabled": enabled})
+}
+
 #[tokio::test]
 async fn prompt_picker_panels_and_focus_share_one_owner() {
     let temp = tempfile::tempdir().unwrap();
@@ -71,9 +81,7 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
     .unwrap();
 
     let log = temp.path().join("children.jsonl");
-    let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
-    let definition =
-        |id: &str, enabled| json!({"command":"node", "args":[stub, log, id], "enabled":enabled});
+    let definition = |id: &str, enabled| definition(&log, id, enabled);
     let config = paths.data_dir.join("mcp-servers.json");
     fs::write(
         &config,
@@ -113,13 +121,14 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
     tty.wait_output(b"Manage MCP servers", true).await;
     key(&mut tty, b"\x1b", b"\x1b[?2004h").await;
     tty.wait_output(PROMPT, true).await;
+    let initial_worker = worker::current(&paths.data_dir, &session).unwrap().unwrap();
+    let engine = initial_worker.child_pid.unwrap();
     assert_eq!(
         starts(&log, "aaa").iter().map(|p| p.1).collect::<Vec<_>>(),
-        [tty.pid(), tty.pid()]
+        [engine, engine]
     );
 
-    // Edit disk after frontend startup. The prompt is expanded locally before
-    // its first model turn is delegated, in this same terminal.
+    // The worker fetches the prompt before the first chat turn in this terminal.
     let mut definitions: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
     definitions["mcpServers"]["later"] = definition("later", true);
     fs::write(&config, definitions.to_string()).unwrap();
@@ -127,6 +136,7 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
     let host = worker::current(&paths.data_dir, &session).unwrap().unwrap();
     let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
     let worker_pid = host.child_pid.unwrap();
+    assert_eq!(initial_worker.id, host.id);
     assert!(requests
         .lock()
         .unwrap()
@@ -134,9 +144,16 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
         .any(|request| request["messages"]
             .to_string()
             .contains("expanded owner probe")));
+    repl(&mut tty, "/doctor errors", b"No problems found").await;
     repl(&mut tty, "/mcp state later", b"later  user").await;
     assert_eq!(starts(&log, "aaa").last().unwrap().1, worker_pid);
 
+    command(&mut tty, "/mcp", b"Manage MCP servers").await;
+    key(&mut tty, b"\r", b"View tools").await;
+    key(&mut tty, b"\r", b"owner witness").await;
+    key(&mut tty, b"\x1b", b"Manage MCP servers").await;
+    key(&mut tty, b"\x1b", b"\x1b[?2004h").await;
+    tty.wait_output(PROMPT, true).await;
     command(&mut tty, "/tools", b"[Built-in]").await;
     key(&mut tty, b"\x1b[C", b"[Skills]").await;
     key(&mut tty, b"\x1b[C", b"[Mcp]").await;
@@ -194,10 +211,12 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
 
     repl(&mut tty, "/focus on", b"focus updated").await;
     repl(&mut tty, "local focus turn", b"worker result").await;
-    let released = worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
+    let focused = worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
         .await
         .unwrap();
-    assert!(matches!(released.mcp, Some(worker::McpResult::Unavailable)));
+    assert!(
+        matches!(focused.mcp, Some(worker::McpResult::Servers { servers, .. }) if servers.iter().any(|s| s.id == "later" && s.running))
+    );
     repl(&mut tty, "/focus off", b"focus updated").await;
     repl(&mut tty, "back to worker", b"worker result").await;
     assert_eq!(
@@ -205,14 +224,14 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
             .iter()
             .map(|p| p.1)
             .collect::<Vec<_>>(),
-        [worker_pid, worker_pid, worker_pid, tty.pid(), worker_pid]
+        [worker_pid; 3]
     );
     assert_eq!(
         starts(&log, "later")
             .iter()
             .map(|p| p.1)
             .collect::<Vec<_>>(),
-        [tty.pid(), worker_pid, tty.pid(), worker_pid]
+        [worker_pid]
     );
     let last = starts(&log, "later").last().unwrap().0;
     let mut definitions: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
@@ -223,7 +242,7 @@ async fn prompt_picker_panels_and_focus_share_one_owner() {
     fs::write(&config, definitions.to_string()).unwrap();
     repl(&mut tty, "apply removal", b"worker result").await;
     assert!(worker::process_exited(last));
-    assert_eq!(starts(&log, "later").len(), 4);
+    assert_eq!(starts(&log, "later").len(), 1);
 
     worker::shutdown(&paths.data_dir, &session).await.unwrap();
     provider.abort();
@@ -285,10 +304,12 @@ impl OwnerFixture {
             json!({"trusted_folders":[workspace]}).to_string(),
         )
         .unwrap();
-        let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
-        fs::write(paths.data_dir.join("mcp-servers.json"), json!({"mcpServers":{"w":{
-            "command":"node","args":[stub,temp.path().join("children.jsonl"),"w","survive-eof"],"enabled":true
-        }}}).to_string()).unwrap();
+        let log = temp.path().join("children.jsonl");
+        fs::write(
+            paths.data_dir.join("mcp-servers.json"),
+            json!({"mcpServers":{"w":definition(&log, "w", true)}}).to_string(),
+        )
+        .unwrap();
         Self {
             temp,
             paths,
@@ -345,6 +366,17 @@ impl Drop for OwnerFixture {
     }
 }
 
+fn assert_tree_gone(log: &Path) {
+    for line in fs::read_to_string(log).unwrap().lines() {
+        let row: Value = serde_json::from_str(line).unwrap();
+        for field in ["pid", "launcher"] {
+            let pid = row[field].as_u64().unwrap() as u32;
+            assert!(worker::process_exited(pid), "{field} {pid} survived");
+            eprintln!("MCP stop observed for {} {field} {pid}", row["id"]);
+        }
+    }
+}
+
 async fn crash_takeover(in_flight: bool) {
     let fixture = OwnerFixture::new().await;
     let mut tty = fixture.terminal().await;
@@ -356,7 +388,7 @@ async fn crash_takeover(in_flight: bool) {
     if in_flight {
         repl(&mut tty, "/focus on", b"focus updated").await;
         assert_eq!(unsafe { libc::kill(engine, libc::SIGSTOP) }, 0);
-        tty.submit("handoff in flight", false).await;
+        tty.submit("focus submission in flight", false).await;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     assert_eq!(unsafe { libc::kill(supervisor, libc::SIGSTOP) }, 0);
@@ -374,22 +406,24 @@ async fn crash_takeover(in_flight: bool) {
     resume.await.unwrap();
     let children = fixture.starts();
     assert_eq!(children.len(), 2);
-    assert_eq!(children[1].1, tty.pid());
+    assert_eq!(children[1].1, fixture.worker().child_pid.unwrap());
+    assert_ne!(host.id, fixture.worker().id);
     assert!(worker::process_exited(old));
     tty.submit("/exit", false).await;
     tty.wait_success().await;
+    assert_tree_gone(&fixture.temp.path().join("children.jsonl"));
     for (pid, _) in children {
         assert!(worker::process_exited(pid));
     }
 }
 
 #[tokio::test]
-async fn idle_worker_death_drains_children_before_takeover() {
+async fn idle_worker_death_drains_launcher_children_before_restart() {
     crash_takeover(false).await;
 }
 
 #[tokio::test]
-async fn lost_handoff_reply_drains_children_before_takeover() {
+async fn worker_death_during_focus_submit_drains_launcher_children() {
     crash_takeover(true).await;
 }
 
@@ -475,7 +509,7 @@ async fn busy_panel_disable_preserves_catalog_and_runtime() {
 }
 
 #[tokio::test]
-async fn slow_mutations_and_disconnected_handoff_report_the_admitted_outcome() {
+async fn slow_remove_and_lost_reconnect_reply_apply_once() {
     use tokio::io::AsyncWriteExt;
     let fixture = OwnerFixture::new().await;
     let mut tty = fixture.terminal().await;
@@ -488,7 +522,7 @@ async fn slow_mutations_and_disconnected_handoff_report_the_admitted_outcome() {
         .env("MCP_LOG", &http_log)
         .env("MCP_PORT_FILE", &port_file)
         .env("MCP_INIT_DELAY", "7000")
-        .env("MCP_DELETE_DELAY", "7000")
+        .env("MCP_DELETE_DELAY", "0")
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -507,67 +541,59 @@ async fn slow_mutations_and_disconnected_handoff_report_the_admitted_outcome() {
     defs["mcpServers"]["http"] =
         json!({"type":"http","url":format!("http://127.0.0.1:{port}"),"enabled":true});
     fs::write(&path, defs.to_string()).unwrap();
-    repl(&mut tty, "/mcp state w off", b"w  off").await;
+    defs["mcpServers"]["keep"] =
+        definition(&fixture.temp.path().join("children.jsonl"), "keep", true);
+    fs::write(&path, defs.to_string()).unwrap();
+    repl(&mut tty, "/mcp remove w", b"Removed w").await;
     assert!(worker::process_exited(fixture.starts()[0].0));
-    // Disconnect after sending StopAll. Its actual completion (including the
-    // delayed DELETE) is retrievable from the same worker without re-execution.
+    assert!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["mcpServers"]
+            .get("w")
+            .is_none()
+    );
     let id = uuid::Uuid::new_v4();
-    let stop = worker::Request::McpTracked {
+    let restart = worker::Request::McpTracked {
         id,
-        operation: worker::McpOp::StopAll,
+        operation: worker::McpOp::Reconnect {
+            server: "keep".into(),
+        },
     };
     let mut stream = tokio::net::UnixStream::connect(&host.endpoint)
         .await
         .unwrap();
-    let mut bytes = serde_json::to_vec(&stop).unwrap();
+    let mut bytes = serde_json::to_vec(&restart).unwrap();
     bytes.push(b'\n');
     stream.write_all(&bytes).await.unwrap();
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !fs::read_to_string(&http_log).unwrap().contains("stop") {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
     let outcome = worker::Request::McpOutcome { id };
-    assert!(matches!(
-        worker::call(&host, &outcome).await.unwrap().mcp,
-        Some(worker::McpResult::Pending)
-    ));
-    tokio::time::timeout(Duration::from_secs(12), async {
+    tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if matches!(
                 worker::call(&host, &outcome).await.unwrap().mcp,
-                Some(worker::McpResult::Stopped)
+                Some(worker::McpResult::Message { .. })
             ) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
     .unwrap();
     assert!(matches!(
-        worker::call(&host, &stop).await.unwrap().mcp,
-        Some(worker::McpResult::Stopped)
+        worker::call(&host, &restart).await.unwrap().mcp,
+        Some(worker::McpResult::Message { .. })
     ));
-    assert_eq!(fs::read_to_string(&http_log).unwrap(), "start\nstop\n");
-    // Exercise a connected foreground handoff under the same DELETE delay.
-    repl(&mut tty, "worker reacquires", b"worker result").await;
-    repl(&mut tty, "/focus on", b"focus updated").await;
-    repl(&mut tty, "bounded handoff", b"worker result").await;
-    assert_eq!(
-        fs::read_to_string(&http_log).unwrap(),
-        "start\nstop\nstart\nstop\nstart\n"
-    );
+    let children = starts(&fixture.temp.path().join("children.jsonl"), "keep");
+    assert_eq!(children.len(), 2, "one initial server and one reconnect");
+    assert!(worker::process_exited(children[0].0));
+    assert!(!worker::process_exited(children[1].0));
     server.kill().await.unwrap();
     tty.submit("/exit", false).await;
     tty.wait_success().await;
 }
 
 #[tokio::test]
-async fn malformed_hot_edit_keeps_provider_tools_across_both_handoffs() {
+async fn malformed_hot_edit_keeps_provider_tools_in_both_focus_modes() {
     let fixture = OwnerFixture::new().await;
     let mut tty = fixture.terminal().await;
     repl(&mut tty, "/mcp state w", b"w  user").await;
@@ -600,7 +626,7 @@ async fn malformed_hot_edit_keeps_provider_tools_across_both_handoffs() {
     assert!(String::from_utf8_lossy(&tty.transcript).contains("MCP reload:"));
     assert_eq!(
         fixture.starts().iter().map(|p| p.1).collect::<Vec<_>>(),
-        [tty.pid(), host.child_pid.unwrap(), tty.pid()]
+        [host.child_pid.unwrap()]
     );
     let requests = fixture.requests.lock().unwrap();
     for prompt in [
@@ -628,7 +654,7 @@ async fn malformed_hot_edit_keeps_provider_tools_across_both_handoffs() {
 }
 
 #[tokio::test]
-async fn idle_frontend_yields_before_first_turn_and_after_focus() {
+async fn two_frontends_and_a_frontend_crash_preserve_the_same_worker() {
     let fixture = OwnerFixture::new().await;
     let mut first = fixture.terminal().await;
     let mut second = fixture.terminal().await;
@@ -640,19 +666,217 @@ async fn idle_frontend_yields_before_first_turn_and_after_focus() {
     repl(&mut first, "/focus on", b"focus updated").await;
     repl(&mut first, "focused local turn", b"worker result").await;
     repl(&mut second, "/mcp state w", b"w  user").await;
-    assert_eq!(fixture.starts().last().unwrap().1, first.pid());
+    assert_eq!(fixture.starts().last().unwrap().1, engine);
     repl(&mut second, "/focus off", b"focus updated").await;
     repl(&mut second, "second worker transfer", b"worker result").await;
     repl(&mut first, "/mcp state w", b"w  user").await;
     let children = fixture.starts();
-    assert_eq!(
-        children.iter().map(|p| p.1).collect::<Vec<_>>(),
-        [first.pid(), engine, first.pid(), engine]
-    );
-    assert!(children[..3]
-        .iter()
-        .all(|(pid, _)| worker::process_exited(*pid)));
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].1, engine);
+    // Kill only the original frontend. The worker was started by that process.
+    assert_eq!(unsafe { libc::kill(first.pid() as i32, libc::SIGKILL) }, 0);
+    repl(&mut second, "/mcp state w", b"w  user").await;
+    assert_eq!(fixture.starts(), children);
     second.submit("/exit", false).await;
     second.wait_success().await;
-    assert!(worker::process_exited(children[3].0));
+    assert_tree_gone(&fixture.temp.path().join("children.jsonl"));
+}
+
+#[tokio::test]
+async fn focus_modes_send_live_argument_schema_and_preserve_sibling() {
+    let fixture = OwnerFixture::new().await;
+    let log = fixture.temp.path().join("children.jsonl");
+    let path = fixture.paths.data_dir.join("mcp-servers.json");
+    // An older binary may have left a first-seen contract for this session.
+    let snapshots = fixture.paths.data_dir.join("cache/mcp-tool-snapshots");
+    fs::create_dir_all(&snapshots).unwrap();
+    fs::write(snapshots.join(format!("{}.json", fixture.session)), json!({
+        "mcp__w__probe":{"name":"mcp__w__probe","description":"legacy","input_schema":{"type":"object","required":["legacy"]}}
+    }).to_string()).unwrap();
+    let mut tty = fixture.terminal().await;
+    for (focus, field) in [("off", "alpha"), ("on", "beta"), ("off", "gamma")] {
+        repl(&mut tty, &format!("/focus {focus}"), b"focus updated").await;
+        let mut server = definition(&log, "w", true);
+        server["env"] = json!({"PROBE_FIELD":field});
+        let mut sibling = definition(&log, "sibling", true);
+        sibling["env"] = json!({"PROBE_FIELD":"constant"});
+        fs::write(
+            &path,
+            json!({"mcpServers":{"w":server,"sibling":sibling}}).to_string(),
+        )
+        .unwrap();
+        let prompt = format!("inspect {field}");
+        repl(&mut tty, &prompt, b"worker result").await;
+        let requests = fixture.requests.lock().unwrap();
+        let request = requests
+            .iter()
+            .find(|r| {
+                let last = r["messages"].as_array().unwrap().last().unwrap();
+                r["stream"] == true
+                    && last["role"] == "user"
+                    && last["content"]
+                        .as_str()
+                        .is_some_and(|content| prompt_text(content) == prompt)
+            })
+            .unwrap_or_else(|| panic!("No streamed chat request for {prompt}"));
+        for (name, expected) in [
+            ("mcp__w__probe", field),
+            ("mcp__sibling__probe", "constant"),
+        ] {
+            let tool = request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["function"]["name"] == name)
+                .unwrap();
+            assert_eq!(tool["function"]["description"], expected);
+            assert_eq!(
+                tool["function"]["parameters"]["required"],
+                json!([expected])
+            );
+        }
+    }
+    assert_eq!(starts(&log, "sibling").len(), 1);
+    assert_eq!(starts(&log, "w").len(), 3);
+    let image = linux_terminal::image_prompt(&fixture.temp.path().join("work"), "inspect image");
+    repl(&mut tty, &image, b"worker result").await;
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(
+            |request| request["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "image_url"))
+        ));
+    assert_eq!(starts(&log, "w").len(), 3);
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+    assert_tree_gone(&log);
+}
+
+#[tokio::test]
+async fn rejected_plugin_write_preserves_setting_and_next_provider_turn() {
+    use deepseek_code_core::services::{plugins, EnvironmentCredentials, ServiceContext};
+    let fixture = OwnerFixture::new().await;
+    let log = fixture.temp.path().join("children.jsonl");
+    let package = fixture.temp.path().join("package.json");
+    fs::write(&package, json!({"id":"transaction","version":"1.0.0","description":"plugin toggle","commands":{},"files":{},
+        "mcp_servers":{"child":definition(&log,"plugin",true)}}).to_string()).unwrap();
+    let context =
+        ServiceContext::open(fixture.paths.clone(), Arc::new(EnvironmentCredentials)).unwrap();
+    plugins::install(&context, package.to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "initialize plugin", b"worker result").await;
+    let before = starts(&log, "plugin");
+    let path = fixture.paths.data_dir.join("mcp-servers.json");
+    fs::write(&path, "{").unwrap();
+    repl(
+        &mut tty,
+        "/plugin disable transaction",
+        b"configuration changed in another process",
+    )
+    .await;
+    assert!(
+        plugins::list(&context)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "transaction")
+            .unwrap()
+            .enabled
+    );
+    repl(&mut tty, "after rejected toggle", b"worker result").await;
+    let tool = deepseek_code_core::mcp::tool_executor::qualified_tool_name(
+        "plugin:transaction:child",
+        "probe",
+    );
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(
+            |r| r["messages"].as_array().unwrap().last().unwrap()["content"]
+                .to_string()
+                .contains("after rejected toggle")
+                && r["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["function"]["name"] == tool)
+        ));
+    assert_eq!(fs::read_to_string(path).unwrap(), "{");
+    assert_eq!(starts(&log, "plugin"), before);
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+}
+
+#[tokio::test]
+async fn advertised_restart_obeys_turn_admission() {
+    let fixture = OwnerFixture::new().await;
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "initialize worker", b"worker result").await;
+    let original = fixture.starts();
+    tty.submit("hold owner turn", false).await;
+    tokio::time::timeout(Duration::from_secs(10), fixture.held.notified())
+        .await
+        .unwrap();
+    let restart = || {
+        let mut cmd = tokio::process::Command::new(test_cli_executable());
+        cmd.arg("--data-dir")
+            .arg(&fixture.paths.data_dir)
+            .args(["mcp", "restart", "w"]);
+        cmd
+    };
+    let refused = tokio::time::timeout(Duration::from_secs(4), restart().output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("MCP is busy"),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.starts(), original);
+    assert!(!worker::process_exited(original[0].0));
+    tty.clear_output();
+    fixture.release.notify_one();
+    tty.wait_output(b"worker result", true).await;
+    wait_for_editor_after(&mut tty, b"worker result").await;
+    let accepted = restart().output().await.unwrap();
+    assert!(accepted.status.success(), "{accepted:?}");
+    assert_eq!(fixture.starts().len(), 2);
+    assert!(worker::process_exited(original[0].0));
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+}
+
+#[tokio::test]
+async fn plain_tty_modes_render_worker_output() {
+    for screen_reader in [true, false] {
+        let fixture = OwnerFixture::new().await;
+        let mut launch = Terminal::command(
+            portable_pty::CommandBuilder::new(test_cli_executable()),
+            &fixture.temp.path().join("work"),
+            &fixture.paths.data_dir,
+            &fixture.temp.path().join("coord"),
+            true,
+            screen_reader,
+        );
+        if !screen_reader {
+            launch.env("TERM", "dumb");
+        }
+        launch.args(["--resume", &fixture.session]);
+        let mut tty = Terminal::spawn(launch);
+        tty.wait_output(b"> ", true).await;
+        tty.submit("plain worker prompt", true).await;
+        tty.wait_output(b"worker result", true).await;
+        assert_eq!(fixture.starts()[0].1, fixture.worker().child_pid.unwrap());
+        tty.wait_output(b"> ", true).await;
+        tty.submit("/exit", true).await;
+        tty.wait_success().await;
+    }
 }

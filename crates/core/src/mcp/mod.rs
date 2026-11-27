@@ -829,7 +829,7 @@ impl McpConnector {
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .kill_on_drop(true);
-                // An MCP server is a separate session, not part of the worker.
+                // Keep worker control and authentication variables out of server environments.
                 crate::services::background_sessions::strip_internal_env(&mut cmd);
                 if let Some(cwd) = &self.config.cwd {
                     cmd.current_dir(cwd);

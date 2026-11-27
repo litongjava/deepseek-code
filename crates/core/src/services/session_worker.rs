@@ -63,12 +63,10 @@ pub struct Worker {
     pub error: Option<String>,
 }
 
-/// MCP actions dispatched to the session's owning manager. StopAll acknowledges
-/// a handoff only after the current owner releases its children.
+/// MCP actions dispatched to the session's worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
-    ProbeOwner,
     ListPlugins,
     ReloadPlugins,
     SetPluginEnabled {
@@ -91,7 +89,6 @@ pub enum McpOp {
     Hosts,
     Restart { server: String, host: Option<String> },
     List,
-    StopAll,
     State {
         server: Option<String>,
         state: Option<String>,
@@ -109,15 +106,12 @@ pub enum McpOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpResult {
-    Owned,
     Pending,
     MissingReceipt,
     Busy,
-    Unavailable,
     Reloaded { notices: Vec<(String, String)> },
     Json { value: serde_json::Value },
     Message { text: String },
-    Stopped,
     State {
         /// The `NAME  STATE` line `state_command` produced.
         text: String,

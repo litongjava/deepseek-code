@@ -84,8 +84,7 @@ async fn run(trigger: Trigger, controlling_terminal: bool, mid_turn: bool, scree
         .expect("the frontend is registered at the ready prompt");
     let session = frontend.session_id.unwrap();
     if mid_turn {
-        // An image attachment takes the direct engine path with a raw live
-        // display, avoiding an independently persistent worker in this test.
+        // Exercise a live image submission and a screen-reader text submission.
         let prompt = if screen_reader {
             GATED_PROMPT.to_owned()
         } else {

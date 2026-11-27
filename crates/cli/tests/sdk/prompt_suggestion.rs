@@ -424,7 +424,7 @@ mod terminal_fixture;
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn single_turn_worker_releases_foreground_before_suggestion_finishes() {
+async fn tty_worker_releases_foreground_before_suggestion_finishes() {
     use portable_pty::CommandBuilder;
     use terminal_fixture::Terminal;
     let gate = Arc::new(tokio::sync::Notify::new());
@@ -449,7 +449,6 @@ async fn single_turn_worker_releases_foreground_before_suggestion_finishes() {
         true,
         false,
     );
-    command.env("DEEPSEEK_CODE_SINGLE_TURN_WORKER", "1");
     command.env("TMPDIR", std::env::temp_dir());
     command.args(["--session-id", &session, "first probe"]);
     let mut terminal = Terminal::spawn(command);
@@ -463,7 +462,7 @@ async fn single_turn_worker_releases_foreground_before_suggestion_finishes() {
         }
     })
     .await
-    .expect("single-turn worker did not start its suggestion");
+    .expect("TTY worker did not start its suggestion");
     // Both the foreground claim and the turn lease must become available
     // while the optional response is held at the endpoint.
     tokio::time::timeout(Duration::from_secs(4), async {

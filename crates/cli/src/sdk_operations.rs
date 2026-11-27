@@ -28,7 +28,7 @@ async fn server_id(session: &Session, request: &Value) -> Result<String> {
         "SDK-hosted MCP server {name} is managed by the SDK host"
     );
     session
-        .mcp
+        .local_mcp()?
         .list_servers()
         .await
         .into_iter()
@@ -40,21 +40,21 @@ async fn server_id(session: &Session, request: &Value) -> Result<String> {
 async fn mcp_toggle(session: &Session, request: &Value) -> Result<Value> {
     let enabled = request["enabled"].as_bool().context("enabled must be a boolean")?;
     let id = server_id(session, request).await?;
-    session.mcp.set_server_enabled(&id, enabled).await?;
-    let running = session.mcp.get_server(&id).await.is_some_and(|server| server.running);
+    session.local_mcp()?.set_server_enabled(&id, enabled).await?;
+    let running = session.local_mcp()?.get_server(&id).await.is_some_and(|server| server.running);
     if enabled && !running {
-        session.mcp.start_server(&id).await?;
+        session.local_mcp()?.start_server(&id).await?;
     } else if !enabled && running {
-        session.mcp.stop_server(&id).await?;
+        session.local_mcp()?.stop_server(&id).await?;
     }
     Ok(json!({}))
 }
 
 async fn mcp_reconnect(session: &Session, request: &Value) -> Result<Value> {
     let id = server_id(session, request).await?;
-    let server = session.mcp.get_server(&id).await.context("MCP server disappeared")?;
+    let server = session.local_mcp()?.get_server(&id).await.context("MCP server disappeared")?;
     ensure!(server.enabled, "MCP server {} is disabled; enable it with mcp_toggle", server.name);
-    session.mcp.restart_server(&id).await?;
+    session.local_mcp()?.restart_server(&id).await?;
     Ok(json!({}))
 }
 

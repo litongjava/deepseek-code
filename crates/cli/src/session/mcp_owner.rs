@@ -12,8 +12,18 @@ use tokio::sync::{Mutex, OnceCell};
 const BUSY: &str = "MCP is busy, try after this turn";
 
 impl Session {
+    pub(crate) fn uses_worker(&self) -> bool {
+        self.mcp.is_none()
+    }
+
+    pub(crate) fn local_mcp(&self) -> Result<&McpServerManager> {
+        self.mcp
+            .as_deref()
+            .context("This session runs MCP in its worker")
+    }
+
     pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
-        if self.worker_frontend {
+        if self.uses_worker() {
             let host = worker::ensure_worker(
                 &self.paths.data_dir,
                 &std::env::current_exe()?,
@@ -35,16 +45,18 @@ impl Session {
             };
         }
         self.ensure_mcp().await?;
-        local_operation(&self.paths, &self.workspace, &self.mcp, op).await
+        local_operation(&self.paths, &self.workspace, self.local_mcp()?, op).await
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
-        self.sdk_cancellable(initialize(&self.mcp, &self.mcp_ready))
+        self.sdk_cancellable(initialize(self.local_mcp()?, &self.mcp_ready))
             .await
     }
 
     pub(super) async fn reset_local_mcp(&mut self) -> Result<()> {
-        self.mcp.shutdown_all().await?;
+        if let Some(manager) = &self.mcp {
+            manager.shutdown_all().await?;
+        }
         self.mcp_ready = Arc::default();
         Ok(())
     }
@@ -138,7 +150,7 @@ impl WorkerMcp {
         &self,
     ) -> deepseek_code_core::services::runtime_status::RuntimeSource {
         deepseek_code_core::services::runtime_status::RuntimeSource {
-            mcp: self.manager.clone(),
+            mcp: Some(self.manager.clone()),
             mcp_ready: self.ready.clone(),
             data_dir: self.paths.data_dir.clone(),
             workspace: self.workspace.clone(),
@@ -154,8 +166,7 @@ impl WorkerMcp {
         initialize(&self.manager, &self.ready).await?;
         local_operation(&self.paths, &self.workspace, &self.manager, op).await
     }
-}
-impl WorkerMcp {
+
     /// Take admission before handing the stream to the serving task.
     pub(crate) fn dispatch(
         &self,

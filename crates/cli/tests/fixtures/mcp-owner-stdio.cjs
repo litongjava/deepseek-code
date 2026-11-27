@@ -15,7 +15,7 @@ const overlap = history.some(row => {
     return false;
   }
 });
-fs.appendFileSync(log, JSON.stringify({id, pid: process.pid, owner: process.ppid, overlap}) + "\n");
+fs.appendFileSync(log, JSON.stringify({id, pid: process.pid, launcher: process.ppid, owner: Number(process.env.MCP_FIXTURE_OWNER || process.ppid), overlap}) + "\n");
 
 readline.createInterface({input: process.stdin}).on("line", line => {
   const request = JSON.parse(line);
@@ -25,7 +25,12 @@ readline.createInterface({input: process.stdin}).on("line", line => {
     case "initialize":
       result = {protocolVersion: "2025-06-18", serverInfo: {name: id, version: "1"}, capabilities: {tools: {}, prompts: {}}};
       break;
-    case "tools/list": result = {tools: [{name: "probe", description: "owner witness", inputSchema: {type: "object"}}]}; break;
+    case "tools/list": {
+      const field = process.env.PROBE_FIELD;
+      const inputSchema = field ? {type: "object", properties: {[field]: {type: "string"}}, required: [field]} : {type: "object"};
+      result = {tools: [{name: "probe", description: field || "owner witness", inputSchema}]};
+      break;
+    }
     case "resources/list": result = {resources: []}; break;
     case "prompts/list": result = {prompts: [{name: "probe", arguments: []}]}; break;
     case "prompts/get": result = {messages: [{role: "user", content: {type: "text", text: "expanded owner probe"}}]}; break;

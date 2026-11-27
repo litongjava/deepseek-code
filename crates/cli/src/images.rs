@@ -127,7 +127,7 @@ fn image_path_words(prompt: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Image paths written in the prompt: plain, quoted or after @.
-fn image_paths(workspace: &Path, prompt: &str) -> Vec<PathBuf> {
+pub(crate) fn image_paths(workspace: &Path, prompt: &str) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     for path in placeholders(prompt) {
         if path.is_file() && !paths.contains(&path) {
@@ -157,12 +157,17 @@ pub fn content(workspace: &Path, prompt: &str) -> Result<Option<Value>> {
     if paths.is_empty() {
         return Ok(None);
     }
+    Ok(Some(content_from_paths(workspace, prompt, &paths)?))
+}
+
+pub(crate) fn content_from_paths(workspace: &Path, prompt: &str, paths: &[PathBuf]) -> Result<Value> {
+    anyhow::ensure!(!paths.is_empty() && paths.len() <= MAX_IMAGES, "Invalid image attachment count");
     let text = crate::mentions::expand(workspace, prompt).unwrap_or_else(|| prompt.to_owned());
     let mut blocks = vec![json!({"type": "text", "text": text})];
     for path in paths {
         blocks.push(image_block_from_file(&path)?);
     }
-    Ok(Some(Value::Array(blocks)))
+    Ok(Value::Array(blocks))
 }
 
 #[cfg(not(windows))]

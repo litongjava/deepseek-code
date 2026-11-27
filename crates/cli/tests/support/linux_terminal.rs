@@ -288,7 +288,7 @@ impl Terminal {
     }
 }
 
-/// An image prompt selects the direct engine while keeping the live renderer.
+/// Attach a real one-pixel PNG to a terminal prompt.
 pub(crate) fn image_prompt(workspace: &Path, prompt: &str) -> String {
     use base64::Engine;
     let png = base64::engine::general_purpose::STANDARD.decode(

@@ -137,16 +137,10 @@ pub(crate) enum WorkerInput {
     Queued { request_id: String, revision: i64 },
     InitialHook { publish: bool },
     HookWake,
+    Images(Vec<std::path::PathBuf>),
 }
 
 pub(crate) const INPUT_KEY: &str = "DEEPSEEK_CODE_WORKER_INPUT";
-
-pub(crate) async fn internal_turn(cli: &Cli, session: &Session, prompt: &str, input: &mut Option<TerminalInput>, kind: WorkerInput) -> Result<()> {
-    if let Some(kickoff) = single_turn(cli, session, prompt, input, crate::session::TurnOrigin::Generated, Some(kind)).await? {
-        turn(cli, session, &kickoff, input, crate::session::TurnOrigin::GoalContinuation).await?;
-    }
-    Ok(())
-}
 
 pub async fn turn(
     cli: &Cli,
@@ -154,10 +148,11 @@ pub async fn turn(
     prompt: &str,
     input: &mut Option<TerminalInput>,
     mut origin: crate::session::TurnOrigin<'_>,
+    mut kind: Option<WorkerInput>,
 ) -> Result<()> {
     let mut next = prompt.to_owned();
     while !crate::signals::terminating() {
-        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input, origin, None)).await? else {
+        let Some(kickoff) = Box::pin(single_turn(cli, session, &next, input, origin, kind.take())).await? else {
             return Ok(());
         };
         next = kickoff;
@@ -437,6 +432,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
             &kickoff,
             input,
             crate::session::TurnOrigin::GoalContinuation,
+            None,
         ))
         .await?;
     }
@@ -719,10 +715,10 @@ async fn observe(
                         if let Some(index) = queued_inputs.iter().position(|queued| queued == text) { queued_inputs.remove(index); }
                     }
                     if event["type"] == "result" {
-                        if let Some(text)=result_text(&event,streamed) {render_text(display, text);}
+                        if let Some(text) = result_text(&event, streamed) { render_text(display, text)?; }
                         streamed = false;
                     }
-                    render(display, &event);
+                    render(display, &event)?;
                 }
                 let question = jobs::pending_question(root, id, owner)?;
                 let current = question.as_ref().map(|question| question.request_id.as_str());
@@ -1187,23 +1183,28 @@ fn resource_alert_renders_a_system_resource_warning_notice() {
             "summary": "Low memory: 1.0 GiB available",
             "details": "Reduce parallel jobs and command output."
         }),
-    );
+    )
+    .unwrap();
     assert_eq!(
         display.take_notices(),
         vec!["● System resource warning: Low memory: 1.0 GiB available".to_string()]
     );
 }
 
-fn render_text(display: &mut TurnDisplay, text: &str) {
+fn render_text(display: &mut TurnDisplay, text: &str) -> Result<()> {
     display.before_text(text);
     if !display.is_live() {
         use std::io::Write;
-        print!("{text}");
-        let _ = std::io::stdout().flush();
+        let mut stdout = crate::terminal_output::stdout_locked();
+        stdout
+            .write_all(text.as_bytes())
+            .and_then(|_| stdout.flush())
+            .map_err(crate::terminal_output::stream_write_error)?;
     }
+    Ok(())
 }
 
-fn render(display: &mut TurnDisplay, event: &Value) {
+fn render(display: &mut TurnDisplay, event: &Value) -> Result<()> {
     let text = |name: &str| event[name].as_str().unwrap_or("");
     match text("type") {
         "hook_progress" => display.hook_progress(text("hook_id"), event["status_message"].as_str()),
@@ -1215,7 +1216,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
             }
         }
         "request_attempt" => { if let Some(message) = event["message"].as_str() { display.notice(message); } },
-        "text" => render_text(display, text("delta")),
+        "text" => render_text(display, text("delta"))?,
         "queued_input" => display.queued_delivered(text("text")),
         "thinking" => {
             display.record_thinking(text("delta"));
@@ -1244,6 +1245,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[derive(Debug)]

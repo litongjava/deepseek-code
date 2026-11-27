@@ -323,6 +323,15 @@ async fn prompt_turn(
     origin: TurnOrigin<'_>,
 ) -> Result<()> {
     terminal::title::name_topic(session, prompt);
+    if session.uses_worker() {
+        let paths = images::image_paths(&session.workspace, prompt);
+        if !paths.is_empty() {
+            session.ensure_writable_workspace("the prompt")?;
+            session.allow_automatic_wake();
+            return worker_frontend::turn(cli, session, prompt, input, origin, Some(worker_frontend::WorkerInput::Images(paths))).await;
+        }
+        return session.turn(cli, prompt, input, origin).await;
+    }
     let Some(content) = images::content(&session.workspace, prompt)? else {
         return session.turn(cli, prompt, input, origin).await;
     };
@@ -1160,7 +1169,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
     // known host child inherits that absolute native root.
     let prepared = local_coordination::prepare_startup(cli, &paths, launch_cwd.as_deref()).await;
     local_coordination::export_child_root(&prepared);
-    let mut session = if interactive_resume && resumed.is_some() {
+    let mut session = if !single && !sdk_stream {
         session::Session::open_interactive(
             cli,
             &paths,
@@ -1177,11 +1186,6 @@ async fn run(cli: &mut Cli) -> Result<()> {
         )
         .await?
     };
-    // The interactive REPL delegates its turns to a session worker, whose
-    // manager owns the MCP children. A direct print/SDK launch owns its own.
-    if !single && !sdk_stream {
-        session.worker_frontend = true;
-    }
     if normal_frontend && resumed.is_some() && session.startup_provider.is_none() {
         // After observation or a rejected selection, raw startup options have no authority.
         cli.discard_binding_options();

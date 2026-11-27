@@ -26,7 +26,7 @@ pub struct RuntimeStatus {
 }
 #[derive(Clone)]
 pub struct RuntimeSource {
-    pub mcp: Arc<McpServerManager>,
+    pub mcp: Option<Arc<McpServerManager>>,
     pub mcp_ready: Arc<tokio::sync::OnceCell<()>>,
     pub workspace: PathBuf,
     pub data_dir: PathBuf,
@@ -40,9 +40,9 @@ pub fn label(value: &str) -> String {
 }
 impl RuntimeSource {
     pub async fn snapshot(&self) -> RuntimeStatus {
-        let initialized = self.mcp_ready.get().is_some();
-        let (configuration, mut mcp) = if initialized {
-            let servers = self.mcp.list_servers().await;
+        let live = self.mcp.as_ref().filter(|_| self.mcp_ready.get().is_some());
+        let (configuration, mut mcp) = if let Some(manager) = live {
+            let servers = manager.list_servers().await;
             (
                 "loaded".to_owned(),
                 servers
@@ -69,7 +69,7 @@ impl RuntimeSource {
         };
         mcp.sort_by(|a, b| a.name.cmp(&b.name));
         let mut report = RuntimeStatus {
-            mcp_initialized: initialized,
+            mcp_initialized: live.is_some(),
             mcp_configuration: configuration,
             mcp,
             lsp_state: "unavailable".into(),
@@ -212,7 +212,7 @@ mod tests {
         std::fs::write(&path,serde_json::json!({"mcpServers":{"fixture":{"command":"must-not-start","args":["arg-secret"],"env":{"KEY":"env-secret"},"url":"https://user:password@example.test/?key=query-secret","enabled":true},"disabled":{"enabled":false}}}).to_string()).unwrap();
         let mcp = Arc::new(McpServerManager::new(path));
         let source = RuntimeSource {
-            mcp: mcp.clone(),
+            mcp: Some(mcp.clone()),
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
             workspace: dir.path().into(),
             data_dir: dir.path().into(),

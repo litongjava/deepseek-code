@@ -159,6 +159,12 @@ pub(crate) fn missing_workspace_rejected_action(line: &str) -> Option<String> {
     Some("the prompt".into())
 }
 
+pub(crate) enum McpHost<'a> {
+    Local,
+    RemoteWorker,
+    Resident(&'a WorkerMcp),
+}
+
 pub struct Session {
     pub(crate) binding_requester: String,
     launch_binding_rejected: bool,
@@ -185,11 +191,10 @@ pub struct Session {
     pub(crate) paths: RuntimePaths,
     pub(crate) permissions: Arc<deepseek_code_core::permissions::PermissionManager>,
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
-    pub(crate) mcp: Arc<McpServerManager>,
+    mcp: Option<Arc<McpServerManager>>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
     mcp_gate: Arc<Mutex<()>>,
     mcp_client: Mutex<deepseek_code_core::services::session_worker::McpClient>,
-    pub(crate) worker_frontend: bool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
     pub(crate) startup_provider: Option<crate::config::StartupProvider>,
@@ -522,7 +527,7 @@ impl Session {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        for server in self.mcp.list_servers_full().await {
+        for server in self.local_mcp()?.list_servers_full().await {
             anyhow::ensure!(
                 !names.iter().any(|name| name == &server.config.name
                     || name == &server.config.id
@@ -568,7 +573,7 @@ impl Session {
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
         tools.extend(
-            self.mcp
+            self.local_mcp()?
                 .get_all_tools()
                 .await
                 .into_iter()
@@ -605,7 +610,8 @@ impl Session {
 
     /// Reference MCP server status entries: configured servers plus SDK-hosted ones.
     pub(crate) async fn sdk_mcp_status(&self) -> Vec<Value> {
-        let mut servers = self.mcp.list_servers().await.into_iter().map(|server| {
+        let configured = match &self.mcp { Some(manager) => manager.list_servers().await, None => Vec::new() };
+        let mut servers = configured.into_iter().map(|server| {
             let status = if !server.enabled { "disabled" } else if server.running { "connected" } else if server.error.is_some() { "failed" } else { "pending" };
             let mut entry = json!({"name":server.name,"status":status,"config":{"type":server.transport_type,"command":server.command,"args":server.args}});
             if let Some(error) = server.error { entry["error"] = json!(error); }
@@ -812,7 +818,7 @@ impl Session {
     }
 
     pub async fn reload_plugins(&self) -> Result<()> {
-        if !self.worker_frontend && self.mcp_ready.get().is_none() {
+        if !self.uses_worker() && self.mcp_ready.get().is_none() {
             return mcp_owner::reload_plugin_metadata(&self.paths, &self.workspace);
         }
         self.apply_plugin_operation(McpOp::ReloadPlugins).await
@@ -874,7 +880,7 @@ impl Session {
             mode,
             host_binding,
             false,
-            None,
+            McpHost::Local,
         )
         .await
     }
@@ -893,8 +899,8 @@ impl Session {
             resumed_id,
             crate::local_coordination::RegistrationMode::Automatic,
             None,
-            true,
-            None,
+            !cli.fork_session,
+            McpHost::RemoteWorker,
         )
         .await
     }
@@ -907,7 +913,7 @@ impl Session {
         mode: crate::local_coordination::RegistrationMode,
         host_binding: Option<&deepseek_code_core::native_engine::session_binding::SessionBinding>,
         allow_missing_workspace: bool,
-        worker_mcp: Option<&WorkerMcp>,
+        host: McpHost<'_>,
     ) -> Result<Self> {
         anyhow::ensure!(
             !cli.fork_session || resumed_id.is_some(),
@@ -1230,7 +1236,11 @@ impl Session {
         manager.binding = binding.clone();
 
         let providers = Arc::new(Mutex::new(manager));
-        let mcp = worker_mcp.map(|host| host.manager.clone()).unwrap_or_else(|| Arc::new(McpServerManager::new(paths.data_dir.join("mcp-servers.json"))));
+        let (mcp, mcp_ready, mcp_gate) = match host {
+            McpHost::Local => (Some(Arc::new(McpServerManager::new(paths.data_dir.join("mcp-servers.json")))), Arc::default(), Arc::default()),
+            McpHost::RemoteWorker => (None, Arc::default(), Arc::default()),
+            McpHost::Resident(worker) => (Some(worker.manager.clone()), worker.ready.clone(), worker.gate.clone()),
+        };
         let ide = Arc::new(deepseek_code_core::services::ide::IdeClient::default());
         let sdk_mcp = Arc::new(deepseek_code_core::mcp::sdk::Runtime::default());
         let engine = runtime::create_engine(
@@ -1239,12 +1249,11 @@ impl Session {
             providers.clone(),
             permissions.clone(),
             Arc::new(FileCache::new()),
-        )
-        .with_mcp_registry(Arc::new(
-            McpToolRegistry::new(mcp.clone())
-                .with_ide(ide.clone())
-                .with_sdk(sdk_mcp.clone()),
-        ))
+        );
+        let engine = match &mcp {
+            Some(manager) => engine.with_mcp_registry(Arc::new(McpToolRegistry::new(manager.clone()).with_ide(ide.clone()).with_sdk(sdk_mcp.clone()))),
+            None => engine,
+        }
         .with_skills_manager(Arc::new(Mutex::new(
             deepseek_code_core::skills::SkillsManager::with_path(paths.data_dir.join("skills")),
         )))
@@ -1284,10 +1293,9 @@ impl Session {
             store,
             engine,
             mcp,
-            mcp_ready: worker_mcp.map(|host| host.ready.clone()).unwrap_or_default(),
-            mcp_gate: worker_mcp.map(|host| host.gate.clone()).unwrap_or_default(),
+            mcp_ready,
+            mcp_gate,
             mcp_client: Default::default(),
-            worker_frontend: false,
             extension_watch: Mutex::new(None),
             startup_provider,
             has_saved_providers: paths.layout().config_file("config.json").is_file()
@@ -2016,7 +2024,8 @@ impl Session {
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
         let _guard = self.mcp_gate.lock().await;
-        self.mcp.shutdown_all().await
+        if let Some(manager) = &self.mcp { manager.shutdown_all().await?; }
+        Ok(())
     }
 
     /// Close this session's registry incarnation, if any.
@@ -2229,8 +2238,8 @@ impl Session {
         };
         crate::session_commands::migrate_goal(self)?;
         deepseek_code_core::services::session_goals::begin_input(&self.store.db, &self.id)?;
-        if self.worker_frontend {
-            return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
+        if self.uses_worker() {
+            return crate::worker_frontend::turn(cli, self, prompt, input, origin, None).await;
         }
         let mut next = prompt.to_owned();
         loop {
@@ -2366,8 +2375,8 @@ impl Session {
 
     pub async fn wake_hooks(&self, cli: &Cli, input: &mut Option<TerminalInput>) -> Result<()> {
         self.ensure_writable_workspace("hook wakes")?;
-        if self.worker_frontend {
-            return crate::worker_frontend::internal_turn(cli, self, "Async hook feedback", input, crate::worker_frontend::WorkerInput::HookWake).await;
+        if self.uses_worker() {
+            return crate::worker_frontend::turn(cli, self, "Async hook feedback", input, TurnOrigin::Generated, Some(crate::worker_frontend::WorkerInput::HookWake)).await;
         }
         Box::pin(self.run_turn_origin(cli, "", input, TurnOrigin::HookWake, true)).await
     }
@@ -2392,8 +2401,8 @@ impl Session {
     ) -> Result<()> {
         self.ensure_writable_workspace("the initial hook turn")?;
         self.apply_settings_permissions(cli)?;
-        if self.worker_frontend {
-            return crate::worker_frontend::internal_turn(cli, self, prompt, input, crate::worker_frontend::WorkerInput::InitialHook { publish }).await;
+        if self.uses_worker() {
+            return crate::worker_frontend::turn(cli, self, prompt, input, TurnOrigin::Generated, Some(crate::worker_frontend::WorkerInput::InitialHook { publish })).await;
         }
         self.run_turn_origin(cli, prompt, input, TurnOrigin::InitialHook, publish)
             .await
@@ -2435,9 +2444,9 @@ impl Session {
                 crate::worker_frontend::occupancy_message(self, &occupancy)
             );
         }
-        if self.worker_frontend {
+        if self.uses_worker() {
             let (prompt, _) = deepseek_code_core::db::message_repo::prepare_user_message(&item.content)?;
-            return crate::worker_frontend::internal_turn(cli, self, &prompt, input, crate::worker_frontend::WorkerInput::Queued { request_id: item.request_id, revision: item.revision }).await;
+            return crate::worker_frontend::turn(cli, self, &prompt, input, TurnOrigin::Generated, Some(crate::worker_frontend::WorkerInput::Queued { request_id: item.request_id, revision: item.revision })).await;
         }
         self.execute_queued(cli, item, input).await
     }

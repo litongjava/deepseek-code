@@ -1404,6 +1404,19 @@ pub fn pending_question(root: &Path, id: &str, parent: &str) -> Result<Option<Pe
     unreachable!()
 }
 
+// Serialize question replacement and cleanup with publication of its answer.
+// A fast worker can read the answer immediately after the atomic rename.
+fn question_fence(dir: &Path) -> Result<PublicationFence> {
+    let file = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("question.lock"))?;
+    crate::fs::lock_file(&file)?;
+    Ok(PublicationFence(file))
+}
+
 pub fn answer_question(
     root: &Path,
     id: &str,
@@ -1426,14 +1439,15 @@ pub fn answer_question(
         &serde_json::json!({"request_id":request,"answer":answer}),
     )?;
     response.flush()?;
+    let _fence = question_fence(&dir)?;
+    ensure!(
+        pending_question(root, id, parent)?.is_some_and(|question| question.request_id == request),
+        "Question was resolved before the answer was published"
+    );
     response
         .persist_noclobber(&path)
         .map_err(|error| error.error)
         .context("This question already has an answer or the response could not be published")?;
-    if !pending_question(root, id, parent)?.is_some_and(|question| question.request_id == request) {
-        let _ = fs::remove_file(path);
-        anyhow::bail!("Question was resolved before the answer was published");
-    }
     Ok(())
 }
 
@@ -1598,6 +1612,7 @@ mod answer_cleanup_tests {
 }
 impl Drop for PendingAnswerCleanup {
     fn drop(&mut self) {
+        let Ok(_fence) = question_fence(&self.dir) else { return };
         let pending = self.dir.join("pending-question.json");
         if fs::read(&pending)
             .ok()
@@ -1623,15 +1638,18 @@ async fn wait_for_answer(
         dir: dir.to_path_buf(),
         request: request.into(),
     };
-    save(
-        &dir.join("pending-question.json"),
-        &PendingQuestion {
-            request_id: request.into(),
-            question: question.into(),
-            kind: kind.into(),
-            tool,
-        },
-    )?;
+    {
+        let _fence = question_fence(dir)?;
+        save(
+            &dir.join("pending-question.json"),
+            &PendingQuestion {
+                request_id: request.into(),
+                question: question.into(),
+                kind: kind.into(),
+                tool,
+            },
+        )?;
+    }
     loop {
         ensure!(
             !dir.join("cancel").exists(),

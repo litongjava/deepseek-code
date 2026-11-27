@@ -131,7 +131,7 @@ pub(crate) async fn tracked(endpoint: &str, id: Uuid, op: &McpOp) -> Result<Repl
         id,
         operation: op.clone(),
     };
-    let reply = match exchange(endpoint, &request, Duration::from_secs(30)).await {
+    let reply = match exchange(endpoint, &request, Duration::from_secs(5)).await {
         Ok(reply) if !matches!(reply.mcp, Some(McpResult::Pending)) => reply,
         _ => resolve(endpoint, id).await?,
     };
@@ -191,7 +191,7 @@ mod tests {
                 .unwrap();
             let Request::McpTracked {
                 id,
-                operation: McpOp::StopAll,
+                operation: McpOp::Reconnect { .. },
             } = request
             else {
                 panic!("expected one mutation");
@@ -204,22 +204,31 @@ mod tests {
                     .unwrap();
                 assert!(matches!(query, Request::McpOutcome { id: prior } if prior == id));
                 if deliver {
-                    reply(stream, &response(Ok(McpResult::Stopped)))
-                        .await
-                        .unwrap();
+                    reply(
+                        stream,
+                        &response(Ok(McpResult::Message {
+                            text: "reconnected".into(),
+                        })),
+                    )
+                    .await
+                    .unwrap();
                 }
             }
         });
         let mut client = McpClient::default();
         assert!(client
-            .call(&host, &McpOp::StopAll)
+            .call(&host, &McpOp::Reconnect { server: "w".into() })
             .await
             .unwrap_err()
             .to_string()
             .contains("outcome unknown"));
         assert!(matches!(
-            client.call(&host, &McpOp::StopAll).await.unwrap().mcp,
-            Some(McpResult::Stopped)
+            client
+                .call(&host, &McpOp::Reconnect { server: "w".into() })
+                .await
+                .unwrap()
+                .mcp,
+            Some(McpResult::Message { .. })
         ));
         server.await.unwrap();
     }

@@ -532,7 +532,7 @@ async fn execute(
                 crate::local_coordination::RegistrationMode::HostOwned,
                 Some(&binding),
                 false,
-                Some(&mcp_target),
+                crate::session::McpHost::Resident(&mcp_target),
             )
             .await?,
         );
@@ -566,6 +566,17 @@ async fn execute(
     );
     use crate::worker_frontend::WorkerInput;
     let result = match input_kind {
+        Some(WorkerInput::Images(paths)) => {
+            let content = crate::images::content_from_paths(&session.workspace, prompt, &paths)?;
+            let origin = crate::session::TurnOrigin::command_line(&cli, prompt);
+            if matches!(origin, crate::session::TurnOrigin::User(_)) {
+                deepseek_code_core::services::permission_authority::record_user(&session.store.db, &session.id, &content)?;
+            }
+            session.sdk_content = Some(content);
+            let result = session.turn(&cli, prompt, &mut None, origin).await;
+            session.sdk_content = None;
+            result
+        }
         Some(WorkerInput::HookWake) => session.wake_hooks(&cli, &mut None).await,
         Some(WorkerInput::InitialHook { publish }) => session.turn_initial_hook(&cli, prompt, &mut None, publish).await,
         Some(WorkerInput::Queued { request_id, revision }) => {

@@ -477,8 +477,23 @@ async fn ownership_survives_a_delayed_post_compact_hook() {
         State(state): State<Fixture>,
         Json(body): Json<Value>,
     ) -> axum::response::Response {
-        if body["stream"] != true {
-            // The compaction summary request, not a turn.
+        // Reactive compaction may send its summary request as a stream; the
+        // prompt identifies it, never the turn's own final message.
+        let summary = body["stream"] != true
+            || body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|content| content.contains("Summarize the supplied conversation"));
+        if summary {
+            if body["stream"] == true {
+                let stream = concat!(
+                    "data: {\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"compacted summary\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                return ([("content-type", "text/event-stream")], stream).into_response();
+            }
             return Json(json!({
                 "id":"summary","object":"chat.completion","created":0,"model":"fixture-model",
                 "choices":[{"index":0,"message":{"role":"assistant","content":"compacted summary"},"finish_reason":"stop"}],
