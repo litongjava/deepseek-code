@@ -175,6 +175,7 @@ impl McpServerManager {
                         config,
                         status,
                         connector: None,
+                        plugin_start_failed: false,
                     },
                 );
             }

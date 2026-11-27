@@ -225,3 +225,44 @@ async fn a_failed_start_is_kept_in_the_server_status() {
     assert_eq!(server.error, None);
     manager.shutdown_all().await.unwrap();
 }
+
+#[tokio::test]
+async fn plugin_reconcile_failure_is_shared_until_an_explicit_start_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mcp-servers.json");
+    let cwd = root.path().join("temporarily-unavailable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live-mcp.cjs");
+    let id = "plugin:fixture:probe";
+    let manager = McpServerManager::new(path.clone());
+    std::fs::write(&path, "{}").unwrap();
+    manager.load_config().await.unwrap();
+    let config = serde_json::json!({"mcpServers":{(id):{
+        "command":"node", "args":[fixture], "cwd":cwd, "enabled":true
+    }}});
+    std::fs::write(path, config.to_string()).unwrap();
+
+    let changes = manager.reconcile_config().await.unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].0, id);
+    assert!(changes[0].1.starts_with("failed to start"));
+    std::fs::create_dir(&cwd).unwrap();
+    assert!(!manager.start_automatically(id).await.unwrap());
+    assert!(!manager.get_server(id).await.unwrap().running);
+
+    manager.start_server(id).await.unwrap();
+    assert!(manager.get_server(id).await.unwrap().error.is_none());
+    manager.stop_server(id).await.unwrap();
+    assert!(manager.start_automatically(id).await.unwrap());
+    // A repair also unlocks automatic startup, while doctor continues to
+    // show the previous error until the replacement actually starts.
+    let good = manager.list_servers_full().await.pop().unwrap().config;
+    let mut broken = good.clone();
+    broken.cwd = Some(root.path().join("missing-again"));
+    manager.update_server(id, broken).await.unwrap();
+    assert!(manager.start_automatically(id).await.is_err());
+    manager.update_server(id, good).await.unwrap();
+    assert!(manager.get_server(id).await.unwrap().error.is_some());
+    assert!(manager.start_automatically(id).await.unwrap());
+    assert!(manager.get_server(id).await.unwrap().error.is_none());
+    manager.shutdown_all().await.unwrap();
+}

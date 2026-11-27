@@ -61,10 +61,8 @@ pub struct Worker {
     pub error: Option<String>,
 }
 
-/// MCP work the frontend delegates when a session's worker owns the only
-/// server manager. `State` is the same operation as `dcl mcp state` and
-/// `/mcp state`; the others are the reads the REPL picker and prompt commands
-/// need from that manager.
+/// MCP actions dispatched to the session's owning manager. StopAll acknowledges
+/// a handoff only after the current owner releases its children.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {

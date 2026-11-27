@@ -165,7 +165,7 @@ impl Terminal {
         }
     }
 
-    fn send(&self, bytes: &[u8]) {
+    pub(crate) fn send(&self, bytes: &[u8]) {
         let fd = self.master.as_ref().unwrap().as_raw_fd().unwrap();
         let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
         assert_eq!(
@@ -199,9 +199,17 @@ impl Terminal {
     }
 
     pub(crate) async fn wait_output(&mut self, text: &[u8], answer_cursor: bool) {
+        self.wait_output_since(0, text, answer_cursor).await;
+    }
+
+    pub(crate) async fn wait_output_since(
+        &mut self,
+        offset: usize,
+        text: &[u8],
+        answer_cursor: bool,
+    ) {
         let deadline = Instant::now() + READY_TIMEOUT;
-        while !self
-            .transcript
+        while !self.transcript[offset..]
             .windows(text.len())
             .any(|bytes| bytes == text)
         {
@@ -216,9 +224,13 @@ impl Terminal {
         }
     }
 
-    pub(crate) async fn submit(&mut self, line: &str, screen_reader: bool) {
+    pub(crate) fn clear_output(&mut self) {
         self.transcript.clear();
         self.answered_through = 0;
+    }
+
+    pub(crate) async fn submit(&mut self, line: &str, screen_reader: bool) {
+        self.clear_output();
         self.send(line.as_bytes());
         // Wait for the draft to finish painting. An immediate Enter after a
         // text burst can be interpreted as a multiline paste.

@@ -271,7 +271,11 @@ pub async fn run_from_env() -> Result<bool> {
                         },
                         Request::Mcp(op) => {
                             let target = mcp_target.lock().unwrap().clone();
-                            let busy = active.load(Ordering::Acquire);
+                            // The supervisor can publish completion just before the
+                            // host drops admission. MCP may already use the manager.
+                            let current = current_turn.lock().unwrap().clone();
+                            let busy = admission_state(active.load(Ordering::Acquire), current.as_deref(),
+                                |id| jobs::get(&worker.root, id).is_ok_and(|job| job.finished_ms.is_some())) == Admission::Busy;
                             let admission = target.as_ref().and_then(|target| target.try_admit());
                             tokio::spawn(async move {
                                 use service::{McpOp, McpResult};

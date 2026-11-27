@@ -144,8 +144,8 @@ pub fn command_hooks(context: &ServiceContext<impl PluginCatalog>) -> Result<Vec
 /// Synchronize only names reserved for plugin-owned stdio servers. Changes to
 /// user-managed servers remain untouched. Call at startup and before each turn.
 ///
-/// A start failure is returned as a notice instead of an error, and a start is
-/// successful stdio child that exits between turns is restarted.
+/// A failed start produces one notice for that definition. A successful stdio
+/// child that exits between turns is restarted on the next synchronization.
 pub async fn sync_mcp(
     context: &ServiceContext<impl PluginCatalog>,
     manager: &crate::mcp::McpServerManager,

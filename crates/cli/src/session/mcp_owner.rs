@@ -2,6 +2,7 @@
 //! finishes releasing its children before the new process can start any.
 use super::Session;
 use anyhow::{bail, Context, Result};
+use deepseek_code_core::services::session_worker::{self as worker, McpOp, McpResult, Request};
 use deepseek_code_core::{fs::OwnedFileLock, mcp::McpServerManager, runtime::RuntimePaths};
 use std::{
     fs::File,
@@ -14,7 +15,7 @@ const BUSY: &str = "MCP is busy, try after this turn";
 
 fn acquire_lease(paths: &RuntimePaths, session: &str) -> Result<OwnedFileLock> {
     let id = uuid::Uuid::parse_str(session)?;
-    let dir = paths.layout().state_dir("locks/mcp-owner");
+    let dir = paths.layout().lock_path("mcp-owner");
     std::fs::create_dir_all(&dir)?;
     let file = File::options()
         .read(true)
@@ -38,8 +39,6 @@ async fn release_local(
     Ok(())
 }
 
-use deepseek_code_core::services::session_worker::{self as worker, McpOp, McpResult, Request};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum McpOwner {
     None,
@@ -48,7 +47,7 @@ pub(crate) enum McpOwner {
 }
 
 impl Session {
-    pub(crate) fn running_mcp_worker(&self) -> Result<Option<worker::Worker>> {
+    fn running_mcp_worker(&self) -> Result<Option<worker::Worker>> {
         Ok(
             worker::current(&self.paths.data_dir, &self.id)?.filter(|host| {
                 host.status == "running" && !host.child_pid.is_some_and(worker::process_exited)
@@ -56,17 +55,24 @@ impl Session {
         )
     }
 
-    pub(crate) async fn set_mcp_owner(&self, target: McpOwner) -> Result<()> {
+    /// An explicit target hands off a turn. A command passes None to retain
+    /// the current owner, starting locally if the session has no owner yet.
+    /// Keep the guard through dispatch so a handoff cannot overtake the call.
+    pub(crate) async fn set_mcp_owner(
+        &self,
+        target: impl Into<Option<McpOwner>>,
+    ) -> Result<tokio::sync::MutexGuard<'_, McpOwner>> {
         let mut owner = self.mcp_owner.lock().await;
         self.discover_mcp_owner(&mut owner)?;
-        self.transition_mcp_owner(&mut owner, target).await
+        let target = target.into().unwrap_or_else(|| match *owner {
+            McpOwner::None => McpOwner::Frontend,
+            current => current,
+        });
+        self.transition_mcp_owner(&mut owner, target).await?;
+        Ok(owner)
     }
 
-    pub(super) async fn transition_mcp_owner(
-        &self,
-        owner: &mut McpOwner,
-        target: McpOwner,
-    ) -> Result<()> {
+    async fn transition_mcp_owner(&self, owner: &mut McpOwner, target: McpOwner) -> Result<()> {
         if *owner == target {
             return Ok(());
         }
@@ -88,6 +94,11 @@ impl Session {
         if target == McpOwner::Frontend {
             let lease = if self.observe_mcp_worker
                 || self.coordination_mode == crate::local_coordination::RegistrationMode::HostOwned
+                || deepseek_code_core::services::background_sessions::worker_directory(
+                    &self.paths.data_dir,
+                    &self.id,
+                )?
+                .is_some()
             {
                 Some(acquire_lease(&self.paths, &self.id)?)
             } else {
@@ -97,24 +108,29 @@ impl Session {
             *self.mcp_lease.lock().unwrap() = lease;
             let _ = self.mcp_ready.set(());
             *owner = target;
-            for server in self.mcp.list_servers().await {
-                if server.enabled {
-                    if let Err(error) = self.mcp.start_automatically(&server.id).await {
-                        crate::compaction::notice(&format!(
-                            "MCP: {} failed to start: {error:#}",
-                            server.id
-                        ));
+            let startup = async {
+                for server in self.mcp.list_servers().await {
+                    if server.enabled {
+                        if let Err(error) = self.mcp.start_automatically(&server.id).await {
+                            crate::compaction::notice(&format!(
+                                "MCP: {} failed to start: {error:#}",
+                                server.id
+                            ));
+                        }
                     }
                 }
+                Ok(())
+            };
+            if let Err(error) = self.sdk_cancellable(startup).await {
+                release_local(&self.mcp, &self.mcp_lease, owner).await?;
+                return Err(error);
             }
         } else {
             *owner = target;
         }
         Ok(())
     }
-}
 
-impl Session {
     fn discover_mcp_owner(&self, owner: &mut McpOwner) -> Result<()> {
         if *owner == McpOwner::None
             && self.observe_mcp_worker
@@ -138,13 +154,11 @@ impl Session {
     }
 
     pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
-        let mut owner = self.mcp_owner.lock().await;
         if matches!(op, McpOp::StopAll) {
-            self.transition_mcp_owner(&mut owner, McpOwner::None)
-                .await?;
+            drop(self.set_mcp_owner(McpOwner::None).await?);
             return Ok(McpResult::Stopped);
         }
-        self.discover_mcp_owner(&mut owner)?;
+        let mut owner = self.set_mcp_owner(None).await?;
         if *owner == McpOwner::Worker {
             if let Some(host) = self.running_mcp_worker()? {
                 match worker::call(&host, &Request::Mcp(op.clone()))
@@ -157,9 +171,9 @@ impl Session {
                     result => return Ok(result),
                 }
             }
+            self.transition_mcp_owner(&mut owner, McpOwner::Frontend)
+                .await?;
         }
-        self.transition_mcp_owner(&mut owner, McpOwner::Frontend)
-            .await?;
         local_operation(&self.paths, &self.workspace, &self.id, &self.mcp, op).await
     }
 }

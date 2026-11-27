@@ -822,7 +822,8 @@ impl Session {
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
-        self.set_mcp_owner(McpOwner::Frontend).await
+        drop(self.set_mcp_owner(McpOwner::Frontend).await?);
+        Ok(())
     }
 
     pub async fn context_window(&self) -> Option<u32> {
@@ -2505,7 +2506,7 @@ impl Session {
                 ));
             }
         };
-        self.set_mcp_owner(McpOwner::Frontend).await?;
+        drop(self.set_mcp_owner(McpOwner::Frontend).await?);
         let mut turn = match &completion.queued {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
             None=>self.store.db.start_turn_timer(&self.id)?,

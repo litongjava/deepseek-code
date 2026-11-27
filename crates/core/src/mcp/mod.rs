@@ -134,12 +134,10 @@ pub struct McpServerState {
     pub connector: Option<Arc<Mutex<McpConnector>>>,
     pub config: McpServerConfig,
     pub status: McpServerStatus,
-}
-
-impl McpServerState {
-    fn plugin_start_failed(&self) -> bool {
-        self.config.id.starts_with("plugin:") && self.status.error.is_some()
-    }
+    // Automatic retries are scoped to this exact live definition. Keep the
+    // displayed diagnostic until a start succeeds, even after a config edit.
+    #[serde(skip)]
+    plugin_start_failed: bool,
 }
 
 impl std::fmt::Debug for McpServerState {
@@ -159,7 +157,6 @@ pub struct McpServerManager {
     applied: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     control: std::sync::Mutex<Option<control::Host>>,
     lifecycle_lock: Arc<Mutex<()>>,
-
 }
 
 impl McpServerManager {
@@ -301,6 +298,7 @@ impl McpServerManager {
                 let state = McpServerState {
                     config: server_config,
                     connector: None,
+                    plugin_start_failed: false,
                     status,
                 };
 
@@ -363,6 +361,7 @@ impl McpServerManager {
         let state = McpServerState {
             config,
             connector: None,
+            plugin_start_failed: false,
             status,
         };
 
@@ -397,7 +396,7 @@ impl McpServerManager {
         if let Some(state) = servers.get_mut(id) {
             let was_running = state.status.running;
             if state.config != config {
-                state.status.error = None;
+                state.plugin_start_failed = false;
             }
             state.config = config;
             state.status.name = state.config.name.clone();
@@ -461,14 +460,14 @@ impl McpServerManager {
         self.servers.read().await.get(id).map(|s| s.status.clone())
     }
 
-    /// Start at an ownership or reconciliation boundary. A failed plugin
-    /// definition already carries its diagnostic in the manager's live state.
+    /// Start at an ownership or reconciliation boundary. Skip an unchanged
+    /// plugin definition after its first reported failure.
     /// Explicit starts (Enable/Reconnect) may always retry it.
     pub async fn start_automatically(&self, id: &str) -> Result<bool> {
         let _guard = self.lifecycle_lock.lock().await;
         let state = self.servers.read().await.get(id).cloned()
             .ok_or_else(|| anyhow!("Server not found: {id}"))?;
-        if !state.config.enabled || state.plugin_start_failed() {
+        if !state.config.enabled || state.plugin_start_failed {
             return Ok(false);
         }
         if state.status.running {
@@ -513,6 +512,7 @@ impl McpServerManager {
             // The status keeps the start failure so `/mcp` and `/doctor errors` can show it.
             let mut servers = self.servers.write().await;
             if let Some(state) = servers.get_mut(id) {
+                state.plugin_start_failed = id.starts_with("plugin:") && state.config == config;
                 state.status.error = Some(format!("{error:#}"));
                 state.status.running = false;
             }
@@ -532,6 +532,7 @@ impl McpServerManager {
             state.status.tools_count = tools.len();
             state.status.resources_count = resources.len();
             state.status.error = None;
+            state.plugin_start_failed = false;
         }
 
         Ok(())
@@ -712,7 +713,7 @@ impl McpServerManager {
         transfer::persist(&self.config_path, &self.revision, &configs, false)?;
         let state = servers.get_mut(id).unwrap();
         if state.config.enabled != enabled {
-            state.status.error = None;
+            state.plugin_start_failed = false;
         }
         state.config.enabled = enabled;
         state.status.enabled = enabled;

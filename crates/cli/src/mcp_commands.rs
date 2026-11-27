@@ -10,7 +10,7 @@ use std::collections::HashMap;
 pub(crate) fn operation(action: &McpCommands) -> Result<McpOp> {
     Ok(match action {
         McpCommands::ImportLegacy { source, preview } => McpOp::ImportLegacy {
-            source: source.clone(),
+            source: std::path::absolute(source)?,
             preview: *preview,
         },
         McpCommands::Hosts => McpOp::Hosts,

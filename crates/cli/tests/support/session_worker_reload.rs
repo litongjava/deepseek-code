@@ -4,6 +4,15 @@ use super::*;
 /// failure is announced once, and the next turn does not retry it.
 #[tokio::test]
 async fn plugin_mcp_start_failure_is_announced_once_and_turns_continue() {
+    broken_plugin_turns(false).await;
+}
+
+#[tokio::test]
+async fn persisted_plugin_start_failure_is_announced_once_on_first_turn() {
+    broken_plugin_turns(true).await;
+}
+
+async fn broken_plugin_turns(persisted: bool) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -34,6 +43,18 @@ async fn plugin_mcp_start_failure_is_announced_once_and_turns_continue() {
         .await
         .unwrap();
     deepseek_code_core::services::plugins::enable(&context, "broken", true).unwrap();
+    if persisted {
+        // Materialize exactly the definition a previous process would leave.
+        let manager =
+            deepseek_code_core::mcp::McpServerManager::new(paths.data_dir.join("mcp-servers.json"));
+        manager.initialize().await.unwrap();
+        let notices = deepseek_code_core::services::plugins::sync_mcp(&context, &manager)
+            .await
+            .unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].1.starts_with("failed to start"));
+        manager.shutdown_all().await.unwrap();
+    }
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -85,6 +106,7 @@ async fn plugin_mcp_start_failure_is_announced_once_and_turns_continue() {
                 .filter(|message| message.starts_with("MCP: plugin:broken:missing failed to start"))
                 .map(str::to_owned),
         );
+        assert_eq!(failures.len(), 1, "through turn {turn}: {failures:?}");
         assert_eq!(
             requests.lock().unwrap().len(),
             turn + 1,
@@ -114,8 +136,7 @@ async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
     // `stop` when the manager ends the session after the config changes.
     let log = temp.path().join("mcp-lifecycle.log");
     let port_file = temp.path().join("mcp.port");
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-log-stub.cjs");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-log-stub.cjs");
     let mut stub = tokio::process::Command::new("node")
         .arg(&script)
         .env("MCP_LOG", &log)
@@ -143,12 +164,26 @@ async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
         "type":"http", "url":format!("http://127.0.0.1:{port}/mcp"), "enabled":true
     }}}));
 
-    let requests = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let app = Router::new()
-        .route("/v1/chat/completions", post(respond))
-        .with_state((requests.clone(), workspace.join("unused-lsp")));
+    let app = Router::new().route("/v1/chat/completions", post({
+        let started = started.clone();
+        let release = release.clone();
+        move |Json(body): Json<Value>| {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                if body["messages"].as_array().unwrap().last().unwrap()["content"].to_string().contains("hold MCP test") {
+                    started.notify_one();
+                    release.notified().await;
+                }
+                ([("content-type", "text/event-stream")],
+                 "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+            }
+        }
+    }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let executable = temp.path().join(if cfg!(windows) {
         "mcp-owner.exe"
@@ -161,11 +196,15 @@ async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
         .unwrap();
     let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
 
+    let uninitialized = worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
+        .await
+        .unwrap();
+    assert!(matches!(
+        uninitialized.mcp,
+        Some(worker::McpResult::Unavailable)
+    ));
     let job = submit(&host, &endpoint, "stub turn one", "fixture", 128).await;
-    assert_eq!(
-        completed(&paths.data_dir, &job).await.status,
-        "completed"
-    );
+    assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
     // The same request `/mcp state <name>` sends: it must see the server the
     // worker started, not a frontend manager that never initialized it.
     let reply = worker::call(
@@ -182,14 +221,47 @@ async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
         other => panic!("unexpected MCP result: {other:?}"),
     }
 
+    // A held provider request outlasts the IPC deadline. An off request must
+    // be refused immediately, and must never take effect when the turn exits.
+    let held = submit(&host, &endpoint, "hold MCP test", "fixture", 128).await;
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .unwrap();
+    let state = |label: Option<&str>| {
+        worker::Request::Mcp(worker::McpOp::State {
+            server: Some("stub".into()),
+            state: label.map(str::to_owned),
+        })
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        worker::call(&host, &state(Some("off"))),
+    )
+    .await
+    .expect("MCP blocked on the turn")
+    .unwrap();
+    assert!(matches!(response.mcp, Some(worker::McpResult::Busy)));
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        worker::call(&host, &worker::Request::Ping),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(5100)).await;
+    release.notify_one();
+    assert_eq!(completed(&paths.data_dir, &held).await.status, "completed");
+    let reply = worker::call(&host, &state(None)).await.unwrap();
+    assert!(
+        matches!(reply.mcp, Some(worker::McpResult::State { text, .. }) if text == "stub  user")
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "start\n");
+
     // Removing the definition and running another turn must stop the child
     // the worker started, exactly once.
     configure(json!({"mcpServers":{}}));
     let job = submit(&host, &endpoint, "stub turn two", "fixture", 128).await;
-    assert_eq!(
-        completed(&paths.data_dir, &job).await.status,
-        "completed"
-    );
+    assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
     let lifecycle = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
         lifecycle.lines().collect::<Vec<_>>(),
@@ -375,3 +447,7 @@ async fn running_session_reloads_extensions_on_the_next_request() {
     server.abort();
     let _ = server.await;
 }
+
+#[cfg(target_os = "linux")]
+#[path = "session_worker_owner_tty.rs"]
+mod tty;

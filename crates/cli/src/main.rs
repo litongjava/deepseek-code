@@ -116,7 +116,7 @@ mod workflow_commands;
 mod workflow_runner;
 mod workflows_view;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
 use deepseek_code_core::{
     mcp::McpServerManager,

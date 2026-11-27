@@ -1,5 +1,5 @@
 // A Streamable HTTP MCP server with observable start/stop: one `start` line
-// when it answers the first initialize, one `stop` line when the manager ends
+// for every initialize, one `stop` line when the manager ends
 // the session with DELETE. It also reports its ephemeral port so the test can
 // write the user configuration.
 const fs = require('node:fs');
@@ -7,12 +7,12 @@ const http = require('node:http');
 
 const log = process.env.MCP_LOG;
 const portFile = process.env.MCP_PORT_FILE;
-let started = false;
+let sessionNumber = 0;
 
 const server = http.createServer((request, response) => {
   if (request.method === 'DELETE') {
     fs.appendFileSync(log, 'stop\n');
-    response.writeHead(200, {'mcp-session-id': 'stub-session'});
+    response.writeHead(200);
     response.end();
     return;
   }
@@ -47,8 +47,8 @@ const server = http.createServer((request, response) => {
       }
       replies.push({jsonrpc: '2.0', id: item.id, result});
     }
-    if (initialized && !started) {
-      started = true;
+    if (initialized) {
+      sessionNumber += 1;
       fs.appendFileSync(log, 'start\n');
     }
     if (replies.length === 0) {
@@ -57,7 +57,7 @@ const server = http.createServer((request, response) => {
       return;
     }
     const headers = {'content-type': 'application/json'};
-    if (initialized) headers['mcp-session-id'] = 'stub-session';
+    if (initialized) headers['mcp-session-id'] = 'stub-session-' + sessionNumber;
     response.writeHead(200, headers);
     response.end(JSON.stringify(replies.length === 1 ? replies[0] : replies));
   });
