@@ -241,6 +241,17 @@ fn readable_html(html: &str, url: &reqwest::Url) -> (String, String) {
     (title, text)
 }
 
+/// Ask for Markdown first so a server that negotiates it sends the source
+/// instead of an HTML rendering; HTML and any other representation stay
+/// acceptable, and per-request `headers` still override this default.
+fn fetch_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
+    HeaderMap::from_iter([(
+        ACCEPT,
+        HeaderValue::from_static("text/markdown, text/html, */*"),
+    )])
+}
+
 fn page_result(
     input: &Value,
     url: &str,
@@ -373,6 +384,7 @@ fn is_thin_html(page: &Page, result: &Value, input: &Value) -> bool {
 
 fn async_client(proxy: Option<&str>, allow_local_target: bool) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
+        .default_headers(fetch_headers())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
@@ -392,6 +404,7 @@ fn blocking_client(
     allow_local_target: bool,
 ) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
+        .default_headers(fetch_headers())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
