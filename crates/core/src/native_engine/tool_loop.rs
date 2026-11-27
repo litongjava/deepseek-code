@@ -890,6 +890,31 @@ async fn web_fetch_with_prompt(
         return Ok(page);
     }
     let content = page["content"].as_str().unwrap_or_default();
+    let offset = page["offset"].as_u64().unwrap_or(0);
+    let total = page["total_extracted_chars"].as_u64().unwrap_or(0);
+    // An offset at or past the end has nothing to read. Report it explicitly
+    // instead of returning an empty answer; an empty page read from offset
+    // zero keeps its own "No readable text" note.
+    if offset >= total && (offset > 0 || total > 0) {
+        let mut result = json!({
+            "url": page["url"],
+            "title": page["title"],
+            "result": format!(
+                "Nothing left to read from offset {offset}: this page's text is {total} characters long."
+            ),
+            "offset": page["offset"],
+            "next_offset": page["next_offset"],
+            "truncated": page["truncated"],
+            "via": page["via"],
+            "summarized": false,
+        });
+        // Keep the page's own advice, such as a download cut at the 2 MiB
+        // limit, where the total describes only the fetched prefix.
+        if !page["note"].is_null() {
+            result["note"] = page["note"].clone();
+        }
+        return Ok(result);
+    }
     if content.chars().count() <= WEB_FETCH_LLM_THRESHOLD_CHARS {
         let mut result = json!({
             "url": page["url"],
