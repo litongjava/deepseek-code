@@ -67,10 +67,23 @@ pub struct Worker {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
     ReloadPlugins,
-    Reconnect { server: String },
-    Add { config: crate::mcp::McpServerConfig },
-    Remove { server: String },
-    ImportLegacy { source: PathBuf, preview: bool },
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+    },
+    Reconnect {
+        server: String,
+    },
+    Add {
+        config: crate::mcp::McpServerConfig,
+    },
+    Remove {
+        server: String,
+    },
+    ImportLegacy {
+        source: PathBuf,
+        preview: bool,
+    },
     Hosts,
     Restart { server: String, host: Option<String> },
     List,

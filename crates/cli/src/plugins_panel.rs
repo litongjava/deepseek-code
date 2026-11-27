@@ -1367,9 +1367,13 @@ pub(crate) async fn run(
                     .iter()
                     .find(|plugin| plugin.id == id)
                     .is_some_and(|plugin| plugin.enabled);
-                let context = crate::services::context(paths)?;
-                deepseek_code_core::services::plugins::enable(&context, &id, !enabled)?;
-                session.reload_plugins().await?;
+                use deepseek_code_core::services::session_worker::McpOp;
+                session
+                    .apply_plugin_operation(McpOp::SetPluginEnabled {
+                        id,
+                        enabled: !enabled,
+                    })
+                    .await?;
                 changed = true;
                 model = load(paths, session, scope).await?;
             }

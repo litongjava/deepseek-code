@@ -234,6 +234,8 @@ struct OwnerFixture {
     paths: RuntimePaths,
     session: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    held: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
     provider: tokio::task::JoinHandle<()>,
 }
 
@@ -252,8 +254,30 @@ impl OwnerFixture {
             &paths.data_dir,
             &format!("http://{}", listener.local_addr().unwrap()),
         );
+        let held = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         let app = Router::new()
-            .route("/v1/chat/completions", post(respond))
+            .route(
+                "/v1/chat/completions",
+                post({
+                    let held = held.clone();
+                    let release = release.clone();
+                    move |state, body: Json<Value>| {
+                        let held = held.clone();
+                        let release = release.clone();
+                        async move {
+                            if body["messages"].as_array().unwrap().last().unwrap()["content"]
+                                .to_string()
+                                .contains("hold owner turn")
+                            {
+                                held.notify_one();
+                                release.notified().await;
+                            }
+                            respond(state, body).await
+                        }
+                    }
+                }),
+            )
             .with_state((requests.clone(), workspace.join("unused")));
         let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         deepseek_code_core::data_layout::write_config_file(
@@ -270,6 +294,8 @@ impl OwnerFixture {
             paths,
             session,
             requests,
+            held,
+            release,
             provider,
         }
     }
@@ -365,4 +391,85 @@ async fn idle_worker_death_drains_children_before_takeover() {
 #[tokio::test]
 async fn lost_handoff_reply_drains_children_before_takeover() {
     crash_takeover(true).await;
+}
+
+async fn refused_package_toggle(enabled: bool) {
+    use deepseek_code_core::services::{plugins, EnvironmentCredentials, ServiceContext};
+    let fixture = OwnerFixture::new().await;
+    let context =
+        ServiceContext::open(fixture.paths.clone(), Arc::new(EnvironmentCredentials)).unwrap();
+    let plugin = fixture.temp.path().join("package.json");
+    let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-owner-stdio.cjs");
+    fs::write(&plugin, json!({"id":"busy-plugin","description":"busy fixture","version":"1.0.0","commands":{},"files":{},
+        "mcp_servers":{"child":{"command":"node","args":[stub,fixture.temp.path().join("children.jsonl"),"plugin"]}}
+    }).to_string()).unwrap();
+    plugins::install(&context, plugin.to_str().unwrap(), None)
+        .await
+        .unwrap();
+    plugins::enable(&context, "busy-plugin", enabled).unwrap();
+    let mut owner = fixture.terminal().await;
+    let mut panel = fixture.terminal().await;
+    repl(&mut owner, "initialize worker", b"worker result").await;
+    if enabled {
+        command(&mut panel, "/plugins", b"busy-plugin").await;
+        panel.send(b"\x1b[B");
+    } else {
+        command(&mut panel, "/plugins", b"Show disabled").await;
+        key(&mut panel, b"\r", b"Disabled plugins").await;
+        panel.send(b"\x1b[B\x1b[B");
+    }
+    owner.submit("hold owner turn", false).await;
+    tokio::time::timeout(Duration::from_secs(10), fixture.held.notified())
+        .await
+        .unwrap();
+    key(&mut panel, b" ", b"MCP is busy").await;
+    assert_eq!(
+        plugins::list(&context)
+            .unwrap()
+            .iter()
+            .find(|p| p.id == "busy-plugin")
+            .unwrap()
+            .enabled,
+        enabled
+    );
+    fixture.release.notify_one();
+    owner.wait_output(b"worker result", true).await;
+    owner.wait_output(b"\x1b[?2004h", true).await;
+    let host = fixture.worker();
+    let servers = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match worker::call(&host, &worker::Request::Mcp(worker::McpOp::ListServers))
+                .await
+                .unwrap()
+                .mcp
+            {
+                Some(worker::McpResult::Servers { servers, .. }) => break servers,
+                Some(worker::McpResult::Busy) => {
+                    tokio::time::sleep(Duration::from_millis(25)).await
+                }
+                other => panic!("unexpected worker state: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("worker did not finish the held turn");
+    assert_eq!(
+        servers
+            .iter()
+            .any(|s| s.id == "plugin:busy-plugin:child" && s.running),
+        enabled
+    );
+    worker::shutdown(&fixture.paths.data_dir, &fixture.session)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn busy_panel_enable_preserves_catalog_and_runtime() {
+    refused_package_toggle(false).await;
+}
+
+#[tokio::test]
+async fn busy_panel_disable_preserves_catalog_and_runtime() {
+    refused_package_toggle(true).await;
 }

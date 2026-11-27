@@ -195,8 +195,11 @@ pub(crate) async fn local_operation(
     op: McpOp,
 ) -> Result<McpResult> {
     reconcile(manager, paths, session).await?;
-    if matches!(op, McpOp::ReloadPlugins) {
+    if matches!(op, McpOp::ReloadPlugins | McpOp::SetPluginEnabled { .. }) {
         let context = crate::services::context(paths)?;
+        if let McpOp::SetPluginEnabled { id, enabled } = op {
+            deepseek_code_core::services::plugins::enable(&context, &id, enabled)?;
+        }
         let notices = deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?;
         reconcile(manager, paths, session).await?;
         reload_plugin_metadata(paths, workspace)?;

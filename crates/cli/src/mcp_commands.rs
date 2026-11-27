@@ -198,7 +198,9 @@ pub(crate) async fn execute(
                 text: manager.get_prompt(&server, &name, arguments).await?,
             })
         }
-        McpOp::ReloadPlugins | McpOp::StopAll => anyhow::bail!("MCP operation requires an owner"),
+        McpOp::ReloadPlugins | McpOp::SetPluginEnabled { .. } | McpOp::StopAll => {
+            anyhow::bail!("MCP operation requires an owner")
+        }
     };
     Ok(McpResult::Json { value })
 }

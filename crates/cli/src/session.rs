@@ -815,7 +815,11 @@ impl Session {
         if !self.observe_mcp_worker && *self.mcp_owner.lock().await == McpOwner::None {
             return mcp_owner::reload_plugin_metadata(&self.paths, &self.workspace);
         }
-        let McpResult::Reloaded { notices } = self.mcp_call(McpOp::ReloadPlugins).await? else {
+        self.apply_plugin_operation(McpOp::ReloadPlugins).await
+    }
+
+    pub(crate) async fn apply_plugin_operation(&self, op: McpOp) -> Result<()> {
+        let McpResult::Reloaded { notices } = self.mcp_call(op).await? else {
             bail!("Unexpected MCP plugin reload reply");
         };
         for (id, action) in notices {
