@@ -19,7 +19,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-type McpTarget = Arc<std::sync::Mutex<Option<crate::session::WorkerMcp>>>;
+use crate::session::WorkerMcp;
 type StatusTarget =
     Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
 struct ModeControl {
@@ -193,7 +193,7 @@ pub async fn run_from_env() -> Result<bool> {
     let mut coordination_active = false;
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
     let receipts = service::McpReceipts::default();
-    let mcp_target: McpTarget = Arc::default();
+    let mcp_target = WorkerMcp::new(RuntimePaths::new(worker.root.clone())?, worker.workspace.clone(), worker.session_id.clone());
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
     let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
     let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
@@ -287,11 +287,10 @@ pub async fn run_from_env() -> Result<bool> {
                             let _ = service::reply(stream, &response).await;
                         },
                         Request::Mcp(_) | Request::McpTracked { .. } | Request::McpOutcome { .. } => {
-                            let target = mcp_target.lock().unwrap().clone();
                             let current = current_turn.lock().unwrap().clone();
                             let busy = admission_state(active.load(Ordering::Acquire), current.as_deref(),
                                 |id| jobs::get(&worker.root, id).is_ok_and(|job| job.finished_ms.is_some())) == Admission::Busy;
-                            crate::session::WorkerMcp::dispatch(target, request, stream, &receipts, busy, None);
+                            mcp_target.dispatch(request, stream, &receipts, busy);
                         }
                         Request::RuntimeStatus => {
                             let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
@@ -414,7 +413,7 @@ pub async fn run_from_env() -> Result<bool> {
     // closed even when that shutdown reports an error or no Session existed.
     let shutdown = match session.lock().await.take() {
         Some(session) => Some(session.close().await),
-        None => None,
+        None => Some(mcp_target.shutdown().await),
     };
     if let Some(mut guard) = coordination.take() {
         let _ = guard.close().await;
@@ -437,7 +436,7 @@ async fn execute(
     mode_target: ModeTarget,
     status_target: StatusTarget,
     bash_target: BashTarget,
-    mcp_target: McpTarget,
+    mcp_target: WorkerMcp,
 ) -> Result<()> {
     let dir = worker.root.join("tasks/background").join(id);
     service::set_event_sink(Some(dir.join("output.jsonl")));
@@ -522,7 +521,7 @@ async fn execute(
             .await?;
     } else {
         *current = Some(
-            Session::open_with_registration(
+            Session::open_with_registration_inner(
                 &cli,
                 &paths,
                 crate::config::Selection {
@@ -533,13 +532,14 @@ async fn execute(
                 Some(&worker.session_id),
                 crate::local_coordination::RegistrationMode::HostOwned,
                 Some(&binding),
+                false,
+                Some(&mcp_target),
             )
             .await?,
         );
     }
     let prompt = cli.prompt.as_deref().context("Worker prompt missing")?;
     let session = current.as_mut().unwrap();
-    *mcp_target.lock().unwrap() = Some(session.worker_mcp());
     *bash_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.permissions.clone());
     session
         .engine

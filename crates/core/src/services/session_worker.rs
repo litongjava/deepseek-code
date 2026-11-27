@@ -309,41 +309,6 @@ pub fn process_exited(pid: u32) -> bool {
     recovery::exited(pid)
 }
 
-/// A dead host may have lost its lease while its supervisor is still
-/// draining the process group. Only the supervisor's completion is a handoff.
-pub async fn live_mcp_worker(root: &Path, session: &str) -> Result<Option<Worker>> {
-    let Some(worker) = current(root, session)? else {
-        return Ok(None);
-    };
-    if worker.status != "running" {
-        return Ok(None);
-    }
-    let Some(pid) = worker.child_pid else {
-        return Ok(None);
-    };
-    let mut dead = process_exited(pid);
-    #[cfg(target_os = "linux")]
-    {
-        dead |= fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .is_some_and(|(_, fields)| fields.starts_with(" Z "))
-        });
-    }
-    if !dead {
-        return Ok(Some(worker));
-    }
-    let dir = directory(&worker);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while read_worker(&dir)?.status != "stopped" {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .context("Previous MCP worker is still cleaning up")??;
-    Ok(None)
-}
-
 pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
     let pointer = match fs::read(base.join("current.json")) {
@@ -600,11 +565,6 @@ const SUN_PATH_LIMIT: usize = 104;
 #[cfg(windows)]
 fn worker_endpoint(id: &str) -> Result<String> {
     Ok(format!(r"\\.\pipe\deepseek-code-session-{id}"))
-}
-
-/// Use the same private local transport for the lifetime of an interactive owner.
-pub fn frontend_endpoint(id: uuid::Uuid) -> Result<String> {
-    worker_endpoint(&id.to_string())
 }
 
 /// macOS keeps `TMPDIR` in a long per-user directory, which leaves no room for

@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::Context;
 use anyhow::{ensure, Result};
-use deepseek_code_core::services::background_sessions::{self as jobs, Launch};
+use deepseek_code_core::services::background_sessions as jobs;
 use serde_json::Value;
 
 #[derive(Default)]
@@ -300,38 +300,7 @@ async fn single_turn(
     } else { None };
     let owner = session.binding.selected_session(&session.id)?;
     let _admission = owner.hold_incarnation()?;
-    let job = if std::env::var("DEEPSEEK_CODE_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
-        let arguments = crate::background_commands::arguments(
-            cli,
-            &session.paths,
-            session,
-            &session.id,
-            prompt,
-            origin,
-            &provider,
-        )?;
-        let mut environment =
-            crate::background_commands::worker_environment(session.auto_route, &provider)?;
-        environment.push((
-            jobs::WORKER_GENERATION_ENV.into(),
-            format!("{}:{}", session.id, session.binding_state().generation),
-        ));
-        // A one-shot worker has no resident MCP endpoint. Release any
-        // previous resident or frontend owner before this child takes over.
-        drop(session.set_mcp_owner(crate::session::McpOwner::None).await?);
-        jobs::spawn_foreground(
-            root,
-            &executable,
-            Launch {
-                executable: executable.clone(),
-                arguments,
-                cwd: session.workspace.clone(),
-            },
-            &session.id,
-            prompt,
-            &environment,
-        )?
-    } else {
+    let job = {
         use deepseek_code_core::services::session_worker::{self, Request};
         let mut worker =
             session_worker::ensure_worker(root, &executable, &session.id, &session.workspace)
@@ -364,7 +333,6 @@ async fn single_turn(
         let state = session.binding.read().context("Missing session binding")?;
         environment.push((crate::worker_binding::SNAPSHOT_ENV.into(), serde_json::to_string(state.as_ref())?));
         let id = uuid::Uuid::new_v4().to_string();
-        drop(session.set_mcp_owner(crate::session::McpOwner::Worker).await?);
         let response = session_worker::call(
             &worker,
             &Request::Submit {

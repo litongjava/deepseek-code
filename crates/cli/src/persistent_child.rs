@@ -26,7 +26,6 @@ pub(super) async fn start_pending(
     let Some(session) = current.as_ref() else {
         return Ok(());
     };
-    if session.mcp_released() { return Ok(()); }
     let Some((installed, _)) = &session.idle_launch else { return Ok(()); };
     if expected_binding.is_some_and(|expected| installed != expected) {
         return Ok(());

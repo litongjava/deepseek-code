@@ -1180,7 +1180,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
     // The interactive REPL delegates its turns to a session worker, whose
     // manager owns the MCP children. A direct print/SDK launch owns its own.
     if !single && !sdk_stream {
-        session.observe_mcp_worker = true;
+        session.worker_frontend = true;
     }
     if normal_frontend && resumed.is_some() && session.startup_provider.is_none() {
         // After observation or a rejected selection, raw startup options have no authority.

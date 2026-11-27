@@ -1,5 +1,5 @@
 mod mcp_owner;
-pub(crate) use mcp_owner::{McpOwner, WorkerMcp};
+pub(crate) use mcp_owner::WorkerMcp;
 #[cfg(test)]
 use crate::fixture_sql::FixtureSql;
 use deepseek_code_core::db::session_store::{ExecutorHistory, SegmentPlacement, SegmentUpdate};
@@ -187,12 +187,9 @@ pub struct Session {
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
-    mcp_owner: Arc<Mutex<McpOwner>>,
+    mcp_gate: Arc<Mutex<()>>,
     mcp_client: Mutex<deepseek_code_core::services::session_worker::McpClient>,
-    mcp_endpoint: std::sync::Mutex<Option<mcp_owner::FrontendEndpoint>>,
-    mcp_local_turn: Arc<Mutex<()>>,
-    mcp_lease: Arc<std::sync::Mutex<Option<mcp_owner::OwnerLease>>>,
-    pub(crate) observe_mcp_worker: bool,
+    pub(crate) worker_frontend: bool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
     pub(crate) startup_provider: Option<crate::config::StartupProvider>,
@@ -815,7 +812,7 @@ impl Session {
     }
 
     pub async fn reload_plugins(&self) -> Result<()> {
-        if !self.observe_mcp_worker && *self.mcp_owner.lock().await == McpOwner::None {
+        if !self.worker_frontend && self.mcp_ready.get().is_none() {
             return mcp_owner::reload_plugin_metadata(&self.paths, &self.workspace);
         }
         self.apply_plugin_operation(McpOp::ReloadPlugins).await
@@ -828,11 +825,6 @@ impl Session {
         for (id, action) in notices {
             crate::compaction::notice(&format!("MCP: {id} {action}"));
         }
-        Ok(())
-    }
-
-    pub(crate) async fn ensure_mcp(&self) -> Result<()> {
-        drop(self.set_mcp_owner(McpOwner::Frontend).await?);
         Ok(())
     }
 
@@ -882,6 +874,7 @@ impl Session {
             mode,
             host_binding,
             false,
+            None,
         )
         .await
     }
@@ -901,11 +894,12 @@ impl Session {
             crate::local_coordination::RegistrationMode::Automatic,
             None,
             true,
+            None,
         )
         .await
     }
 
-    async fn open_with_registration_inner(
+    pub(crate) async fn open_with_registration_inner(
         cli: &Cli,
         paths: &RuntimePaths,
         mut selection: Selection,
@@ -913,6 +907,7 @@ impl Session {
         mode: crate::local_coordination::RegistrationMode,
         host_binding: Option<&deepseek_code_core::native_engine::session_binding::SessionBinding>,
         allow_missing_workspace: bool,
+        worker_mcp: Option<&WorkerMcp>,
     ) -> Result<Self> {
         anyhow::ensure!(
             !cli.fork_session || resumed_id.is_some(),
@@ -1235,9 +1230,7 @@ impl Session {
         manager.binding = binding.clone();
 
         let providers = Arc::new(Mutex::new(manager));
-        let mcp = Arc::new(McpServerManager::new(
-            paths.data_dir.join("mcp-servers.json"),
-        ));
+        let mcp = worker_mcp.map(|host| host.manager.clone()).unwrap_or_else(|| Arc::new(McpServerManager::new(paths.data_dir.join("mcp-servers.json"))));
         let ide = Arc::new(deepseek_code_core::services::ide::IdeClient::default());
         let sdk_mcp = Arc::new(deepseek_code_core::mcp::sdk::Runtime::default());
         let engine = runtime::create_engine(
@@ -1291,13 +1284,10 @@ impl Session {
             store,
             engine,
             mcp,
-            mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
-            mcp_owner: Arc::new(Mutex::new(McpOwner::None)),
+            mcp_ready: worker_mcp.map(|host| host.ready.clone()).unwrap_or_default(),
+            mcp_gate: worker_mcp.map(|host| host.gate.clone()).unwrap_or_default(),
             mcp_client: Default::default(),
-            mcp_endpoint: Default::default(),
-            mcp_local_turn: Default::default(),
-            mcp_lease: Arc::default(),
-            observe_mcp_worker: false,
+            worker_frontend: false,
             extension_watch: Mutex::new(None),
             startup_provider,
             has_saved_providers: paths.layout().config_file("config.json").is_file()
@@ -1483,7 +1473,7 @@ impl Session {
         let next_store = SessionStore::new(Arc::new(next.scoped_stores()));
         target.track_session(next);
         target.install(state)?;
-        self.detach_mcp_owner().await?;
+        self.reset_local_mcp().await?;
         self.end_hooks("clear").await;
         self.binding = target.initialized()?;
         self.real_providers = Some(self.binding_state().providers.clone());
@@ -1625,7 +1615,7 @@ impl Session {
                 return Err(error.context("Resume did not apply; current session retained"));
             }
         };
-        if self.id != id { self.detach_mcp_owner().await?; }
+        if self.id != id { self.reset_local_mcp().await?; }
         {
             let mut manager = self.providers.lock().await;
             manager.binding = (*target).clone();
@@ -1727,7 +1717,7 @@ impl Session {
                 return Err(error.context("Resume did not apply; current session retained"));
             }
         };
-        if self.id != id { self.detach_mcp_owner().await?; }
+        if self.id != id { self.reset_local_mcp().await?; }
         self.providers.lock().await.binding = (*target).clone();
         self.binding = target;
         self.workspace = path.clone();
@@ -2025,7 +2015,7 @@ impl Session {
         self.engine.cancel_turn(&self.id).await;
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
-        self.detach_mcp_owner().await
+        self.mcp.shutdown_all().await
     }
 
     /// Close this session's registry incarnation, if any.
@@ -2519,10 +2509,8 @@ impl Session {
                 ));
             }
         };
-        // A peer may ask an idle interactive owner to yield. Keep its
-        // admission closed through the entire local turn, including teardown.
-        let _mcp_turn = self.mcp_local_turn.lock().await;
-        drop(self.set_mcp_owner(McpOwner::Frontend).await?);
+        let _mcp_turn = self.mcp_gate.lock().await;
+        self.ensure_mcp().await?;
         let mut turn = match &completion.queued {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
             None=>self.store.db.start_turn_timer(&self.id)?,
@@ -5380,7 +5368,7 @@ mod event_tests {
         let mut session = session;
         crate::sdk_operations::handle(&mut session, &json!({"subtype":"reload_plugins"}))
             .await.unwrap().unwrap();
-        assert_eq!(*session.mcp_owner.lock().await, super::McpOwner::None);
+        assert!(session.mcp_ready.get().is_none());
         assert!(
             !marker.exists(),
             "metadata refresh must not start unused MCP children"
@@ -5397,9 +5385,9 @@ mod event_tests {
         }
         // A resumed SDK session may have initialized the shared manager before
         // detaching from its previous conversation.
-        session.detach_mcp_owner().await.unwrap();
+        session.reset_local_mcp().await.unwrap();
         session.reload_plugins().await.unwrap();
-        assert_eq!(*session.mcp_owner.lock().await, super::McpOwner::None);
+        assert!(session.mcp_ready.get().is_none());
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
         session.close().await.unwrap();
         server.abort();
