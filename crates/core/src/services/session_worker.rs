@@ -1154,6 +1154,7 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     struct Owner(
         std::process::Child,
         #[cfg(target_os = "linux")] String,
+        #[cfg(target_os = "linux")] PathBuf,
         #[cfg(windows)] crate::terminal::TerminalJob,
     );
     impl Drop for Owner {
@@ -1164,7 +1165,15 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
             #[cfg(target_os = "linux")]
-            crate::mcp::process::drain_worker(&self.1);
+            if let Err(error) = crate::mcp::process::drain_worker(&self.1) {
+                let message = format!("MCP worker {} could not be stopped: {error}", self.1);
+                tracing::error!("{message}");
+                // The detached supervisor has no stderr subscriber.
+                if let Ok(mut log) = fs::OpenOptions::new().append(true).open(&self.2) {
+                    let _ = writeln!(log, "{message}");
+                }
+                return; // The engine itself may still be live; wait() would hang.
+            }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
                 loop {
@@ -1197,6 +1206,8 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
         child,
         #[cfg(target_os = "linux")]
         worker.id.clone(),
+        #[cfg(target_os = "linux")]
+        dir.join("stderr.log"),
         #[cfg(windows)]
         job,
     );

@@ -13,6 +13,8 @@ pub(super) struct ServerProcess {
     pub child: Child,
     #[cfg(target_os = "linux")]
     tree: linux::Tracker,
+    #[cfg(target_os = "linux")]
+    stopped: bool,
     #[cfg(all(unix, not(target_os = "linux")))]
     group: i32,
     #[cfg(windows)]
@@ -39,11 +41,22 @@ impl ServerProcess {
             child,
             #[cfg(target_os = "linux")]
             tree: linux::Tracker::new(pid as i32, token),
+            #[cfg(target_os = "linux")]
+            stopped: false,
             #[cfg(all(unix, not(target_os = "linux")))]
             group: pid as i32,
             #[cfg(windows)]
             job,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn stop(&mut self) -> Result<()> {
+        if !self.stopped {
+            self.tree.stop(&mut self.child)?;
+            self.stopped = true;
+        }
+        Ok(())
     }
 }
 
@@ -54,7 +67,9 @@ impl Drop for ServerProcess {
             tracing::error!(%error, "Terminating MCP server job");
         }
         #[cfg(target_os = "linux")]
-        self.tree.stop(&mut self.child);
+        if let Err(error) = self.stop() {
+            tracing::error!(%error, "MCP server process tree could not be stopped");
+        }
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             unsafe { libc::kill(-self.group, libc::SIGKILL) };

@@ -12,6 +12,7 @@ use std::{
 
 const INSTANCE_ENV: &str = "DEEPSEEK_CODE_MCP_INSTANCE";
 const TERM_GRACE: Duration = Duration::from_millis(250);
+const STOP_BOUND: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(10);
 static OWNER: OnceLock<uuid::Uuid> = OnceLock::new();
 
@@ -78,9 +79,10 @@ fn parse_stat(bytes: &[u8]) -> Option<Stat> {
     })
 }
 
-fn children(pid: i32) -> io::Result<Vec<i32>> {
+fn children(pid: i32, deadline: Instant) -> io::Result<Vec<i32>> {
     let mut result = Vec::new();
     for task in fs::read_dir(format!("/proc/{pid}/task"))? {
+        check_deadline(deadline)?;
         let task = task?;
         match fs::read_to_string(task.path().join("children")) {
             Ok(ids) => result.extend(ids.split_whitespace().filter_map(|s| s.parse::<i32>().ok())),
@@ -95,22 +97,33 @@ fn children(pid: i32) -> io::Result<Vec<i32>> {
 struct Members(HashMap<i32, u64>);
 
 impl Members {
-    fn refresh(&mut self) {
-        self.0.retain(|&pid, born| match stat(pid) {
-            Ok(s) => s.birth == *born,
-            Err(e) => e.raw_os_error() != Some(libc::ESRCH),
+    fn refresh(&mut self, deadline: Instant) {
+        self.0.retain(|&pid, born| {
+            Instant::now() >= deadline
+                || match stat(pid) {
+                    Ok(s) => s.birth == *born,
+                    Err(e) => e.raw_os_error() != Some(libc::ESRCH),
+                }
         });
         let mut pending: Vec<_> = self.0.keys().copied().collect();
         let mut visited = HashSet::new();
         while let Some(pid) = pending.pop() {
+            if Instant::now() >= deadline {
+                break;
+            }
             if !visited.insert(pid) {
                 continue;
             }
-            let Ok(ids) = children(pid) else { continue };
+            let Ok(ids) = children(pid, deadline) else {
+                continue;
+            };
             if !stat(pid).is_ok_and(|s| self.0.get(&pid) == Some(&s.birth)) {
                 continue;
             }
             for child in ids {
+                if Instant::now() >= deadline {
+                    return;
+                }
                 if let Ok(s) = stat(child) {
                     if s.parent == pid && s.state != b'Z' {
                         self.0.insert(child, s.birth);
@@ -121,11 +134,12 @@ impl Members {
         }
     }
 
-    fn scan(&mut self, scope: &Scope<'_>) -> io::Result<bool> {
+    fn scan(&mut self, scope: &Scope<'_>, deadline: Instant) -> io::Result<bool> {
         let mut found_token = false;
         let uid = unsafe { libc::geteuid() };
         let mut group_members = Vec::new();
         for entry in fs::read_dir("/proc")? {
+            check_deadline(deadline)?;
             let entry = entry?;
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
                 continue;
@@ -273,6 +287,14 @@ trait Signals {
 struct Kernel;
 impl Signals for Kernel {}
 
+fn check_deadline(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        Err(io::Error::from_raw_os_error(libc::ETIMEDOUT))
+    } else {
+        Ok(())
+    }
+}
+
 enum Scope<'a> {
     Instance { entry: &'a str, launcher: i32 },
     Worker { prefix: &'a str },
@@ -294,50 +316,74 @@ impl Scope<'_> {
     }
 }
 
-fn drain(members: &mut Members, scope: Scope<'_>, mut reap: impl FnMut() -> io::Result<bool>) {
-    let mut term_started = None;
+fn drain(
+    members: &mut Members,
+    scope: Scope<'_>,
+    signals: &dyn Signals,
+    mut reap: impl FnMut(Instant) -> io::Result<bool>,
+) -> io::Result<()> {
+    let start = Instant::now();
+    let deadline = start + STOP_BOUND;
+    let mut delay = POLL;
     let mut termed = HashSet::new();
     let mut previously_empty = false;
-    loop {
+    let mut last_error = io::Error::from_raw_os_error(libc::ETIMEDOUT);
+    while Instant::now() < deadline {
         let result = (|| -> io::Result<bool> {
-            members.refresh();
-            let found_token = members.scan(&scope)?;
+            members.refresh(deadline);
+            let found_token = members.scan(&scope, deadline)?;
             if let Scope::Worker { .. } = scope {
-                // The dedicated supervisor also owns untagged adopted children,
-                // including the engine if supervision returned on an error.
-                for pid in children(std::process::id() as i32)? {
+                // The supervisor also owns untagged adopted children, including
+                // the engine if supervision returned on an error.
+                for pid in children(std::process::id() as i32, deadline)? {
+                    check_deadline(deadline)?;
                     if let Ok(s) = stat(pid) {
                         members.0.insert(pid, s.birth);
                     }
                 }
             }
-            let signal = if term_started.get_or_insert_with(Instant::now).elapsed() < TERM_GRACE {
+            let signal = if start.elapsed() < TERM_GRACE {
                 libc::SIGTERM
             } else {
                 libc::SIGKILL
             };
             let mut stopped = true;
             for (&pid, &birth) in &members.0 {
-                match members.signal_member(&scope, pid, birth, signal, &mut termed, &Kernel) {
+                check_deadline(deadline)?;
+                match members.signal_member(&scope, pid, birth, signal, &mut termed, signals) {
                     Ok(done) => stopped &= done,
                     Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        stopped = false;
+                        last_error = e;
+                    }
                 }
             }
-            Ok(reap()? && stopped && !found_token)
+            Ok(reap(deadline)? && stopped && !found_token)
         })();
-        let empty = result.unwrap_or_else(|error| {
-            tracing::warn!(%error, "Checking MCP process ownership");
-            false
-        });
-        // Enumeration can race a final fork/exec or reparent. Confirm an empty
-        // pass with a fresh scan before releasing the lifecycle lock.
+        let empty = match result {
+            Ok(empty) => empty,
+            Err(e) => {
+                if e.raw_os_error() != Some(libc::ETIMEDOUT) {
+                    last_error = e;
+                }
+                false
+            }
+        };
+        // Confirm an empty pass after a final fork/exec or reparent.
         if empty && previously_empty {
-            return;
+            return Ok(());
         }
         previously_empty = empty;
-        std::thread::sleep(POLL);
+        std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        delay = (delay * 2).min(Duration::from_millis(200));
     }
+    let mut pids: Vec<_> = members.0.keys().copied().collect();
+    pids.sort_unstable();
+    Err(io::Error::new(
+        last_error.kind(),
+        format!("PIDs {pids:?}: {last_error}"),
+    ))
 }
 
 pub(super) struct Tracker {
@@ -357,7 +403,10 @@ impl Tracker {
         let tracked = members.clone();
         let monitor = tokio::spawn(async move {
             loop {
-                tracked.lock().unwrap().refresh();
+                tracked
+                    .lock()
+                    .unwrap()
+                    .refresh(Instant::now() + Duration::from_millis(100));
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
@@ -369,7 +418,7 @@ impl Tracker {
         }
     }
 
-    pub(super) fn stop(&self, child: &mut tokio::process::Child) {
+    pub(super) fn stop(&self, child: &mut tokio::process::Child) -> io::Result<()> {
         self.monitor.abort();
         drain(
             &mut self.members.lock().unwrap(),
@@ -377,21 +426,24 @@ impl Tracker {
                 entry: &self.token,
                 launcher: self.launcher,
             },
-            || Ok(child.try_wait()?.is_some()),
-        );
+            &Kernel,
+            |_| Ok(child.try_wait()?.is_some()),
+        )
     }
 }
 
 /// After engine death the supervisor has no connector handles. Its worker UUID
 /// covers every instance, even one whose launcher exited before registration.
-pub(crate) fn drain_worker(worker_id: &str) {
+pub(crate) fn drain_worker(worker_id: &str) -> io::Result<()> {
     let prefix = format!("{INSTANCE_ENV}={worker_id}:");
     drain(
         &mut Members::default(),
         Scope::Worker { prefix: &prefix },
-        || {
+        &Kernel,
+        |deadline| {
             // ECHILD confirms the kernel finished reparenting the worker's children.
             loop {
+                check_deadline(deadline)?;
                 match unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } {
                     0 => return Ok(false),
                     -1 => {
@@ -406,7 +458,7 @@ pub(crate) fn drain_worker(worker_id: &str) {
                 }
             }
         },
-    );
+    )
 }
 
 #[cfg(test)]
@@ -416,6 +468,7 @@ mod tests {
 
     struct Denied {
         deny_open: bool,
+        deny_kill: bool,
         errno: i32,
         kills: std::cell::Cell<usize>,
     }
@@ -436,7 +489,11 @@ mod tests {
 
         fn kill(&self, pid: i32, signal: i32) -> io::Result<()> {
             self.kills.set(self.kills.get() + 1);
-            Kernel.kill(pid, signal)
+            if self.deny_kill {
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            } else {
+                Kernel.kill(pid, signal)
+            }
         }
     }
 
@@ -455,6 +512,7 @@ mod tests {
                 };
                 let denied = Denied {
                     deny_open,
+                    deny_kill: false,
                     errno,
                     kills: 0.into(),
                 };
@@ -471,13 +529,10 @@ mod tests {
                     .signal_member(&scope, pid, birth + 1, libc::SIGTERM, &mut termed, &denied)
                     .unwrap());
                 assert_eq!(denied.kills.get(), 0);
-                assert!(!members
-                    .signal_member(&scope, pid, birth, libc::SIGTERM, &mut termed, &denied)
-                    .unwrap());
-                tokio::time::timeout(Duration::from_secs(2), server.child.wait())
-                    .await
-                    .unwrap()
-                    .unwrap();
+                drain(&mut Members::default(), scope, &denied, |_| {
+                    Ok(server.child.try_wait()?.is_some())
+                })
+                .unwrap();
                 assert_eq!(denied.kills.get(), 1);
                 assert_eq!(
                     server.child.try_wait().unwrap().unwrap().signal(),
@@ -485,6 +540,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn refused_signals_return_pid_and_errno_within_the_drain_bound() {
+        let mut cmd = tokio::process::Command::new("/bin/sleep");
+        let mut server = ServerProcess::spawn(cmd.arg("60")).unwrap();
+        let pid = server.tree.launcher;
+        let denied = Denied {
+            deny_open: true,
+            deny_kill: true,
+            errno: libc::EPERM,
+            kills: 0.into(),
+        };
+        let before = Instant::now();
+        let error = drain(
+            &mut Members::default(),
+            Scope::Instance {
+                entry: &server.tree.token,
+                launcher: pid,
+            },
+            &denied,
+            |_| Ok(server.child.try_wait()?.is_some()),
+        )
+        .unwrap_err();
+        assert!(
+            before.elapsed() >= STOP_BOUND
+                && before.elapsed() < STOP_BOUND + Duration::from_secs(1)
+        );
+        assert!(
+            (2..30).contains(&denied.kills.get()),
+            "{}",
+            denied.kills.get()
+        );
+        assert!(
+            error.to_string().contains(&pid.to_string())
+                && error.to_string().contains("os error 1"),
+            "{error}"
+        );
+        assert!(server.child.try_wait().unwrap().is_none());
+        server.stop().unwrap();
     }
 
     #[tokio::test]
@@ -517,7 +612,7 @@ mod tests {
         })
         .await
         .unwrap();
-        server.tree.stop(&mut server.child);
+        server.tree.stop(&mut server.child).unwrap();
         assert_eq!(
             fs::read_to_string(tmp.path().join("signal"))
                 .unwrap()
