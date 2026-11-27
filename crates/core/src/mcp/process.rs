@@ -2,8 +2,13 @@
 use anyhow::Result;
 use tokio::process::{Child, Command};
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub(super) struct ServerProcess {
     pub child: Child,
+    #[cfg(target_os = "linux")]
+    tree: linux::Tracker,
     #[cfg(unix)]
     group: i32,
     #[cfg(windows)]
@@ -26,6 +31,8 @@ impl ServerProcess {
         };
         Ok(Self {
             child,
+            #[cfg(target_os = "linux")]
+            tree: linux::Tracker::new(pid as i32),
             #[cfg(unix)]
             group: pid as i32,
             #[cfg(windows)]
@@ -42,11 +49,18 @@ impl Drop for ServerProcess {
         }
         #[cfg(unix)]
         {
+            #[cfg(target_os = "linux")]
+            self.tree.stop();
             unsafe { libc::kill(-self.group, libc::SIGKILL) };
             // Reap the launcher. Its children can briefly remain as zombies in
             // the supervisor (or init) but must no longer be executing at return.
             loop {
                 let _ = self.child.try_wait();
+                #[cfg(target_os = "linux")]
+                if !self.tree.stop() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
                 if unsafe { libc::kill(-self.group, 0) } < 0 {
                     break;
                 }
@@ -88,6 +102,9 @@ fn processes() -> Result<Vec<(i32, i32, bool)>> {
 /// even if the engine dies between fork and the connector recording its PID.
 #[cfg(unix)]
 pub(crate) fn drain_worker_session(session: i32) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    let mut empty = linux::drain_adopted()?;
+    #[cfg(not(target_os = "linux"))]
     let mut empty = true;
     for (pid, group, alive) in processes()? {
         if unsafe { libc::getsid(pid) } != session {

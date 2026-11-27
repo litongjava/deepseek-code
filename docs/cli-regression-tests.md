@@ -688,6 +688,7 @@ cargo test --locked -p deepseek-code-core --lib live_reconcile_preserves_process
 cargo test --locked -p deepseek-code-cli --test session_worker running_session_reloads_extensions_on_the_next_request
 ```
 
+- Linux stdio 生命周期：禁用、重启和退出时按启动器进程树清理，包括已观察到的换组或另建会话的后代。若 daemon 在首次观察前就双重 fork 并被 init 收养，可能仍然存活。Worker 意外退出时由专用 subreaper 回收孤儿。
 - 管理器用例：保留未修改服务的 PID，增删、修改、禁用和重新启用另一服务。待移除服务已有调用时，先让调用正常返回再移除。无效配置不能停止现有进程。
 - 同一 Worker 连续提交五轮：增加服务和项目技能，修改同名工具定义及技能正文，切换为按需加载，再禁用两者。核对实际请求中的 `tools`、最新用户消息的差异提醒以及保持不变的第一条用户消息，并检查 Worker 的终端通知事件。
 - 手工补充：保持交互终端打开，在同一数据目录的第二个终端用 `dcl mcp add/remove/enable/disable` 改动本地测试服务；也可从会话安装。每次只在下一轮检查变更及简短通知，不需重启会话。用编辑器的原子保存方式修改数据目录技能、项目 `.claude/commands`，切换内置技能状态；核对斜杠列表、实际调用内容及模型可见性。项目 `.mcp.json` 不是独立 CLI 自动执行的服务清单，需先按原流程导入。

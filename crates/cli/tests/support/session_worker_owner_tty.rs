@@ -377,14 +377,32 @@ fn assert_tree_gone(log: &Path) {
     }
 }
 
-async fn crash_takeover(in_flight: bool) {
+async fn crash_takeover(in_flight: bool, separate_session: bool) {
     let fixture = OwnerFixture::new().await;
+    if separate_session {
+        let config = fixture.paths.data_dir.join("mcp-servers.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        value["mcpServers"]["w"]["env"] = json!({"MCP_FIXTURE_SETSID":"1"});
+        fs::write(config, value.to_string()).unwrap();
+    }
     let mut tty = fixture.terminal().await;
     repl(&mut tty, "start worker", b"worker result").await;
     let host = fixture.worker();
     let engine = host.child_pid.unwrap() as i32;
     let supervisor = host.supervisor_pid.unwrap() as i32;
-    let old = fixture.starts()[0].0;
+    let first = fixture.starts()[0].0 as i32;
+    assert_eq!(
+        unsafe { libc::getsid(first) },
+        if separate_session { first } else { engine }
+    );
+    repl(&mut tty, "/mcp state w off", b"w  off").await;
+    assert!(
+        worker::process_exited(first as u32),
+        "server {first} remained after disable: {:?}",
+        fs::read_to_string(format!("/proc/{first}/stat"))
+    );
+    repl(&mut tty, "/mcp state w user", b"w  user").await;
+    let old = fixture.starts()[1].0;
     if in_flight {
         repl(&mut tty, "/focus on", b"focus updated").await;
         assert_eq!(unsafe { libc::kill(engine, libc::SIGSTOP) }, 0);
@@ -405,8 +423,8 @@ async fn crash_takeover(in_flight: bool) {
     repl(&mut tty, "/mcp state w", b"w  user").await;
     resume.await.unwrap();
     let children = fixture.starts();
-    assert_eq!(children.len(), 2);
-    assert_eq!(children[1].1, fixture.worker().child_pid.unwrap());
+    assert_eq!(children.len(), 3);
+    assert_eq!(children[2].1, fixture.worker().child_pid.unwrap());
     assert_ne!(host.id, fixture.worker().id);
     assert!(worker::process_exited(old));
     tty.submit("/exit", false).await;
@@ -419,12 +437,17 @@ async fn crash_takeover(in_flight: bool) {
 
 #[tokio::test]
 async fn idle_worker_death_drains_launcher_children_before_restart() {
-    crash_takeover(false).await;
+    crash_takeover(false, false).await;
 }
 
 #[tokio::test]
 async fn worker_death_during_focus_submit_drains_launcher_children() {
-    crash_takeover(true).await;
+    crash_takeover(true, false).await;
+}
+
+#[tokio::test]
+async fn separate_session_server_stops_on_disable_worker_death_and_exit() {
+    crash_takeover(false, true).await;
 }
 
 async fn refused_package_toggle(enabled: bool) {
