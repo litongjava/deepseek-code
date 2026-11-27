@@ -68,6 +68,7 @@ pub struct Worker {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
+    StopAll,
     State {
         server: Option<String>,
         state: Option<String>,
@@ -85,6 +86,7 @@ pub enum McpOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpResult {
+    Stopped,
     State {
         /// The `NAME  STATE` line `state_command` produced.
         text: String,

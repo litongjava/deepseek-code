@@ -713,6 +713,7 @@ impl McpServerManager {
         let control=self.control.lock().unwrap().take();
         if let Some(mut control)=control {control.stop().await;}
 
+        let _guard = self.lifecycle_lock.lock().await;
         let server_ids: Vec<String> = {
             let servers = self.servers.read().await;
             servers.keys()
@@ -723,7 +724,7 @@ impl McpServerManager {
 
         for id in server_ids {
             tracing::info!(module = "MCP", "Shutting down server: {}", id);
-            let _ = self.stop_server(&id).await;
+            self.stop_server_inner(&id).await?;
         }
 
         Ok(())

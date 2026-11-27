@@ -1,3 +1,5 @@
+mod mcp_owner;
+pub(crate) use mcp_owner::McpOwner;
 #[cfg(test)]
 use crate::fixture_sql::FixtureSql;
 use deepseek_code_core::db::session_store::{ExecutorHistory, SegmentPlacement, SegmentUpdate};
@@ -185,8 +187,7 @@ pub struct Session {
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
-    /// Enabled servers were started once by this process's manager.
-    mcp_started: tokio::sync::OnceCell<()>,
+    mcp_owner: Mutex<McpOwner>,
     /// This process is the interactive REPL frontend whose turns run in a
     /// session worker, so that worker owns the only MCP server manager.
     worker_frontend: std::sync::atomic::AtomicBool,
@@ -841,32 +842,7 @@ impl Session {
     }
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
-        self.mcp_ready
-            .get_or_try_init(|| async { self.mcp.initialize().await })
-            .await?;
-        // A worker-backed frontend only reads the manager. Starting here would
-        // duplicate every child the worker owns, so the start step is deferred
-        // until this process is the owner (or the worker host itself runs it).
-        if self.worker_frontend_owns_mcp() {
-            return Ok(());
-        }
-        self.mcp_started
-            .get_or_try_init(|| async {
-                for server in self
-                    .mcp
-                    .list_servers()
-                    .await
-                    .into_iter()
-                    .filter(|server| server.enabled && !server.running)
-                {
-                    if let Err(error) = self.mcp.start_server(&server.id).await {
-                        eprintln!("MCP {}: {error}", server.name);
-                    }
-                }
-                Ok::<(), anyhow::Error>(())
-            })
-            .await?;
-        Ok(())
+        self.set_mcp_owner(McpOwner::Frontend).await
     }
 
     /// Whether this process must leave MCP server ownership to its worker.
@@ -887,6 +863,10 @@ impl Session {
     /// its own manager. Before the first worker turn there is no owner process,
     /// so the frontend applies configuration without starting children.
     pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
+        if matches!(op, McpOp::StopAll) {
+            self.set_mcp_owner(McpOwner::None).await?;
+            return Ok(McpResult::Stopped);
+        }
         if self.worker_frontend_owns_mcp() {
             if let Some(worker) = deepseek_code_core::services::session_worker::current(
                 &self.paths.data_dir,
@@ -919,6 +899,7 @@ impl Session {
     /// false only for a worker-backed frontend that does not own any children.
     async fn mcp_op_local(&self, op: McpOp, start_servers: bool) -> Result<McpResult> {
         match op {
+            McpOp::StopAll => unreachable!("handled by the ownership transition"),
             McpOp::State { server, state } => {
                 let text = crate::mcp_states::state_command(
                     &self.paths,
@@ -1421,7 +1402,7 @@ impl Session {
             engine,
             mcp,
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
-            mcp_started: tokio::sync::OnceCell::new(),
+            mcp_owner: Mutex::new(McpOwner::None),
             worker_frontend: std::sync::atomic::AtomicBool::new(false),
             extension_watch: Mutex::new(None),
             startup_provider,
