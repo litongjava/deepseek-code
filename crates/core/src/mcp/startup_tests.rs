@@ -6,6 +6,29 @@ fn empty_or_unrelated_config_means_no_servers() {
     assert!(McpServerManager::parse_config(br#"{"other":1}"#)
         .unwrap()
         .is_empty());
+    assert!(McpServerManager::parse_config(br#"{"mcpServers":null}"#)
+        .unwrap()
+        .is_empty());
+    assert!(McpServerManager::parse_config(br#"{"mcpServers":[]}"#)
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn hot_reload_rejects_a_non_object_mcp_servers_and_keeps_the_last_config() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mcp-servers.json");
+    std::fs::write(
+        &path,
+        br#"{"mcpServers":{"kept":{"command":"missing","enabled":false}}}"#,
+    )
+    .unwrap();
+    let manager = McpServerManager::new(path.clone());
+    manager.load_config().await.unwrap();
+
+    std::fs::write(&path, br#"{"mcpServers":[]}"#).unwrap();
+    assert!(manager.reconcile_config().await.is_err());
+    assert!(manager.get_server("kept").await.is_some());
 }
 
 #[tokio::test]

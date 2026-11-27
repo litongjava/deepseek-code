@@ -299,6 +299,24 @@ async fn empty_mcp_config_lists_zero_servers_on_cold_start() {
 }
 
 #[tokio::test]
+async fn null_mcp_config_lists_zero_servers_on_cold_start() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("mcp-servers.json"),
+        "{\"mcpServers\":null}\n",
+    )
+    .unwrap();
+    assert_eq!(run(dir.path(), &["mcp", "list"]).await, json!([]));
+}
+
+#[tokio::test]
+async fn array_mcp_config_lists_zero_servers_on_cold_start() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("mcp-servers.json"), "{\"mcpServers\":[]}\n").unwrap();
+    assert_eq!(run(dir.path(), &["mcp", "list"]).await, json!([]));
+}
+
+#[tokio::test]
 async fn legacy_mcp_import_is_standalone_and_preserves_source() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("old.json");

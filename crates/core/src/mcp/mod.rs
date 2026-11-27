@@ -202,17 +202,34 @@ impl McpServerManager {
     }
 
     fn parse_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {
+        Self::parse_config_with(content, false)
+    }
+
+    /// A hot reload keeps the last good configuration when a present
+    /// `mcpServers` is not an object; a first load treats it as zero servers.
+    fn parse_reload_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {
+        Self::parse_config_with(content, true)
+    }
+
+    fn parse_config_with(
+        content: &[u8],
+        reject_non_object: bool,
+    ) -> Result<HashMap<String, McpServerState>> {
         let config: serde_json::Value = serde_json::from_slice(content)?;
         let mut parsed = HashMap::new();
         // A config without an mcpServers key means zero servers, as it did on
-        // main. A present but non-object value is a malformed edit and errors so
-        // a hot reload keeps the last good configuration.
+        // main.
         let Some(servers) = config.get("mcpServers") else {
             return Ok(parsed);
         };
-        let servers = servers
-            .as_object()
-            .ok_or_else(|| anyhow!("expected an mcpServers object"))?;
+        let servers = match servers.as_object() {
+            Some(servers) => servers,
+            None if reject_non_object => {
+                return Err(anyhow!("expected an mcpServers object"));
+            }
+            // A cold start accepts `null` or `[]` as an empty configuration.
+            None => return Ok(parsed),
+        };
         {
             for (id, value) in servers {
                 let server_config = McpServerConfig {

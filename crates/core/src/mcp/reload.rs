@@ -17,14 +17,17 @@ impl McpServerManager {
         if bytes == prior {
             return Ok(Vec::new());
         }
-        let parse = |bytes: Option<&[u8]>| {
-            bytes
-                .map(Self::parse_config)
-                .transpose()
-                .map(Option::unwrap_or_default)
+        let previous = match prior.as_deref() {
+            Some(bytes) => Self::parse_config(bytes)?,
+            None => Default::default(),
         };
-        let previous = parse(prior.as_deref())?;
-        let mut desired = parse(bytes.as_deref())?;
+        // A malformed edit keeps the last good configuration on a hot reload;
+        // only a first load treats a non-object `mcpServers` as empty.
+        let mut desired = match bytes.as_deref() {
+            Some(bytes) if prior.is_some() => Self::parse_reload_config(bytes)?,
+            Some(bytes) => Self::parse_config(bytes)?,
+            None => Default::default(),
+        };
         let ids: BTreeSet<_> = previous
             .keys()
             .chain(desired.keys())
