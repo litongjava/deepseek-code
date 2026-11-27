@@ -1,5 +1,13 @@
 use super::*;
 
+#[test]
+fn empty_or_unrelated_config_means_no_servers() {
+    assert!(McpServerManager::parse_config(b"{}").unwrap().is_empty());
+    assert!(McpServerManager::parse_config(br#"{"other":1}"#)
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn live_reconcile_preserves_processes_and_drains_calls() {
     use serde_json::{json, Value};

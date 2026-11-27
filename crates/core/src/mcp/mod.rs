@@ -199,9 +199,16 @@ impl McpServerManager {
     fn parse_config(content: &[u8]) -> Result<HashMap<String, McpServerState>> {
         let config: serde_json::Value = serde_json::from_slice(content)?;
         let mut parsed = HashMap::new();
+        // A config without an mcpServers key means zero servers, as it did on
+        // main. A present but non-object value is a malformed edit and errors so
+        // a hot reload keeps the last good configuration.
+        let Some(servers) = config.get("mcpServers") else {
+            return Ok(parsed);
+        };
+        let servers = servers
+            .as_object()
+            .ok_or_else(|| anyhow!("expected an mcpServers object"))?;
         {
-            let servers = config.get("mcpServers").and_then(|s| s.as_object())
-                .ok_or_else(|| anyhow!("expected an mcpServers object"))?;
             for (id, value) in servers {
                 let server_config = McpServerConfig {
                     id: id.clone(),
