@@ -259,19 +259,30 @@ fn page_result(
     bytes: &[u8],
     source_truncated: bool,
 ) -> Result<Value> {
-    let content_type_lower = content_type.to_ascii_lowercase();
-    let is_text = content_type_lower.starts_with("text/")
+    // Media types may carry parameters and any letter case; classify by the
+    // bare type so `Text/Markdown; charset=utf-8` stays Markdown.
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let markdown = mime == "text/markdown";
+    let is_text = mime.starts_with("text/")
         || ["json", "xml", "javascript"]
             .iter()
-            .any(|kind| content_type_lower.contains(kind));
+            .any(|kind| mime.contains(kind));
     if !is_text {
         bail!("Unsupported content type {content_type}; WebFetch reads text and HTML pages");
     }
     let body = String::from_utf8_lossy(bytes);
     let raw = input["raw"].as_bool().unwrap_or(false);
-    let is_html = content_type_lower.contains("html")
-        || body.trim_start().starts_with("<!DOCTYPE html")
-        || body.trim_start().starts_with("<html");
+    // Markdown may contain literal HTML blocks; only HTML media types and
+    // unlabeled markup are converted to readable text.
+    let is_html = !markdown
+        && (mime.contains("html")
+            || body.trim_start().starts_with("<!DOCTYPE html")
+            || body.trim_start().starts_with("<html"));
     let (title, text) = if is_html && !raw {
         readable_html(&body, &http_url(url)?)
     } else {
@@ -293,7 +304,7 @@ fn page_result(
     }
     Ok(json!({
         "url":url, "title":title, "content_type":content_type,
-        "format":if raw { "raw" } else if is_html { "readable_text" } else { "text" },
+        "format":if raw { "raw" } else if is_html { "readable_text" } else if markdown { "markdown" } else { "text" },
         "content":content, "downloaded_bytes":bytes.len(), "total_extracted_chars":total_chars,
         "returned_chars":returned_chars, "offset":offset, "max_chars":limit,
         "truncated":source_truncated || has_more || offset > 0, "source_truncated":source_truncated,
