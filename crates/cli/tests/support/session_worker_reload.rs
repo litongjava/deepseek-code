@@ -1,5 +1,106 @@
 use super::*;
 
+/// A plugin whose MCP executable is missing must not block chat. Its start
+/// failure is announced once, and the next turn does not retry it.
+#[tokio::test]
+async fn plugin_mcp_start_failure_is_announced_once_and_turns_continue() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let command = temp.path().join("missing-plugin-mcp");
+    let source = temp.path().join("broken-plugin.json");
+    std::fs::write(
+        &source,
+        json!({
+            "id": "broken",
+            "version": "1.0.0",
+            "description": "fixture whose MCP executable does not exist",
+            "commands": {},
+            "files": {},
+            "mcp_servers": {"missing": {"command": command.to_string_lossy()}},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let context = deepseek_code_core::services::ServiceContext::open(
+        paths.clone(),
+        Arc::new(deepseek_code_core::services::EnvironmentCredentials),
+    )
+    .unwrap();
+    deepseek_code_core::services::plugins::install(&context, source.to_str().unwrap(), None)
+        .await
+        .unwrap();
+    deepseek_code_core::services::plugins::enable(&context, "broken", true).unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let requests = requests.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().unwrap().push(body);
+                    (
+                        [("content-type", "text/event-stream")],
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) {
+        "plugin-mcp.exe"
+    } else {
+        "plugin-mcp"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    let mut failures = Vec::new();
+    for turn in 0..2 {
+        let id = submit(
+            &host,
+            &endpoint,
+            &format!("plugin turn {turn}"),
+            "fixture",
+            128,
+        )
+        .await;
+        let job = completed(&paths.data_dir, &id).await;
+        assert_eq!(job.status, "completed", "turn {turn}: {:?}", job.error);
+        let (_, _, events) = jobs::events_since(&paths.data_dir, &id, &session, 0).unwrap();
+        failures.extend(
+            events
+                .iter()
+                .filter(|event| event["type"] == "notice")
+                .filter_map(|event| event["message"].as_str())
+                .filter(|message| message.starts_with("MCP: plugin:broken:missing failed to start"))
+                .map(str::to_owned),
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            turn + 1,
+            "turn {turn} did not reach the provider"
+        );
+    }
+    assert_eq!(
+        failures.len(),
+        1,
+        "a failed plugin MCP start must be announced once: {failures:?}"
+    );
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test]
 async fn running_session_reloads_extensions_on_the_next_request() {
     let temp = tempfile::tempdir().unwrap();

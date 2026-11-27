@@ -143,10 +143,14 @@ pub fn command_hooks(context: &ServiceContext<impl PluginCatalog>) -> Result<Vec
 
 /// Synchronize only names reserved for plugin-owned stdio servers. Changes to
 /// user-managed servers remain untouched. Call at startup and before each turn.
+///
+/// A start failure is returned as a notice instead of an error, and a start is
+/// retried only after the server is added or its configuration changes, so an
+/// unchanged broken plugin does not fail every turn.
 pub async fn sync_mcp(
     context: &ServiceContext<impl PluginCatalog>,
     manager: &crate::mcp::McpServerManager,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let mut desired = BTreeMap::new();
     for installed in list(context)?.into_iter().filter(|p| p.enabled) {
         let bundle = enabled_bundle(context, &installed.id)?;
@@ -196,22 +200,38 @@ pub async fn sync_mcp(
             manager.remove_server(&server.config.id).await?;
         }
     }
+    let mut notices = Vec::new();
     for (id, config) in desired {
-        match current.iter().find(|s| s.config.id == id) {
-            None => manager.add_server(config).await?,
-            Some(server) if server.config != config => manager.update_server(&id, config).await?,
-            Some(_) => {}
-        }
-        if !manager
+        let existing = current.iter().find(|s| s.config.id == id);
+        let was_running = existing.is_some_and(|s| s.status.running);
+        let changed = match existing {
+            None => {
+                manager.add_server(config.clone()).await?;
+                true
+            }
+            Some(server) if server.config != config => {
+                manager.update_server(&id, config.clone()).await?;
+                true
+            }
+            Some(_) => false,
+        };
+        if manager
             .get_server(&id)
             .await
             .is_some_and(|status| status.running)
         {
-            manager
-                .start_server(&id)
-                .await
-                .with_context(|| format!("Starting plugin MCP server {id}"))?;
+            continue;
         }
+        if !changed && manager.plugin_start_attempted(&id, &config) {
+            continue;
+        }
+        manager.note_plugin_start_attempt(&id, &config);
+        let status = match manager.start_server(&id).await {
+            Ok(()) if was_running => "restarted".to_owned(),
+            Ok(()) => "started".to_owned(),
+            Err(error) => format!("failed to start: {error:#}"),
+        };
+        notices.push((id, status));
     }
-    Ok(())
+    Ok(notices)
 }

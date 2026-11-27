@@ -153,6 +153,9 @@ pub struct McpServerManager {
     applied: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     control: std::sync::Mutex<Option<control::Host>>,
     lifecycle_lock: Arc<Mutex<()>>,
+    // Plugin-owned servers whose start was attempted for a given definition, so
+    // an unchanged broken plugin is announced once instead of every turn.
+    plugin_starts: Arc<std::sync::Mutex<Vec<(String, McpServerConfig)>>>,
 }
 
 impl McpServerManager {
@@ -164,6 +167,7 @@ impl McpServerManager {
             applied: Arc::default(),
             control: std::sync::Mutex::new(None),
             lifecycle_lock: Arc::new(Mutex::new(())),
+            plugin_starts: Arc::default(),
         }
     }
 
@@ -182,6 +186,7 @@ impl McpServerManager {
                 applied: self.applied.clone(),
                 control: std::sync::Mutex::new(None),
                 lifecycle_lock: self.lifecycle_lock.clone(),
+                plugin_starts: self.plugin_starts.clone(),
             };
             *control = Some(control::Host::start(worker)?);
         }
@@ -432,6 +437,22 @@ impl McpServerManager {
 
     pub async fn get_server(&self, id: &str) -> Option<McpServerStatus> {
         self.servers.read().await.get(id).map(|s| s.status.clone())
+    }
+
+    /// Whether plugin synchronization already tried to start this definition.
+    /// An unchanged definition that failed is not retried on every turn.
+    pub(crate) fn plugin_start_attempted(&self, id: &str, config: &McpServerConfig) -> bool {
+        self.plugin_starts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(attempted, definition)| attempted == id && definition == config)
+    }
+
+    pub(crate) fn note_plugin_start_attempt(&self, id: &str, config: &McpServerConfig) {
+        let mut attempts = self.plugin_starts.lock().unwrap();
+        attempts.retain(|(attempted, _)| attempted != id);
+        attempts.push((id.to_owned(), config.clone()));
     }
 
     pub async fn start_server(&self, id: &str) -> Result<()> {

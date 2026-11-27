@@ -689,7 +689,11 @@ impl Session {
     pub async fn reload_plugins(&self) -> Result<()> {
         let context = crate::services::context(&self.paths)?;
         if self.mcp_ready.get().is_some() {
-            deepseek_code_core::services::plugins::sync_mcp(&context, &self.mcp).await?;
+            for (id, status) in
+                deepseek_code_core::services::plugins::sync_mcp(&context, &self.mcp).await?
+            {
+                crate::compaction::notice(&format!("MCP: {id} {status}"));
+            }
         }
         deepseek_code_core::tools::configure_lsp_servers(
             &self.workspace.to_string_lossy(),
