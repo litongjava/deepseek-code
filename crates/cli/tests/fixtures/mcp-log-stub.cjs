@@ -12,8 +12,7 @@ let sessionNumber = 0;
 const server = http.createServer((request, response) => {
   if (request.method === 'DELETE') {
     fs.appendFileSync(log, 'stop\n');
-    response.writeHead(200);
-    response.end();
+    setTimeout(() => { response.writeHead(200); response.end(); }, Number(process.env.MCP_DELETE_DELAY || 0));
     return;
   }
   let body = '';
@@ -58,8 +57,10 @@ const server = http.createServer((request, response) => {
     }
     const headers = {'content-type': 'application/json'};
     if (initialized) headers['mcp-session-id'] = 'stub-session-' + sessionNumber;
-    response.writeHead(200, headers);
-    response.end(JSON.stringify(replies.length === 1 ? replies[0] : replies));
+    setTimeout(() => {
+      response.writeHead(200, headers);
+      response.end(JSON.stringify(replies.length === 1 ? replies[0] : replies));
+    }, initialized ? Number(process.env.MCP_INIT_DELAY || 0) : 0);
   });
 });
 

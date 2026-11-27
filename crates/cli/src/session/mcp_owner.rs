@@ -2,7 +2,7 @@
 //! finishes releasing its children before the new process can start any.
 use super::Session;
 use anyhow::{bail, Context, Result};
-use deepseek_code_core::services::session_worker::{self as worker, McpOp, McpResult, Request};
+use deepseek_code_core::services::session_worker::{self as worker, McpOp, McpResult};
 use deepseek_code_core::{fs::OwnedFileLock, mcp::McpServerManager, runtime::RuntimePaths};
 use std::{
     fs::File,
@@ -76,7 +76,12 @@ impl Session {
             McpOwner::Frontend => release_local(&self.mcp, &self.mcp_lease, owner).await?,
             McpOwner::Worker => {
                 if let Some(host) = self.running_mcp_worker().await? {
-                    let reply = worker::call(&host, &Request::Mcp(McpOp::StopAll)).await?;
+                    let reply = self
+                        .mcp_client
+                        .lock()
+                        .await
+                        .call(&host, &McpOp::StopAll)
+                        .await?;
                     match reply.mcp.context("Missing StopAll reply")? {
                         McpResult::Stopped => {}
                         McpResult::Busy => bail!(BUSY),
@@ -157,7 +162,11 @@ impl Session {
         let mut owner = self.set_mcp_owner(None).await?;
         if *owner == McpOwner::Worker {
             if let Some(host) = self.running_mcp_worker().await? {
-                match worker::call(&host, &Request::Mcp(op.clone()))
+                match self
+                    .mcp_client
+                    .lock()
+                    .await
+                    .call(&host, &op)
                     .await?
                     .mcp
                     .context("Missing MCP reply")?
@@ -266,6 +275,9 @@ impl WorkerMcp {
         }
         if *owner != McpOwner::Frontend {
             return Ok(McpResult::Unavailable);
+        }
+        if matches!(op, McpOp::ProbeOwner) {
+            return Ok(McpResult::Owned);
         }
         local_operation(
             &self.paths,

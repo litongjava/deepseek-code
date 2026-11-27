@@ -473,3 +473,95 @@ async fn busy_panel_enable_preserves_catalog_and_runtime() {
 async fn busy_panel_disable_preserves_catalog_and_runtime() {
     refused_package_toggle(true).await;
 }
+
+#[tokio::test]
+async fn slow_mutations_and_disconnected_handoff_report_the_admitted_outcome() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = OwnerFixture::new().await;
+    let mut tty = fixture.terminal().await;
+    repl(&mut tty, "start worker", b"worker result").await;
+    let host = fixture.worker();
+    let http_log = fixture.temp.path().join("http.log");
+    let port_file = fixture.temp.path().join("http.port");
+    let mut server = tokio::process::Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-log-stub.cjs"))
+        .env("MCP_LOG", &http_log)
+        .env("MCP_PORT_FILE", &port_file)
+        .env("MCP_INIT_DELAY", "7000")
+        .env("MCP_DELETE_DELAY", "7000")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let port = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(port) = fs::read_to_string(&port_file) {
+                break port;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let path = fixture.paths.data_dir.join("mcp-servers.json");
+    let mut defs: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    defs["mcpServers"]["http"] =
+        json!({"type":"http","url":format!("http://127.0.0.1:{port}"),"enabled":true});
+    fs::write(&path, defs.to_string()).unwrap();
+    repl(&mut tty, "/mcp state w off", b"w  off").await;
+    assert!(worker::process_exited(fixture.starts()[0].0));
+    // Disconnect after sending StopAll. Its actual completion (including the
+    // delayed DELETE) is retrievable from the same worker without re-execution.
+    let id = uuid::Uuid::new_v4();
+    let stop = worker::Request::McpTracked {
+        id,
+        operation: worker::McpOp::StopAll,
+    };
+    let mut stream = tokio::net::UnixStream::connect(&host.endpoint)
+        .await
+        .unwrap();
+    let mut bytes = serde_json::to_vec(&stop).unwrap();
+    bytes.push(b'\n');
+    stream.write_all(&bytes).await.unwrap();
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !fs::read_to_string(&http_log).unwrap().contains("stop") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let outcome = worker::Request::McpOutcome { id };
+    assert!(matches!(
+        worker::call(&host, &outcome).await.unwrap().mcp,
+        Some(worker::McpResult::Pending)
+    ));
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            if matches!(
+                worker::call(&host, &outcome).await.unwrap().mcp,
+                Some(worker::McpResult::Stopped)
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        worker::call(&host, &stop).await.unwrap().mcp,
+        Some(worker::McpResult::Stopped)
+    ));
+    assert_eq!(fs::read_to_string(&http_log).unwrap(), "start\nstop\n");
+    // Exercise a connected foreground handoff under the same DELETE delay.
+    repl(&mut tty, "worker reacquires", b"worker result").await;
+    repl(&mut tty, "/focus on", b"focus updated").await;
+    repl(&mut tty, "bounded handoff", b"worker result").await;
+    assert_eq!(
+        fs::read_to_string(&http_log).unwrap(),
+        "start\nstop\nstart\nstop\nstart\n"
+    );
+    server.kill().await.unwrap();
+    tty.submit("/exit", false).await;
+    tty.wait_success().await;
+}

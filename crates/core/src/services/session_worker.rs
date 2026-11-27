@@ -1,5 +1,7 @@
 //! Persistent session ownership, independent of individual model-turn jobs.
 //! Provider credentials cross a local IPC stream in memory, never a job file.
+mod mcp_operations;
+pub use mcp_operations::{McpClient, McpReceipts};
 mod recovery;
 use super::background_sessions::{self as jobs, Job, SessionClaim};
 use anyhow::{ensure, Context, Result};
@@ -66,6 +68,7 @@ pub struct Worker {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpOp {
+    ProbeOwner,
     ReloadPlugins,
     SetPluginEnabled {
         id: String,
@@ -105,6 +108,9 @@ pub enum McpOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum McpResult {
+    Owned,
+    Pending,
+    MissingReceipt,
     Busy,
     Unavailable,
     Reloaded { notices: Vec<(String, String)> },
@@ -137,6 +143,13 @@ pub enum McpResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Mcp(McpOp),
+    McpTracked {
+        id: uuid::Uuid,
+        operation: McpOp,
+    },
+    McpOutcome {
+        id: uuid::Uuid,
+    },
     Ping,
     RuntimeStatus,
     Bind { identity: String },
@@ -541,7 +554,27 @@ async fn read_reply(stream: LocalStream) -> Result<(LocalStream, Reply)> {
     Ok((reader.into_inner(), response))
 }
 pub async fn call(worker: &Worker, request: &Request) -> Result<Reply> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    if let Request::Mcp(op) = request {
+        return McpClient::default().call(worker, op).await;
+    }
+    exchange(worker, request, Duration::from_secs(5))
+        .await?
+        .checked()
+}
+
+impl Reply {
+    fn checked(self) -> Result<Self> {
+        ensure!(
+            self.ok,
+            "{}",
+            self.error.as_deref().unwrap_or("Worker rejected request")
+        );
+        Ok(self)
+    }
+}
+
+async fn exchange(worker: &Worker, request: &Request, timeout: Duration) -> Result<Reply> {
+    tokio::time::timeout(timeout, async {
         let mut stream = connect(worker).await?;
         let mut bytes = serde_json::to_vec(request)?;
         ensure!(bytes.len() < MAX_FRAME, "Worker request exceeds 16 MiB");
@@ -549,14 +582,6 @@ pub async fn call(worker: &Worker, request: &Request) -> Result<Reply> {
         stream.write_all(&bytes).await?;
         stream.flush().await?;
         let (_, response) = read_reply(stream).await?;
-        ensure!(
-            response.ok,
-            "{}",
-            response
-                .error
-                .as_deref()
-                .unwrap_or("Worker rejected request")
-        );
         Ok(response)
     })
     .await

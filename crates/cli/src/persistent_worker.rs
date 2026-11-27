@@ -187,6 +187,7 @@ pub async fn run_from_env() -> Result<bool> {
         .unwrap_or(None);
     let mut coordination_active = false;
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
+    let receipts = service::McpReceipts::default();
     let mcp_target: McpTarget = Arc::default();
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
     let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
@@ -280,7 +281,26 @@ pub async fn run_from_env() -> Result<bool> {
                             response.edit_session = Some(manager.is_some_and(|manager| manager.edit_session_allowed(&worker.session_id)));
                             let _ = service::reply(stream, &response).await;
                         },
-                        Request::Mcp(op) => {
+                        Request::McpOutcome { id } => {
+                            let _ = service::reply(stream, &receipts.query(id)).await;
+                        }
+                        Request::Mcp(_) | Request::McpTracked { .. } => {
+                            let (id, op) = match request {
+                                Request::Mcp(op) => (None, op),
+                                Request::McpTracked { id, operation } => {
+                                    if !operation.needs_receipt() {
+                                        let _ = service::reply(stream, &Reply::error("Unexpected tracked operation")).await;
+                                        continue;
+                                    }
+                                    if let Some(reply) = receipts.admit(id) {
+                                        let _ = service::reply(stream, &reply).await;
+                                        continue;
+                                    }
+                                    (Some(id), operation)
+                                }
+                                _ => unreachable!(),
+                            };
+                            let receipts = receipts.clone();
                             let target = mcp_target.lock().unwrap().clone();
                             // The supervisor can publish completion just before the
                             // host drops admission. MCP may already use the manager.
@@ -302,14 +322,16 @@ pub async fn run_from_env() -> Result<bool> {
                                 } else {
                                     Ok(McpResult::Unavailable)
                                 };
-                                let response = match result {
+                                let response = if let Some(id) = id {
+                                    receipts.finish(id, result)
+                                } else { match result {
                                     Ok(mcp) => {
                                         let mut reply = Reply::ok(None);
                                         reply.mcp = Some(mcp);
                                         reply
                                     }
                                     Err(error) => Reply::error(error),
-                                };
+                                }};
                                 let _ = service::reply(stream, &response).await;
                             });
                         },
