@@ -948,6 +948,66 @@ mod tests {
     }
 
     #[test]
+    fn markdown_media_types_are_labeled_and_not_converted_as_html() {
+        let body = "<html>\n# Heading\n";
+        let result = page_result(
+            &json!({}),
+            "https://example.org/doc.md",
+            "Text/Markdown; charset=utf-8",
+            body.as_bytes(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result["format"], "markdown");
+        assert_eq!(result["content"], body);
+    }
+
+    #[tokio::test]
+    async fn both_fetch_clients_request_markdown() {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let app = axum::Router::new().route(
+            "/page",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(
+                        headers
+                            .get(axum::http::header::ACCEPT)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    "page body"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let async_page = fetch(json!({"url": format!("{base}/page?async")}))
+            .await
+            .unwrap();
+        assert_eq!(async_page["content"], "page body");
+        let url = format!("{base}/page?blocking");
+        let blocking_page = tokio::task::spawn_blocking(move || fetch_blocking(json!({"url": url})))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocking_page["content"], "page body");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen.iter()
+                .all(|accept| accept == "text/markdown, text/html, */*"),
+            "{seen:?}"
+        );
+        server.abort();
+    }
+
+    #[test]
     fn collapses_long_base64_in_page_code() {
         use base64::Engine;
         let json = format!("{{\"request\":\"{}\"}}", "x".repeat(20_000));

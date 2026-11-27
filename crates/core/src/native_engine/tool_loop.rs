@@ -65,6 +65,10 @@ use tokio::time::{timeout, Duration};
 mod search_integration_tests;
 
 #[cfg(test)]
+#[path = "web_fetch_tests.rs"]
+mod web_fetch_tests;
+
+#[cfg(test)]
 #[path = "code_prompt_tests.rs"]
 mod code_prompt_tests;
 
