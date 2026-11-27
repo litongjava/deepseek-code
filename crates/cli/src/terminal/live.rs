@@ -1576,7 +1576,7 @@ impl Frame {
             return Ok(());
         }
         if !selection.document() {
-            self.refresh_history(state, self.size.0.saturating_sub(1) as usize);
+            self.refresh_history(state, self.size.0.saturating_sub(1) as usize, self.size.1);
             let Some(top) = selection.promote(
                 self.history_view.document_rows(),
                 page,
@@ -1604,7 +1604,7 @@ impl Frame {
             .is_some_and(|&block| Some(block) == self.scrollback.last_block())
     }
 
-    fn refresh_history(&mut self, state: &State, width: usize) {
+    fn refresh_history(&mut self, state: &State, width: usize, height: u16) {
         self.history_view.set_pinned(&self.pinned.text, width);
         self.history_view.refresh(&[], &self.scrollback.presentation(), width);
         if state.activity.starts_with("Running Bash") {
@@ -1634,8 +1634,10 @@ impl Frame {
         // The compact transcript opens at its tail. Give the running calls only
         // the rows that stay visible, so gaps and hints never push a header off
         // the top while its status remains; whole calls are omitted if needed.
+        // The height comes from the caller: the live frame's own size is still
+        // (0, 0) on the first compact frame, before `place` has run.
         let room = if super::scrollback::compact() {
-            let page = (self.size.1 as usize).saturating_sub(self.composer_height);
+            let page = (height as usize).saturating_sub(self.composer_height);
             let trailing = state
                 .notices
                 .iter()
@@ -1670,7 +1672,7 @@ impl Frame {
             return Ok(false);
         }
         let size = crate::terminal::size();
-        self.refresh_history(state, size.0.saturating_sub(1) as usize);
+        self.refresh_history(state, size.0.saturating_sub(1) as usize, size.1);
         self.history_view.navigate(key, (size.1 as usize).saturating_sub(self.composer_height))
     }
 
@@ -2197,11 +2199,11 @@ impl Frame {
         self.input_rows = draft_height;
         self.composer_height = lines.len();
         if super::scrollback::compact() && !self.history_view.active() {
-            self.refresh_history(state, width);
+            self.refresh_history(state, width, size.1);
             self.history_view.show_compact((size.1 as usize).saturating_sub(lines.len()))?;
         }
         if self.history_view.active() {
-            self.refresh_history(state, width);
+            self.refresh_history(state, width, size.1);
             let input_row = lines
                 .len()
                 .saturating_sub(choice_cursor.map_or(cursor_from_end, |(row, _)| row));
@@ -3152,7 +3154,7 @@ fn run(
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
                         screen.pinned.expanded = false;
-                        screen.refresh_history(state, screen.size.0.saturating_sub(1) as usize);
+                        screen.refresh_history(state, screen.size.0.saturating_sub(1) as usize, screen.size.1);
                         screen.history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (screen.size.1 as usize).saturating_sub(screen.composer_height))?;
                         screen.draw(state)?;
                         continue;
@@ -3198,7 +3200,7 @@ fn run(
                                     let width = screen.size.0.saturating_sub(1) as usize;
                                     let row =
                                         screen.scrollback.expand_prompt(&screen.pinned.text, width);
-                                    screen.refresh_history(state, width);
+                                    screen.refresh_history(state, width, screen.size.1);
                                     screen.history_view.open_at(row)?;
                                     screen.draw(state)?;
                                     continue;
@@ -3251,7 +3253,7 @@ fn run(
                         screen.pinned.expanded = false;
                         let width = screen.size.0.saturating_sub(1) as usize;
                         let row = screen.scrollback.expand_prompt(&screen.pinned.text, width);
-                        screen.refresh_history(state, width);
+                        screen.refresh_history(state, width, screen.size.1);
                         screen.history_view.open_at(row)?;
                         screen.draw(state)?;
                         continue;
@@ -3263,7 +3265,7 @@ fn run(
                         {
                             let width = screen.size.0.saturating_sub(1) as usize;
                             let row = screen.scrollback.expand_prompt_id(id, width);
-                            screen.refresh_history(state, width);
+                            screen.refresh_history(state, width, screen.size.1);
                             screen.history_view.open_at(row)?;
                             screen.draw(state)?;
                             continue;
@@ -3346,7 +3348,7 @@ fn run(
                     selection.discard();
                     screen.scrollback.reflow(columns as usize);
                     if screen.history_view.active() {
-                        screen.refresh_history(state, columns.saturating_sub(1) as usize);
+                        screen.refresh_history(state, columns.saturating_sub(1) as usize, screen.size.1);
                     } else {
                         // Padding in the old frame is free space, not transcript.
                         let reserved = if screen.scrollback.has_welcome() {

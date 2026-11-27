@@ -171,12 +171,18 @@ fn compact_visible_rows(count: usize, height: u16) -> Vec<String> {
         display.tool_started(&i.to_string(), name, input);
     }
     let size = (80, height);
+    // The live turn starts from `Frame::default()`, whose size is still
+    // (0, 0); only the first `draw_at` knows the real terminal size.
     let mut frame = Frame {
-        size,
         top: Some(0),
         aligned: true,
         ..Frame::default()
     };
+    assert_eq!(
+        frame.size,
+        (0, 0),
+        "the turn starts before any frame sets its size"
+    );
     frame.pinned.text = "Inspect the fixture".into();
     let mut state = State::new("ask".into());
     dispatch(&receive, &mut frame, &mut state);
@@ -230,4 +236,9 @@ fn compact_tail_keeps_two_running_statuses_with_headers_at_80x14() {
 #[test]
 fn compact_tail_keeps_three_running_statuses_with_headers_at_80x17() {
     assert_visible_pairs(&compact_visible_rows(3, 17), 3);
+}
+
+#[test]
+fn compact_turn_start_keeps_three_running_statuses_with_headers_at_80x24() {
+    assert_visible_pairs(&compact_visible_rows(3, 24), 3);
 }
