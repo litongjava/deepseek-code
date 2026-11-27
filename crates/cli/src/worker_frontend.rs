@@ -482,7 +482,7 @@ async fn present(
         display.notice(&format!("Task {} continues in the background after a view error. Use /tasks attach {} to return; /tasks show {} contains the original diagnostic.", job.id, job.id, job.id));
     }
     // Raw engine events and terminal error remain in the durable job logs.
-    // The footer owns the single user-facing error; do not rethrow it to REPL.
+    // Present one sanitized diagnostic before the REPL resumes.
     let error_text = result.as_ref().err().map(|error| {
         if still_running {
             return format!(
@@ -518,6 +518,11 @@ async fn present(
     if display.is_live() {
         display.set_running_shells(crate::background_commands::running_shells(&session.paths, &session.id));
         display.set_running_agents(crate::background_commands::running_agents(&session.paths, &session.store.db, &session.id).len());
+    }
+    if !display.is_live() {
+        if let Some(message) = error_text.as_deref() {
+            display.notice(message);
+        }
     }
     for action in display.finish(footer) {
         restore(input, action);

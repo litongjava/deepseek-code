@@ -8,6 +8,15 @@ pub(super) fn provider_reply(body: &Value) -> Option<axum::response::Response> {
         return None;
     }
     let prompt = prompt_text(last["content"].as_str()?);
+    if prompt == "request provider failure" {
+        return Some(
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"error":{"message":"fixture authentication error"}})),
+            )
+                .into_response(),
+        );
+    }
     if prompt != "request gated write" {
         return None;
     }
@@ -128,5 +137,34 @@ async fn interrupt_at_plain_permission_prompt_cancels_the_worker() {
             "{mode:?}: cancelled {}, question cleared, following turn reached provider",
             job.id
         );
+    }
+}
+
+#[tokio::test]
+async fn failed_request_prints_one_diagnostic_in_plain_modes() {
+    for mode in MODES {
+        let fixture = OwnerFixture::new().await;
+        let mut tty = mode.terminal(&fixture).await;
+        tty.submit("request provider failure", mode.line_editor())
+            .await;
+        tty.wait_output(b"HTTP 401", true).await;
+        let text = String::from_utf8_lossy(&tty.transcript);
+        let after = text.find("HTTP 401").unwrap() + "HTTP 401".len();
+        mode.wait_editor(&mut tty, after).await;
+        assert_eq!(
+            String::from_utf8_lossy(&tty.transcript)
+                .matches("HTTP 401")
+                .count(),
+            1,
+            "{mode:?}"
+        );
+        let jobs = jobs::list(&fixture.paths.data_dir, Some(&fixture.session)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, "failed");
+        mode.successful_turn(&mut tty, "follow up after failure")
+            .await;
+        tty.submit("/exit", mode.line_editor()).await;
+        tty.wait_success().await;
+        eprintln!("{mode:?}: one HTTP 401 diagnostic, one failed job and a successful follow-up");
     }
 }
