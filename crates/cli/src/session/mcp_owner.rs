@@ -203,13 +203,19 @@ pub(crate) async fn local_operation(
         let context = crate::services::context(paths)?;
         let notices = deepseek_code_core::services::plugins::sync_mcp(&context, manager).await?;
         reconcile(manager, paths, session).await?;
-        deepseek_code_core::tools::configure_lsp_servers(
-            &workspace.to_string_lossy(),
-            deepseek_code_core::services::plugins::all_language_servers(&context)?,
-        )?;
+        reload_plugin_metadata(paths, workspace)?;
         return Ok(McpResult::Reloaded { notices });
     }
     crate::mcp_commands::execute(paths, manager, op, true).await
+}
+
+pub(super) fn reload_plugin_metadata(paths: &RuntimePaths, workspace: &Path) -> Result<()> {
+    let context = crate::services::context(paths)?;
+    deepseek_code_core::tools::configure_lsp_servers(
+        &workspace.to_string_lossy(),
+        deepseek_code_core::services::plugins::all_language_servers(&context)?,
+    )?;
+    Ok(())
 }
 
 /// A handle to the worker Session's actual manager, published before a turn.

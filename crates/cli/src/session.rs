@@ -812,6 +812,9 @@ impl Session {
     }
 
     pub async fn reload_plugins(&self) -> Result<()> {
+        if !self.observe_mcp_worker && *self.mcp_owner.lock().await == McpOwner::None {
+            return mcp_owner::reload_plugin_metadata(&self.paths, &self.workspace);
+        }
         let McpResult::Reloaded { notices } = self.mcp_call(McpOp::ReloadPlugins).await? else {
             bail!("Unexpected MCP plugin reload reply");
         };
@@ -5361,7 +5364,10 @@ mod event_tests {
             !marker.exists(),
             "opening the foreground must not start MCP children"
         );
-        session.reload_plugins().await.unwrap();
+        let mut session = session;
+        crate::sdk_operations::handle(&mut session, &json!({"subtype":"reload_plugins"}))
+            .await.unwrap().unwrap();
+        assert_eq!(*session.mcp_owner.lock().await, super::McpOwner::None);
         assert!(
             !marker.exists(),
             "metadata refresh must not start unused MCP children"
@@ -5376,6 +5382,12 @@ mod event_tests {
             .unwrap();
             assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
         }
+        // A resumed SDK session may have initialized the shared manager before
+        // detaching from its previous conversation.
+        session.detach_mcp_owner().await.unwrap();
+        session.reload_plugins().await.unwrap();
+        assert_eq!(*session.mcp_owner.lock().await, super::McpOwner::None);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
         session.close().await.unwrap();
         server.abort();
     }
