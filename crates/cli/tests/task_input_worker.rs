@@ -321,13 +321,19 @@ fn start_time(_pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit(')')
-        .next()?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    state_and_parent(pid).map(|(_, parent)| parent)
+}
+
+#[cfg(target_os = "linux")]
+fn state_and_parent(pid: u32) -> Option<(u8, u32)> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = std::str::from_utf8(stat.rsplit(|&b| b == b')').next()?)
+        .ok()?
+        .split_whitespace();
+    Some((
+        *fields.next()?.as_bytes().first()?,
+        fields.next()?.parse().ok()?,
+    ))
 }
 
 /// The exact process is gone, not merely its PID reused.
@@ -608,6 +614,69 @@ async fn worker_owns_pipe_input_across_turns_and_stops_the_exact_tree() {
     let (engine_started, supervisor_started) = (start_time(engine), start_time(supervisor));
     wait_gone(engine, engine_started, "stopped engine").await;
     wait_gone(supervisor, supervisor_started, "stopped supervisor").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn killed_bash_orphan_is_reaped_while_the_engine_is_running() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let (endpoint, fixture) = start_server().await;
+    let script = workspace.join("orphan.sh");
+    std::fs::write(
+        &script,
+        "(sleep 120 </dev/null >/dev/null 2>&1 & echo $! > child.pid)\nmv child.pid orphan.pid\nread -r line\n",
+    )
+    .unwrap();
+    *fixture.script.lock().unwrap() = Some(script);
+    let executable = std::env::var_os("CLAUDE_SESSION_WORKER_TEST_EXE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_dcl")));
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let engine = host.child_pid.unwrap();
+    let supervisor = host.supervisor_pid.unwrap();
+    let mut cleanup = Cleanup(vec![engine, supervisor]);
+    let job = submit(&host, &endpoint, "start the shell").await;
+    completed(&paths.data_dir, &job).await;
+    let orphan = wait_for_pid(&workspace.join("orphan.pid"), "orphan").await;
+    cleanup.0.push(orphan);
+    let adopter = parent_of(orphan).unwrap();
+    let birth = start_time(orphan).unwrap();
+    assert_eq!(unsafe { libc::kill(orphan as i32, libc::SIGKILL) }, 0);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gone(orphan, Some(birth)) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let zombies: Vec<u32> = std::fs::read_dir("/proc")
+        .unwrap()
+        .map(Result::unwrap)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&pid| state_and_parent(pid) == Some((b'Z', engine)))
+        .collect();
+    assert!(
+        zombies.is_empty(),
+        "engine {engine} has zombies {zombies:?}"
+    );
+    assert_eq!(adopter, supervisor);
+    assert!(
+        gone(orphan, Some(birth)),
+        "supervisor did not reap {orphan}"
+    );
+    cleanup.0.pop();
+
+    // Completing a later turn proves the owner was still serving after the reap.
+    let stop = submit(&host, &endpoint, "stop the shell").await;
+    completed(&paths.data_dir, &stop).await;
+    let id = fixture.task_id.lock().unwrap().clone().unwrap();
+    shutdown_after_terminal_stop(&paths.data_dir, &session, &id, &[]).await;
+    cleanup.0.clear();
 }
 
 #[tokio::test]

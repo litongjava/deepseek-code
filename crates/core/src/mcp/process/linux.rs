@@ -19,7 +19,12 @@ const INSTANCE_ENV: &str = "DEEPSEEK_CODE_MCP_INSTANCE";
 const TERM_GRACE: Duration = Duration::from_millis(250);
 const STOP_BOUND: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(10);
-static OWNER: OnceLock<Uuid> = OnceLock::new();
+struct Owner {
+    id: Uuid,
+    supervisor_pid: Option<u32>,
+}
+
+static OWNER: OnceLock<Owner> = OnceLock::new();
 
 fn owner_uuid(worker_id: &str) -> Uuid {
     if let Some(id) = Uuid::parse_str(worker_id)
@@ -49,14 +54,19 @@ fn worker_prefix(owner: Uuid) -> String {
 
 /// Run once in the worker before constructing any stdio connectors. Only the
 /// engine and its supervisor need the worker ID. Other hosts get a local UUID.
-pub fn init_worker_mcp(worker_id: &str, session_dir: &std::path::Path) -> anyhow::Result<()> {
+pub fn init_worker_mcp(
+    worker_id: &str,
+    session_dir: &std::path::Path,
+    supervisor_pid: Option<u32>,
+) -> anyhow::Result<()> {
+    let owner = Owner {
+        id: owner_uuid(worker_id),
+        supervisor_pid,
+    };
     anyhow::ensure!(
-        OWNER.set(owner_uuid(worker_id)).is_ok(),
+        OWNER.set(owner).is_ok(),
         "MCP process owner already initialized"
     );
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
-        return Err(io::Error::last_os_error().into());
-    }
     fences::initialize(session_dir)
 }
 
@@ -64,7 +74,12 @@ pub(super) fn spawn(
     command: &mut tokio::process::Command,
     server: &str,
 ) -> anyhow::Result<(tokio::process::Child, Tracker)> {
-    let owner = *OWNER.get_or_init(Uuid::new_v4);
+    let owner = OWNER
+        .get_or_init(|| Owner {
+            id: Uuid::new_v4(),
+            supervisor_pid: None,
+        })
+        .id;
     let instance = Uuid::new_v4();
     let fence = fences::reserve(server, owner, instance)?;
     let token = instance_token(owner, instance);
@@ -258,6 +273,11 @@ impl Members {
                     }
                 }
                 return Ok(waited != 0);
+            }
+            // The supervisor reaps detached descendants on its own heartbeat.
+            // Keep the instance fenced until the old PID actually disappears.
+            if OWNER.get().and_then(|owner| owner.supervisor_pid) == Some(s.parent as u32) {
+                return Ok(false);
             }
             return Ok(!self.0.contains_key(&s.parent)); // might still await adoption
         }

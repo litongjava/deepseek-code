@@ -1120,6 +1120,43 @@ pub fn run_supervisor_from_env() -> Result<bool> {
     jobs::save(&dir.join("worker.json"), &worker)?;
     Ok(true)
 }
+/// Only the engine has an outstanding Child handle here. The cancellation
+/// helper runs synchronously on this same thread. Peek before reaping so the
+/// engine's Child retains its status even when it exits during this pass.
+#[cfg(target_os = "linux")]
+fn reap_adopted_children(engine: u32) -> std::io::Result<()> {
+    // A stream of exits must not starve the worker heartbeat or cancellation.
+    for _ in 0..256 {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_ALL,
+                0,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        let pid = unsafe { info.si_pid() };
+        if pid == 0 || pid == engine as i32 {
+            break;
+        }
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     let mut command = engine_command(&worker.executable, dir, &worker.workspace);
     command
@@ -1215,6 +1252,8 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     worker.status = "running".into();
     let mut cancelling: Option<(String, std::time::Instant)> = None;
     loop {
+        #[cfg(target_os = "linux")]
+        reap_adopted_children(child.0.id())?;
         let exited = child.0.try_wait()?;
         worker.active_job = fs::read(dir.join("active.json"))
             .ok()

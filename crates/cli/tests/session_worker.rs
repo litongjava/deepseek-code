@@ -820,7 +820,17 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
             .output()
             .unwrap();
     }
-    assert_eq!(completed(&paths.data_dir, &crash).await.status, "failed");
+    let crashed = completed(&paths.data_dir, &crash).await;
+    assert_eq!(crashed.status, "failed");
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(libc::SIGKILL);
+        assert_eq!(
+            crashed.error.unwrap(),
+            format!("Session worker exited unexpectedly: {status}")
+        );
+    }
     let recovered = worker::ensure_worker(&paths.data_dir, executable, &session, &workspace)
         .await
         .unwrap();

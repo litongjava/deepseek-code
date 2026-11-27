@@ -579,7 +579,7 @@ async fn direct_setsid_disable_and_reenable_ten_times_then_worker_death_and_exit
     let mut starts = fixture.starts();
     for round in 1..=10 {
         let (pid, parent) = *starts.last().unwrap();
-        assert_eq!(parent, host.child_pid.unwrap());
+        assert_eq!(parent, host.supervisor_pid.unwrap());
         assert_eq!(unsafe { libc::getsid(pid as i32) }, pid as i32);
         let live = worker_instances(&host);
         assert_eq!(live.len(), 1, "before disable {round}: {live:?}");
