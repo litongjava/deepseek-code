@@ -212,6 +212,7 @@ cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --noc
 4. `--resume` 后，修改行的显示和点击效果与上面相同。
 5. 思考内容 `Thought ... (click to expand)` 和较长的用户消息也能展开、收起。
 6. `Ctrl+O` 的详细记录不受影响，也不出现点击提示。
+7. `cargo test --locked -p deepseek-code-cli --bin dcl running_status_tests -- --nocapture --test-threads=1`：本地模拟一段 11 行思考，然后分别启动 1、2、3 个调用，最后一个为 Bash。对比第 2 秒和第 3 秒（出现 Ctrl+B 提示）的渲染行；80×15 的两个调用和 80×24 的三个调用都应各有一个 `⎿  Running…`，紧跟自己的编号标题，不能挂在 `Thought for …` 下。缩到 12 行时只能隐藏整个调用；逆序完成后，相应状态消失，结果只显示一次。
 
 ### C2. 紧凑工具组与复制不跳动
 
@@ -258,12 +259,12 @@ cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --noc
 
 `--print` 和 `--output-format json` 直接执行时，回合以执行租约标为“运行中”，并按秒发布已生成的公开文本和工具行（每个回合只有消息行和工具行，不写逐 token 文件）。恢复时必须按租约和 `execution_turns` 判断真实状态，不能只查 worker 任务；部分回答不能显示成已完成的 `Previous turn`。
 
-1. **原进程运行中恢复**：显示 `A turn is still running in another process since …; this terminal only observes its published progress and closing it does not stop that turn.`，随后显示已发布的工具行和文本；不得出现 `Previous turn … duration unavailable`。观察只读：不取得执行租约，不提交输入，不回答审批，不执行工具。
-2. **观察期间的新进度**：只有观察开始之后发布的内容才算增量。长段落按完整行显示；没有换行且超过约 200 字符的文本先显示一段并以 `…` 结尾，不能无限缓冲。
-3. **每段独立游标**：一个回合因恢复或压缩包含多个 assistant 段时，每段各自记住已显示位置；重复轮询不重放任何一段。切换到别的会话（`/resume`）会清空状态，空闲会话不显示上一会话的完成信息。
+1. **原进程运行中恢复**：显示 `A turn is still running in another process since …; this terminal only observes its published progress and closing it does not stop that turn.`，随后以与普通会话相同的富文本工具块显示已发布工具（`● #N`、工作区相对路径、`⎿` 结果摘要、编辑 diff 预览、`(click to expand)`/`(click to collapse)`、复制绑定、`Alt+M` 紧凑分组），助手文本经 Markdown 渲染（首行 `●`、续行悬挂缩进）。不得出现 `Previous turn … duration unavailable`，也不得出现旧的 `● Tool  hint` + `✓ Tool · ok` 两行或重复重放。观察只读：不取得执行租约，不提交输入，不回答审批，不执行工具。
+2. **观察期间的新进度**：只有观察开始之后发布的内容才算增量。助手文本按完整行经 Markdown 流提交；没有换行且超过约 200 字符的文本先显示一段并以 `…` 结尾，不能无限缓冲。`output` 为空（仍在执行）的工具只出现在输入框上方的常驻活动提示（如 `Running Bash(...)`），有结果后才一次性提交富文本块；回合结束或中断时仍未完成的工具按历史规则提交 `No result recorded`。
+3. **每段独立游标**：一个回合因恢复或压缩包含多个 assistant 段时，每段各自记住已显示位置；重复轮询不重放任何一段。`--resume`/`/resume` 已由 `show_resumed` 渲染的文本和已完成工具通过 `ResumedView` 移交给观察器，后续工具继续按会话中真实的 `#N` 编号，不重复显示。切换到别的会话（`/resume`）会清空状态，空闲会话不显示上一会话的完成信息。
 4. **占用期间输入 `/continue`**：只提示继续观察（`Progress appears here as it is published`），不提交新回合。
-5. **观察中退出终端**：在空提示符按 `Ctrl+C` 退出本终端（不是 `Esc`），原进程继续运行；服务端请求数、工具执行次数和数据库中的行都不变。
-6. **原进程正常结束**：仍打开的观察端先显示结束前写入的最后文本和工具结果，再显示 `Observed turn finished · Worked for …`；结束后的恢复显示 `Worked for … · done` 和 `Session restored; waiting for input…`。观察本身不打开自动唤醒：排队中的任务通知保持未消费，也不额外请求模型，只有显式输入才继续。
+5. **观察中退出终端**：输入 `/exit` 或按 `Ctrl+C`/EOF 只离开只读视图，提示 `Leaving read-only view; the session continues running in another worker.`，原进程继续运行；不得调用 `quit_worker`，不得 cancel 托管 job、停止 shell 或 shutdown worker，也不得向共享 async hook 目录写 `cancel` 文件。服务端请求数、工具执行次数和数据库中的行都不变。只读占用时 prompt 保持正常样式，状态由输入框上方的常驻只读行表达，不再使用 `… ` 或错误的 `Esc exits`。
+6. **原进程正常结束**：仍打开的观察端先显示结束前写入的最后文本和工具结果，再显示 `Observed turn finished · Worked for …`，并清除常驻只读状态；结束后的恢复显示 `Worked for … · done` 和 `Session restored; waiting for input…`。观察本身不打开自动唤醒：排队中的任务通知保持未消费，也不额外请求模型，只有显式输入才继续。观察期间有新工具完成或回合结束时刷新 `Ctrl+O` 记录，保证能看到完整内容。
 7. **原进程被杀**：已打开的观察端在宽限期后把 `running` 回合结算为中断，显示 `interrupted · duration unknown`，随后保持空闲、不重放、不自动重新请求。重新打开会话也会结算并提示 “the previous turn was interrupted before it completed and its request was not replayed”。只有显式 `/continue` 或新消息才发出一次新请求。
 8. **执行所有权与准入**：恢复和观察只探测租约；结算只在取得租约后执行并立即释放，因此不会把仍在执行的回合标成中断。整个回合（包括反应式压缩、`Stop`/`PostCompact` 钩子、后处理和最终持久化）由宿主独占持有租约，引擎持有同一个 `Arc` 直到执行任务真正结束，包括公开 `MessageStop` 之后的收尾；宿主提前断开流或释放自己的引用不会让会话变成“无主”。独立提交（CLI、SDK、Desktop 或直接调用引擎）在发送入口就取得同一把锁，被占用时在保存输入、创建回合记录或请求模型之前立即拒绝；没有宿主租约时由引擎自己取得。委派子会话同样在执行器整个生命周期内持有租约，成功结束后才清除。准入是独占的：同一进程内第二个 Session 对象、或另一个进程的同会话顶层回合，都会被拒绝（跨进程 `flock`，进程内同样是独立描述符）。释放不依赖文件描述符关闭：`flock` 属于打开文件描述，`fork` 出的子进程会通过继承的描述符共享它，因此持有方结束时必须显式解锁（`fs::unlock_file`），否则锁会一直保留到子进程退出。租约在进程内只由取得它的进程解锁（记录取得时的 PID），子进程退出不会误放父进程仍在持有的锁；`execution_active` 探测成功后同样立即解锁再关闭。准入因此是立即且独占的，不再做 `WouldBlock` 重试。执行任务的完成记录按“尝试”身份登记，由任务自己在结束（含取消、panic、断流和提前出错）时删除；等待方只观察、不移除，因此 Desktop 等从不等待的调用方不会积累记录，旧尝试的清理也不能删除或等待同一会话的更新尝试。`wait_for_executor` 返回明确的 `Completed`/`Pending`：超时必须报告未完成并保留租约直到真正结束，不能把截止时间当成完成。取消语义同样以“强制工作真正结束”为准：外层执行任务被 abort 时，已经开始且无法中止的强制写库任务（`save_response` 的 assistant 消息与计数）继续持有同一份租约和同一个完成记录，因此取消返回后 `execution_active` 仍为真、独立提交仍被拒绝、`wait_for_executor` 仍返回 `Pending`，直到该阻塞任务退出才释放租约并报告 `Completed`；不能声称运行中的阻塞代码可以被终止。同一套语义适用于消息端点：`PresenceLease`（前端打开会话）和 `Consumer`（模型消息消费者）也在逻辑结束时显式解锁，并用取得时的 PID 保护，`session_open`/`receiver_active` 探测成功后立即释放自己的锁、`WouldBlock` 时不释放他人锁；`Consumer::attach` 在取得锁之后若建表/项目校验失败也会显式释放。生成行删除是尽力而为：`Consumer` 与所有 `Target` 克隆共享一个进程内生命周期标记，释放时先置为无效再清理数据库，因此即使删除失败，旧 `Target` 也不能再 `drain`，排队消息保持 `queued`；同一把锁同时串行化“正在进行的 drain”和释放，所以释放完成后不会再有旧句柄提交。新消费者用新的 generation 行，旧 generation 的清理不会删除它。`cargo test --locked -p deepseek-code-core --lib fs::file_lock`、`services::session_messages` 和 `executor_lifetime_tests` 用受控子进程继承描述符、复制描述符、执行器尾部闸门与写库任务内部闸门验证这一点。
 9. 空闲恢复仍是第 6 条的 `Session restored; waiting for input`，不触发模型。
@@ -274,6 +275,8 @@ cargo test --locked -p deepseek-code-cli --test prompt_submit_stability -- --noc
 cargo test --locked -p deepseek-code-cli --test live_observation
 cargo test --locked -p deepseek-code-core --lib db::turn_repo
 cargo test --locked -p deepseek-code-cli --bin dcl observe::
+cargo test --locked -p deepseek-code-cli --bin dcl terminal::input
+cargo test --locked -p deepseek-code-cli --bin dcl terminal::picker::tests::resume_search
 ```
 
 `live_observation` 使用真实 CLI 进程、隔离数据目录和本地 SSE：证明运行中已发布工具/文本、消息 ID 不变、完成后测得耗时；`PostCompact` 钩子延迟期间租约仍在；杀死 owner 后恢复只结算、不重放，排队通知不被消费，显式继续才新增一次请求。准入与连续回合在 `--bin dcl` 中有确定性的进程内测试：`a_second_top_level_turn_is_rejected_before_any_record_or_request`（第一个模型的流被挂起，第二个顶层回合在任何记录或请求之前被拒绝）和 `rapid_sequential_turns_each_run_once_and_release_the_session`（连续 6 个回合各一次请求、各自完成）。执行器生命周期在 `cargo test --locked -p deepseek-code-core --lib executor_lifetime_tests` 中用一个只在测试中存在的尾部闸门验证：公开 `MessageStop` 之后、任务收尾之前，即使宿主断开流并释放自己的租约引用，`execution_active` 仍为真、独立提交仍被拒绝且不新增请求/消息；等待超时返回 `Pending` 且不释放；释放闸门后 `wait_for_executor` 返回 `Completed`，会话立即可用；取消、提前出错、无人等待的完成记录清理，以及旧尝试不能删除新尝试的记录也分别有确定性用例。另有一个真实成功尾路径的用例：在 `save_response=true` 的 assistant 持久化阻塞任务内部、实际写库之前设闸门，取消外层任务后仍保持租约、拒绝独立提交、报告 `Pending` 且保留完成记录；释放闸门后写库恰好发生一次，随后才释放并允许新回合，旧回合不会在新回合准入后再写库。终端显示必须用真实 pty 验收：
@@ -289,12 +292,13 @@ python3 dev-support/deepseek-code/super-agent-20261110/harness-fix/h1_pty_accept
 
 另一个进程持有执行租约时，恢复的 REPL 必须保持只读，并且所有会自动开回合的入口都必须先检查占用。
 
-1. **后台任务占用**：`/resume` 显示 `✻ Task … is executing this session since …`，普通消息提示未提交；`/continue` 接回任务，`/tasks attach ID` 打开完整视图，`Esc` 退出。
-2. **直接执行占用**：显示 `A turn is still running in another process since …`，继续显示已发布的文本和工具行；不得出现原始的 `lock acquisition failed`。
+1. **后台任务占用**：`/resume` 显示 `✻ Task … is executing this session since …`，普通消息提示未提交；输入框上方常驻 `● Read-only · occupied by Task … (partial features: observe, /status, /tasks, /resume, /clear, /exit; prompts disabled)`；`/continue` 接回任务，`/tasks attach ID` 打开完整视图，`Esc` 退出完整视图。一次性横幅明确说明被另一个 worker 占用、普通提示词和启动回合的命令已禁用，并以 `/exit` 或 `Ctrl+C` 离开只读视图（不再声称 `Esc exits`）。
+2. **直接执行占用**：显示 `A turn is still running in another process since …`，继续以富文本显示已发布文本和工具行，并常驻 `● Read-only · occupied by another worker (partial features: …)`；不得出现原始的 `lock acquisition failed`。观察端 `/exit`、`Ctrl+C`、EOF 或信号退出只关闭本地资源，不打断 owner。
 3. **自动入口**：占用期间 task notification、`/loop`、cron、hook wake、remote deferred prompt 都不得创建新 turn；通知留在队列中，占用结束后也不自动提交，直到用户显式输入或 `/continue`。`dispatch_input` 自身也必须再次检查，不能消费队列项。
-4. **恢复输入**：owner 结束后显示 `The other turn finished; input is enabled`，只读 banner 不再出现；之后输入的消息可以提交。
+4. **恢复输入**：owner 结束后显示 `The other turn finished; input is enabled`，常驻只读状态和 banner 都不再出现；之后输入的消息可以提交。
 5. **goal proposal 失主**：另一个 frontend 接管 goal proposal 时，任务 view 不退出、不 detach；日志记录一次，重新 acquire 一次，失败则提示 `Goal proposal status unavailable; task output continues.`，文本和工具行继续。
 6. **切换会话清理**：`/resume`、`/branch`、`/clear` 后，Remote Control 断开并提示，旧 `/loop`、草稿、`NEXT_DRAFT` 和排队提示被丢弃；新会话不会收到旧 remote 注册的消息或权限。
+7. **`/resume` 运行标识**：另一个进程执行期间，在第三个终端打开 `/resume`，运行中的会话标题以 `[running] ` 开头，详情第一项是完整 session ID（`{id} · {ago} · {branch} · {size}[ · {path}]`）。在 Picker 搜索框输入 `running` 或 session ID 前缀都能命中该行。非 TTY 的 JSON 列表为每个会话保留原有字段并增加 `"running": bool`。
 
 自动回归：
 
@@ -305,10 +309,14 @@ cargo test --locked -p deepseek-code-cli --bin dcl a_second_top_level_turn_is_re
 cargo test --locked -p deepseek-code-cli --bin dcl losing_the_goal_proposal_frontend
 cargo test --locked -p deepseek-code-cli --bin dcl a_caller_banner_suppresses
 cargo test --locked -p deepseek-code-cli --bin dcl turn_command_tests
+cargo test --locked -p deepseek-code-cli --bin dcl extended_commands::resume_tests
+cargo test --locked -p deepseek-code-cli --bin dcl exit_tests
+cargo test --locked -p deepseek-code-cli --bin dcl session::request_usage_tests::read_only_shutdown
 cargo test --locked -p deepseek-code-core --lib current_rejects_a_worker_record
+cargo test --locked -p deepseek-code-core --lib services::background_sessions::tests::active_session_ids
 ```
 
-第 1、2、4 条及 banner 的终端渲染需要真实 pty。2026-11-26 已在 macOS 用 tmux + 本地 mock SSE 跑通：owner 为 `dcl --resume ID --print`，observer 在 40×140 tmux 面板中 `dcl --resume ID`；banner、已发布文本、未提交提示、owner 结束后的输入恢复均通过，且观察期间没有模型请求。脚本和日志见 `dev-support/deepseek-code/session-occupancy-20261126/`（`dcl_occupancy_tmux.py`、`pty-run.log`）。Windows ConPTY 尚未运行。第 5 条由 `worker_frontend::failure_tests::losing_the_goal_proposal_frontend_keeps_the_task_view_and_its_output` 覆盖：running job 的 proposal presence 被另一 live frontend 接管后，观察只记录失败、禁用提案 UI，任务完成且无 cancel/detach。banner 去重由 `observe::tests::a_caller_banner_suppresses_the_first_running_notice` 覆盖；`/loop stop-*` 边界由 `turn_command_tests` 覆盖。`read_prompt` 期间被另一进程接管的 tick 门禁尚未用真实 pty 重跑。
+第 1、2、4 条及 banner 的终端渲染需要真实 pty。2026-11-26 已在 macOS 用 tmux + 本地 mock SSE 跑通：owner 为 `dcl --resume ID --print`，observer 在 40×140 tmux 面板中 `dcl --resume ID`；banner、已发布文本、未提交提示、owner 结束后的输入恢复均通过，且观察期间没有模型请求。脚本和日志见 `dev-support/deepseek-code/session-occupancy-20261126/`（`dcl_occupancy_tmux.py`、`pty-run.log`）。Windows ConPTY 尚未运行。第 5 条由 `worker_frontend::failure_tests::losing_the_goal_proposal_frontend_keeps_the_task_view_and_its_output` 覆盖：running job 的 proposal presence 被另一 live frontend 接管后，观察只记录失败、禁用提案 UI，任务完成且无 cancel/detach。banner 去重由 `observe::tests::a_caller_banner_suppresses_the_first_running_notice` 覆盖；`/loop stop-*` 边界由 `turn_command_tests` 覆盖。2026-11-26 又在 macOS 用独立临时数据目录和本地 mock SSE 重跑同一 PTY 验收：owner 执行 `Read` 后流式输出 20 段文本；observer 显示 `#1 Read(fixture.txt)`、`⎿` 摘要、`● Read-only · occupied by another worker`，旧 `✓ Read` 和重复块均未出现；输入 `/exit` 后 owner 仍完成全部 20 段并以 `status: completed` 退出。第三个终端 `/resume` 显示 `[running] read the fixture and answer` 和完整 session ID。另一个持续观察的终端在 owner 结束后显示 `Observed turn finished · Worked for 24s · done` 与 `The other turn finished; input is enabled`，常驻 `Read-only` 状态消失。脚本与日志见 `dev-support/deepseek-code/session-occupancy-20261126/readonly-ux-20261126/`（`run_scenarios.py`、`logs/observer-screen.txt`、`logs/observer-finished.txt`、`logs/resume-screen.txt`）。`read_prompt` 期间被另一进程接管的 tick 门禁尚未用真实 pty 重跑。
 
 #### D10. 已删除目录的只读恢复
 
@@ -965,6 +973,8 @@ SDK 用例通过真实 CLI、本地 OpenAI mock、ToolLoad 与私有 worker 验�
 - 欢迎区生命周期、输入框与运行帧交接、`/plan` 提示：J，以及 B、C、E1、E3
 - `session.rs`：B、D（含 D8–D10）、E；SDK 输入路径另见“第十一轮：SDK 回合内引导”；回合内的执行所有权（含反应式压缩与钩子）按 D8 第 8 条，另跑 `cargo test --locked -p deepseek-code-cli --test live_observation ownership_survives`
 - `db/turn_repo.rs`、`services/session_messages.rs` 的回合状态与执行租约、`observe.rs` 的只读观察：D8–D10，以及 `cargo test --locked -p deepseek-code-cli --test live_observation`、`cargo test --locked -p deepseek-code-core --lib db::turn_repo`、`cargo test --locked -p deepseek-code-cli --bin dcl observe::`；恢复/租约回归另跑 `cargo test --locked -p deepseek-code-cli --test session_worker --test session_messages`；`crates/core/src/native_engine/engine_core.rs`、`tool_loop.rs` 的租约字段类型改动另跑 `cargo test --locked -p deepseek-code-core --lib native_engine::`
+- `terminal/input.rs` 的富文本观察通道、`terminal/editor.rs` 的观察块/常驻只读状态、`repl.rs` 的 `ResumedView`、`worker_frontend.rs` 的只读文案、`main.rs` 的观察生命周期与 `/exit` 安全：D8、D9（含真实 PTY），以及 `cargo test --locked -p deepseek-code-cli --bin dcl terminal::input`、`cargo test --locked -p deepseek-code-cli --bin dcl observed_`、`cargo test --locked -p deepseek-code-cli --bin dcl exit_tests`、`cargo test --locked -p deepseek-code-cli --bin dcl session::request_usage_tests::read_only_shutdown`、`cargo test --locked -p deepseek-code-cli --bin dcl repl::a_resumed_read_only_view`
+- `extended_commands.rs` 的 `/resume` 运行态标识与 JSON `running` 字段：D9 第 7 条，以及 `cargo test --locked -p deepseek-code-cli --bin dcl extended_commands::resume_tests`、`cargo test --locked -p deepseek-code-cli --bin dcl terminal::picker::tests::resume_search`；作业扫描回归跑 `cargo test --locked -p deepseek-code-core --lib services::background_sessions::tests::active_session_ids`，存储盘点跑 `cargo test --locked -p deepseek-code-core --test session_resolver_inventory`
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4，以及 `cargo test --locked -p deepseek-code-core --test worker_environment`（普通子进程不继承 worker 的控制变量）
 - `args.rs`、`restart.rs`、`remote_host.rs` 及 `main.rs` 的进程交接，`batch_commands.rs`、`workflow_runner.rs`、`native_engine/script_workflow.rs`、`tools/external_agents.rs` 和 Worker 的模型快照改动：I4。涉及 `session.rs`、`persistent_worker.rs` 时，同时运行 Worker 生命周期与本地协调回归。
 - `tools/coordination.rs`、`native_engine/tool_loop.rs`、`native_engine/plan_tool.rs` 的计划入口退役：`cargo test --locked -p deepseek-code-core --lib native_engine::tool_loading_tests`、`cargo test --locked -p deepseek-code-core --lib native_engine::plan_tool::tests`、`cargo test --locked -p deepseek-code-core --lib tools::coordination::tests`（四个任务内置各一次、`TaskOutput` 与 `plan_mode` 不在目录/请求/搜索中；旧设置启用和旧 ToolLoad 记录都不能恢复 `plan_mode`；直接调用报 Unknown tool 且不创建 `.claude`；`EnterPlanMode`/`ExitPlanMode` 审批与计划边界仍通过）

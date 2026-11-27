@@ -2020,6 +2020,21 @@ impl Session {
         }
         deepseek_code_core::services::async_hooks::cancel_shared(&self.paths.data_dir, &self.id)
             .await;
+        self.close_local_resources().await
+    }
+
+    /// Close only this process's resources. A read-only observer must not write
+    /// a shared cancel signal for hooks owned by the other worker, so only the
+    /// in-process task registry is cancelled here.
+    pub async fn close_local(&self) -> Result<()> {
+        if let Err(error) = self.store.db.release_binding_requester(&self.binding_requester) {
+            eprintln!("Could not release binding notice: {error:#}");
+        }
+        deepseek_code_core::services::async_hooks::cancel(&self.id).await;
+        self.close_local_resources().await
+    }
+
+    async fn close_local_resources(&self) -> Result<()> {
         self.engine.cancel_turn(&self.id).await;
         self.ide.disconnect().await;
         deepseek_code_core::tools::shutdown_lsp_servers().await;
@@ -2044,6 +2059,13 @@ impl Session {
     /// the original error even though the incarnation was released.
     pub(crate) async fn close_owned(&mut self) -> Result<()> {
         let shutdown = self.close().await;
+        self.close_coordination().await;
+        shutdown
+    }
+
+    /// Close this terminal without cancelling another worker's shared hooks.
+    pub(crate) async fn close_owned_local(&mut self) -> Result<()> {
+        let shutdown = self.close_local().await;
         self.close_coordination().await;
         shutdown
     }
@@ -6871,6 +6893,120 @@ mod request_usage_tests {
             json!({}),
             "a new user turn starts empty"
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_shutdown_leaves_jobs_worker_and_shared_hooks_untouched() {
+        use clap::Parser;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(directory.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let provider = serde_json::from_value(json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+        let selection = Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::parse_from(["dcl"]);
+        let mut session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let id = session.id.clone();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let current = std::process::id();
+
+        // A managed task that a real `/exit` would cancel.
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let job_dir = paths.data_dir.join("tasks/background").join(&job_id);
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let job = deepseek_code_core::services::background_sessions::Job {
+            id: job_id.clone(),
+            foreground: false,
+            parent_session_id: id.clone(),
+            session_id: id.clone(),
+            title: "running task".into(),
+            status: "running".into(),
+            supervisor_pid: Some(current),
+            child_pid: Some(current),
+            started_ms: now,
+            heartbeat_ms: now,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        std::fs::write(job_dir.join("state.json"), serde_json::to_vec(&job).unwrap()).unwrap();
+
+        // A live persistent worker that a real `/exit` would shut down.
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let worker_dir = paths
+            .data_dir
+            .join("state/workers")
+            .join(&id)
+            .join(&worker_id);
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        let worker = deepseek_code_core::services::session_worker::Worker {
+            id: worker_id.clone(),
+            session_id: id.clone(),
+            root: paths.data_dir.clone(),
+            workspace: session.workspace.clone(),
+            executable: std::env::current_exe().unwrap(),
+            endpoint: "unused".into(),
+            status: "running".into(),
+            supervisor_pid: Some(current),
+            child_pid: Some(current),
+            heartbeat_ms: now,
+            active_job: Some(job_id.clone()),
+            error: None,
+        };
+        std::fs::write(
+            worker_dir.join("worker.json"),
+            serde_json::to_vec(&worker).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            paths.data_dir.join("state/workers").join(&id).join("current.json"),
+            serde_json::to_vec(&worker_id).unwrap(),
+        )
+        .unwrap();
+
+        // A shared asynchronous hook owned by the other process.
+        let digest = ring::digest::digest(&ring::digest::SHA256, id.as_bytes());
+        let key: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+        let hook_task = paths.data_dir.join("hook-async").join(key).join("task");
+        std::fs::create_dir_all(&hook_task).unwrap();
+        std::fs::write(hook_task.join("owner"), "").unwrap();
+
+        // The other process owns the execution lease throughout.
+        let owner = session.store.db.open_session(&id).unwrap().acquire_execution().unwrap();
+        session.close_owned_local().await.unwrap();
+
+        assert!(
+            session.store.db.execution_active_for(&id).unwrap(),
+            "the other owner keeps the lease"
+        );
+        assert_eq!(
+            deepseek_code_core::services::background_sessions::get(&paths.data_dir, &job_id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!job_dir.join("cancel").exists(), "the job was not cancelled");
+        assert_eq!(
+            deepseek_code_core::services::session_worker::current(&paths.data_dir, &id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "running",
+            "the worker was not stopped"
+        );
+        assert!(
+            !hook_task.join("cancel").exists(),
+            "a local shutdown must not cancel shared hooks"
+        );
+
+        // An ordinary close still signals the shared hook once the owner is gone.
+        drop(owner);
+        session.close().await.unwrap();
+        assert!(hook_task.join("cancel").exists());
     }
 }
 

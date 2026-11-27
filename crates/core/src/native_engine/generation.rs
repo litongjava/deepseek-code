@@ -1748,6 +1748,31 @@ pub(crate) async fn generate_with_options(
     .await
 }
 
+/// A requested auxiliary output budget, reduced only when the context window
+/// cannot hold the input, the full budget and the protocol margin. The budget
+/// is a ceiling, so a tight window reserves whatever room remains.
+fn fit_output_budget(
+    provider: &ResolvedProvider,
+    system: &str,
+    input: &str,
+    max_tokens: u32,
+) -> u32 {
+    match provider.model.context_window {
+        Some(window) => {
+            let estimate = input_tokens(system, input);
+            let room = u64::from(window).saturating_sub(estimate + u64::from(PROTOCOL_MARGIN));
+            // When nothing is left, keep the requested budget so the request's
+            // own context check reports the real problem, not a zero budget.
+            if room == 0 {
+                max_tokens
+            } else {
+                max_tokens.min(room as u32)
+            }
+        }
+        None => max_tokens,
+    }
+}
+
 /// A fixed output budget for an auxiliary request that needs more room than the
 /// 4,096-token default, such as a long page summary.
 pub(crate) async fn generate_with_budget(
@@ -1757,6 +1782,7 @@ pub(crate) async fn generate_with_budget(
     max_tokens: u32,
     options: super::request_options::RequestOptions,
 ) -> Result<String> {
+    let max_tokens = fit_output_budget(&provider, system, input, max_tokens);
     generate_request(
         provider,
         system,
@@ -1890,6 +1916,37 @@ mod tests {
         let estimate = input_tokens("system", &input);
         assert!(estimate < input.len() as u64);
         assert!(input_tokens(&"system".repeat(1000), &input) > estimate);
+    }
+
+    #[test]
+    fn auxiliary_budget_is_a_ceiling_for_tight_context_windows() {
+        let system = "Summary instructions";
+        let input = "a".repeat(20_001);
+        let estimate = input_tokens(system, &input);
+        let room = u64::from(8_192u32).saturating_sub(estimate + u64::from(PROTOCOL_MARGIN));
+        assert!(
+            room > 0 && room < 8_192,
+            "the fixture must leave partial output room: {room}"
+        );
+        assert_eq!(
+            fit_output_budget(&provider(8_192, Some(8_192)), system, &input, 8_192),
+            room as u32
+        );
+        assert_eq!(
+            fit_output_budget(&provider(128_000, Some(8_192)), system, &input, 8_192),
+            8_192
+        );
+        // Without window metadata the requested budget is unchanged.
+        let mut unbounded = provider(128_000, Some(8_192));
+        unbounded.model.context_window = None;
+        assert_eq!(fit_output_budget(&unbounded, system, &input, 8_192), 8_192);
+        // When nothing fits, keep the requested budget so the request's own
+        // context check reports the real problem.
+        let oversized = "a".repeat(30_000);
+        assert_eq!(
+            fit_output_budget(&provider(8_192, Some(8_192)), system, &oversized, 8_192),
+            8_192
+        );
     }
 
     #[test]

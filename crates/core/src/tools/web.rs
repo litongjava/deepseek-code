@@ -241,6 +241,17 @@ fn readable_html(html: &str, url: &reqwest::Url) -> (String, String) {
     (title, text)
 }
 
+/// Ask for Markdown first so a server that negotiates it sends the source
+/// instead of an HTML rendering; HTML and any other representation stay
+/// acceptable, and per-request `headers` still override this default.
+fn fetch_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
+    HeaderMap::from_iter([(
+        ACCEPT,
+        HeaderValue::from_static("text/markdown, text/html, */*"),
+    )])
+}
+
 fn page_result(
     input: &Value,
     url: &str,
@@ -248,19 +259,30 @@ fn page_result(
     bytes: &[u8],
     source_truncated: bool,
 ) -> Result<Value> {
-    let content_type_lower = content_type.to_ascii_lowercase();
-    let is_text = content_type_lower.starts_with("text/")
+    // Media types may carry parameters and any letter case; classify by the
+    // bare type so `Text/Markdown; charset=utf-8` stays Markdown.
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let markdown = mime == "text/markdown";
+    let is_text = mime.starts_with("text/")
         || ["json", "xml", "javascript"]
             .iter()
-            .any(|kind| content_type_lower.contains(kind));
+            .any(|kind| mime.contains(kind));
     if !is_text {
         bail!("Unsupported content type {content_type}; WebFetch reads text and HTML pages");
     }
     let body = String::from_utf8_lossy(bytes);
     let raw = input["raw"].as_bool().unwrap_or(false);
-    let is_html = content_type_lower.contains("html")
-        || body.trim_start().starts_with("<!DOCTYPE html")
-        || body.trim_start().starts_with("<html");
+    // Markdown may contain literal HTML blocks; only HTML media types and
+    // unlabeled markup are converted to readable text.
+    let is_html = !markdown
+        && (mime.contains("html")
+            || body.trim_start().starts_with("<!DOCTYPE html")
+            || body.trim_start().starts_with("<html"));
     let (title, text) = if is_html && !raw {
         readable_html(&body, &http_url(url)?)
     } else {
@@ -282,7 +304,7 @@ fn page_result(
     }
     Ok(json!({
         "url":url, "title":title, "content_type":content_type,
-        "format":if raw { "raw" } else if is_html { "readable_text" } else { "text" },
+        "format":if raw { "raw" } else if is_html { "readable_text" } else if markdown { "markdown" } else { "text" },
         "content":content, "downloaded_bytes":bytes.len(), "total_extracted_chars":total_chars,
         "returned_chars":returned_chars, "offset":offset, "max_chars":limit,
         "truncated":source_truncated || has_more || offset > 0, "source_truncated":source_truncated,
@@ -373,6 +395,7 @@ fn is_thin_html(page: &Page, result: &Value, input: &Value) -> bool {
 
 fn async_client(proxy: Option<&str>, allow_local_target: bool) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
+        .default_headers(fetch_headers())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
@@ -392,6 +415,7 @@ fn blocking_client(
     allow_local_target: bool,
 ) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
+        .default_headers(fetch_headers())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
@@ -924,6 +948,67 @@ mod tests {
     }
 
     #[test]
+    fn markdown_media_types_are_labeled_and_not_converted_as_html() {
+        let body = "<html>\n# Heading\n";
+        let result = page_result(
+            &json!({}),
+            "https://example.org/doc.md",
+            "Text/Markdown; charset=utf-8",
+            body.as_bytes(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result["format"], "markdown");
+        assert_eq!(result["content"], body);
+    }
+
+    #[tokio::test]
+    async fn both_fetch_clients_request_markdown() {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let app = axum::Router::new().route(
+            "/page",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(
+                        headers
+                            .get(axum::http::header::ACCEPT)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    "page body"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let async_page = fetch(json!({"url": format!("{base}/page?async")}))
+            .await
+            .unwrap();
+        assert_eq!(async_page["content"], "page body");
+        let url = format!("{base}/page?blocking");
+        let blocking_page =
+            tokio::task::spawn_blocking(move || fetch_blocking(json!({"url": url})))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(blocking_page["content"], "page body");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen.iter()
+                .all(|accept| accept == "text/markdown, text/html, */*"),
+            "{seen:?}"
+        );
+        server.abort();
+    }
+
+    #[test]
     fn collapses_long_base64_in_page_code() {
         use base64::Engine;
         let json = format!("{{\"request\":\"{}\"}}", "x".repeat(20_000));
@@ -1200,8 +1285,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_targets_bypass_a_configured_proxy() {
-        let app = axum::Router::new()
-            .route("/page", axum::routing::get(|| async { "local body" }));
+        let app = axum::Router::new().route("/page", axum::routing::get(|| async { "local body" }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {

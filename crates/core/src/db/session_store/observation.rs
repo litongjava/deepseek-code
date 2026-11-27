@@ -46,7 +46,10 @@ impl SessionRepository<'_> {
             Ok(turn_repo::get_turn(c, turn)?)
         })
     }
-    pub fn observed_segments(&self, turn: &str) -> Result<Vec<(MessageRow, Vec<ToolCallRow>)>> {
+    pub fn observed_segments(
+        &self,
+        turn: &str,
+    ) -> Result<Vec<(MessageRow, Vec<(ToolCallRow, usize)>)>> {
         self.read(|c, id| {
             // Session reads already own a pinned snapshot.
             let snapshot = if c.is_autocommit() {
@@ -55,16 +58,41 @@ impl SessionRepository<'_> {
                 None
             };
             let c = snapshot.as_deref().unwrap_or(c);
+            // The same order `repl::conversation` numbers saved tools with, so a
+            // live observer keeps the transcript's `#N` identities.
+            let mut numbers = std::collections::BTreeMap::new();
+            let mut query = c.prepare(
+                "SELECT t.id, ROW_NUMBER() OVER (
+                     ORDER BY m.sort_order ASC, m.rowid ASC, t.sort_order ASC, t.rowid ASC)
+                 FROM tool_calls t JOIN messages m ON m.id=t.message_id
+                 WHERE m.conversation_id=?1",
+            )?;
+            for row in query.query_map([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (tool, number) = row?;
+                numbers.insert(tool, number.max(1) as usize);
+            }
             let mut result = Vec::new();
             for message in turn_repo::turn_messages(c, turn)? {
                 if let Some(row) =
                     message_repo::get_message(c, &message)?.filter(|m| m.conversation_id == id)
                 {
-                    result.push((row, message_repo::get_tool_calls_for_message(c, &message)?));
+                    let tools = message_repo::get_tool_calls_for_message(c, &message)?
+                        .into_iter()
+                        .map(|tool| {
+                            let number = numbers.get(&tool.id).copied().unwrap_or(1);
+                            (tool, number)
+                        })
+                        .collect();
+                    result.push((row, tools));
                 }
             }
             Ok(result)
         })
+    }
+    pub fn observed_tool_duration(&self, tool: &str) -> Result<Option<u64>> {
+        self.read(|c, _| message_repo::tool_duration(c, tool))
     }
     pub fn settle_observed_turn(&self, root: &Path) -> Result<Option<TurnRecord>> {
         match &self.0 {

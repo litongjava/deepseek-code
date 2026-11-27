@@ -200,6 +200,67 @@ async fn image_reads_preserve_content_with_legacy_text_only_metadata() {
     assert!(content.has_images());
 }
 
+#[test]
+fn computer_use_screenshot_attaches_image_without_requiring_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let screenshot = temp.path().join("shot.jpg");
+    let jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9";
+    std::fs::write(&screenshot, jpeg_bytes).unwrap();
+
+    let mut value = json!({
+        "success": true,
+        "action": "Screenshot",
+        "screenshot_path": screenshot.to_string_lossy(),
+        "mime_type": "image/jpeg",
+        "error": null,
+        "duration_ms": 0
+    });
+    let expected_text = serde_json::to_string_pretty(&value).unwrap();
+    let (text, content) = take_read_image("computer_use", &mut value).unwrap().unwrap();
+    assert_eq!(text, expected_text);
+    assert_eq!(content.openai_text(), expected_text);
+    assert!(content.has_images());
+
+    let parts = content.openai_images("call-shot");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["text"], "Image content from tool result call-shot:");
+    let url = parts[1]["image_url"]["url"].as_str().unwrap();
+    assert!(url.starts_with("data:image/jpeg;base64,"));
+
+    let mut executor = executor(temp.path());
+    let (output, failed) = executor.finish_builtin(
+        "computer_use",
+        &json!({"action_type": "Screenshot"}),
+        "call-shot",
+        Ok(value),
+    );
+    assert!(!failed);
+    assert_eq!(output, expected_text);
+    let stored = executor.mcp_outputs.remove("call-shot").unwrap();
+    assert!(stored.has_images());
+    assert_eq!(stored.openai_images("call-shot").len(), 2);
+
+    let mut no_screenshot = json!({
+        "success": true,
+        "action": "TypeText",
+        "screenshot_path": null,
+        "mime_type": null,
+        "error": null,
+        "duration_ms": 1
+    });
+    assert!(take_read_image("computer_use", &mut no_screenshot).is_none());
+
+    let mut failed_shot = json!({
+        "success": false,
+        "action": "Screenshot",
+        "screenshot_path": screenshot.to_string_lossy(),
+        "mime_type": "image/jpeg",
+        "error": "failed",
+        "duration_ms": 1
+    });
+    assert!(take_read_image("computer_use", &mut failed_shot).is_none());
+}
+
 #[tokio::test]
 async fn files_read_in_a_batch_can_be_edited_afterwards() {
     let temp = tempfile::tempdir().unwrap();

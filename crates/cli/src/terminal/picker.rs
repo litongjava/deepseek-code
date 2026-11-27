@@ -536,6 +536,34 @@ mod tests {
     }
 
     #[test]
+    fn resume_search_matches_running_marker_and_session_id() {
+        let entries = vec![
+            Entry {
+                title: "[running] fix parser".into(),
+                detail: "0a1b2c3d-0000-0000-0000-000000000000 · 2 minutes ago · main · 1KB"
+                    .into(),
+            },
+            Entry {
+                title: "add tests".into(),
+                detail: "4e5f6a7b-0000-0000-0000-000000000000 · 3 minutes ago · main · 1KB"
+                    .into(),
+            },
+        ];
+        let picker = Picker {
+            heading: "Resume session",
+            subtitle: None,
+            entries: &entries,
+            search: true,
+            hint: "",
+            selected: 0,
+        };
+        assert_eq!(picker.matching("running"), [0], "the marker is searchable");
+        assert_eq!(picker.matching("0a1b2c3d"), [0], "the session ID is searchable");
+        assert_eq!(picker.matching("4e5f6a7b"), [1]);
+        assert!(picker.matching("not-a-session").is_empty());
+    }
+
+    #[test]
     fn typing_filters_and_enter_returns_the_original_index() {
         let entries = entries();
         let picker = Picker { heading: "Resume session", subtitle: None, entries: &entries, search: true, hint: "Esc to cancel", selected: 0 };

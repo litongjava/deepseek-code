@@ -65,6 +65,10 @@ use tokio::time::{timeout, Duration};
 mod search_integration_tests;
 
 #[cfg(test)]
+#[path = "web_fetch_tests.rs"]
+mod web_fetch_tests;
+
+#[cfg(test)]
 #[path = "code_prompt_tests.rs"]
 mod code_prompt_tests;
 
@@ -890,6 +894,31 @@ async fn web_fetch_with_prompt(
         return Ok(page);
     }
     let content = page["content"].as_str().unwrap_or_default();
+    let offset = page["offset"].as_u64().unwrap_or(0);
+    let total = page["total_extracted_chars"].as_u64().unwrap_or(0);
+    // An offset at or past the end has nothing to read. Report it explicitly
+    // instead of returning an empty answer; an empty page read from offset
+    // zero keeps its own "No readable text" note.
+    if offset >= total && (offset > 0 || total > 0) {
+        let mut result = json!({
+            "url": page["url"],
+            "title": page["title"],
+            "result": format!(
+                "Nothing left to read from offset {offset}: this page's text is {total} characters long."
+            ),
+            "offset": page["offset"],
+            "next_offset": page["next_offset"],
+            "truncated": page["truncated"],
+            "via": page["via"],
+            "summarized": false,
+        });
+        // Keep the page's own advice, such as a download cut at the 2 MiB
+        // limit, where the total describes only the fetched prefix.
+        if !page["note"].is_null() {
+            result["note"] = page["note"].clone();
+        }
+        return Ok(result);
+    }
     if content.chars().count() <= WEB_FETCH_LLM_THRESHOLD_CHARS {
         let mut result = json!({
             "url": page["url"],
@@ -1458,12 +1487,43 @@ fn take_read_image(
     tool_name: &str,
     value: &mut Value,
 ) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if tool_name == "computer_use" {
+        return take_computer_use_screenshot(value);
+    }
     if !matches!(tool_name, "Read" | "ImageGenerate") {
         return None;
     }
     let image = value.as_object_mut()?.remove("image")?;
     let text = value["content"].as_str().unwrap_or_default().to_owned();
     let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
+    Some(
+        McpOutput::from_transport(&transport)
+            .map(|content| (text, content))
+            .map_err(|error| format!("Error: {error:#}")),
+    )
+}
+
+fn take_computer_use_screenshot(
+    value: &Value,
+) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if value["is_error"].as_bool() == Some(true) || value["success"].as_bool() != Some(true) {
+        return None;
+    }
+    let path = value["screenshot_path"]
+        .as_str()
+        .filter(|path| !path.is_empty())?;
+    let bytes = std::fs::read(path).ok()?;
+    let media_type = crate::runtime::image_media_type_from_bytes(&bytes)
+        .or_else(|| value["mime_type"].as_str())?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    let transport = json!({
+        "content": [
+            {"type": "image", "mimeType": media_type, "data": encoded},
+            {"type": "text", "text": text}
+        ]
+    });
     Some(
         McpOutput::from_transport(&transport)
             .map(|content| (text, content))
@@ -3824,6 +3884,19 @@ impl ToolLoopExecutor {
             return false;
         };
         let loading = customization.loading("Python");
+        loading.enabled || loading.on_demand
+    }
+
+    /// Whether the dedicated `Grep` tool is currently enabled or loadable
+    /// via `ToolLoad` in this executor.
+    fn grep_tool_available_or_loadable(&self) -> bool {
+        if !self.builtin_names().contains("Grep") || !self.tool_is_allowed("Grep") {
+            return false;
+        }
+        let Ok(customization) = self.customization() else {
+            return false;
+        };
+        let loading = customization.loading("Grep");
         loading.enabled || loading.on_demand
     }
 
@@ -6515,6 +6588,7 @@ impl ToolLoopExecutor {
                 let mut foreground_sleep_detected = false;
                 let mut inline_python_calls = 0usize;
                 let mut wrapped_powershell_calls = 0usize;
+                let mut standalone_grep_calls = 0usize;
                 if pending_tool_calls
                     .iter()
                     .any(|t| t.name.as_str() == "ExitPlanMode")
@@ -6589,6 +6663,9 @@ impl ToolLoopExecutor {
                                 if has_wrapped_powershell_command(&actual_input, command) {
                                     wrapped_powershell_calls += 1;
                                 }
+                                if is_standalone_grep_command(command) {
+                                    standalone_grep_calls += 1;
+                                }
                             }
                         }
                         let _ = self
@@ -6620,12 +6697,16 @@ impl ToolLoopExecutor {
 
                 let python_available =
                     inline_python_calls > 0 && self.python_tool_available_or_loadable();
+                let grep_available =
+                    standalone_grep_calls > 0 && self.grep_tool_available_or_loadable();
                 if let Some(reminder) = self.bash_coaching.build_turn_reminder(
                     redundant_cd_cwd.as_deref(),
                     foreground_sleep_detected,
                     inline_python_calls,
                     python_available,
                     wrapped_powershell_calls,
+                    standalone_grep_calls,
+                    grep_available,
                 ) {
                     tool_results.push(ContentBlock::Text { text: reminder });
                 }
@@ -7509,6 +7590,7 @@ impl ToolLoopExecutor {
                 let mut foreground_sleep_detected = false;
                 let mut inline_python_calls = 0usize;
                 let mut wrapped_powershell_calls = 0usize;
+                let mut standalone_grep_calls = 0usize;
                 if pending_tool_calls
                     .iter()
                     .any(|t| t.name.as_str() == "ExitPlanMode")
@@ -7580,6 +7662,9 @@ impl ToolLoopExecutor {
                                 if has_wrapped_powershell_command(&actual_input, command) {
                                     wrapped_powershell_calls += 1;
                                 }
+                                if is_standalone_grep_command(command) {
+                                    standalone_grep_calls += 1;
+                                }
                             }
                         }
                         let _ = self
@@ -7631,12 +7716,16 @@ impl ToolLoopExecutor {
                 }
                 let python_available =
                     inline_python_calls > 0 && self.python_tool_available_or_loadable();
+                let grep_available =
+                    standalone_grep_calls > 0 && self.grep_tool_available_or_loadable();
                 if let Some(reminder) = self.bash_coaching.build_turn_reminder(
                     redundant_cd_cwd.as_deref(),
                     foreground_sleep_detected,
                     inline_python_calls,
                     python_available,
                     wrapped_powershell_calls,
+                    standalone_grep_calls,
+                    grep_available,
                 ) {
                     conversation_messages.push(OpenAIMessage {
                         role: "user".into(),
@@ -8715,13 +8804,16 @@ const BASH_COACHING_COOLDOWN_TURNS: usize = 4;
 const FOREGROUND_SLEEP_COACHING_TEXT: &str = "\
 Do NOT poll with foreground `sleep` or `for`/`while` wait loops.\n\
 - Start long-running services that must survive across calls (dev server, backend, browser/local daemon) with `Bash` `detach: true`.\n\
-- For finite long commands, use `Bash` `run_in_background: true` (it notifies you automatically on completion) or `TaskGet` with `block: true` — never `sleep` in the foreground.";
+- For finite long commands, use `Bash` `run_in_background: true` and continue other work or end your turn — you will be notified automatically on completion (only call non-blocking `TaskGet` if you need intermediate output or suspect a stall).";
 
 const INLINE_PYTHON_COACHING_TEXT: &str = "\
 Prefer the dedicated `Python` tool over `Bash` heredocs (`python - <<'EOF'`) or `python -c` for inline Python snippets and data inspection. If `Python` is on-demand, load it first with `ToolLoad({\"names\":[\"Python\"]})`.";
 
 const WRAPPED_POWERSHELL_COACHING_TEXT: &str = "\
 You are invoking `powershell`/`pwsh` inside Git Bash. Pass `shell: \"powershell\"` (or `\"pwsh\"`) directly on the `Bash` tool instead of wrapping `powershell -Command \"...\"`, so you can write native multi-line PowerShell without `\\$`/`\\\"` escaping.";
+
+const STANDALONE_GREP_COACHING_TEXT: &str = "\
+Prefer the dedicated `Grep` tool over standalone `Bash` `grep` calls: `Grep` runs in parallel in one turn, respects `.gitignore` automatically (much faster), and supports `glob` (e.g. `\"*.ts *.vue *.json\"`, space-separated), `output_mode`, and `head_limit`.";
 
 #[derive(Debug, Default)]
 struct BashCoachingState {
@@ -8731,6 +8823,8 @@ struct BashCoachingState {
     inline_python_cooldown: usize,
     wrapped_powershell_count: usize,
     wrapped_powershell_cooldown: usize,
+    standalone_grep_count: usize,
+    standalone_grep_cooldown: usize,
 }
 
 impl BashCoachingState {
@@ -8741,8 +8835,11 @@ impl BashCoachingState {
         self.inline_python_cooldown = 0;
         self.wrapped_powershell_count = 0;
         self.wrapped_powershell_cooldown = 0;
+        self.standalone_grep_count = 0;
+        self.standalone_grep_cooldown = 0;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_turn_reminder(
         &mut self,
         redundant_cd_cwd: Option<&str>,
@@ -8750,6 +8847,8 @@ impl BashCoachingState {
         inline_python_calls: usize,
         python_tool_available: bool,
         wrapped_powershell_calls: usize,
+        standalone_grep_calls: usize,
+        grep_tool_available: bool,
     ) -> Option<String> {
         let mut notices = Vec::new();
 
@@ -8796,6 +8895,23 @@ impl BashCoachingState {
             self.wrapped_powershell_cooldown = BASH_COACHING_COOLDOWN_TURNS;
         }
 
+        let effective_grep_calls = if grep_tool_available {
+            standalone_grep_calls
+        } else {
+            0
+        };
+        if effective_grep_calls > 0 {
+            self.standalone_grep_count = self
+                .standalone_grep_count
+                .saturating_add(effective_grep_calls);
+        }
+        if self.standalone_grep_cooldown > 0 {
+            self.standalone_grep_cooldown -= 1;
+        } else if effective_grep_calls > 0 && self.standalone_grep_count >= 2 {
+            notices.push(STANDALONE_GREP_COACHING_TEXT.to_owned());
+            self.standalone_grep_cooldown = BASH_COACHING_COOLDOWN_TURNS;
+        }
+
         if notices.is_empty() {
             None
         } else {
@@ -8804,6 +8920,412 @@ impl BashCoachingState {
                 notices.join("\n\n")
             ))
         }
+    }
+}
+
+/// Detects a **standalone** foreground `grep`/`egrep`/`fgrep`/`rg` command that
+/// the built-in `Grep` tool can directly replace in a single call:
+/// - Optional leading `cd ... &&` segments.
+/// - No multi-command chaining (`;`, `&&`, `||`, multiple lines) or control flow.
+/// - At most one optional trailing pipe stage whose command is `head` or `tail`.
+/// - No unsupported flags (`-v`/`--invert-match`, `-f`/`--file`, `-L`/`--files-without-match`,
+///   `-P`/`--perl-regexp`, `-z`/`--null-data`, `-q`/`--quiet`/`--silent`).
+/// - At most one explicit target path (since `Grep` takes a single `path`).
+fn is_standalone_grep_command(command: &str) -> bool {
+    struct ShellToken {
+        text: String,
+        has_unquoted_redir: bool,
+    }
+
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Parse top-level `&&`-chained units, each consisting of `|`-separated pipeline stages.
+    let mut and_units: Vec<Vec<Vec<ShellToken>>> = Vec::new();
+    let mut current_pipeline: Vec<Vec<ShellToken>> = Vec::new();
+    let mut current_stage: Vec<ShellToken> = Vec::new();
+    let mut current_word = String::new();
+    let mut current_has_unquoted_redir = false;
+    let mut in_word = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut after_first_newline: Option<&str> = None;
+
+    let flush_word = |stage: &mut Vec<ShellToken>,
+                      word: &mut String,
+                      redir: &mut bool,
+                      in_w: &mut bool| {
+        if *in_w {
+            stage.push(ShellToken {
+                text: std::mem::take(word),
+                has_unquoted_redir: *redir,
+            });
+            *redir = false;
+            *in_w = false;
+        }
+    };
+
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if escaped {
+            current_word.push(ch);
+            in_word = true;
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current_word.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '\\' {
+                if let Some(&(_, next)) = chars.peek() {
+                    if matches!(next, '"' | '\\' | '$' | '`' | '\n') {
+                        chars.next();
+                        current_word.push(next);
+                        continue;
+                    }
+                }
+                current_word.push(ch);
+            } else if ch == '"' {
+                in_double = false;
+            } else {
+                current_word.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escaped = true;
+                in_word = true;
+            }
+            '\'' => {
+                in_single = true;
+                in_word = true;
+            }
+            '"' => {
+                in_double = true;
+                in_word = true;
+            }
+            '#' if !in_word => {
+                for (next_idx, next_ch) in chars.by_ref() {
+                    if next_ch == '\n' {
+                        after_first_newline = Some(&trimmed[next_idx + 1..]);
+                        break;
+                    }
+                }
+                break;
+            }
+            '\n' => {
+                after_first_newline = Some(&trimmed[idx + 1..]);
+                break;
+            }
+            ';' | '(' | ')' | '{' | '}' => {
+                return false;
+            }
+            '|' => {
+                // Reject `||` logical OR.
+                if chars.peek().is_some_and(|&(_, next)| next == '|') {
+                    return false;
+                }
+                flush_word(
+                    &mut current_stage,
+                    &mut current_word,
+                    &mut current_has_unquoted_redir,
+                    &mut in_word,
+                );
+                if current_stage.is_empty() {
+                    return false;
+                }
+                current_pipeline.push(std::mem::take(&mut current_stage));
+            }
+            '&' => {
+                if chars.peek().is_some_and(|&(_, next)| next == '&') {
+                    chars.next();
+                    flush_word(
+                        &mut current_stage,
+                        &mut current_word,
+                        &mut current_has_unquoted_redir,
+                        &mut in_word,
+                    );
+                    if current_stage.is_empty() {
+                        return false;
+                    }
+                    current_pipeline.push(std::mem::take(&mut current_stage));
+                    and_units.push(std::mem::take(&mut current_pipeline));
+                } else if current_word.ends_with('>') {
+                    // Redirection like `2>&1` or `>&2`.
+                    current_word.push(ch);
+                    current_has_unquoted_redir = true;
+                    in_word = true;
+                } else {
+                    return false;
+                }
+            }
+            '>' | '<' => {
+                current_word.push(ch);
+                current_has_unquoted_redir = true;
+                in_word = true;
+            }
+            c if c.is_whitespace() => {
+                flush_word(
+                    &mut current_stage,
+                    &mut current_word,
+                    &mut current_has_unquoted_redir,
+                    &mut in_word,
+                );
+            }
+            _ => {
+                current_word.push(ch);
+                in_word = true;
+            }
+        }
+    }
+
+    if in_single || in_double || escaped {
+        return false;
+    }
+
+    flush_word(
+        &mut current_stage,
+        &mut current_word,
+        &mut current_has_unquoted_redir,
+        &mut in_word,
+    );
+    if !current_stage.is_empty() {
+        current_pipeline.push(current_stage);
+    } else if !current_pipeline.is_empty() {
+        // Trailing `|` with nothing after it.
+        return false;
+    }
+    if !current_pipeline.is_empty() {
+        and_units.push(current_pipeline);
+    }
+
+    // Any non-empty, non-comment line after newline is another command.
+    if let Some(rest) = after_first_newline {
+        if rest.lines().any(|line| {
+            let t = line.trim();
+            !t.is_empty() && !t.starts_with('#')
+        }) {
+            return false;
+        }
+    }
+
+    if and_units.is_empty() {
+        return false;
+    }
+
+    // Strip any leading simple `cd ...` units; reject any other leading unit.
+    let mut non_cd = and_units.iter().skip_while(|pipeline| {
+        pipeline.len() == 1
+            && pipeline[0]
+                .iter()
+                .find(|tok| !is_shell_env_assignment(&tok.text))
+                .is_some_and(|tok| tok.text == "cd")
+    });
+    let Some(target_pipeline) = non_cd.next() else {
+        return false;
+    };
+    // Must NOT be chained with any other commands after the grep pipeline.
+    if non_cd.next().is_some() {
+        return false;
+    }
+
+    // Allow at most one optional trailing pipe stage (`head` or `tail`).
+    if target_pipeline.is_empty() || target_pipeline.len() > 2 {
+        return false;
+    }
+    if let Some(pipe_stage) = target_pipeline.get(1) {
+        if pipe_stage.iter().any(|tok| {
+            tok.has_unquoted_redir && tok.text != "2>/dev/null" && tok.text != "2>&1"
+        }) {
+            return false;
+        }
+        let Some(pipe_cmd) = pipe_stage
+            .iter()
+            .find(|tok| {
+                !is_shell_env_assignment(&tok.text)
+                    && !matches!(tok.text.as_str(), "env" | "command")
+            })
+            .map(|tok| {
+                let base = tok.text.rsplit(['/', '\\']).next().unwrap_or(&tok.text);
+                let lower = base.to_ascii_lowercase();
+                lower.strip_suffix(".exe").unwrap_or(&lower).to_owned()
+            })
+        else {
+            return false;
+        };
+        if !matches!(pipe_cmd.as_str(), "head" | "tail") {
+            return false;
+        }
+    }
+
+    let grep_stage = &target_pipeline[0];
+    let mut idx = 0;
+    while idx < grep_stage.len() {
+        let word = grep_stage[idx].text.as_str();
+        if matches!(word, "env" | "command") || is_shell_env_assignment(word) {
+            idx += 1;
+            continue;
+        }
+        break;
+    }
+    let Some(cmd_tok) = grep_stage.get(idx) else {
+        return false;
+    };
+    if cmd_tok.has_unquoted_redir {
+        return false;
+    }
+    let cmd_base = cmd_tok
+        .text
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&cmd_tok.text)
+        .to_ascii_lowercase();
+    let cmd_stem = cmd_base.strip_suffix(".exe").unwrap_or(&cmd_base);
+    if !matches!(cmd_stem, "grep" | "egrep" | "fgrep" | "rg") {
+        return false;
+    }
+
+    let mut after_double_dash = false;
+    let mut expect_option_arg = false;
+    let mut has_explicit_pattern = false;
+    let mut positional_count = 0usize;
+    let mut i = idx + 1;
+    while i < grep_stage.len() {
+        let tok = &grep_stage[i];
+        let arg = tok.text.as_str();
+
+        if tok.has_unquoted_redir {
+            if arg == "2>/dev/null" || arg == "2>&1" {
+                i += 1;
+                continue;
+            }
+            if arg == "2>"
+                && grep_stage
+                    .get(i + 1)
+                    .is_some_and(|next| next.text == "/dev/null")
+            {
+                i += 2;
+                continue;
+            }
+            return false;
+        }
+
+        if expect_option_arg {
+            expect_option_arg = false;
+            i += 1;
+            continue;
+        }
+
+        if after_double_dash {
+            positional_count += 1;
+            i += 1;
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            i += 1;
+            continue;
+        }
+
+        if arg.starts_with("--") {
+            let flag_name = arg.split_once('=').map_or(arg, |(name, _)| name);
+            if matches!(
+                flag_name,
+                "--invert-match"
+                    | "--file"
+                    | "--files-without-match"
+                    | "--perl-regexp"
+                    | "--pcre2"
+                    | "--null-data"
+                    | "--quiet"
+                    | "--silent"
+            ) {
+                return false;
+            }
+            if flag_name == "--regexp" {
+                has_explicit_pattern = true;
+                if !arg.contains('=') {
+                    expect_option_arg = true;
+                }
+            } else if !arg.contains('=')
+                && matches!(
+                    flag_name,
+                    "--include"
+                        | "--exclude"
+                        | "--exclude-dir"
+                        | "--exclude-from"
+                        | "--max-count"
+                        | "--after-context"
+                        | "--before-context"
+                        | "--context"
+                        | "--glob"
+                        | "--iglob"
+                        | "--type"
+                        | "--type-not"
+                        | "--color"
+                        | "--colour"
+                        | "--label"
+                        | "--binary-files"
+                        | "--directories"
+                        | "--devices"
+                        | "--max-depth"
+                        | "--max-filesize"
+                        | "--encoding"
+                        | "--sort"
+                        | "--sortr"
+                )
+            {
+                expect_option_arg = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        if arg.starts_with('-') && arg.len() > 1 {
+            let mut chars = arg[1..].chars().peekable();
+            while let Some(ch) = chars.next() {
+                if matches!(ch, 'v' | 'f' | 'L' | 'P' | 'z' | 'q') {
+                    return false;
+                }
+                if matches!(ch, 'e' | 'm' | 'A' | 'B' | 'C' | 'd' | 'D' | 'g' | 't' | 'T' | 'M' | 'j') {
+                    if ch == 'e' {
+                        has_explicit_pattern = true;
+                    }
+                    if chars.peek().is_none() {
+                        expect_option_arg = true;
+                    }
+                    // Remaining characters in this short-option cluster are the option's value.
+                    break;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        positional_count += 1;
+        i += 1;
+    }
+
+    if expect_option_arg {
+        return false;
+    }
+
+    if has_explicit_pattern {
+        positional_count <= 1
+    } else {
+        (1..=2).contains(&positional_count)
     }
 }
 
@@ -9712,10 +10234,10 @@ mod shell_state_input_tests {
 mod bash_coaching_tests {
     use super::{
         extract_redundant_cd_cwd, format_redundant_cd_coaching, has_foreground_sleep_command,
-        has_wrapped_powershell_command, is_foreground_bash_call,
+        has_wrapped_powershell_command, is_foreground_bash_call, is_standalone_grep_command,
         is_standalone_inline_python_command, BashCoachingState, BASH_COACHING_COOLDOWN_TURNS,
         FOREGROUND_SLEEP_COACHING_TEXT, INLINE_PYTHON_COACHING_TEXT,
-        WRAPPED_POWERSHELL_COACHING_TEXT,
+        STANDALONE_GREP_COACHING_TEXT, WRAPPED_POWERSHELL_COACHING_TEXT,
     };
     use serde_json::json;
 
@@ -9754,7 +10276,7 @@ mod bash_coaching_tests {
 
         let mut state = BashCoachingState::default();
         let reminder = state
-            .build_turn_reminder(Some("/workspace/app"), false, 0, false, 0)
+            .build_turn_reminder(Some("/workspace/app"), false, 0, false, 0, 0, false)
             .expect("redundant cd reminder");
         assert_eq!(
             reminder,
@@ -9842,28 +10364,36 @@ mod bash_coaching_tests {
         // Unavailable Python tool never triggers (even across repeated calls)
         let mut unavailable_state = BashCoachingState::default();
         assert_eq!(
-            unavailable_state.build_turn_reminder(None, false, 1, false, 0),
+            unavailable_state.build_turn_reminder(None, false, 1, false, 0, 0, false),
             None
         );
         assert_eq!(
-            unavailable_state.build_turn_reminder(None, false, 1, false, 0),
+            unavailable_state.build_turn_reminder(None, false, 1, false, 0, 0, false),
             None
         );
 
         // Available Python tool: 1st occurrence does not trigger; 2nd triggers; then 4-turn cooldown
         let mut state = BashCoachingState::default();
-        assert_eq!(state.build_turn_reminder(None, false, 1, true, 0), None);
+        assert_eq!(
+            state.build_turn_reminder(None, false, 1, true, 0, 0, false),
+            None
+        );
         let second = state
-            .build_turn_reminder(None, false, 1, true, 0)
+            .build_turn_reminder(None, false, 1, true, 0, 0, false)
             .expect("inline python reminder on 2nd occurrence");
         assert_eq!(
             second,
             format!("<system-reminder>\n{INLINE_PYTHON_COACHING_TEXT}\n</system-reminder>")
         );
         for _ in 0..BASH_COACHING_COOLDOWN_TURNS {
-            assert_eq!(state.build_turn_reminder(None, false, 1, true, 0), None);
+            assert_eq!(
+                state.build_turn_reminder(None, false, 1, true, 0, 0, false),
+                None
+            );
         }
-        assert!(state.build_turn_reminder(None, false, 1, true, 0).is_some());
+        assert!(state
+            .build_turn_reminder(None, false, 1, true, 0, 0, false)
+            .is_some());
     }
 
     #[test]
@@ -9905,18 +10435,106 @@ mod bash_coaching_tests {
 
         // 1st occurrence does not trigger; 2nd triggers; then 4-turn cooldown
         let mut state = BashCoachingState::default();
-        assert_eq!(state.build_turn_reminder(None, false, 0, false, 1), None);
+        assert_eq!(
+            state.build_turn_reminder(None, false, 0, false, 1, 0, false),
+            None
+        );
         let second = state
-            .build_turn_reminder(None, false, 0, false, 1)
+            .build_turn_reminder(None, false, 0, false, 1, 0, false)
             .expect("wrapped powershell reminder on 2nd occurrence");
         assert_eq!(
             second,
             format!("<system-reminder>\n{WRAPPED_POWERSHELL_COACHING_TEXT}\n</system-reminder>")
         );
         for _ in 0..BASH_COACHING_COOLDOWN_TURNS {
-            assert_eq!(state.build_turn_reminder(None, false, 0, false, 1), None);
+            assert_eq!(
+                state.build_turn_reminder(None, false, 0, false, 1, 0, false),
+                None
+            );
         }
-        assert!(state.build_turn_reminder(None, false, 0, false, 1).is_some());
+        assert!(state
+            .build_turn_reminder(None, false, 0, false, 1, 0, false)
+            .is_some());
+    }
+
+    #[test]
+    fn standalone_grep_coaching_triggers_on_second_call_without_false_positives() {
+        // True positives
+        assert!(is_standalone_grep_command(
+            "grep -rn \"foo\" src | head -20"
+        ));
+        assert!(is_standalone_grep_command(
+            "grep -rln \"bar\" HuLa --include=*.ts --include=*.json --exclude-dir=node_modules | head -20"
+        ));
+        assert!(is_standalone_grep_command(
+            "cd HuLa && grep -rni \"baz\" src/file.sql | head -20"
+        ));
+        assert!(is_standalone_grep_command("rg -n \"qux\" src"));
+        assert!(is_standalone_grep_command(
+            "egrep -rn \"foo|bar\" src 2>/dev/null | tail -n 10"
+        ));
+        assert!(is_standalone_grep_command("grep -rn \"a > b\" src"));
+        assert!(is_standalone_grep_command("grep -e \"foo\" -e \"bar\" src"));
+
+        // False positives: loops, non-head/tail pipes, multi-path, chaining, unsupported flags, non-grep
+        assert!(!is_standalone_grep_command(
+            "for f in a b; do grep foo $f; done"
+        ));
+        assert!(!is_standalone_grep_command(
+            "grep -rn foo src | grep -vi bar"
+        ));
+        assert!(!is_standalone_grep_command("grep -rn foo a.vue b.vue"));
+        assert!(!is_standalone_grep_command("grep -rn foo src; ls src"));
+        assert!(!is_standalone_grep_command("grep -rn foo src && biome check"));
+        assert!(!is_standalone_grep_command("grep -rnv foo src"));
+        assert!(!is_standalone_grep_command("grep -f patterns.txt src"));
+        assert!(!is_standalone_grep_command("echo \"grep foo bar\""));
+        assert!(!is_standalone_grep_command("grep -rn foo src | wc -l"));
+        assert!(!is_standalone_grep_command(
+            "grep -rn foo src | head -20 | tail -5"
+        ));
+        assert!(!is_standalone_grep_command("grep --invert-match foo src"));
+        assert!(!is_standalone_grep_command("grep -L foo src"));
+        assert!(!is_standalone_grep_command("grep -P \"foo(?=bar)\" src"));
+        assert!(!is_standalone_grep_command("grep -z foo src"));
+        assert!(!is_standalone_grep_command("grep -q foo src"));
+        assert!(!is_standalone_grep_command("grep -rn foo src > out.txt"));
+        assert!(!is_standalone_grep_command("grep -rn foo src || true"));
+        assert!(!is_standalone_grep_command("grep -rn foo src\nls src"));
+
+        // Unavailable Grep tool never triggers (even across repeated calls)
+        let mut unavailable_state = BashCoachingState::default();
+        assert_eq!(
+            unavailable_state.build_turn_reminder(None, false, 0, false, 0, 1, false),
+            None
+        );
+        assert_eq!(
+            unavailable_state.build_turn_reminder(None, false, 0, false, 0, 1, false),
+            None
+        );
+
+        // Available Grep tool: 1st occurrence does not trigger; 2nd triggers; then 4-turn cooldown
+        let mut state = BashCoachingState::default();
+        assert_eq!(
+            state.build_turn_reminder(None, false, 0, false, 0, 1, true),
+            None
+        );
+        let second = state
+            .build_turn_reminder(None, false, 0, false, 0, 1, true)
+            .expect("standalone grep reminder on 2nd occurrence");
+        assert_eq!(
+            second,
+            format!("<system-reminder>\n{STANDALONE_GREP_COACHING_TEXT}\n</system-reminder>")
+        );
+        for _ in 0..BASH_COACHING_COOLDOWN_TURNS {
+            assert_eq!(
+                state.build_turn_reminder(None, false, 0, false, 0, 1, true),
+                None
+            );
+        }
+        assert!(state
+            .build_turn_reminder(None, false, 0, false, 0, 1, true)
+            .is_some());
     }
 
     #[test]
@@ -9926,7 +10544,7 @@ mod bash_coaching_tests {
 
         // Both triggers in the same turn merge into one <system-reminder>.
         let combined = state
-            .build_turn_reminder(Some("/repo"), true, 0, false, 0)
+            .build_turn_reminder(Some("/repo"), true, 0, false, 0, 0, false)
             .expect("combined reminder");
         let expected = format!(
             "<system-reminder>\n{}\n\n{}\n</system-reminder>",
@@ -9939,33 +10557,37 @@ mod bash_coaching_tests {
 
         // Next 4 turns are cooled down for both categories.
         for _ in 0..BASH_COACHING_COOLDOWN_TURNS {
-            assert_eq!(state.build_turn_reminder(Some("/repo"), true, 0, false, 0), None);
+            assert_eq!(
+                state.build_turn_reminder(Some("/repo"), true, 0, false, 0, 0, false),
+                None
+            );
         }
 
         // Turn 5: only redundant_cd triggers -> arms only redundant_cd cooldown.
         let cd_only = state
-            .build_turn_reminder(Some("/repo"), false, 0, false, 0)
+            .build_turn_reminder(Some("/repo"), false, 0, false, 0, 0, false)
             .expect("cd reminder after cooldown");
         assert!(cd_only.contains("ALREADY in `/repo`"));
         assert!(!cd_only.contains("Do NOT poll with foreground `sleep`"));
 
         // Next turn: redundant_cd is suppressed, but foreground_sleep fires independently.
         let sleep_only = state
-            .build_turn_reminder(Some("/repo"), true, 0, false, 0)
+            .build_turn_reminder(Some("/repo"), true, 0, false, 0, 0, false)
             .expect("independent sleep reminder");
         assert!(!sleep_only.contains("ALREADY in `/repo`"));
         assert!(sleep_only.contains(FOREGROUND_SLEEP_COACHING_TEXT));
 
         // Reset (e.g. on compaction) clears all cooldowns immediately.
         state.reset();
-        let all_four = state
-            .build_turn_reminder(Some("/repo"), true, 2, true, 2)
-            .expect("all four notices merged");
-        assert!(all_four.contains("ALREADY in `/repo`"));
-        assert!(all_four.contains(FOREGROUND_SLEEP_COACHING_TEXT));
-        assert!(all_four.contains(INLINE_PYTHON_COACHING_TEXT));
-        assert!(all_four.contains(WRAPPED_POWERSHELL_COACHING_TEXT));
-        assert_eq!(all_four.matches("<system-reminder>").count(), 1);
+        let all_five = state
+            .build_turn_reminder(Some("/repo"), true, 2, true, 2, 2, true)
+            .expect("all five notices merged");
+        assert!(all_five.contains("ALREADY in `/repo`"));
+        assert!(all_five.contains(FOREGROUND_SLEEP_COACHING_TEXT));
+        assert!(all_five.contains(INLINE_PYTHON_COACHING_TEXT));
+        assert!(all_five.contains(WRAPPED_POWERSHELL_COACHING_TEXT));
+        assert!(all_five.contains(STANDALONE_GREP_COACHING_TEXT));
+        assert_eq!(all_five.matches("<system-reminder>").count(), 1);
     }
 }
 

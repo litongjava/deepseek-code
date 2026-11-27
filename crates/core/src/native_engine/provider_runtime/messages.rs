@@ -71,7 +71,9 @@ pub(in crate::native_engine) fn request(
             input.insert(0, json!({"role":"system","content":system}));
         }
         let mut body = json!({"model":provider.model.id,"messages":input,"stream":true,"stream_options":{"include_usage":true}});
-        if crate::performance::accepts_mid_system(&provider.provider.base_url) { crate::performance::move_system_tail_chat(&mut body); }
+        if crate::performance::accepts_mid_system(&provider.provider.base_url) {
+            crate::performance::move_system_tail_chat(&mut body);
+        }
         let field = metadata["compat"]["maxTokensField"]
             .as_str()
             .unwrap_or("max_tokens");
@@ -226,7 +228,12 @@ pub(in crate::native_engine) fn conversation_input(
             }
         }
         // Replay exact provider blocks, including encrypted reasoning/signatures, within a tool loop.
-        if message.role == "assistant" || message.provider_content.as_ref().is_some_and(|v| v["compaction"] == true) {
+        if message.role == "assistant"
+            || message
+                .provider_content
+                .as_ref()
+                .is_some_and(|v| v["compaction"] == true)
+        {
             if let Some(native) = &message.provider_content {
                 if native["api"] == api {
                     if let Some(items) = native["items"].as_array() {
@@ -234,24 +241,34 @@ pub(in crate::native_engine) fn conversation_input(
                         // a session may switch either between turns. Unknown issuers are foreign.
                         let issued_here = native["provider"].as_str() == Some(provider_id)
                             && native["model"].as_str() == Some(model_id);
-                        let mut items = if native["compaction"] == true || issued_here {
+                        if api == "openai-responses" {
+                            // Compact windows are replayed verbatim. Other stateless requests
+                            // can replay only native reasoning with self-contained opaque state.
+                            let window = native["compaction"] == true;
+                            input.extend(
+                                items
+                                    .iter()
+                                    .filter(|item| {
+                                        window
+                                            || item["type"] != "reasoning"
+                                            || (issued_here
+                                                && item["encrypted_content"]
+                                                    .as_str()
+                                                    .is_some_and(|s| !s.trim().is_empty()))
+                                    })
+                                    .cloned(),
+                            );
+                            if window {
+                                compact_prefix = input.len();
+                            }
+                            continue;
+                        }
+                        let items = if native["compaction"] == true || issued_here {
                             items.clone()
                         } else {
                             foreign_items(api, items)
                         };
-                        if api == "openai-responses" {
-                            if let Some(thinking) = message.reasoning_content.as_deref().filter(|text| !text.trim().is_empty()) {
-                                if !has_reasoning_text(&items) {
-                                    if let Some(slot) = items.iter_mut().find(|item| item["type"] == "reasoning") {
-                                        slot["summary"] = json!([{"type": "summary_text", "text": thinking}]);
-                                    } else {
-                                        items.insert(0, reasoning_item(thinking));
-                                    }
-                                }
-                            }
-                            input.extend(items);
-                            if native["compaction"] == true { compact_prefix = input.len(); }
-                        } else if api == "google-generative-ai" {
+                        if api == "google-generative-ai" {
                             input.push(json!({"role":"model","parts":items}));
                         } else {
                             input.push(json!({"role":"assistant","content":items}));
@@ -278,11 +295,6 @@ pub(in crate::native_engine) fn conversation_input(
             continue;
         }
         let mut content = parts(&message.content, api, message.role == "assistant")?;
-        if api == "openai-responses" && message.role == "assistant" {
-            if let Some(thinking) = message.reasoning_content.as_deref().filter(|text| !text.trim().is_empty()) {
-                input.push(reasoning_item(thinking));
-            }
-        }
         if let Some(calls) = &message.tool_calls {
             for call in calls {
                 if api == "openai-responses" {
@@ -318,42 +330,11 @@ pub(in crate::native_engine) fn conversation_input(
     Ok(input)
 }
 
-/// Plain thinking is replayed as a readable summary item, never as opaque state.
-fn reasoning_item(text: &str) -> Value {
-    json!({"type": "reasoning", "id": format!("rs_{}", uuid::Uuid::new_v4()), "summary": [{"type": "summary_text", "text": text}]})
-}
-
-fn has_reasoning_text(items: &[Value]) -> bool {
-    items.iter().any(|item| {
-        item["type"] == "reasoning"
-            && ["summary", "content"].iter().any(|key| {
-                item[*key].as_array().is_some_and(|parts| {
-                    parts
-                        .iter()
-                        .any(|part| part["text"].as_str().is_some_and(|text| !text.trim().is_empty()))
-                })
-            })
-    })
-}
-
-/// Keeps readable summaries but drops opaque state issued by another account or model.
+/// Drops opaque state issued by another provider or model.
 fn foreign_items(api: &str, items: &[Value]) -> Vec<Value> {
     let mut kept = Vec::with_capacity(items.len());
     for item in items {
         match api {
-            "openai-responses" => {
-                if item["type"] == "reasoning" {
-                    let mut item = item.clone();
-                    if let Some(object) = item.as_object_mut() {
-                        object.remove("encrypted_content");
-                    }
-                    if reasoning_text(&item) {
-                        kept.push(item);
-                    }
-                    continue;
-                }
-                kept.push(item.clone());
-            }
             "anthropic-messages" => {
                 if matches!(
                     item["type"].as_str(),
@@ -383,16 +364,6 @@ fn foreign_items(api: &str, items: &[Value]) -> Vec<Value> {
         }
     }
     kept
-}
-
-fn reasoning_text(item: &Value) -> bool {
-    ["summary", "content"].iter().any(|key| {
-        item[*key].as_array().is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|part| part["text"].as_str().is_some_and(|text| !text.trim().is_empty()))
-        })
-    })
 }
 
 fn bedrock_input(messages: Vec<OpenAIMessage>) -> Result<Vec<Value>> {

@@ -4,9 +4,13 @@
 //! whole turn and publishes bounded intermediate assistant/tool rows. Another
 //! terminal may resume the same session; it must show that progress without
 //! taking the lease, submitting input, running tools, or cancelling the owner.
+//!
+//! The observer reports semantic updates. The prompt editor renders them with
+//! the same tool blocks, diff previews, Markdown and copy bindings a normal
+//! foreground turn uses.
 use crate::session::Session;
-use deepseek_code_core::db::session_store::{SessionAccess,SessionRepository};
 use anyhow::Result;
+use deepseek_code_core::db::session_store::{SessionAccess, SessionRepository};
 use deepseek_code_core::db::{message_repo, turn_repo};
 #[cfg(test)]
 use std::sync::Arc;
@@ -32,6 +36,40 @@ pub enum State {
     Finished,
 }
 
+/// One finished tool call. The editor turns this into the same expanded tool
+/// block a foreground turn writes, including `#N`, the diff preview, the result
+/// summary, elapsed time and copy bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUpdate {
+    /// Assistant message id whose text preceded this call.
+    pub segment: String,
+    pub number: usize,
+    pub name: String,
+    pub input: Option<String>,
+    pub output: String,
+    pub is_error: bool,
+    pub elapsed: Option<Duration>,
+}
+
+/// What the editor must render next. Updates are ordered: assistant text and
+/// tools appear in publication order, and `Finish` closes any open Markdown
+/// block before the terminal notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    Text { segment: String, lines: Vec<String> },
+    Tool(ToolUpdate),
+    Notice(String),
+    Finish,
+}
+
+#[derive(Debug)]
+pub struct PollResult {
+    pub state: State,
+    pub updates: Vec<Update>,
+    /// Currently executing tool labels, shown in the pinned read-only status.
+    pub activity: Option<String>,
+}
+
 /// Per assistant segment. A turn may span several segments when a recovery or
 /// a compaction replaces the answer, and each keeps its own cursor so polling
 /// never replays an older segment.
@@ -41,6 +79,9 @@ struct Cursor {
     pending: String,
     /// Tool call id → whether its result has been shown.
     tools: BTreeMap<String, bool>,
+    /// Calls still executing, kept with their transcript number for the
+    /// "No result recorded" row if the turn ends first.
+    running: BTreeMap<String, (message_repo::ToolCallRow, usize)>,
 }
 
 #[derive(Default)]
@@ -53,6 +94,7 @@ pub struct Observer {
     turn: Option<String>,
     segments: BTreeMap<String, Cursor>,
     idle_since: Option<Instant>,
+    activity: Option<String>,
 }
 
 /// Whether some process holds execution ownership, whether a managed worker or
@@ -100,15 +142,54 @@ impl Observer {
 
     fn preannounce_at(&mut self, db: &impl SessionAccess, session_id: &str) -> Result<()> {
         let selected = db.select_session(session_id)?;
-        // The banner starts a fresh view: progress published before it is
-        // shown once after it, not replayed from an older cursor set.
-        self.reset(Some(selected.observation_identity().into()));
+        let identity = selected.observation_identity();
+        // A different session starts a fresh view. The same session may already
+        // have cursors seeded from a resumed screen; keep them so the banner
+        // does not replay what the resume already rendered.
+        if self.session.as_deref() != Some(identity) {
+            self.reset(Some(identity.into()));
+        }
         self.preannounced = true;
         Ok(())
     }
 
-    pub fn poll(&mut self, session: &Session) -> Result<(State, Vec<String>)> {
-        self.poll_at(&session.paths.data_dir, &session.store.db, &session.id)
+    /// Takes over cursors from the rich history `show_resumed` rendered. The
+    /// rendered text and completed tools are not repeated; later publications
+    /// continue after them.
+    pub fn seed_from_resumed(&mut self, view: crate::repl::ResumedView) {
+        self.reset(Some(view.identity));
+        self.segments = view
+            .messages
+            .into_iter()
+            .map(|(id, message)| {
+                (
+                    id,
+                    Cursor {
+                        text_seen: message.text_seen,
+                        pending: String::new(),
+                        tools: message
+                            .tools
+                            .into_iter()
+                            .map(|tool| (tool, true))
+                            .collect(),
+                        running: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect();
+    }
+
+    pub fn activity(&self) -> Option<&str> {
+        self.activity.as_deref()
+    }
+
+    pub fn poll(&mut self, session: &Session) -> Result<PollResult> {
+        self.poll_at(
+            &session.paths.data_dir,
+            &session.store.db,
+            &session.id,
+            Some(&session.workspace),
+        )
     }
 
     /// Polls the published state. Never takes the lease, submits input, answers
@@ -118,10 +199,11 @@ impl Observer {
         root: &Path,
         db: &impl SessionAccess,
         session_id: &str,
-    ) -> Result<(State, Vec<String>)> {
-        let mut lines = Vec::new();
+        workspace: Option<&Path>,
+    ) -> Result<PollResult> {
+        let mut updates = Vec::new();
         // A resumed different session starts from a clean view.
-        let selected=db.select_session(session_id)?;
+        let selected = db.select_session(session_id)?;
         if self.session.as_deref() != Some(selected.observation_identity()) {
             self.reset(Some(selected.observation_identity().into()));
         }
@@ -132,7 +214,7 @@ impl Observer {
                 self.announced = true;
                 self.turn = turn.as_ref().map(|record| record.turn_id.clone());
                 if !self.preannounced {
-                    lines.push(running_notice_for(turn.as_ref()));
+                    updates.push(Update::Notice(running_notice_for(turn.as_ref())));
                 }
             }
             if let Some(turn) = turn {
@@ -142,20 +224,35 @@ impl Observer {
                     self.turn = Some(turn.turn_id.clone());
                     self.segments.clear();
                 }
-                self.render(&selected, &turn.turn_id, &mut lines)?;
+                self.render(&selected, &turn.turn_id, workspace, &mut updates)?;
             }
-            return Ok((State::Running, lines));
+            return Ok(PollResult {
+                state: State::Running,
+                updates,
+                activity: self.activity.clone(),
+            });
         }
         if !self.announced {
-            return Ok((State::Idle, lines));
+            self.activity = None;
+            return Ok(PollResult {
+                state: State::Idle,
+                updates,
+                activity: None,
+            });
         }
         // Drain whatever the owner published between the last active poll and
-        // its lease disappearing; those final lines are otherwise lost.
+        // its lease disappearing; those final lines are otherwise lost. The
+        // stream is not finished yet: within the settle window the owner may
+        // still publish the real tool result and the completed turn.
         if let Some(turn) = self.turn.clone() {
-            self.render(&selected, &turn, &mut lines)?;
-            self.flush_all(&mut lines);
+            self.render(&selected, &turn, workspace, &mut updates)?;
         }
-        let turn=self.turn.as_deref().map(|id|selected.observed_turn(id)).transpose()?.flatten();
+        let turn = self
+            .turn
+            .as_deref()
+            .map(|id| selected.observed_turn(id))
+            .transpose()?
+            .flatten();
         let running = turn
             .as_ref()
             .is_some_and(|record| record.status == turn_repo::TurnStatus::Running);
@@ -165,22 +262,43 @@ impl Observer {
             // is still alive is never marked interrupted.
             let since = *self.idle_since.get_or_insert_with(Instant::now);
             if since.elapsed() < SETTLE_GRACE {
-                return Ok((State::Running, lines));
+                return Ok(PollResult {
+                    state: State::Running,
+                    updates,
+                    activity: self.activity.clone(),
+                });
             }
             match selected.settle_observed_turn(root).ok().flatten() {
                 Some(settled) => finished_notice(Some(&settled)),
-                None => return Ok((State::Running, lines)),
+                None => {
+                    return Ok(PollResult {
+                        state: State::Running,
+                        updates,
+                        activity: self.activity.clone(),
+                    })
+                }
             }
         } else {
             finished_notice(turn.as_ref())
         };
+        // The turn is truly over. Only now close a partial line and account
+        // for calls that never recorded a result; doing this inside the grace
+        // period both preempts a result that is about to land and repeats the
+        // placeholder on every poll while the owner is gone.
+        self.finish_segments(&mut updates);
         self.announced = false;
         self.preannounced = false;
         self.turn = None;
         self.segments.clear();
         self.idle_since = None;
-        lines.push(notice);
-        Ok((State::Finished, lines))
+        self.activity = None;
+        updates.push(Update::Finish);
+        updates.push(Update::Notice(notice));
+        Ok(PollResult {
+            state: State::Finished,
+            updates,
+            activity: None,
+        })
     }
 
     fn reset(&mut self, session: Option<String>) {
@@ -190,88 +308,133 @@ impl Observer {
         self.turn = None;
         self.segments.clear();
         self.idle_since = None;
+        self.activity = None;
     }
 
     fn render(
         &mut self,
         selected: &SessionRepository<'_>,
         turn_id: &str,
-        lines: &mut Vec<String>,
+        workspace: Option<&Path>,
+        updates: &mut Vec<Update>,
     ) -> Result<()> {
         let segments = selected.observed_segments(turn_id)?;
         let mut present = BTreeSet::new();
+        let mut running = Vec::new();
         for (row, tools) in segments {
             present.insert(row.id.clone());
-            self.segments
-                .entry(row.id.clone())
-                .or_default()
-                .refresh(&row, &tools, lines);
+            let cursor = self.segments.entry(row.id.clone()).or_default();
+            cursor.refresh_text(&row, updates);
+            for (tool, number) in tools {
+                cursor.refresh_tool(
+                    &row.id,
+                    tool,
+                    number,
+                    selected,
+                    workspace,
+                    updates,
+                    &mut running,
+                )?;
+            }
         }
         // A recovery removes a segment; its cursor would only replay if the id
         // ever came back.
         self.segments.retain(|id, _| present.contains(id));
+        self.activity = (!running.is_empty()).then(|| {
+            let mut labels: Vec<String> = running.iter().take(3).cloned().collect();
+            if running.len() > 3 {
+                labels.push(format!("+{} more", running.len() - 3));
+            }
+            format!("Running {}", labels.join(" · "))
+        });
         Ok(())
     }
 
-    fn flush_all(&mut self, lines: &mut Vec<String>) {
-        for cursor in self.segments.values_mut() {
-            cursor.flush(lines, usize::MAX);
+    /// Closes every pending text line and submits unfinished calls as "No
+    /// result recorded", exactly as a saved history renders them.
+    fn finish_segments(&mut self, updates: &mut Vec<Update>) {
+        for (segment, cursor) in self.segments.iter_mut() {
+            cursor.flush_all(segment, updates);
+            for (id, (tool, number)) in std::mem::take(&mut cursor.running) {
+                cursor.tools.insert(id, true);
+                updates.push(Update::Tool(ToolUpdate {
+                    segment: segment.clone(),
+                    number,
+                    name: tool.name,
+                    input: tool.input,
+                    output: "No result recorded".into(),
+                    is_error: false,
+                    elapsed: None,
+                }));
+            }
         }
     }
 }
 
 impl Cursor {
-    fn refresh(
-        &mut self,
-        row: &message_repo::MessageRow,
-        tools: &[message_repo::ToolCallRow],
-        lines: &mut Vec<String>,
-    ) {
+    fn refresh_text(&mut self, row: &message_repo::MessageRow, updates: &mut Vec<Update>) {
         // The owner rewrites the row with the same accumulated prefix as the
         // turn grows, so only new bytes are public progress.
         if row.content.len() > self.text_seen && row.content.is_char_boundary(self.text_seen) {
             self.pending.push_str(&row.content[self.text_seen..]);
             self.text_seen = row.content.len();
         }
-        self.flush(lines, 40);
-        for tool in tools {
-            match self.tools.get(&tool.id).copied() {
-                None => {
-                    lines.push(tool_line(tool));
-                    match &tool.output {
-                        Some(output) => {
-                            lines.push(tool_result_line(tool, output));
-                            self.tools.insert(tool.id.clone(), true);
-                        }
-                        None => {
-                            self.tools.insert(tool.id.clone(), false);
-                        }
-                    }
-                }
-                Some(false) => {
-                    if let Some(output) = &tool.output {
-                        lines.push(tool_result_line(tool, output));
-                        self.tools.insert(tool.id.clone(), true);
-                    }
-                }
-                Some(true) => {}
+        self.flush_limited(&row.id, updates, 40);
+    }
+
+    fn refresh_tool(
+        &mut self,
+        segment: &str,
+        tool: message_repo::ToolCallRow,
+        number: usize,
+        selected: &SessionRepository<'_>,
+        workspace: Option<&Path>,
+        updates: &mut Vec<Update>,
+        running: &mut Vec<String>,
+    ) -> Result<()> {
+        if self.tools.get(&tool.id).copied() == Some(true) {
+            self.running.remove(&tool.id);
+            return Ok(());
+        }
+        match tool.output.as_deref() {
+            Some(output) => {
+                let elapsed = selected
+                    .observed_tool_duration(&tool.id)?
+                    .map(Duration::from_millis);
+                updates.push(Update::Tool(ToolUpdate {
+                    segment: segment.to_owned(),
+                    number,
+                    name: tool.name.clone(),
+                    input: tool.input.clone(),
+                    output: output.to_owned(),
+                    is_error: tool.is_error,
+                    elapsed,
+                }));
+                self.tools.insert(tool.id.clone(), true);
+                self.running.remove(&tool.id);
+            }
+            None => {
+                self.tools.entry(tool.id.clone()).or_insert(false);
+                let label = crate::terminal::tool_view::label(&tool.name, &tool_input(&tool), workspace);
+                running.push(label);
+                self.running.insert(tool.id.clone(), (tool, number));
             }
         }
+        Ok(())
     }
 
     /// Emits complete lines, then chunks of an unterminated one so long text
     /// still shows progress instead of being buffered indefinitely.
-    fn flush(&mut self, lines: &mut Vec<String>, limit: usize) {
+    fn flush_limited(&mut self, segment: &str, updates: &mut Vec<Update>, limit: usize) {
+        let mut lines = Vec::new();
         let mut emitted = 0;
         while emitted < limit {
             let Some(index) = self.pending.find('\n') else {
                 break;
             };
             let line: String = self.pending.drain(..=index).collect();
-            let line = line.trim_end();
-            if !line.is_empty() {
-                lines.push(format!("  {line}"));
-            }
+            let line = line.trim_end_matches(['\r', '\n']).to_owned();
+            lines.push(line);
             emitted += 1;
         }
         while emitted < limit && self.pending.chars().count() >= LONG_LINE {
@@ -282,70 +445,38 @@ impl Cursor {
                 .map(|(index, _)| index)
                 .unwrap_or(self.pending.len());
             let chunk: String = self.pending.drain(..cut).collect();
-            let chunk = chunk.trim_end();
-            if !chunk.is_empty() {
-                lines.push(format!("  {chunk}…"));
-            }
+            lines.push(format!("{}…", chunk.trim_end()));
             emitted += 1;
         }
-        if limit == usize::MAX && !self.pending.trim().is_empty() {
-            let line = self.pending.trim_end().to_owned();
-            lines.push(format!("  {line}"));
+        if !lines.is_empty() {
+            updates.push(Update::Text {
+                segment: segment.to_owned(),
+                lines,
+            });
+        }
+    }
+
+    fn flush_all(&mut self, segment: &str, updates: &mut Vec<Update>) {
+        let mut lines = Vec::new();
+        let remainder = self.pending.trim_end().to_owned();
+        if !remainder.is_empty() {
+            lines.push(remainder);
             self.pending.clear();
         }
-    }
-}
-
-/// Settles a turn whose owner vanished. The lease is acquired first, so a live
-/// owner is never marked interrupted, and released immediately after.
-/// A one-line hint from the public tool input; never the whole payload.
-fn tool_hint(input: Option<&str>) -> String {
-    let Some(input) = input else {
-        return String::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
-        return String::new();
-    };
-    for key in [
-        "file_path",
-        "path",
-        "command",
-        "pattern",
-        "url",
-        "description",
-        "prompt",
-    ] {
-        if let Some(text) = value.get(key).and_then(|value| value.as_str()) {
-            let line = text.lines().next().unwrap_or_default();
-            let mut short: String = line.chars().take(80).collect();
-            if line.chars().count() > 80 {
-                short.push_str("...");
-            }
-            return short;
+        if !lines.is_empty() {
+            updates.push(Update::Text {
+                segment: segment.to_owned(),
+                lines,
+            });
         }
     }
-    String::new()
 }
 
-fn tool_line(tool: &message_repo::ToolCallRow) -> String {
-    let hint = tool_hint(tool.input.as_deref());
-    if hint.is_empty() {
-        format!("● {}", tool.name)
-    } else {
-        format!("● {}  {hint}", tool.name)
-    }
-}
-
-fn tool_result_line(tool: &message_repo::ToolCallRow, output: &str) -> String {
-    if tool.is_error {
-        return format!("  ✗ {} · error", tool.name);
-    }
-    let lines = output.lines().count().max(1);
-    format!(
-        "  ✓ {} · ok · {lines} line{}",
-        tool.name,
-        if lines == 1 { "" } else { "s" }
-    )
+fn tool_input(tool: &message_repo::ToolCallRow) -> serde_json::Value {
+    tool.input
+        .as_deref()
+        .and_then(|input| serde_json::from_str(input).ok())
+        .unwrap_or_default()
 }
 
 fn finished_notice(turn: Option<&turn_repo::TurnRecord>) -> String {
@@ -406,6 +537,8 @@ mod tests {
         session: &str,
         message: &str,
         id: &str,
+        name: &str,
+        input: &str,
         output: Option<&str>,
     ) {
         let content = db
@@ -423,8 +556,8 @@ mod tests {
                 &message_repo::ToolCallRow {
                     id: format!("{message}:{id}"),
                     message_id: message.to_owned(),
-                    name: "Read".into(),
-                    input: Some("{\"file_path\":\"fixture.txt\"}".into()),
+                    name: name.into(),
+                    input: Some(input.into()),
                     output: output.map(str::to_owned),
                     is_error: false,
                     sort_order: 0,
@@ -435,6 +568,36 @@ mod tests {
         .unwrap();
     }
 
+    fn text_lines(updates: &[Update]) -> Vec<String> {
+        updates
+            .iter()
+            .flat_map(|update| match update {
+                Update::Text { lines, .. } => lines.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn notices(updates: &[Update]) -> Vec<&str> {
+        updates
+            .iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tools(updates: &[Update]) -> Vec<&ToolUpdate> {
+        updates
+            .iter()
+            .filter_map(|update| match update {
+                Update::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn published_progress_is_rendered_once_and_completion_reports_the_measured_turn() {
         let (temp, db, session_id) = fixture();
@@ -442,20 +605,28 @@ mod tests {
         let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
         let message = timer.ensure_segment().unwrap();
         write_text(&db, &session_id, &message, "first line\nsecond");
-        save_tool(&db, &session_id, &message, "read-1", None);
+        save_tool(&db, &session_id, &message, "read-1", "Read", "{\"file_path\":\"fixture.txt\"}", None);
         // The owner's lease: the observer only probes it.
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
-        assert!(lines[0].contains("still running in another process"));
-        assert!(lines.iter().any(|line| line.contains("first line")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("● Read") && line.contains("fixture.txt")));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
+        assert!(notices(&result.updates)[0].contains("still running in another process"));
+        let text = text_lines(&result.updates);
+        assert!(text.iter().any(|line| line.contains("first line")));
         assert!(
-            !lines.iter().any(|line| line.contains("second")),
+            !text.iter().any(|line| line.contains("second")),
             "partial lines wait"
+        );
+        assert!(
+            tools(&result.updates).is_empty(),
+            "a running call is not written as an orphan header: {:?}",
+            result.updates
+        );
+        assert!(
+            result.activity.as_deref().is_some_and(|activity| activity.contains("Read(fixture.txt)")),
+            "{:?}",
+            result.activity
         );
 
         // Growing text and a finished tool appear on the next poll only.
@@ -465,21 +636,30 @@ mod tests {
             &session_id,
             &message,
             "read-1",
+            "Read",
+            "{\"file_path\":\"fixture.txt\"}",
             Some("fixture contents\n"),
         );
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
-        assert!(lines.iter().any(|line| line.contains("second line")));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
+        let text = text_lines(&result.updates);
+        assert!(text.iter().any(|line| line.contains("second line")));
         assert!(
-            !lines.iter().any(|line| line.contains("first line")),
+            !text.iter().any(|line| line.contains("first line")),
             "already shown"
         );
-        assert!(lines.iter().any(|line| line.contains("✓ Read")));
+        let tools = tools(&result.updates);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "Read");
+        assert_eq!(tools[0].number, 1);
+        assert_eq!(tools[0].output, "fixture contents\n");
+        assert_eq!(tools[0].elapsed, None);
+        assert!(result.activity.is_none(), "the call finished");
 
         // Idle polls repeat nothing.
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
-        assert!(lines.is_empty(), "{lines:?}");
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
 
         // The owner exits: the same poll reports the measured completion once.
         drop(lease);
@@ -493,15 +673,16 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Finished);
-        assert!(lines
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        assert!(result.updates.contains(&Update::Finish));
+        assert!(notices(&result.updates)
             .iter()
             .any(|line| line.contains("Observed turn finished")));
-        assert!(lines[0].contains("2m 8s"));
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Idle);
-        assert!(lines.is_empty(), "a finished observation is not repeated");
+        assert!(notices(&result.updates)[0].contains("2m 8s"));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Idle);
+        assert!(result.updates.is_empty(), "a finished observation is not repeated");
     }
 
     #[test]
@@ -515,36 +696,40 @@ mod tests {
         // The REPL printed observation_banner before the owner's lease was
         // visible. It must not settle that empty view as a finished turn.
         observer.preannounce_at(&db, &session_id).unwrap();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Idle);
-        assert!(lines.is_empty(), "{lines:?}");
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Idle);
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
 
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
         assert!(
-            !lines
+            !notices(&result.updates)
                 .iter()
                 .any(|line| line.contains("still running in another process")),
-            "the caller's banner was repeated: {lines:?}"
+            "the caller's banner was repeated: {:?}",
+            result.updates
         );
-        assert!(lines.iter().any(|line| line.contains("visible progress")));
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert!(lines.is_empty(), "{lines:?}");
+        assert!(text_lines(&result.updates)
+            .iter()
+            .any(|line| line.contains("visible progress")));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
 
         // Completion still reports the measured turn exactly once.
         drop(lease);
         timer.finish(turn_repo::TurnStatus::Completed).unwrap();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Finished);
-        assert!(lines
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        assert!(notices(&result.updates)
             .iter()
             .any(|line| line.contains("Observed turn finished")));
         assert!(
-            !lines
+            !notices(&result.updates)
                 .iter()
                 .any(|line| line.contains("still running in another process")),
-            "{lines:?}"
+            "{:?}",
+            result.updates
         );
     }
 
@@ -555,46 +740,54 @@ mod tests {
         let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
         let first = timer.ensure_segment().unwrap();
         write_text(&db, &session_id, &first, "first segment\n");
-        save_tool(&db, &session_id, &first, "read-1", Some("one\n"));
+        save_tool(&db, &session_id, &first, "read-1", "Read", "{\"file_path\":\"one.txt\"}", Some("one\n"));
         // A recovery replaced the answer with a second segment of the same turn.
         let second = timer.new_segment().unwrap();
         write_text(&db, &session_id, &second, "second segment\n");
-        save_tool(&db, &session_id, &second, "read-2", None);
+        save_tool(&db, &session_id, &second, "read-2", "Read", "{\"file_path\":\"two.txt\"}", None);
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
 
         let mut observer = Observer::default();
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert!(lines.iter().any(|line| line.contains("first segment")));
-        assert!(lines.iter().any(|line| line.contains("✓ Read")));
-        assert!(lines.iter().any(|line| line.contains("second segment")));
-        assert!(lines.iter().any(|line| line.contains("● Read")));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert!(text_lines(&result.updates)
+            .iter()
+            .any(|line| line.contains("first segment")));
+        assert!(text_lines(&result.updates)
+            .iter()
+            .any(|line| line.contains("second segment")));
+        assert_eq!(tools(&result.updates).len(), 1);
+        assert_eq!(tools(&result.updates)[0].number, 1);
+        assert!(result
+            .activity
+            .as_deref()
+            .is_some_and(|activity| activity.contains("Read(two.txt)")));
 
         // Repeated idle polls must not replay either segment.
         for _ in 0..3 {
-            let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-            assert_eq!(state, State::Running);
-            assert!(lines.is_empty(), "replayed: {lines:?}");
+            let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+            assert_eq!(result.state, State::Running);
+            assert!(result.updates.is_empty(), "replayed: {:?}", result.updates);
         }
 
         // New progress in the current segment appears exactly once.
         write_text(&db, &session_id, &second, "second segment\nthird line\n");
-        save_tool(&db, &session_id, &second, "read-2", Some("two\n"));
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        save_tool(&db, &session_id, &second, "read-2", "Read", "{\"file_path\":\"two.txt\"}", Some("two\n"));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
         assert_eq!(
-            lines
+            text_lines(&result.updates)
                 .iter()
                 .filter(|line| line.contains("third line"))
                 .count(),
             1,
-            "{lines:?}"
+            "{:?}",
+            result.updates
         );
-        assert_eq!(
-            lines.iter().filter(|line| line.contains("✓ Read")).count(),
-            1,
-            "{lines:?}"
-        );
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert!(lines.is_empty(), "{lines:?}");
+        let tools = tools(&result.updates);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].number, 2, "numbering follows the saved conversation");
+        assert_eq!(tools[0].output, "two\n");
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
         drop(lease);
     }
 
@@ -607,9 +800,11 @@ mod tests {
         write_text(&db, &session_id, &message, "started\n");
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
-        assert!(lines.iter().any(|line| line.contains("started")));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
+        assert!(text_lines(&result.updates)
+            .iter()
+            .any(|line| line.contains("started")));
 
         // Everything below is written after the last poll that saw a live owner.
         write_text(&db, &session_id, &message, "started\nfinal answer\n");
@@ -618,6 +813,8 @@ mod tests {
             &session_id,
             &message,
             "read-1",
+            "Read",
+            "{\"file_path\":\"fixture.txt\"}",
             Some("fixture contents\n"),
         );
         drop(lease);
@@ -632,17 +829,42 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Finished);
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
         assert!(
-            lines.iter().any(|line| line.contains("final answer")),
-            "final text was dropped: {lines:?}"
+            text_lines(&result.updates)
+                .iter()
+                .any(|line| line.contains("final answer")),
+            "final text was dropped: {:?}",
+            result.updates
         );
-        assert!(
-            lines.iter().any(|line| line.contains("✓ Read")),
-            "final tool result was dropped: {lines:?}"
-        );
-        assert!(lines.iter().any(|line| line.contains("42s")));
+        assert_eq!(tools(&result.updates).len(), 1);
+        assert_eq!(tools(&result.updates)[0].output, "fixture contents\n");
+        assert!(notices(&result.updates).iter().any(|line| line.contains("42s")));
+    }
+
+    #[test]
+    fn unfinished_calls_are_committed_with_no_result_recorded_at_turn_end() {
+        let (temp, db, session_id) = fixture();
+        let root = temp.path();
+        let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
+        let message = timer.ensure_segment().unwrap();
+        save_tool(&db, &session_id, &message, "read-1", "Read", "{\"file_path\":\"fixture.txt\"}", None);
+        let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
+        let mut observer = Observer::default();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert!(tools(&result.updates).is_empty());
+        assert!(result.activity.is_some());
+
+        drop(lease);
+        std::mem::forget(timer);
+        observer.idle_since = Some(Instant::now() - SETTLE_GRACE - Duration::from_millis(1));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        let tools = tools(&result.updates);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].output, "No result recorded");
+        assert_eq!(tools[0].number, 1);
     }
 
     #[test]
@@ -654,37 +876,39 @@ mod tests {
         write_text(&db, &session_id, &message, "partial answer\n");
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        let (state, _) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Running);
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
 
         // The process is killed: no endpoint is ever written, the lease is gone.
         drop(lease);
         std::mem::forget(timer);
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
         assert_eq!(
-            state,
+            result.state,
             State::Running,
             "the finalization window is respected"
         );
-        assert!(lines.is_empty(), "{lines:?}");
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
 
         // After the grace period the turn is settled as interrupted, not complete.
         observer.idle_since = Some(Instant::now() - SETTLE_GRACE - Duration::from_millis(1));
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Finished);
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
         assert!(
-            lines
+            notices(&result.updates)
                 .iter()
                 .any(|line| line.contains("interrupted · duration unknown")),
-            "{lines:?}"
+            "{:?}",
+            result.updates
         );
         assert!(
-            !lines.iter().any(|line| line.contains("finished")),
-            "a dead owner is not reported as completed: {lines:?}"
+            !notices(&result.updates).iter().any(|line| line.contains("finished")),
+            "a dead owner is not reported as completed: {:?}",
+            result.updates
         );
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Idle, "never stays running");
-        assert!(lines.is_empty(), "never replays: {lines:?}");
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Idle, "never stays running");
+        assert!(result.updates.is_empty(), "never replays: {:?}", result.updates);
         let record = db
             .shard_sql(&session_id, |conn| turn_repo::latest_turn(conn, &session_id))
             .unwrap()
@@ -692,6 +916,98 @@ mod tests {
             .unwrap();
         assert!(record.interrupted());
         assert_eq!(record.elapsed_ms, None, "duration stays unknown");
+    }
+
+    #[test]
+    fn the_settle_grace_never_preempts_a_result_that_lands_before_the_turn_closes() {
+        let (temp, db, session_id) = fixture();
+        let root = temp.path();
+        let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
+        let message = timer.ensure_segment().unwrap();
+        save_tool(&db, &session_id, &message, "read-1", "Read", "{\"file_path\":\"fixture.txt\"}", None);
+        let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
+        let mut observer = Observer::default();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
+        assert!(tools(&result.updates).is_empty());
+        assert!(result.activity.is_some());
+
+        // The owner released the lease but has not finished writing the turn:
+        // the call stays running instead of being settled as an orphan.
+        drop(lease);
+        for _ in 0..3 {
+            let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+            assert_eq!(result.state, State::Running, "the grace period is respected");
+            assert!(
+                tools(&result.updates).is_empty(),
+                "an unfinished call was preempted: {:?}",
+                result.updates
+            );
+        }
+
+        // The finalization publishes the real result and completes the turn.
+        save_tool(
+            &db,
+            &session_id,
+            &message,
+            "read-1",
+            "Read",
+            "{\"file_path\":\"fixture.txt\"}",
+            Some("fixture contents\n"),
+        );
+        timer.finish(turn_repo::TurnStatus::Completed).unwrap();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        let tools = tools(&result.updates);
+        assert_eq!(tools.len(), 1, "the result must be published exactly once: {:?}", result.updates);
+        assert_eq!(tools[0].output, "fixture contents\n");
+        assert!(
+            !result.updates.iter().any(|update| matches!(
+                update,
+                Update::Tool(tool) if tool.output == "No result recorded"
+            )),
+            "an orphan placeholder contradicted the real result: {:?}",
+            result.updates
+        );
+    }
+
+    #[test]
+    fn an_interrupted_turn_records_an_unfinished_call_exactly_once() {
+        let (temp, db, session_id) = fixture();
+        let root = temp.path();
+        let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
+        let message = timer.ensure_segment().unwrap();
+        save_tool(&db, &session_id, &message, "read-1", "Read", "{\"file_path\":\"fixture.txt\"}", None);
+        let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
+        let mut observer = Observer::default();
+        observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+
+        // The process is killed without settling its turn or its call.
+        drop(lease);
+        std::mem::forget(timer);
+        for _ in 0..3 {
+            let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+            assert_eq!(result.state, State::Running);
+            assert!(
+                tools(&result.updates).is_empty(),
+                "the placeholder repeated inside the grace period: {:?}",
+                result.updates
+            );
+        }
+
+        observer.idle_since = Some(Instant::now() - SETTLE_GRACE - Duration::from_millis(1));
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        let tools = tools(&result.updates);
+        assert_eq!(tools.len(), 1, "the orphan is reported exactly once: {:?}", result.updates);
+        assert_eq!(tools[0].output, "No result recorded");
+        assert!(notices(&result.updates)
+            .iter()
+            .any(|line| line.contains("interrupted · duration unknown")));
+
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Idle);
+        assert!(result.updates.is_empty(), "never replays: {:?}", result.updates);
     }
 
     #[test]
@@ -703,7 +1019,7 @@ mod tests {
         write_text(&db, &session_id, &message, "working\n");
         let lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        observer.poll_at(root, &db, &session_id).unwrap();
+        observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
         observer.idle_since = Some(Instant::now() - SETTLE_GRACE - Duration::from_millis(1));
         // The owner is alive: the probe must not settle its turn.
         assert!(
@@ -711,9 +1027,9 @@ mod tests {
             "the owner holds the lease"
         );
         drop(lease);
-        let (state, lines) = observer.poll_at(root, &db, &session_id).unwrap();
-        assert_eq!(state, State::Finished);
-        assert!(lines
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
+        assert_eq!(result.state, State::Finished);
+        assert!(notices(&result.updates)
             .iter()
             .any(|line| line.contains("interrupted · duration unknown")));
         drop(timer);
@@ -729,22 +1045,29 @@ mod tests {
         write_text(&db, &session_id, &message, &long);
         let _lease = db.open_session(&session_id).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
         assert!(
-            lines
+            text_lines(&result.updates)
                 .iter()
-                .any(|line| line.starts_with("  xxxx") && line.ends_with('…')),
-            "long text is buffered forever: {lines:?}"
+                .any(|line| line.starts_with("xxxx") && line.ends_with('…')),
+            "long text is buffered forever: {:?}",
+            result.updates
         );
         write_text(&db, &session_id, &message, &format!("{long}\nsecond"));
-        let (_, lines) = observer.poll_at(root, &db, &session_id).unwrap();
+        let result = observer.poll_at(root, &db, &session_id, Some(root)).unwrap();
         assert!(
-            lines.iter().any(|line| line.contains("xxxxxxxx")),
-            "{lines:?}"
+            text_lines(&result.updates)
+                .iter()
+                .any(|line| line.contains("xxxxxxxx")),
+            "{:?}",
+            result.updates
         );
         assert!(
-            !lines.iter().any(|line| line.contains("second")),
-            "partial line still waits: {lines:?}"
+            !text_lines(&result.updates)
+                .iter()
+                .any(|line| line.contains("second")),
+            "partial line still waits: {:?}",
+            result.updates
         );
     }
 
@@ -759,26 +1082,28 @@ mod tests {
         write_text(&db, &first, &message, "first session text\n");
         let lease = db.open_session(&first).unwrap().acquire_execution().unwrap();
         let mut observer = Observer::default();
-        let (_, lines) = observer.poll_at(root, &db, &first).unwrap();
-        assert!(lines.iter().any(|line| line.contains("first session text")));
+        let result = observer.poll_at(root, &db, &first, Some(root)).unwrap();
+        assert!(text_lines(&result.updates)
+            .iter()
+            .any(|line| line.contains("first session text")));
 
         // /resume to an idle session shows nothing from the observed one.
-        let (state, lines) = observer.poll_at(root, &db, &second).unwrap();
-        assert_eq!(state, State::Idle);
-        assert!(lines.is_empty(), "{lines:?}");
+        let result = observer.poll_at(root, &db, &second, Some(root)).unwrap();
+        assert_eq!(result.state, State::Idle);
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
 
         // Back to the first session: a fresh view re-announces it once.
-        let (state, lines) = observer.poll_at(root, &db, &first).unwrap();
-        assert_eq!(state, State::Running);
+        let result = observer.poll_at(root, &db, &first, Some(root)).unwrap();
+        assert_eq!(result.state, State::Running);
         assert_eq!(
-            lines
+            text_lines(&result.updates)
                 .iter()
                 .filter(|line| line.contains("first session text"))
                 .count(),
             1
         );
-        let (_, lines) = observer.poll_at(root, &db, &first).unwrap();
-        assert!(lines.is_empty(), "{lines:?}");
+        let result = observer.poll_at(root, &db, &first, Some(root)).unwrap();
+        assert!(result.updates.is_empty(), "{:?}", result.updates);
         drop(lease);
         drop(timer);
     }
@@ -787,9 +1112,9 @@ mod tests {
     fn an_idle_observer_stays_silent_and_a_settled_turn_is_interrupted() {
         let (temp, db, session_id) = fixture();
         let mut observer = Observer::default();
-        let (state, lines) = observer.poll_at(temp.path(), &db, &session_id).unwrap();
-        assert_eq!(state, State::Idle);
-        assert!(lines.is_empty());
+        let result = observer.poll_at(temp.path(), &db, &session_id, Some(temp.path())).unwrap();
+        assert_eq!(result.state, State::Idle);
+        assert!(result.updates.is_empty());
 
         let mut timer = turn_repo::TurnTimer::in_session(db.open_session(&session_id).unwrap()).unwrap();
         let message = timer.ensure_segment().unwrap();

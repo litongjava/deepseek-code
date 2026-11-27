@@ -353,7 +353,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             summary: Some("Control the computer: move the mouse, click, type text, press keys and take screenshots".into()),
             name: "computer_use".to_string(),
-            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally; results contain screenshot_path (absolute path) and mime_type, not Base64 image data.".to_string(),
+            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally (screenshot_path and mime_type are returned) and automatically attached as image content in the tool result, so you do not need to call Read on screenshot_path to view them.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

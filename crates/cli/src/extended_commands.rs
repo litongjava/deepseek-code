@@ -142,10 +142,7 @@ pub async fn handle(
                     }
                 }
             } else if argument.is_empty() {
-                let sessions = session
-                    .store
-                    .db
-                    .conversations()?;
+                let sessions = sessions_with_running(session)?;
                 command_println!("{}", serde_json::to_string_pretty(&sessions)?);
                 command_eprintln!("Use /resume ID to switch conversations.");
             } else {
@@ -818,10 +815,19 @@ fn resume_title(title: &str, latest: Option<&str>) -> String {
 
 fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
     let entries = session.store.db.resume_entries(&session.id, (!all).then_some(&session.workspace))?;
-    Ok(entries.into_iter().map(|entry| {
+    // One scan for every row; the execution lease is an O(1) read and never
+    // creates the lock file or settles another worker's state.
+    let active = deepseek_code_core::services::background_sessions::active_session_ids(
+        &session.paths.data_dir,
+    )?;
+    let mut result = Vec::new();
+    for entry in entries {
         let row = entry.conversation;
+        let running = active.contains(&row.id)
+            || session.store.db.execution_active_for(&row.id)?;
         let title = resume_title(row.title.as_deref().filter(|s| !s.trim().is_empty() && *s!="CLI session").unwrap_or("(no prompt)"),entry.latest.as_deref());
-        let mut detail = format!("{} · {} · {}",ago(&row.updated_at),entry.branch.as_deref().unwrap_or("HEAD"),short_size(entry.bytes));
+        let title = if running { format!("[running] {title}") } else { title };
+        let mut detail = format!("{} · {} · {} · {}",row.id,ago(&row.updated_at),entry.branch.as_deref().unwrap_or("HEAD"),short_size(entry.bytes));
         if all {
             if let Some(path) = row.workspace_path.as_deref() {
                 detail.push_str(&format!(" · {path}"));
@@ -830,13 +836,183 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                 }
             }
         }
-        (row.id,Resumable {title,detail,branch:entry.branch})
-    }).collect())
+        result.push((row.id,Resumable {title,detail,branch:entry.branch}));
+    }
+    Ok(result)
+}
+
+/// The non-TTY JSON list keeps every stored field and adds the same `running`
+/// fact the picker shows.
+fn sessions_with_running(session: &Session) -> Result<Vec<Value>> {
+    let active = deepseek_code_core::services::background_sessions::active_session_ids(
+        &session.paths.data_dir,
+    )?;
+    let mut values = session
+        .store
+        .db
+        .conversations()?
+        .into_iter()
+        .map(|row| serde_json::to_value(row).map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+    for row in &mut values {
+        let running = match row["id"].as_str() {
+            Some(id) => active.contains(id) || session.store.db.execution_active_for(id)?,
+            None => false,
+        };
+        row["running"] = Value::Bool(running);
+    }
+    Ok(values)
 }
 
 #[cfg(test)]
 mod resume_tests {
     use super::*;
+    use deepseek_code_core::runtime::RuntimePaths;
+
+    async fn running_fixture() -> (
+        tempfile::TempDir,
+        RuntimePaths,
+        Session,
+        String,
+        String,
+    ) {
+        use clap::Parser;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let selection = || crate::config::Selection {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1",
+                "api_key":"fixture-only","api_format":"openai","enabled":true,
+                "models":[{"id":"fixture","name":"Fixture","enabled":true,
+                    "supports_vision":false,"supports_web_search":false}]
+            }))
+            .unwrap()],
+            provider_id: "fixture".into(),
+            model: "fixture".into(),
+        };
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let running = store.create(&workspace, "fixture", "fixture").unwrap();
+        store.append(&running, "user", "older running task").unwrap();
+        let current = store.create(&workspace, "fixture", "fixture").unwrap();
+        store.append(&current, "user", "current task").unwrap();
+        let cli = crate::args::Cli::parse_from(["dcl"]);
+        let session = Session::open(&cli, &paths, selection(), Some(&current))
+            .await
+            .unwrap();
+        (temp, paths, session, running, current)
+    }
+
+    fn append_job(paths: &RuntimePaths, session: &str) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let directory = paths.data_dir.join("tasks/background").join(&id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let job = deepseek_code_core::services::background_sessions::Job {
+            id,
+            foreground: false,
+            parent_session_id: session.into(),
+            session_id: session.into(),
+            title: "running task".into(),
+            status: "running".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            started_ms: now,
+            heartbeat_ms: now,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        std::fs::write(
+            directory.join("state.json"),
+            serde_json::to_vec(&job).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn entry<'a>(
+        entries: &'a [(String, Resumable)],
+        id: &str,
+    ) -> &'a Resumable {
+        &entries
+            .iter()
+            .find(|(entry, _)| entry.as_str() == id)
+            .unwrap()
+            .1
+    }
+
+    #[tokio::test]
+    async fn idle_sessions_show_the_full_id_without_a_running_marker() {
+        let (_temp, _paths, session, running, _current) = running_fixture().await;
+        let entries = resumable(&session, false).unwrap();
+        let entry = entry(&entries, &running);
+        assert!(!entry.title.starts_with("[running]"), "{}", entry.title);
+        assert!(
+            entry.detail.starts_with(&format!("{running} · ")),
+            "{}",
+            entry.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn an_execution_lease_marks_the_session_running_and_keeps_the_full_id() {
+        let (_temp, _paths, session, running, _current) = running_fixture().await;
+        let lease = session
+            .store
+            .db
+            .open_session(&running)
+            .unwrap()
+            .acquire_execution()
+            .unwrap();
+        let entries = resumable(&session, false).unwrap();
+        let entry = entry(&entries, &running);
+        assert!(entry.title.starts_with("[running] "), "{}", entry.title);
+        assert!(
+            entry.detail.starts_with(&format!("{running} · ")),
+            "{}",
+            entry.detail
+        );
+        let values = sessions_with_running(&session).unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .find(|row| row["id"] == running.as_str())
+                .unwrap()["running"],
+            true
+        );
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn an_active_managed_job_marks_the_session_running() {
+        let (_temp, paths, session, running, _current) = running_fixture().await;
+        append_job(&paths, &running);
+        let entries = resumable(&session, false).unwrap();
+        assert!(entry(&entries, &running).title.starts_with("[running] "));
+        let values = sessions_with_running(&session).unwrap();
+        let row = values
+            .iter()
+            .find(|row| row["id"] == running.as_str())
+            .unwrap();
+        assert_eq!(row["running"], true);
+        // Every stored field is retained.
+        assert!(row.get("updated_at").is_some(), "{row}");
+    }
+
+    #[tokio::test]
+    async fn the_json_fallback_marks_and_preserves_idle_sessions() {
+        let (_temp, _paths, session, _running, current) = running_fixture().await;
+        let values = sessions_with_running(&session).unwrap();
+        let row = values
+            .iter()
+            .find(|row| row["id"] == current.as_str())
+            .unwrap();
+        assert_eq!(row["running"], false);
+        assert_eq!(row["id"], current);
+    }
 
     #[test]
     fn osc52_payload_is_standard_base64() {

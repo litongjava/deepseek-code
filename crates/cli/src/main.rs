@@ -368,6 +368,33 @@ fn observing_session(
         || worker_frontend::occupancy(session)?.is_some())
 }
 
+/// A session that may still own the turn must be left without stopping it.
+/// An unreadable occupancy probe is treated as owned: uncertainty never kills
+/// another process's work.
+fn leaving_observing_session(
+    session: &session::Session,
+    announced: bool,
+    state: observe::State,
+) -> bool {
+    !matches!(observing_session(session, announced, state), Ok(false))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitAction {
+    /// Leave the read-only view; the other worker keeps the session.
+    LeaveObserver,
+    /// No other owner was proven absent; the worker may be stopped.
+    StopOwner,
+}
+
+fn exit_action(observing: Result<bool>) -> ExitAction {
+    match observing {
+        Ok(false) => ExitAction::StopOwner,
+        // `Ok(true)` is observing; `Err` cannot prove the session is idle.
+        _ => ExitAction::LeaveObserver,
+    }
+}
+
 /// Read-only sessions must not enter multiline composition: a pending
 /// composer would swallow `/exit` and `/resume`. Scheduled prompts are already
 /// complete and skip composition too.
@@ -397,7 +424,6 @@ fn launch_directory_matches(path: &std::path::Path, cwd: &std::path::Path) -> Re
     }
     Ok(())
 }
-
 async fn run(cli: &mut Cli) -> Result<()> {
     if let Some(Commands::Help { topic, command }) = &cli.command {
         return help::show(topic.as_deref(), command);
@@ -1197,6 +1223,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
     // Set by /restart; the replacement starts after this session is closed.
     let mut restart_launch = None;
+    let mut observing_exit = false;
     let result = async {
         session.admit_launch_prompt(&mut prompt, single)?;
         // Applied inside the cleanup scope so a startup failure reaches teardown
@@ -1322,11 +1349,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
         let mut reported_binding_failures = std::collections::HashMap::new();
         // Read-only view of a turn a direct print/json owner still executes.
         let mut execution_observer = observe::Observer::default();
+        // A resume already rendered the conversation; the observer continues
+        // from those cursors instead of replaying the running turn.
+        if let Some(view) = repl::take_resumed_view(&session.id) {
+            execution_observer.seed_from_resumed(view);
+        }
         // Cross-session state is reset when /resume, /branch or /clear changes
         // session.id; observation state follows the same boundary.
         let mut active_session = session.id.clone();
         let mut observe_announced = false;
         let mut observe_state = observe::State::Idle;
+        let mut last_observation_status: Option<String> = None;
         let mut last_occupancy_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.
@@ -1338,6 +1371,8 @@ async fn run(cli: &mut Cli) -> Result<()> {
         }
         'repl: loop {
             if crate::signals::terminating() {
+                observing_exit |=
+                    leaving_observing_session(&session, observe_announced, observe_state);
                 break 'repl;
             }
             if active_session != session.id {
@@ -1366,6 +1401,13 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     command_eprintln!("Draft or queued prompts from the previous session were discarded.");
                 }
                 execution_observer = observe::Observer::default();
+                if let Some(view) = repl::take_resumed_view(&session.id) {
+                    execution_observer.seed_from_resumed(view);
+                }
+                if let Some(reader) = input.as_ref() {
+                    reader.reset_observation();
+                }
+                last_observation_status = None;
                 observe_announced = false;
                 observe_state = observe::State::Idle;
             }
@@ -1412,6 +1454,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
             if !observing && observe_announced {
                 observe_announced = false;
                 command_eprintln!("✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.");
+            }
+            let status = worker_frontend::observation_status(
+                occupancy.as_ref(),
+                observing,
+                execution_observer.activity(),
+            );
+            if status != last_observation_status {
+                if let Some(reader) = input.as_ref() {
+                    reader.set_observation_status(status.clone());
+                }
+                last_observation_status = status;
             }
             // A committed transition may have resolved a root this launch deferred,
             // so children of this iteration inherit the current native value.
@@ -1529,8 +1582,6 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 "\n\u{2026} "
             } else if composer.is_pending() {
                 "... "
-            } else if observing {
-                "\n\u{2026} "
             } else {
                 idle_prompt.as_str()
             };
@@ -1557,13 +1608,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         if let Err(error) = session.cycle_permission_mode().await { command_eprintln!("Permission mode: {error:#}"); }
                         continue 'repl;
                     },
-                    Err(_) if signals::terminating() => break 'repl,
+                    Err(_) if signals::terminating() => {
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                        break 'repl
+                    },
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                         if composer.is_pending() {
                             composer.cancel();
                             command_eprintln!("Prompt discarded.");
                             continue 'repl;
                         }
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                         break 'repl;
                     },
                     Err(error) => return Err(error.into()),
@@ -1571,6 +1626,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         #[cfg(unix)]
                         signals::check_terminal_hangup();
                         if composer.is_pending() { command_eprintln!("Unfinished prompt discarded."); }
+                        observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                         break 'repl;
                     }
                 },
@@ -1654,18 +1710,38 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         match execution_observer.poll(&session) {
                             // Observing never opens the automatic-wake path: a
                             // queued notification waits for explicit input.
-                            Ok((state, lines)) => {
-                                observe_state = state;
+                            Ok(result) => {
+                                observe_state = result.state;
+                                let refresh_transcript = result.state == observe::State::Finished
+                                    || result
+                                        .updates
+                                        .iter()
+                                        .any(|update| matches!(update, observe::Update::Tool(_)));
                                 if let Some(reader) = input.as_ref() {
-                                    for line in lines { reader.notice(line); }
+                                    reader.observe(result.updates);
                                 }
-                                if observe_announced && state != observe::State::Running {
-                                    let occupied = worker_frontend::occupancy(&session).ok().flatten().is_some();
-                                    if state == observe::State::Finished || !occupied {
+                                if refresh_transcript {
+                                    if let (Some(reader), Ok(lines)) =
+                                        (input.as_ref(), repl::transcript(&session))
+                                    {
+                                        reader.set_observation_transcript(lines);
+                                    }
+                                }
+                                if observe_announced && result.state != observe::State::Running {
+                                    let occupied = worker_frontend::occupancy(&session)
+                                        .ok()
+                                        .flatten()
+                                        .is_some();
+                                    if result.state == observe::State::Finished || !occupied {
                                         observe_announced = false;
                                         observe_state = observe::State::Idle;
                                         if let Some(reader) = input.as_ref() {
-                                            reader.notice("✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.".into());
+                                            reader.observe(vec![observe::Update::Notice(
+                                                "✻ The other turn finished; input is enabled. Nothing queued while observing was submitted.".into(),
+                                            )]);
+                                            if last_observation_status.take().is_some() {
+                                                reader.set_observation_status(None);
+                                            }
                                         }
                                         // The current prompt still shows the
                                         // read-only marker; redraw it as idle.
@@ -1678,6 +1754,20 @@ async fn run(cli: &mut Cli) -> Result<()> {
                                             continue 'repl;
                                         }
                                     }
+                                }
+                                let observing_now = occupancy.is_some()
+                                    || (observe_announced
+                                        && observe_state == observe::State::Running);
+                                let status = worker_frontend::observation_status(
+                                    occupancy.as_ref(),
+                                    observing_now,
+                                    result.activity.as_deref(),
+                                );
+                                if status != last_observation_status {
+                                    if let Some(reader) = input.as_ref() {
+                                        reader.set_observation_status(status.clone());
+                                    }
+                                    last_observation_status = status;
                                 }
                             }
                             Err(error) => {
@@ -1810,9 +1900,13 @@ async fn run(cli: &mut Cli) -> Result<()> {
                         command_eprintln!("Prompt discarded.");
                         continue 'repl;
                     }
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                     break 'repl;
                 },
-                _ = crate::signals::termination() => break 'repl,
+                _ = crate::signals::termination() => {
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                    break 'repl
+                },
             } };
             fn input_origin(scheduled: bool, text: &str) -> TurnOrigin<'_> {
                 if scheduled { TurnOrigin::Scheduled } else { TurnOrigin::User(text) }
@@ -1992,7 +2086,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
             }
             match background_commands::handle(cli, command, argument, input_origin(scheduled, argument.trim()), &paths, &mut session, &mut input).await {
                 Ok(background_commands::Outcome::Handled) => continue,
-                Ok(background_commands::Outcome::Exit) => break,
+                Ok(background_commands::Outcome::Exit) => {
+                    observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
+                    break;
+                },
                 Err(error) => { report_error(error)?; continue; },
                 Ok(background_commands::Outcome::NotHandled) => {},
             }
@@ -2113,6 +2210,7 @@ async fn run(cli: &mut Cli) -> Result<()> {
                     continue;
                 }
                 if let Err(error) = worker_binding::retain_for_transfer(&session).await { command_eprintln!("Relaunch did not apply: {error:#}"); continue; }
+                observing_exit |= leaving_observing_session(&session, observe_announced, observe_state);
                 let launch = restart::resume(cli, &session)?;
                 restart_launch = Some(launch);
                 break;
@@ -2121,7 +2219,15 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 "" => continue,
                 "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => {
                     if !session.is_missing_workspace() {
-                        session_trust::quit_worker(&session.paths, &session.id).await?;
+                        match exit_action(observing_session(&session, observe_announced, observe_state)) {
+                            ExitAction::LeaveObserver => {
+                                command_eprintln!("Leaving read-only view; the session continues running in another worker.");
+                                observing_exit = true;
+                            }
+                            ExitAction::StopOwner => {
+                                session_trust::quit_worker(&session.paths, &session.id).await?;
+                            }
+                        }
                     }
                     break;
                 },
@@ -2176,13 +2282,17 @@ async fn run(cli: &mut Cli) -> Result<()> {
     if !single {
         terminal::title::clear();
     }
-    session
-        .end_hooks(if result.is_ok() && !single && !signals::terminating() {
-            "prompt_input_exit"
-        } else {
-            "other"
-        })
-        .await;
+    // A read-only view leaves the session running in the other worker: the
+    // conversation did not end and this process must not cancel its hooks.
+    if !observing_exit {
+        session
+            .end_hooks(if result.is_ok() && !single && !signals::terminating() {
+                "prompt_input_exit"
+            } else {
+                "other"
+            })
+            .await;
+    }
     let resume_hint = restart_launch.is_none()
         && !single
         && !sdk_stream
@@ -2190,7 +2300,11 @@ async fn run(cli: &mut Cli) -> Result<()> {
             .store
             .history(&session.id)
             .is_ok_and(|rows| !rows.is_empty());
-    let shutdown = session.close_owned().await;
+    let shutdown = if observing_exit {
+        session.close_owned_local().await
+    } else {
+        session.close_owned().await
+    };
     // Restore the shell before printing the one message that must survive cleanup.
     drop(input);
     drop(screen_mode);
@@ -2288,6 +2402,26 @@ fn read_piped_stdin<R: Read + Send + 'static>(
     }
     let bytes = done_rx.recv().context("stdin reader exited")??;
     String::from_utf8(bytes).context("stdin is not valid UTF-8")
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::{exit_action, ExitAction};
+
+    #[test]
+    fn only_a_proven_idle_session_may_stop_the_worker_on_exit() {
+        assert_eq!(exit_action(Ok(false)), ExitAction::StopOwner);
+        assert_eq!(
+            exit_action(Ok(true)),
+            ExitAction::LeaveObserver,
+            "an occupied session is never stopped by the observer"
+        );
+        assert_eq!(
+            exit_action(Err(anyhow::anyhow!("lock probe unavailable"))),
+            ExitAction::LeaveObserver,
+            "an unreadable probe must not kill another process's work"
+        );
+    }
 }
 
 #[cfg(test)]

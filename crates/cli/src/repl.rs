@@ -5,6 +5,39 @@ use crate::session::Session;
 use anyhow::{ensure, Result};
 use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 
+/// What `show_resumed` already rendered, so a live observer does not replay it.
+/// One entry per assistant message keeps the observer's text cursor and the
+/// completed tools that already have a visible block.
+#[derive(Debug, Clone, Default)]
+pub struct ResumedMessage {
+    /// Bytes of `content` that the resumed screen rendered.
+    pub text_seen: usize,
+    /// Tool call ids already visible (calls with a recorded result).
+    pub tools: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResumedView {
+    pub identity: String,
+    pub messages: std::collections::BTreeMap<String, ResumedMessage>,
+}
+
+/// The last rendered resume screen, handed to the main REPL once so its
+/// observer can take over the same cursors.
+static RESUMED_VIEW: std::sync::Mutex<Option<(String, ResumedView)>> =
+    std::sync::Mutex::new(None);
+
+/// Takes the view rendered for this session, if the REPL has not consumed it.
+pub fn take_resumed_view(session: &str) -> Option<ResumedView> {
+    let mut stored = RESUMED_VIEW
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    match stored.as_ref() {
+        Some((id, _)) if id == session => stored.take().map(|(_, view)| view),
+        _ => None,
+    }
+}
+
 /// The whole conversation for the Ctrl+O transcript, as in the reference CLI:
 /// each prompt, each answer under its time and model, its thinking and every
 /// tool call in full.
@@ -17,7 +50,7 @@ pub fn transcript_of(
     session: &Session,
     id: &str,
 ) -> Result<Vec<crate::terminal::change_view::Line>> {
-    conversation(session, id, true, None)
+    conversation(session, id, true, None, false, None, None)
 }
 
 /// After a resume, as in the reference CLI: the screen starts over with the
@@ -30,6 +63,36 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     if !std::io::stderr().is_terminal() {
         return Ok(());
     }
+    // Another owner keeps the screen read-only. A call whose result has not
+    // been recorded yet is still executing there: skip its block and let the
+    // observer render it when it finishes. Outside that view, saved history
+    // keeps its "No result recorded" row.
+    let active = if session.waiting_for_continue() {
+        crate::worker_frontend::settle_session(session).ok().flatten()
+    } else {
+        None
+    };
+    let leased = active.is_none()
+        && session.waiting_for_continue()
+        && crate::observe::execution_lease_active(session).unwrap_or(false);
+    let read_only = active.is_some() || leased;
+    let running_turn = if read_only {
+        session
+            .selected_session()
+            .ok()
+            .and_then(|selected| selected.repository().running_turn().ok().flatten())
+            .map(|turn| turn.turn_id)
+    } else {
+        None
+    };
+    let identity = session
+        .selected_session()
+        .map(|selected| selected.repository().observation_identity().to_owned())
+        .unwrap_or_default();
+    let mut view = ResumedView {
+        identity,
+        messages: Default::default(),
+    };
     let mut out = String::new();
     if clear {
         out.push_str("\x1b[2J\x1b[H");
@@ -37,23 +100,30 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
         out.push('\n');
     }
     let mut recorded = crate::terminal::scrollback::Scrollback::default();
-    conversation(session, &session.id, false, Some(&mut recorded))?;
+    conversation(
+        session,
+        &session.id,
+        false,
+        Some(&mut recorded),
+        read_only,
+        running_turn.as_deref(),
+        Some(&mut view),
+    )?;
     for row in recorded.all() {
         out.push_str(&row);
         out.push('\n');
     }
     eprint!("{out}");
     recorded.save();
+    *RESUMED_VIEW
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) =
+        Some((session.id.clone(), view));
     if let Some(notice) = session.missing_workspace_banner_notice() {
         command_eprintln!("{notice}");
         return Ok(());
     }
     if session.waiting_for_continue() {
-        let active = crate::worker_frontend::settle_session(session)
-            .ok()
-            .flatten();
-        let leased = active.is_none()
-            && crate::observe::execution_lease_active(session).unwrap_or(false);
         if active.is_some() || leased {
             // The REPL prints a read-only observation banner and blocks
             // ordinary prompts; do not claim the session is waiting for input.
@@ -155,6 +225,9 @@ fn conversation(
     id: &str,
     detailed: bool,
     mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>,
+    read_only: bool,
+    running_turn: Option<&str>,
+    mut resumed: Option<&mut ResumedView>,
 ) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
     let width = crate::terminal::size().0.saturating_sub(1) as usize;
@@ -248,6 +321,14 @@ fn conversation(
             if let Some(recorded) = recorded.as_deref_mut() {
                 record_lines(recorded, &lines[message_start..], width);
             }
+            let in_running_turn = read_only
+                && running_turn.is_some_and(|turn| {
+                    history
+                        .message_turn(&message.id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| record.turn_id == turn)
+                });
             for tool in
                 history.tools(&message.id)?
             {
@@ -258,9 +339,15 @@ fn conversation(
                     .as_deref()
                     .and_then(|input| serde_json::from_str(input).ok())
                     .unwrap_or_default();
+                // A call still executing under the other owner is rendered by
+                // the observer once it has a result; saving it as "No result
+                // recorded" here would claim a completion that never happened.
+                let skip_running = recorded.is_some()
+                    && in_running_turn
+                    && tool.output.is_none();
                 // Neutral on purpose: the call may have been cut off or may still be running.
                 let output = tool.output.as_deref().unwrap_or("No result recorded");
-                if let Some(recorded) = recorded.as_deref_mut() {
+                if let (Some(recorded), false) = (recorded.as_deref_mut(), skip_running) {
                     // A saved edit looks as it did live: summary and diff preview, click for the rest.
                     let change = matches!(
                         tool.name.as_str(),
@@ -320,6 +407,13 @@ fn conversation(
                     for row in rows {
                         recorded.push(row, Some(id));
                     }
+                    if let Some(view) = resumed.as_deref_mut() {
+                        view.messages
+                            .entry(message.id.clone())
+                            .or_default()
+                            .tools
+                            .insert(tool.id.clone());
+                    }
                 }
                 if detailed {
                     separate_block(&mut lines);
@@ -372,6 +466,12 @@ fn conversation(
                 for (index, line) in rendered.iter().enumerate() {
                     let indent = " ".repeat(2 + crate::terminal::markdown::hanging_indent(line));
                     recorded.push_flow(line, if index == 0 { "● " } else { "  " }, &indent, width);
+                }
+                if let Some(view) = resumed.as_deref_mut() {
+                    view.messages
+                        .entry(message.id.clone())
+                        .or_default()
+                        .text_seen = message.content.len();
                 }
             }
             let saved = session
@@ -446,6 +546,149 @@ fn resumed_answers_keep_markdown_colors_and_flush_tables() {
 }
 
 #[tokio::test]
+async fn a_resumed_read_only_view_seeds_the_observer_without_replaying() {
+    use clap::Parser;
+    use deepseek_code_core::db::{message_repo, turn_repo};
+    let root = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+    let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+    let selection = crate::config::Selection {
+        providers: vec![provider],
+        provider_id: "fixture".into(),
+        model: "fixture".into(),
+    };
+    let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let id = store.create(root.path(), "fixture", "fixture").unwrap();
+    let session = Session::open(&cli, &paths, selection, Some(&id))
+        .await
+        .unwrap();
+    let mut timer = turn_repo::TurnTimer::in_session(session.store.db.open_session(&id).unwrap()).unwrap();
+    let message = timer.ensure_segment().unwrap();
+    session
+        .store
+        .db
+        .shard_sql(&id, |conn| -> Result<()> {
+            message_repo::update_message_content(conn, &message, "published answer\n")?;
+            message_repo::insert_tool_call(
+                conn,
+                "completed",
+                &message,
+                "Read",
+                Some(r#"{"file_path":"completed.txt"}"#),
+                Some("contents"),
+                false,
+                0,
+            )?;
+            message_repo::insert_tool_call(
+                conn,
+                "running",
+                &message,
+                "Read",
+                Some(r#"{"file_path":"running.txt"}"#),
+                None,
+                false,
+                1,
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let turn = timer.record().turn_id.clone();
+    let mut recorded = crate::terminal::scrollback::Scrollback::default();
+    let mut view = ResumedView {
+        identity: session
+            .selected_session()
+            .unwrap()
+            .repository()
+            .observation_identity()
+            .to_owned(),
+        ..Default::default()
+    };
+    conversation(
+        &session,
+        &id,
+        false,
+        Some(&mut recorded),
+        true,
+        Some(&turn),
+        Some(&mut view),
+    )
+    .unwrap();
+    let recorded_text = recorded
+        .all()
+        .iter()
+        .map(|row| crate::terminal::tool_view::plain_terminal_text(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(recorded_text.contains("#1 Read(completed.txt)"), "{recorded_text}");
+    assert!(
+        !recorded_text.contains("running.txt") && !recorded_text.contains("No result recorded"),
+        "a still-running call is left for the observer: {recorded_text}"
+    );
+    let seeded = view.messages.get(&message).expect("resumed message cursor");
+    assert_eq!(seeded.text_seen, "published answer\n".len());
+    assert!(seeded.tools.contains("completed"));
+    assert!(!seeded.tools.contains("running"));
+
+    // The observer takes over exactly the rendered history.
+    let mut observer = crate::observe::Observer::default();
+    observer.seed_from_resumed(view);
+    // The REPL prints the occupancy banner and preannounces before polling.
+    observer.preannounce(&session).unwrap();
+    let _lease = session
+        .store
+        .db
+        .open_session(&id)
+        .unwrap()
+        .acquire_execution()
+        .unwrap();
+    let first = observer
+        .poll_at(&paths.data_dir, &session.store.db, &id, Some(root.path()))
+        .unwrap();
+    assert!(first.updates.is_empty(), "replayed: {:?}", first.updates);
+
+    // New text and the running call's result appear once, numbered next.
+    session
+        .store
+        .db
+        .shard_sql(&id, |conn| -> Result<()> {
+            message_repo::update_message_content(conn, &message, "published answer\nnew line\n")?;
+            conn.execute(
+                "UPDATE tool_calls SET output='later result' WHERE id='running'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let second = observer
+        .poll_at(&paths.data_dir, &session.store.db, &id, Some(root.path()))
+        .unwrap();
+    let text: Vec<String> = second
+        .updates
+        .iter()
+        .flat_map(|update| match update {
+            crate::observe::Update::Text { lines, .. } => lines.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert!(text.iter().any(|line| line == "new line"), "{text:?}");
+    let tools: Vec<&crate::observe::ToolUpdate> = second
+        .updates
+        .iter()
+        .filter_map(|update| match update {
+            crate::observe::Update::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].number, 2);
+    assert_eq!(tools[0].output, "later result");
+    std::mem::forget(timer);
+}
+
+#[tokio::test]
 async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
     use clap::Parser;
     use deepseek_code_core::db::message_repo;
@@ -497,7 +740,7 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
         .unwrap()
         .unwrap();
     for detailed in [false, true] {
-        let lines = conversation(&session, &id, detailed, None).unwrap();
+        let lines = conversation(&session, &id, detailed, None, false, None, None).unwrap();
         let text = crate::terminal::change_view::plain(&lines);
         for (index, name) in names.iter().enumerate() {
             assert!(text.contains(&format!("#{} {name}", index + 1)), "{text}");

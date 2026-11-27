@@ -160,6 +160,52 @@ async fn late_default_creation_does_not_hide_invalid_configuration() {
     assert!(late.list_servers().await.is_empty());
 }
 
+#[test]
+fn parameterless_requests_omit_params() {
+    let request = McpJsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: 1,
+        method: "tools/list".into(),
+        params: None,
+    };
+    let value = serde_json::to_value(request).unwrap();
+    assert!(value.get("params").is_none(), "{value}");
+}
+
+#[tokio::test]
+async fn a_stdio_server_that_exits_before_initialize_reports_stderr_and_status() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("exit.cjs");
+    std::fs::write(
+        &script,
+        "process.stderr.write('fixture: repository root not found\\n', () => process.exit(3));",
+    )
+    .unwrap();
+    let mut connector = McpConnector::new(McpServerConfig {
+        id: "fail".into(),
+        name: "fail".into(),
+        command: "node".into(),
+        args: vec![script.to_string_lossy().into()],
+        enabled: true,
+        ..Default::default()
+    })
+    .with_retry_config(RetryConfig {
+        max_retries: 1,
+        initial_delay_ms: 100,
+        max_delay_ms: 100,
+        backoff_factor: 1.0,
+    });
+
+    let error = connector.start().await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("fixture: repository root not found"),
+        "{message}"
+    );
+    assert!(message.contains("exit"), "{message}");
+    assert!(!message.contains("pipe is being closed"), "{message}");
+}
+
 #[tokio::test]
 async fn a_failed_start_is_kept_in_the_server_status() {
     let root = tempfile::tempdir().unwrap();

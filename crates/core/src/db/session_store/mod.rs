@@ -360,6 +360,19 @@ impl Stores {
         Ok(self.global().incarnation(id, &storage_key(id)?)?.as_deref() == Some(incarnation))
     }
 
+    /// Read-only execution probe for a conversation id. Leases name the
+    /// incarnation, so resolve it from the directory without opening the shard
+    /// or settling any turn. A missing row or lock file is simply idle.
+    pub fn execution_active_for(&self, id: &str) -> Result<bool> {
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Ok(false);
+        }
+        let Some(incarnation) = self.global().incarnation(id, &storage_key(id)?)? else {
+            return Ok(false);
+        };
+        crate::services::session_messages::execution_active(self.data_dir(), &incarnation)
+    }
+
     pub fn open_session(&self, id: &str) -> Result<SessionDb> {
         let expected = self.selected.as_ref().filter(|a| a.session == id).map(|a| a.incarnation.as_str());
         self.open_current_session(id, expected)?
