@@ -1458,12 +1458,43 @@ fn take_read_image(
     tool_name: &str,
     value: &mut Value,
 ) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if tool_name == "computer_use" {
+        return take_computer_use_screenshot(value);
+    }
     if !matches!(tool_name, "Read" | "ImageGenerate") {
         return None;
     }
     let image = value.as_object_mut()?.remove("image")?;
     let text = value["content"].as_str().unwrap_or_default().to_owned();
     let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
+    Some(
+        McpOutput::from_transport(&transport)
+            .map(|content| (text, content))
+            .map_err(|error| format!("Error: {error:#}")),
+    )
+}
+
+fn take_computer_use_screenshot(
+    value: &Value,
+) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if value["is_error"].as_bool() == Some(true) || value["success"].as_bool() != Some(true) {
+        return None;
+    }
+    let path = value["screenshot_path"]
+        .as_str()
+        .filter(|path| !path.is_empty())?;
+    let bytes = std::fs::read(path).ok()?;
+    let media_type = crate::runtime::image_media_type_from_bytes(&bytes)
+        .or_else(|| value["mime_type"].as_str())?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    let transport = json!({
+        "content": [
+            {"type": "image", "mimeType": media_type, "data": encoded},
+            {"type": "text", "text": text}
+        ]
+    });
     Some(
         McpOutput::from_transport(&transport)
             .map(|content| (text, content))
