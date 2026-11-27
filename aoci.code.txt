@@ -5,8 +5,9 @@
 .gitattributes[FV6T]: F:固定嵌入资源、测试夹具与脚本的换行和空白处理，保证逐字节一致。 | R:- | A:- | S:对 design-converter、bundled skills 等路径禁用 text 转换与空白检查，改动会使字节校验或 diff 检查失败。
 .gitignore[FV4T]: F:排除构建产物、运行时数据与密钥、SQLite 文件及本机绑定配置，同时保留模板与 Android 手写工程。 | R:code:.env.example | A:- | S:必须保留 !.env.example 与 !src-tauri/gen/android/ 例外；.mcp.json 与 opencode.json 属机器绑定配置不得提交。
 AGENTS.md[SG7S]: F:仓库结构、构建与测试命令、编码规范和提交要求，以及 AOCI 认知维护规则。 | R:code:docs/cli-regression-tests.md, code:docs/desktop-regression-tests.md | A:- | S:aoci:begin 到 aoci:end 之间由 AOCI 工具维护，手改会破坏索引一致性。
-Cargo.toml[FV7T]: F:定义 Cargo workspace 的成员、默认成员与版本，并用 vendored crossterm 覆盖 crates.io 依赖。 | R:code:.cargo/config.toml, code:crates/cli/Cargo.toml | A:workspace, members, patch.crates-io, workspace.package | S:vendor/crossterm 被 exclude 且仅通过 patch 生效；Unix 事件读取依赖它在终端断开时返回。
+Cargo.toml[FV7T]: F:定义 Cargo workspace 的成员、默认成员、版本与 dev/test 调试信息级别，并用 vendored crossterm 覆盖 crates.io 依赖。 | R:code:.cargo/config.toml, code:crates/cli/Cargo.toml | A:workspace, members, patch.crates-io, workspace.package | S:vendor/crossterm 被 exclude 且只经 patch 生效；dev/test 的 debug=1 只为保留行表以缩短 Windows 链接时间。
 README.md[SG5M]: F:项目定位、功能清单、技术栈、目录结构与构建测试说明。 | R:code:AGENTS.md | A:- | S:构建与产物说明以 AGENTS.md 和 npm run build:all 为准，文中残留旧路径与 dcd.exe 示例。
+branch-tasks.md[SW6M]: F:登记各分支与任务的负责人、工作目录、基准提交、验收方式与记录路径，并规定新任务先登记再建分支或启动 dcl。 | R:code:docs/deepseek-code-server-plan.md | A:- | S:登记区分待启动/开发中/待审核/已验证/已提交/已合入；已合并分支保留而 worktree 必须删除；多个监督者只更新自己的条目。
 check_build.py[XV3T]: F:检查 target/release 下的 Windows 可执行文件，缺失时构建 src-tauri release 包。 | R:- | A:- | S:脚本先 chdir 到自身目录，cargo build 超时 600 秒。
 docker-compose.browserless.yml[OG3T]: F:Browserless/Playwright 的本地 compose 编排：启动 agent、browserless 与 playwright-server 三个服务，共享 bridge 网络与持久卷。 | R:- | A:agent,browserless,playwright-server,agent-network | S:browserless 的 TOKEN 是硬编码内部令牌，不能用于对外暴露。
 fix-api.cjs[XZ1T]: F:一次性迁移脚本：读取外部 claude-desktop-app-main 的 api.ts，把 Electron 检测改成 Tauri，并写回 src/api.ts。 | R:code:src/api.ts | A:- | S:一次性脚本；源路径为硬编码 Windows 相对路径，仅做字符串与全局正则替换。
@@ -22,7 +23,7 @@ vite.config.ts[FV6S]: F:Vite开发与构建配置：React插件、@别名、版�
 vitest.config.ts[TQ5T]: F:Vitest配置：jsdom环境、收集src下测试、加载__tests__/setup、v8覆盖率，并特殊内联与别名react-syntax-highlighter的ESM构建。 | R:code:src/__tests__/setup.ts | A:- | S:react-syntax-highlighter必须inline并别名到dist/esm；测试环境为jsdom。
 
 ===/<repository>/.cargo/===
-config.toml[FV5T]: F:为 Cargo workspace 指定共用 target 目录并提高测试线程栈。 | R:code:Cargo.toml | A:- | S:RUST_MIN_STACK 设为 16 MiB：debug 引擎测试用默认 2 MiB 栈会溢出。
+config.toml[FV5T]: F:为 Cargo workspace 指定共用 target 目录、提高测试线程栈，并为本地 mock 服务设置 NO_PROXY 例外。 | R:code:Cargo.toml | A:- | S:RUST_MIN_STACK 设为 16 MiB；NO_PROXY 只覆盖 127.0.0.1、localhost、::1，避免开发者代理拦截测试端点。
 
 ===/<repository>/.github/workflows/===
 build.yml[OV7S]: F:在 Windows、Linux、macOS 构建 dcl、dcd 与安装包，tag 推送时创建或更新 GitHub Release。 | R:code:.github/workflows/platform-tests.yml | A:build, release | S:发布仅在 tag 触发；产物名固定 dcl-dcd-<artifact>；已有 Release 用 gh release upload --clobber 覆盖。
@@ -34,10 +35,10 @@ LICENSE[SG2T]: F:声明该 CLI 包以 MIT 许可证发布。 | R:code:crates/cli
 build.rs[XV5T]: F:在 Windows MSVC 构建时为 dcl 二进制设置 8 MiB 栈。 | R:code:crates/cli/src/args.rs | A:main | S:仅 cfg(all(windows, target_env="msvc")) 生效，通过 /STACK:8388608 链接参数设置。
 
 ===/<repository>/crates/cli/src/===
-account_commands.rs[AI7S]: F:实现 dcl auth 与 /login、/logout、/fast，管理本应用独立的 Anthropic 账号凭据与快速模式。 | R:code:crates/cli/src/args.rs, code:crates/cli/src/config.rs | A:run, handle, login_account, remove_account, install_provider | S:凭据只以 marker 写入 provider api_key，config.json 不含 access/refresh token；官方 CLI 凭据不被导入。
+account_commands.rs[AI7S]: F:实现 dcl auth 与 /login、/logout、/fast，管理本应用独立的 Anthropic 账号凭据与快速模式。 | R:code:crates/cli/src/args.rs, code:crates/cli/src/config.rs | A:run, handle, login_account, remove_account, install_provider | S:provider 的 api_key 只存 marker，配置文件不含 access/refresh token；/fast 只在 Anthropic messages provider 上检查资格。
 agent_commands.rs[AW5S]: F:实现 dcl agents model 与 /agents model，查看或设置各代理类型的默认模型。 | R:code:crates/cli/src/extended_commands.rs, code:crates/cli/src/args.rs | A:model_command | S:fork 类型不可设置；值 default 清除为继承父会话模型；模型名到代理启动时才校验。
-agent_liveness_tests.rs[TW5M]: F:覆盖后台代理存活判定、运行时长格式与代理行渲染的测试。 | R:code:crates/cli/src/background_commands.rs | A:- | S:交互式 ConPTY 用例被 #[ignore]；心跳过期只影响显示，不回写磁盘上的 Job 状态。
-args.rs[EG9L]: F:用 Clap 定义 dcl 的全局选项、子命令、权限与角色模式，以及子进程启动与绑定代次参数。 | R:code:crates/cli/src/config.rs, code:crates/cli/src/batch_commands.rs, code:crates/cli/src/command_catalog.rs, code:crates/cli/src/main.rs, code:crates/cli/src/help.rs | A:Cli, Commands, PermissionModeArg, Continuation, try_parse_with_mode_source, launch_options | S:启动选项按 clap 的 ValueSource 重建再供子进程转发，不能依据原始 argv 扫描；--rc 在解析前改写为 remote-control；--full-access（别名 --yolo）只在未显式给出 permission_mode 时强制 Bypass。
+agent_liveness_tests.rs[TW5M]: F:覆盖后台代理存活判定、面板行合并、运行时长格式与代理行渲染的测试。 | R:code:crates/cli/src/background_commands.rs, code:crates/cli/src/extended_commands.rs | A:- | S:夹具在 tasks/background/<id> 写 state.json 与 session-owners.json；心跳过期只改显示状态，不回写磁盘 Job。
+args.rs[EG9L]: F:用 Clap 定义 dcl 的全局选项、子命令、权限与角色模式，以及子进程启动与绑定代次参数。 | R:code:crates/cli/src/config.rs, code:crates/cli/src/main.rs, code:crates/cli/src/command_catalog.rs | A:Cli, Commands, PermissionModeArg, Continuation, try_parse_with_mode_source, launch_options | S:启动选项按 ValueSource 重建再转发，不能扫描原始 argv；--rc 在解析前改写为 remote-control；--full-access 仅在未显式给 permission_mode 时强制 Bypass。
 background_commands.rs[AW8L]: F:实现 /continue、/fork、/subtask、/background、/btw 与 /tasks、/workflows，管理后台会话、任务、工作流与完成通知。 | R:code:crates/cli/src/worker_frontend.rs, code:crates/cli/src/workflow_commands.rs, code:crates/cli/src/session.rs, code:crates/core/src/services/background_sessions.rs | A:handle, collect_completed, wake_for_notifications, running_agents, agent_rows, copy_settings | S:/continue 在等待继续或执行租约有效时不提交请求；后台完成通知以 task-notification 入队并唤醒空闲会话，同一事件只入队一次；子进程凭据经 DEEPSEEK_CODE_CHILD_API_KEY 环境变量传递，不出现在参数中。
 batch_commands.rs[AW7M]: F:实现 /batch，用独立只读规划会话生成计划，并在隔离 worktree 中并发运行各单元。 | R:code:crates/cli/src/background_commands.rs, code:crates/cli/src/args.rs, code:crates/core/src/services/batch.rs | A:handle, launch, display, planner_command | S:规划器须剥离 worker 内部环境变量；规划后仓库 HEAD 变化则拒绝该计划；未加 --publish 只做本地提交。
 command_catalog.rs[SU5S]: F:汇总提示、补全与帮助中可发现的斜杠命令及说明，并把别名解析为规范命令。 | R:code:crates/cli/src/args.rs | A:COMMANDS, canonical, help | S:别名只在 canonical 中解析（/new、/reset 到 /clear，/settings 到 /config，/checkpoint 到 /rewind）；新命令必须加入 COMMANDS 才会出现在补全和帮助里。
@@ -2304,7 +2305,7 @@ syncMockData.ts[TQ3M]: F:云同步的本地 mock：构造 push/pull 响应、空
 syncService.ts[AD7L]: F:云备份同步：把本地 Provider、会话、消息与删除标记推送或拉取到 Bridge /data/sync/*，按 updated_at 合并并维护上次同步时间与错误。 | R:code:src/services/localStorageService.ts,code:src/services/bridgeConnection.ts,code:src/stores/useSyncStore.ts | A:pushToCloud,pullFromCloud,fullSync,getSyncStatus,trackConversationDeletion,clearSyncState | S:同步要求 auth_token 存在，请求带 bridge_api_key；合并按 updated_at（缺失回退 created_at）字符串比较，相同保留本地；删除标记须服务端确认后清除。
 
 ===/<repository>/config/===
-orchestration.toml[FC7T]: F:集中声明引擎的工具循环、上下文压缩、tools、memory、bridge、http 重试、日志与遥测启动期参数。 | R:code:crates/core/src/config/mod.rs | A:- | S:多代理编排参数不在此文件，而在数据目录 orchestrator.toml 经 /api/workflow/config 编辑；注释掉的 max_tool_iterations 表示不限迭代；http.request_timeout_secs 约束每次读取而非整个流的期限。
+orchestration.toml[FC7T]: F:集中声明引擎的工具循环、压缩阈值、tools、memory、bridge、HTTP 超时与重试、日志和遥测启动参数。 | R:code:crates/core/src/config/mod.rs | A:- | S:多代理编排参数在数据目录 orchestrator.toml；max_tool_iterations 注释掉表示不限；request_timeout_secs 约束每次读取而非整条流。
 
 ===/<repository>/crates/core/src/memory/files/===
 format.rs[DD6M]: F:解析与校验记忆 Markdown 文档：frontmatter 子集、类型与必填段、不可变 id/created_at、大小与凭据限制 | R:code:crates/core/src/memory/files/mod.rs,code:crates/core/src/memory/files/name_fold.rs,code:crates/core/src/memory/mod.rs | A:MemoryDocument, MemoryKind, MAX_FILE_BYTES, parse, prepare, links | S:frontmatter 禁止别名/anchor/tag 且深度≤8；feedback/project 必须有非空 “## Why” 与 “## How to apply”；parse 拒绝含凭据内容
@@ -2321,3 +2322,17 @@ replay.rs[KM6M]: F:摘要恢复时把历史行里的图像替换为 attached_ima
 
 ===/<repository>/crates/core/src/services/memory_files/===
 prompt.rs[PD7L]: F:在窗口起点冻结各作用域 MEMORY.md 常驻索引，只在索引集合变化时记录一次变更提醒，并按转录顺序重放而不读磁盘。 | R:code:crates/core/src/services/memory_files.rs,code:crates/core/src/services/turn_context.rs,code:crates/core/src/db/session_store/mod.rs | A:IndexState,Admission,visible_indexes,replay_at,freeze_empty_boundary,INDEX_HISTORY | S:索引按字节与行数上限截断并加标记；epoch 更大者优先，新 partial boundary 压过保留后缀的旧观察；重放只读持久化 receipt。
+
+===/<repository>/.agents/experience/===
+cli-editor-test-filter.md[SQ5T]: F:记录 dcl 斜杠补全测试的正确 cargo 过滤路径：editor 经 input 模块声明，测试名带 input 段。 | R:code:crates/cli/src/terminal/input.rs | A:- | S:过滤名须为 terminal::input::editor::tests::；按 terminal::editor::tests:: 运行会得到 0 个用例。
+compact-history-follow-tail.md[SU5T]: F:记录紧凑视图跟随输出尾部的问题与修法：HistoryView 的 follow_tail、refresh/append 重钉、Ctrl+End 保留 top=None。 | R:code:crates/cli/src/terminal/transcript_pager.rs, code:crates/cli/src/terminal/live.rs | A:- | S:append 在 refresh 后追加运行块，必须在 append 里同样重钉；仅 top 为 Some 时跟尾，否则会跳过 show_compact 的重进。
+execution-lease-uses-incarnation.md[SR5T]: F:说明执行租约按会话 incarnation 而非会话 ID 加锁，/resume 的 running 标记必须走 Stores::execution_active_for。 | R:code:crates/core/src/services/session_messages.rs, code:crates/cli/src/extended_commands.rs | A:- | S:租约路径是 state/locks/session-execution/<incarnation>.lock；用 ConversationRow.id 探测永远查不到。
+missing-workspace-readonly-resume.md[SR5T]: F:记录项目或 worktree 目录被删后，交互式 dcl 可只读查看已保存会话，而 print、SDK、fork、worker 路径仍严格恢复。 | R:code:crates/core/src/db/session_store/runtime.rs, code:crates/cli/src/repl.rs | A:- | S:只读绑定不写 workspace、hook、权限、协调或会话库；提示、shell/记忆快捷键与变更命令经同一白名单拒绝。
+readonly-observer-exit.md[SR5T]: F:记录只读观察者退出只结束本进程：不得 quit_worker，也不得触发 SessionEnd 或共享异步 hook 的 cancel。 | R:code:crates/cli/src/session_trust.rs, code:crates/cli/src/session.rs | A:- | S:只有观察探测确定返回 Ok(false) 才能停 worker；其他情况走 close_owned_local，跳过 end_hooks 与 cancel_shared。
+reqwest-proxy-routing-test.md[SN4T]: F:说明如何用记录 CONNECT 目标的 mock 代理证明公开 HTTPS WebFetch 走了代理，无需外网或 TLS 夹具。 | R:code:crates/core/src/tools/web.rs, code:crates/core/src/config/web_fetch.rs | A:- | S:HTTPS 请求只发 CONNECT host:443，mock 代理回 403 即可证明路由。
+resource-monitor-stale-ttl-refresh.md[SP5T]: F:记录资源监控在冷却期内持续超限时刷新未取走的告警，避免 stale_ttl 到期后被剪掉而模型收不到警告。 | R:code:crates/core/src/services/resource_monitor.rs | A:- | S:冷却期内仍超限需返回 Ongoing 并刷新同键未取走告警的 created_at；已取走的告警不得因此重新入队。
+resume-observer-cursor-handoff.md[SU5T]: F:记录恢复会话时富文本视图必须把已渲染游标交给观察者，否则正在运行的回合会被重复输出。 | R:code:crates/cli/src/repl.rs, code:crates/cli/src/observe.rs | A:- | S:show_resumed 记录每个助手消息的已渲染文本长度与已完成工具 ID，经 seed_from_resumed 交给观察者；占用中的工具不要提前提交。
+rustfmt-recurses-into-path-modules.md[SQ4T]: F:记录 rustfmt 会递归格式化 mod 与 #[path] 子模块并重排 mod 声明，使未改动的文件出现在 git status。 | R:- | A:- | S:格式化后按 git status 恢复非预期文件，勿把 rustfmt 视为单文件操作。
+shared-target-symlink-staleness.md[SV4T]: F:记录多个 worktree 共享 target 符号链接时 Cargo 复用旧 rlib 导致的编译错误及处理办法。 | R:code:.cargo/config.toml | A:- | S:编译报缺少新增字段时先 touch 源文件或 cargo clean -p，不要查 Cargo.toml。
+webfetch-summary-tight-context-budget.md[SA5T]: F:记录 WebFetch 摘要在小上下文模型（context_window 等于 max_tokens）下的输出预算钳制位置与原因。 | R:code:crates/core/src/native_engine/generation.rs, code:crates/core/src/config/web_fetch.rs | A:- | S:钳制放在 generate_with_budget 而非 generate_request；该生成器也服务压缩，改后者会改变压缩预算策略。
+workspace-hook-settings-path.md[SQ5T]: F:记录布局 v2 后 CLI 集成测试必须把工作区 hook 写入 .claude/settings.json，而不能写 .claude/config/settings.json。 | R:code:crates/cli/tests/task_input.rs | A:- | S:布局 v2 只改数据目录；HookRunner 仍从工作区 .claude/settings.json 与 settings.local.json 读取 hook。
