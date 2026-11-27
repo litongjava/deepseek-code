@@ -58,17 +58,21 @@ pub(crate) async fn run(name: &str, paths: &RuntimePaths, session: &Session) -> 
         }
         "errors" => {
             let mut failed_mcp = Vec::new();
-            if let Err(error) = session.ensure_mcp().await {
-                failed_mcp.push(("MCP".to_owned(), first_line(&format!("{error:#}"))));
-            }
-            for server in session.mcp.list_servers().await {
-                if mcp_menu::untouched_preset(&server) {
-                    continue;
+            use deepseek_code_core::services::session_worker::{McpOp, McpResult};
+            match session.mcp_call(McpOp::ListServers).await {
+                Ok(McpResult::Servers { servers, .. }) => {
+                    for server in servers {
+                        if mcp_menu::untouched_preset(&server) {
+                            continue;
+                        }
+                        if let Some(error) = mcp_menu::failure(&server) {
+                            let detail = first_line(error);
+                            failed_mcp.push((server.name.clone(), detail));
+                        }
+                    }
                 }
-                if let Some(error) = mcp_menu::failure(&server) {
-                    let detail = first_line(error);
-                    failed_mcp.push((server.name.clone(), detail));
-                }
+                Ok(_) => {}
+                Err(error) => failed_mcp.push(("MCP".to_owned(), first_line(&format!("{error:#}")))),
             }
             let mut report = doctor::inspect(&session.workspace, Some(paths));
             // `inspect` checks the structure only; the runtime parser also

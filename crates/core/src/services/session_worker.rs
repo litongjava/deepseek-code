@@ -61,9 +61,56 @@ pub struct Worker {
     pub error: Option<String>,
 }
 
+/// MCP work the frontend delegates when a session's worker owns the only
+/// server manager. `State` is the same operation as `dcl mcp state` and
+/// `/mcp state`; the others are the reads the REPL picker and prompt commands
+/// need from that manager.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum McpOp {
+    State {
+        server: Option<String>,
+        state: Option<String>,
+    },
+    ListServers,
+    ListPrompts,
+    GetPrompt {
+        server: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+}
+
+/// Serializable outcome of one [`McpOp`], carried back in [`Reply::mcp`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum McpResult {
+    State {
+        /// The `NAME  STATE` line `state_command` produced.
+        text: String,
+        /// A start failure after the state was applied. The state itself took
+        /// effect; this is only the interactive session's start report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+    },
+    Servers {
+        servers: Vec<crate::mcp::McpServerStatus>,
+        /// Tools of the running servers, so the picker can show them without
+        /// a second manager.
+        tools: Vec<crate::mcp::McpTool>,
+    },
+    Prompts {
+        prompts: Vec<(String, crate::mcp::McpPrompt)>,
+    },
+    Prompt {
+        text: String,
+    },
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    Mcp(McpOp),
     Ping,
     RuntimeStatus,
     Bind { identity: String },
@@ -114,6 +161,8 @@ pub struct Reply {
     pub launch_rules: Option<std::collections::HashMap<String, crate::permissions::rules::PermissionAction>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_status: Option<super::runtime_status::RuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpResult>,
 }
 impl Reply {
     pub fn ok(id: Option<String>) -> Self {
@@ -130,6 +179,7 @@ impl Reply {
             edit_session: None,
             launch_rules: None,
             runtime_status: None,
+            mcp: None,
         }
     }
     pub fn error(error: impl ToString) -> Self {
@@ -146,6 +196,7 @@ impl Reply {
             edit_session: None,
             launch_rules: None,
             runtime_status: None,
+            mcp: None,
         }
     }
 }

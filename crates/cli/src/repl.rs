@@ -807,38 +807,20 @@ pub async fn handle(
                 state,
             } = &action
             {
-                // Use this session's manager: a second manager would leave the
-                // running session's configuration revision stale.
-                session.ensure_mcp().await?;
-                let text = crate::mcp_states::state_command(
-                    paths,
-                    &session.mcp,
-                    target.as_deref(),
-                    state.as_deref(),
-                )
-                .await?;
-                if let Some(label) = state {
-                    let update: deepseek_code_core::mcp::states::McpState = label.parse()?;
-                    let servers = session.mcp.list_servers().await;
-                    let query = target.as_deref().unwrap_or_default();
-                    let found = servers
-                        .iter()
-                        .find(|server| server.id == query)
-                        .or_else(|| servers.iter().find(|server| server.name == query));
-                    if let Some(server) = found {
-                        if update == deepseek_code_core::mcp::states::McpState::Off {
-                            crate::mcp_menu::disable(session, server).await?;
-                        } else if let Err(error) = crate::mcp_menu::enable(session, server).await {
-                            command_eprintln!(
-                                "{} is now {}; it failed to start: {error:#}",
-                                server.name,
-                                update.label()
-                            );
-                        }
-                        command_println!("{} is now {}.", server.name, update.label());
-                    } else {
-                        command_println!("{query} is now {}.", update.label());
-                    }
+                // The worker that runs this session's turns owns the servers;
+                // the frontend must not reconcile or start a second manager.
+                use deepseek_code_core::services::session_worker::{McpOp, McpResult};
+                let result = session
+                    .mcp_call(McpOp::State {
+                        server: target.clone(),
+                        state: state.clone(),
+                    })
+                    .await?;
+                let McpResult::State { text, failure } = result else {
+                    anyhow::bail!("Session worker returned an unexpected MCP result");
+                };
+                if let Some(failure) = failure {
+                    command_eprintln!("{text}; it failed to start: {failure}");
                 } else {
                     command_println!("{text}");
                 }

@@ -4,6 +4,7 @@ use crate::session::Session;
 use crate::terminal::picker::{Entry, Picker};
 use anyhow::Result;
 use deepseek_code_core::mcp::McpServerStatus;
+use deepseek_code_core::services::session_worker::{McpOp, McpResult};
 
 /// The error the `/mcp` menu shows for a failed server, if any.
 pub(crate) fn failure(server: &McpServerStatus) -> Option<&str> {
@@ -51,10 +52,13 @@ pub(crate) fn untouched_preset(server: &McpServerStatus) -> bool {
 }
 
 pub async fn run(session: &Session) -> Result<()> {
-    session.ensure_mcp().await?;
     let mut selected = 0;
     loop {
-        let all = session.mcp.list_servers().await;
+        // A worker-backed session lists the servers its worker actually owns.
+        let all = match session.mcp_call(McpOp::ListServers).await? {
+            McpResult::Servers { servers, .. } => servers,
+            _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
+        };
         let hidden = all.iter().filter(|server| untouched_preset(server)).count();
         let servers: Vec<McpServerStatus> = all.into_iter().filter(|server| !untouched_preset(server)).collect();
         if servers.is_empty() {
@@ -126,10 +130,11 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
     };
     match actions[choice] {
         "View tools" => {
-            let tools: Vec<Entry> = session
-                .mcp
-                .get_all_tools()
-                .await
+            let tools = match session.mcp_call(McpOp::ListServers).await? {
+                McpResult::Servers { tools, .. } => tools,
+                _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
+            };
+            let tools: Vec<Entry> = tools
                 .into_iter()
                 .filter(|tool| tool.server_name == server.name || tool.server_name == server.id)
                 .map(|tool| Entry { title: tool.name, detail: tool.description.lines().next().unwrap_or_default().to_owned() })
@@ -144,18 +149,23 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
                 deepseek_code_core::mcp::states::shown(&stored, &server.id, server.enabled);
             match crate::plugins_panel::pick_mcp_state(&server.name, current)? {
                 Some(crate::plugins_panel::McpStateChoice::State(state)) => {
-                    crate::mcp_states::apply(&session.paths, &session.mcp, server, state)
+                    let label = state.label().to_owned();
+                    let result = session
+                        .mcp_call(McpOp::State {
+                            server: Some(server.id.clone()),
+                            state: Some(label.clone()),
+                        })
                         .await?;
-                    if state == deepseek_code_core::mcp::states::McpState::Off {
-                        disable(session, server).await?;
-                    } else if let Err(error) = enable(session, server).await {
-                        eprintln!(
-                            "{} is now {}; it failed to start: {error:#}",
-                            server.name,
-                            state.label()
-                        );
+                    match result {
+                        McpResult::State { failure: Some(failure), .. } => eprintln!(
+                            "{} is now {}; it failed to start: {failure}",
+                            server.name, label
+                        ),
+                        McpResult::State { .. } => {
+                            eprintln!("{} is now {}.", server.name, label)
+                        }
+                        _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
                     }
-                    eprintln!("{} is now {}.", server.name, state.label());
                 }
                 Some(crate::plugins_panel::McpStateChoice::Details) => eprintln!(
                     "{} \u{b7} {} \u{b7} {} tool{}",
@@ -167,18 +177,77 @@ async fn server(session: &Session, server: &McpServerStatus) -> Result<()> {
                 None => {}
             }
         }
-        "Reconnect" => match session.mcp.restart_server(&server.id).await {
-            Ok(()) => eprintln!("Reconnected to {}.", server.name),
-            Err(error) => eprintln!("Failed to reconnect to {}: {error:#}", server.name),
-        },
-        "Disable" => {
-            disable(session, server).await?;
-            eprintln!("Disabled {}.", server.name);
+        "Reconnect" => {
+            let stored = deepseek_code_core::mcp::states::load(&session.paths.data_dir);
+            let current =
+                deepseek_code_core::mcp::states::shown(&stored, &server.id, true);
+            let target = if current == deepseek_code_core::mcp::states::McpState::Off {
+                deepseek_code_core::mcp::states::McpState::User
+            } else {
+                current
+            };
+            let restart = async {
+                session
+                    .mcp_call(McpOp::State {
+                        server: Some(server.id.clone()),
+                        state: Some("off".into()),
+                    })
+                    .await?;
+                session
+                    .mcp_call(McpOp::State {
+                        server: Some(server.id.clone()),
+                        state: Some(target.label().into()),
+                    })
+                    .await
+            }
+            .await;
+            match restart {
+                Ok(McpResult::State { failure: Some(failure), .. }) => {
+                    eprintln!("Failed to reconnect to {}: {failure}", server.name)
+                }
+                Ok(_) => eprintln!("Reconnected to {}.", server.name),
+                Err(error) => eprintln!("Failed to reconnect to {}: {error:#}", server.name),
+            }
         }
-        _ => match enable(session, server).await {
-            Ok(()) => eprintln!("Enabled {}.", server.name),
-            Err(error) => eprintln!("Enabled {}, but it failed to start: {error:#}", server.name),
-        },
+        "Disable" => {
+            let result = session
+                .mcp_call(McpOp::State {
+                    server: Some(server.id.clone()),
+                    state: Some("off".into()),
+                })
+                .await?;
+            match result {
+                McpResult::State { .. } => eprintln!("Disabled {}.", server.name),
+                _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
+            }
+        }
+        _ => {
+            // Enabling restores the state the user stored before turning the
+            // server off; a stored `off` still means "on" once enabled.
+            let stored = deepseek_code_core::mcp::states::load(&session.paths.data_dir);
+            let current =
+                deepseek_code_core::mcp::states::shown(&stored, &server.id, true);
+            let target = if current == deepseek_code_core::mcp::states::McpState::Off {
+                deepseek_code_core::mcp::states::McpState::User
+            } else {
+                current
+            };
+            match session
+                .mcp_call(McpOp::State {
+                    server: Some(server.id.clone()),
+                    state: Some(target.label().into()),
+                })
+                .await
+            {
+                Ok(McpResult::State { failure: Some(failure), .. }) => eprintln!(
+                    "Enabled {}, but it failed to start: {failure}",
+                    server.name
+                ),
+                Ok(McpResult::State { .. }) => eprintln!("Enabled {}.", server.name),
+                Ok(_) => anyhow::bail!("Session worker returned an unexpected MCP result"),
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(())
 }

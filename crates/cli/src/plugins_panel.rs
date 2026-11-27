@@ -259,18 +259,18 @@ pub(crate) async fn load(
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
 
     // MCP belongs to the Tools panel only. The `/mcp` menu's list is used
-    // without its bundled presets nobody changed; `ensure_mcp` starts enabled
-    // servers once and keeps live connectors, so the token estimate sees their
-    // tools and opening the panel does not disconnect running servers.
+    // without its bundled presets nobody changed; the operation routes to the
+    // session worker when one owns the servers, so the token estimate and
+    // running state come from the authoritative manager.
     let mcp: Vec<McpRow> = if scope == Scope::Tools {
-        session.ensure_mcp().await?;
+        use deepseek_code_core::services::session_worker::{McpOp, McpResult};
+        let (server_rows, live_tools) = match session.mcp_call(McpOp::ListServers).await? {
+            McpResult::Servers { servers, tools } => (servers, tools),
+            _ => anyhow::bail!("MCP server listing returned an unexpected result"),
+        };
         let last_used = session.store.db.mcp_last_used(|| false)?;
         let stored_mcp = mcp_states::load(&paths.data_dir);
-        let live_tools = session.mcp.get_all_tools().await;
-        let mut mcp: Vec<McpRow> = session
-            .mcp
-            .list_servers()
-            .await
+        let mut mcp: Vec<McpRow> = server_rows
             .into_iter()
             .filter(|server| !crate::mcp_menu::untouched_preset(server))
             .map(|server| {
@@ -554,19 +554,24 @@ pub(crate) fn space_mcp_state(current: McpState) -> McpState {
 
 /// Apply a state to the live session, starting or stopping the server.
 async fn set_mcp_state(
-    paths: &RuntimePaths,
+    _paths: &RuntimePaths,
     session: &Session,
     server: &deepseek_code_core::mcp::McpServerStatus,
     state: McpState,
 ) -> Result<()> {
-    crate::mcp_states::apply(paths, &session.mcp, server, state).await?;
-    if state == McpState::Off {
-        crate::mcp_menu::disable(session, server).await?;
-    } else {
-        // A failed start is shown in the Errors tab instead of closing the panel.
-        let _ = crate::mcp_menu::enable(session, server).await;
+    use deepseek_code_core::services::session_worker::{McpOp, McpResult};
+    // A worker-backed session must apply this through its owning manager;
+    // otherwise the panel would start a second child for the same server.
+    match session
+        .mcp_call(McpOp::State {
+            server: Some(server.id.clone()),
+            state: Some(state.label().to_owned()),
+        })
+        .await?
+    {
+        McpResult::State { .. } => Ok(()),
+        _ => anyhow::bail!("MCP state change returned an unexpected result"),
     }
-    Ok(())
 }
 
 /// The muted line under a skill: state, source, listing cost and last use.

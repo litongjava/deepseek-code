@@ -102,6 +102,108 @@ async fn plugin_mcp_start_failure_is_announced_once_and_turns_continue() {
 }
 
 #[tokio::test]
+async fn worker_owns_mcp_state_and_stops_removed_servers_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+
+    // An HTTP MCP stub logs `start` when the worker first initializes it and
+    // `stop` when the manager ends the session after the config changes.
+    let log = temp.path().join("mcp-lifecycle.log");
+    let port_file = temp.path().join("mcp.port");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-log-stub.cjs");
+    let mut stub = tokio::process::Command::new("node")
+        .arg(&script)
+        .env("MCP_LOG", &log)
+        .env("MCP_PORT_FILE", &port_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let port = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&port_file) {
+                if let Ok(port) = text.trim().parse::<u16>() {
+                    break port;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the MCP stub did not report its port");
+    let config = paths.data_dir.join("mcp-servers.json");
+    let configure = |servers: Value| std::fs::write(&config, servers.to_string()).unwrap();
+    configure(json!({"mcpServers":{"stub":{
+        "type":"http", "url":format!("http://127.0.0.1:{port}/mcp"), "enabled":true
+    }}}));
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/v1/chat/completions", post(respond))
+        .with_state((requests.clone(), workspace.join("unused-lsp")));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) {
+        "mcp-owner.exe"
+    } else {
+        "mcp-owner"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+
+    let job = submit(&host, &endpoint, "stub turn one", "fixture", 128).await;
+    assert_eq!(
+        completed(&paths.data_dir, &job).await.status,
+        "completed"
+    );
+    // The same request `/mcp state <name>` sends: it must see the server the
+    // worker started, not a frontend manager that never initialized it.
+    let reply = worker::call(
+        &host,
+        &worker::Request::Mcp(worker::McpOp::State {
+            server: Some("stub".into()),
+            state: None,
+        }),
+    )
+    .await
+    .unwrap();
+    match reply.mcp.expect("MCP result") {
+        worker::McpResult::State { text, .. } => assert_eq!(text, "stub  user"),
+        other => panic!("unexpected MCP result: {other:?}"),
+    }
+
+    // Removing the definition and running another turn must stop the child
+    // the worker started, exactly once.
+    configure(json!({"mcpServers":{}}));
+    let job = submit(&host, &endpoint, "stub turn two", "fixture", 128).await;
+    assert_eq!(
+        completed(&paths.data_dir, &job).await.status,
+        "completed"
+    );
+    let lifecycle = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        lifecycle.lines().collect::<Vec<_>>(),
+        ["start", "stop"],
+        "{lifecycle}"
+    );
+
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    stub.kill().await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn running_session_reloads_extensions_on_the_next_request() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

@@ -2,6 +2,7 @@
 //! `/mcp__SERVER__PROMPT [ARGS...]` runs prompts/get and sends the result.
 use crate::session::Session;
 use anyhow::{Context, Result};
+use deepseek_code_core::services::session_worker::{McpOp, McpResult};
 
 /// Positional words fill the prompt's arguments in order; the last argument
 /// takes the rest of the line.
@@ -26,14 +27,26 @@ fn arguments(prompt: &deepseek_code_core::mcp::McpPrompt, line: &str) -> Result<
 pub async fn expand(session: &Session, command: &str, line: &str) -> Result<Option<String>> {
     let Some(rest) = command.strip_prefix("/mcp__") else { return Ok(None) };
     let (server, name) = rest.split_once("__").context("Usage: /mcp__SERVER__PROMPT [ARGS...]")?;
-    session.ensure_mcp().await?;
-    let prompts = session.mcp.get_all_prompts().await;
+    let prompts = match session.mcp_call(McpOp::ListPrompts).await? {
+        McpResult::Prompts { prompts } => prompts,
+        _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
+    };
     let Some((_, prompt)) = prompts.iter().find(|(id, prompt)| id == server && prompt.name == name) else {
         let available: Vec<String> = prompts.iter().map(|(id, prompt)| format!("/mcp__{id}__{}", prompt.name)).collect();
         anyhow::bail!("No MCP prompt {command}. Available: {}", if available.is_empty() { "none".into() } else { available.join(", ") });
     };
     let values = arguments(prompt, line)?;
-    session.mcp.get_prompt(server, name, values).await.map(Some)
+    match session
+        .mcp_call(McpOp::GetPrompt {
+            server: server.to_owned(),
+            name: name.to_owned(),
+            arguments: values,
+        })
+        .await?
+    {
+        McpResult::Prompt { text } => Ok(Some(text)),
+        _ => anyhow::bail!("Session worker returned an unexpected MCP result"),
+    }
 }
 
 #[cfg(test)]

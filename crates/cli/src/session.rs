@@ -7,6 +7,7 @@ use crate::{
     config::Selection,
 };
 use anyhow::{bail, Context, Result};
+use deepseek_code_core::services::session_worker::{McpOp, McpResult};
 use deepseek_code_core::{
     cache::FileCache,
     db::message_repo,
@@ -77,6 +78,11 @@ pub struct Session {
     pub(crate) ide: Arc<deepseek_code_core::services::ide::IdeClient>,
     pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
+    /// Enabled servers were started once by this process's manager.
+    mcp_started: tokio::sync::OnceCell<()>,
+    /// This process is the interactive REPL frontend whose turns run in a
+    /// session worker, so that worker owns the only MCP server manager.
+    worker_frontend: std::sync::atomic::AtomicBool,
     extension_watch: Mutex<Option<deepseek_code_core::mcp::extension_watch::ExtensionWatch>>,
     /// Provider whose entry in this manager was populated using startup options.
     pub(crate) startup_provider: Option<crate::config::StartupProvider>,
@@ -702,7 +708,7 @@ impl Session {
         Ok(())
     }
 
-    async fn reconcile_mcp(&self) -> Result<()> {
+    pub(crate) async fn reconcile_mcp(&self) -> Result<()> {
         match self.mcp.reconcile_config().await {
             Ok(changes) => {
                 deepseek_code_core::mcp::invalidate_snapshots(&self.paths.data_dir, &self.id, &changes)?;
@@ -717,8 +723,16 @@ impl Session {
 
     pub(crate) async fn ensure_mcp(&self) -> Result<()> {
         self.mcp_ready
+            .get_or_try_init(|| async { self.mcp.initialize().await })
+            .await?;
+        // A worker-backed frontend only reads the manager. Starting here would
+        // duplicate every child the worker owns, so the start step is deferred
+        // until this process is the owner (or the worker host itself runs it).
+        if self.worker_frontend_owns_mcp() {
+            return Ok(());
+        }
+        self.mcp_started
             .get_or_try_init(|| async {
-                self.mcp.initialize().await?;
                 for server in self
                     .mcp
                     .list_servers()
@@ -734,6 +748,102 @@ impl Session {
             })
             .await?;
         Ok(())
+    }
+
+    /// Whether this process must leave MCP server ownership to its worker.
+    fn worker_frontend_owns_mcp(&self) -> bool {
+        self.worker_frontend.load(std::sync::atomic::Ordering::Relaxed)
+            && self.coordination_mode
+                == crate::local_coordination::RegistrationMode::Automatic
+    }
+
+    /// Record whether interactive turns in this process run in a session worker.
+    pub(crate) fn mark_worker_frontend(&self, enabled: bool) {
+        self.worker_frontend
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// One MCP command. A worker-backed session sends it to the worker that
+    /// already owns the servers; every other session reconciles and runs it on
+    /// its own manager. Before the first worker turn there is no owner process,
+    /// so the frontend applies configuration without starting children.
+    pub(crate) async fn mcp_call(&self, op: McpOp) -> Result<McpResult> {
+        if self.worker_frontend_owns_mcp() {
+            if let Some(worker) = deepseek_code_core::services::session_worker::current(
+                &self.paths.data_dir,
+                &self.id,
+            )? {
+                if worker.status != "stopped"
+                    && !worker
+                        .child_pid
+                        .is_some_and(deepseek_code_core::services::session_worker::process_exited)
+                {
+                    let reply = deepseek_code_core::services::session_worker::call(
+                        &worker,
+                        &deepseek_code_core::services::session_worker::Request::Mcp(op),
+                    )
+                    .await?;
+                    return reply
+                        .mcp
+                        .context("Session worker returned no MCP result");
+                }
+            }
+            self.ensure_mcp().await?;
+            return self.mcp_op_local(op, false).await;
+        }
+        self.ensure_mcp().await?;
+        self.reconcile_mcp().await?;
+        self.mcp_op_local(op, true).await
+    }
+
+    /// Run one MCP operation on this process's manager. `start_servers` is
+    /// false only for a worker-backed frontend that does not own any children.
+    async fn mcp_op_local(&self, op: McpOp, start_servers: bool) -> Result<McpResult> {
+        match op {
+            McpOp::State { server, state } => {
+                let text = crate::mcp_states::state_command(
+                    &self.paths,
+                    &self.mcp,
+                    server.as_deref(),
+                    state.as_deref(),
+                )
+                .await?;
+                let mut failure = None;
+                if start_servers {
+                    if let Some(label) = state.as_deref() {
+                        let update: deepseek_code_core::mcp::states::McpState = label.parse()?;
+                        let query = server.as_deref().unwrap_or_default();
+                        let servers = self.mcp.list_servers().await;
+                        let found = servers
+                            .iter()
+                            .find(|server| server.id == query)
+                            .or_else(|| servers.iter().find(|server| server.name == query));
+                        if let Some(server) = found {
+                            if update == deepseek_code_core::mcp::states::McpState::Off {
+                                crate::mcp_menu::disable(self, server).await?;
+                            } else if let Err(error) = crate::mcp_menu::enable(self, server).await {
+                                failure = Some(format!("{error:#}"));
+                            }
+                        }
+                    }
+                }
+                Ok(McpResult::State { text, failure })
+            }
+            McpOp::ListServers => Ok(McpResult::Servers {
+                servers: self.mcp.list_servers().await,
+                tools: self.mcp.get_all_tools().await,
+            }),
+            McpOp::ListPrompts => Ok(McpResult::Prompts {
+                prompts: self.mcp.get_all_prompts().await,
+            }),
+            McpOp::GetPrompt {
+                server,
+                name,
+                arguments,
+            } => Ok(McpResult::Prompt {
+                text: self.mcp.get_prompt(&server, &name, arguments).await?,
+            }),
+        }
     }
 
     pub async fn context_window(&self) -> Option<u32> {
@@ -1063,6 +1173,8 @@ impl Session {
             engine,
             mcp,
             mcp_ready: Arc::new(tokio::sync::OnceCell::new()),
+            mcp_started: tokio::sync::OnceCell::new(),
+            worker_frontend: std::sync::atomic::AtomicBool::new(false),
             extension_watch: Mutex::new(None),
             startup_provider,
             has_saved_providers: paths.layout().config_file("config.json").is_file()
@@ -1774,8 +1886,10 @@ impl Session {
             && std::env::var("TERM").as_deref() != Ok("dumb")
             && !crate::display_commands::load(self)?.focus
         {
+            self.mark_worker_frontend(true);
             return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
         }
+        self.mark_worker_frontend(false);
         let mut next = prompt.to_owned();
         loop {
             let goal =

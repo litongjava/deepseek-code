@@ -1073,6 +1073,9 @@ async fn run(cli: &mut Cli) -> Result<()> {
         resumed.as_ref().map(|s| s.id.as_str()),
     )
     .await?;
+    // The interactive REPL delegates its turns to a session worker, whose
+    // manager owns the MCP children. A direct print/SDK launch owns its own.
+    session.mark_worker_frontend(!single && !sdk_stream);
     if normal_frontend && resumed.is_some() && session.startup_provider.is_none() {
         // After observation or a rejected selection, raw startup options have no authority.
         cli.discard_binding_options();

@@ -267,6 +267,28 @@ pub async fn run_from_env() -> Result<bool> {
                             response.edit_session = Some(manager.is_some_and(|manager| manager.edit_session_allowed(&worker.session_id)));
                             let _ = service::reply(stream, &response).await;
                         },
+                        Request::Mcp(op) => {
+                            // The worker host owns the only manager for this
+                            // session. Reconcile first, then run the operation on
+                            // that manager.
+                            let guard = session.lock().await;
+                            let result = match guard.as_ref() {
+                                Some(session) => session.mcp_call(op).await,
+                                None => Err(anyhow::anyhow!(
+                                    "MCP commands are available after this session's first turn"
+                                )),
+                            };
+                            drop(guard);
+                            let response = match result {
+                                Ok(mcp) => {
+                                    let mut response = Reply::ok(None);
+                                    response.mcp = Some(mcp);
+                                    response
+                                }
+                                Err(error) => Reply::error(error),
+                            };
+                            let _ = service::reply(stream, &response).await;
+                        },
                         Request::RuntimeStatus => {
                             let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
                                 mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),
