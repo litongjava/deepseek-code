@@ -1167,7 +1167,12 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 { return Err(std::io::Error::last_os_error()); }
+                Ok(())
+            });
+        }
     }
     // Publish ownership before the host exists. The host reads this record at
     // startup, and a record that does not yet name its supervisor leaves it
@@ -1192,16 +1197,11 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
             }
             #[cfg(unix)]
             {
-                let group = -(self.0.id() as i32);
-                // The group survives its leader. Keep the supervisor lifetime
-                // lock until there are no descendants left to run or reap.
                 loop {
-                    if unsafe { libc::kill(group, libc::SIGKILL) } == -1
-                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                    {
-                        break;
-                    }
-                    while unsafe { libc::waitpid(group, std::ptr::null_mut(), libc::WNOHANG) } > 0 {
+                    match crate::mcp::process::drain_worker_session(self.0.id() as i32) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => tracing::error!(%error, "Checking worker process groups"),
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }

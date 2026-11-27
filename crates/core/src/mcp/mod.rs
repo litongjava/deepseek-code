@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::BufReader;
-use tokio::process::{Child, Command};
+pub(crate) mod process;
+use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
 pub mod composio;
@@ -517,7 +518,7 @@ impl McpServerManager {
             let Some(connector) = state.connector else { return Ok(false) };
             let mut connector = connector.lock().await;
             let Some(child) = connector.process.as_mut() else { return Ok(false) };
-            if child.try_wait()?.is_none() {
+            if child.child.try_wait()?.is_none() {
                 return Ok(false);
             }
             drop(connector);
@@ -812,7 +813,7 @@ impl Default for RetryConfig {
 
 pub struct McpConnector {
     config: McpServerConfig,
-    process: Option<Child>,
+    process: Option<process::ServerProcess>,
     request_id: Mutex<u64>,
     channel: Mutex<Option<transport::Channel>>,
     retry_config: RetryConfig,
@@ -854,9 +855,9 @@ impl McpConnector {
                 if let Some(cwd) = &self.config.cwd {
                     cmd.current_dir(cwd);
                 }
-                let mut child = cmd.spawn()?;
-                let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
-                let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
+                let mut child = process::ServerProcess::spawn(&mut cmd)?;
+                let stdin = child.child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
+                let stdout = child.child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
                 self.process = Some(child);
                 transport::Channel::Stdio { stdin, stdout: BufReader::new(stdout) }
             }
@@ -1189,11 +1190,7 @@ impl McpConnector {
         if let Some(mut channel) = self.channel.lock().await.take() {
             channel.close().await;
         }
-        if let Some(mut child) = self.process.take() {
-            if child.try_wait()?.is_none() {
-                child.kill().await?;
-            }
-        }
+        drop(self.process.take());
         Ok(())
     }
 }

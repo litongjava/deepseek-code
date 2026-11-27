@@ -1304,7 +1304,7 @@ fn prepare_command(
 }
 
 #[cfg(windows)]
-fn resume_command(pid: u32) -> Result<()> {
+pub(crate) fn resume_command(pid: u32) -> Result<()> {
     use windows::Win32::{Foundation::CloseHandle, System::Threading::*};
     #[link(name = "ntdll")]
     unsafe extern "system" {
@@ -1314,7 +1314,7 @@ fn resume_command(pid: u32) -> Result<()> {
         let process = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid)?;
         let status = NtResumeProcess(process);
         let _ = CloseHandle(process);
-        ensure!(status >= 0, "Resuming hook process failed: {status:#x}");
+        ensure!(status >= 0, "Resuming suspended process failed: {status:#x}");
     }
     Ok(())
 }

@@ -152,6 +152,11 @@ pub async fn run_from_env() -> Result<bool> {
         .ok()
         .and_then(|value| value.parse::<u32>().ok());
     std::env::remove_var(service::SUPERVISOR_PID_ENV);
+    // Adopt launcher grandchildren so a connector can reap its whole group.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     let _lifetime = service::host_lifetime_lock(&dir)?;
     // On Windows the supervisor assigns the engine to a kill-on-close job
     // before publishing its PID. No descendant may spawn outside that job.
