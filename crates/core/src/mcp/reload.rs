@@ -43,7 +43,7 @@ impl McpServerManager {
             // Plugin synchronization may have just applied and attempted this
             // exact definition in this turn; starting it again here would repeat
             // its notice and keep retrying an unchanged broken server.
-            if same_live && target.is_some_and(|config| self.plugin_start_attempted(&id, config)) {
+            if same_live && live.get(&id).is_some_and(|server| server.plugin_start_failed()) {
                 continue;
             }
             if same_live && previous.get(&id).map(|s| &s.config) == target {

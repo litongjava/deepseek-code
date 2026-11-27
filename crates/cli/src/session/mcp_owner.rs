@@ -99,7 +99,7 @@ impl Session {
             *owner = target;
             for server in self.mcp.list_servers().await {
                 if server.enabled {
-                    if let Err(error) = self.mcp.start_server(&server.id).await {
+                    if let Err(error) = self.mcp.start_automatically(&server.id).await {
                         crate::compaction::notice(&format!(
                             "MCP: {} failed to start: {error:#}",
                             server.id

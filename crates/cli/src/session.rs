@@ -2238,7 +2238,6 @@ impl Session {
         {
             return crate::worker_frontend::turn(cli, self, prompt, input, origin).await;
         }
-        self.set_mcp_owner(McpOwner::Frontend).await?;
         let mut next = prompt.to_owned();
         loop {
             let goal =
@@ -2506,6 +2505,7 @@ impl Session {
                 ));
             }
         };
+        self.set_mcp_owner(McpOwner::Frontend).await?;
         let mut turn = match &completion.queued {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
             None=>self.store.db.start_turn_timer(&self.id)?,

@@ -136,6 +136,12 @@ pub struct McpServerState {
     pub status: McpServerStatus,
 }
 
+impl McpServerState {
+    fn plugin_start_failed(&self) -> bool {
+        self.config.id.starts_with("plugin:") && self.status.error.is_some()
+    }
+}
+
 impl std::fmt::Debug for McpServerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpServerState")
@@ -153,9 +159,7 @@ pub struct McpServerManager {
     applied: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     control: std::sync::Mutex<Option<control::Host>>,
     lifecycle_lock: Arc<Mutex<()>>,
-    // Plugin-owned servers whose start was attempted for a given definition, so
-    // an unchanged broken plugin is announced once instead of every turn.
-    plugin_starts: Arc<std::sync::Mutex<Vec<(String, McpServerConfig)>>>,
+
 }
 
 impl McpServerManager {
@@ -167,7 +171,6 @@ impl McpServerManager {
             applied: Arc::default(),
             control: std::sync::Mutex::new(None),
             lifecycle_lock: Arc::new(Mutex::new(())),
-            plugin_starts: Arc::default(),
         }
     }
 
@@ -186,7 +189,6 @@ impl McpServerManager {
                 applied: self.applied.clone(),
                 control: std::sync::Mutex::new(None),
                 lifecycle_lock: self.lifecycle_lock.clone(),
-                plugin_starts: self.plugin_starts.clone(),
             };
             *control = Some(control::Host::start(worker)?);
         }
@@ -394,6 +396,9 @@ impl McpServerManager {
         transfer::persist(&self.config_path, &self.revision, &configs, false)?;
         if let Some(state) = servers.get_mut(id) {
             let was_running = state.status.running;
+            if state.config != config {
+                state.status.error = None;
+            }
             state.config = config;
             state.status.name = state.config.name.clone();
             state.status.command = state.config.command.clone();
@@ -456,20 +461,30 @@ impl McpServerManager {
         self.servers.read().await.get(id).map(|s| s.status.clone())
     }
 
-    /// Whether plugin synchronization already tried to start this definition.
-    /// An unchanged definition that failed is not retried on every turn.
-    pub(crate) fn plugin_start_attempted(&self, id: &str, config: &McpServerConfig) -> bool {
-        self.plugin_starts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(attempted, definition)| attempted == id && definition == config)
-    }
-
-    pub(crate) fn note_plugin_start_attempt(&self, id: &str, config: &McpServerConfig) {
-        let mut attempts = self.plugin_starts.lock().unwrap();
-        attempts.retain(|(attempted, _)| attempted != id);
-        attempts.push((id.to_owned(), config.clone()));
+    /// Start at an ownership or reconciliation boundary. A failed plugin
+    /// definition already carries its diagnostic in the manager's live state.
+    /// Explicit starts (Enable/Reconnect) may always retry it.
+    pub async fn start_automatically(&self, id: &str) -> Result<bool> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let state = self.servers.read().await.get(id).cloned()
+            .ok_or_else(|| anyhow!("Server not found: {id}"))?;
+        if !state.config.enabled || state.plugin_start_failed() {
+            return Ok(false);
+        }
+        if state.status.running {
+            // Stdio children can exit between turns without a further tool
+            // call. Reap an exited child before replacing its connector.
+            let Some(connector) = state.connector else { return Ok(false) };
+            let mut connector = connector.lock().await;
+            let Some(child) = connector.process.as_mut() else { return Ok(false) };
+            if child.try_wait()?.is_none() {
+                return Ok(false);
+            }
+            drop(connector);
+            self.stop_server_inner(id).await?;
+        }
+        self.start_server_inner(id).await?;
+        Ok(true)
     }
 
     pub async fn start_server(&self, id: &str) -> Result<()> {
@@ -696,6 +711,9 @@ impl McpServerManager {
         configs.get_mut(id).unwrap().enabled = enabled;
         transfer::persist(&self.config_path, &self.revision, &configs, false)?;
         let state = servers.get_mut(id).unwrap();
+        if state.config.enabled != enabled {
+            state.status.error = None;
+        }
         state.config.enabled = enabled;
         state.status.enabled = enabled;
         Ok(())
@@ -1130,7 +1148,9 @@ impl McpConnector {
             channel.close().await;
         }
         if let Some(mut child) = self.process.take() {
-            child.kill().await?;
+            if child.try_wait()?.is_none() {
+                child.kill().await?;
+            }
         }
         Ok(())
     }
