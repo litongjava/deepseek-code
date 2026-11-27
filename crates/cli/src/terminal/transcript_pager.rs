@@ -101,6 +101,11 @@ pub(super) struct HistoryView {
     cached_width: usize,
     base_len: usize,
     pinned: String,
+    /// The automatic compact view stays on the newest rows while this is set.
+    /// A manual scroll clears it; ctrl+end turns it back on.
+    follow_tail: bool,
+    /// The last content page, so appends can re-pin the tail without it.
+    page: usize,
 }
 
 impl HistoryView {
@@ -127,6 +132,7 @@ impl HistoryView {
         self.top.unwrap_or(0)
     }
     pub(super) fn drag_scroll(&mut self, up: bool, page: usize) {
+        self.follow_tail = false;
         let page = self.content_page(page);
         let top = self.top();
         self.top = Some(if up {
@@ -138,6 +144,7 @@ impl HistoryView {
         self.previous.clear();
     }
     pub(super) fn open_at(&mut self, row: usize) -> io::Result<()> {
+        self.follow_tail = false;
         if !self.active() {
             execute!(crate::terminal_output::stderr(), EnterAlternateScreen)?;
         }
@@ -171,6 +178,7 @@ impl HistoryView {
         (row < page).then(|| self.top.unwrap_or(0) + index)
     }
     pub(super) fn wheel(&mut self, up: bool, page: usize) -> io::Result<()> {
+        self.follow_tail = false;
         let page = self.content_page(page);
         let was_active = self.active();
         let end = self.all.len().saturating_sub(page);
@@ -194,16 +202,27 @@ impl HistoryView {
             self.previous.clear();
             execute!(crate::terminal_output::stderr(), EnterAlternateScreen)?;
         }
-        self.top = Some(self.all.len().saturating_sub(self.content_page(page)));
+        self.follow_tail = true;
+        self.pin_tail(page);
         Ok(())
+    }
+    fn pin_tail(&mut self, page: usize) {
+        self.top = Some(self.all.len().saturating_sub(self.content_page(page)));
+    }
+    fn pin_tail_while_following(&mut self) {
+        if self.follow_tail && self.top.is_some() {
+            self.pin_tail(self.page);
+        }
     }
     pub(super) fn active(&self) -> bool {
         self.top.is_some()
     }
 
-    pub(super) fn refresh(&mut self, lines: &[Line], logged: &[String], width: usize) {
+    pub(super) fn refresh(&mut self, lines: &[Line], logged: &[String], width: usize, page: usize) {
+        self.page = page;
         if lines.is_empty() && self.cached_width == width && self.cached_logged == logged {
             self.all.truncate(self.base_len);
+            self.pin_tail_while_following();
             return;
         }
         self.all = transcript_rows(
@@ -215,10 +234,12 @@ impl HistoryView {
         self.cached_width = if lines.is_empty() { width } else { 0 };
         self.cached_logged = logged.to_vec();
         self.base_len = self.all.len();
+        self.pin_tail_while_following();
     }
 
     pub(super) fn append(&mut self, text: &str, width: usize) {
         append_rows(&mut self.all, text, width);
+        self.pin_tail_while_following();
     }
 
     pub(super) fn is_navigation(key: KeyEvent) -> bool {
@@ -232,6 +253,9 @@ impl HistoryView {
             return Ok(false);
         }
         let was_active = self.active();
+        // ctrl+end returns to the automatic tail; every other navigation key is
+        // a manual scroll that stops following new rows.
+        self.follow_tail = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End;
         self.move_page(key.code, page.max(1));
         if !was_active && self.active() {
             self.previous.clear();
@@ -263,6 +287,7 @@ impl HistoryView {
     }
 
     pub(super) fn close(&mut self) -> io::Result<()> {
+        self.follow_tail = false;
         if self.top.take().is_some() {
             execute!(crate::terminal_output::stderr(), LeaveAlternateScreen)?;
         }
@@ -684,6 +709,7 @@ mod tests {
             &[],
             &(0..20).map(|n| format!("row {n}")).collect::<Vec<_>>(),
             40,
+            10,
         );
         history.move_page(KeyCode::Home, 6);
         let composer = ["border", "draft", "border", "footer"].map(str::to_owned);
@@ -714,7 +740,7 @@ mod tests {
     #[test]
     fn normal_and_running_history_wheel_moves_one_row() {
         let mut view = HistoryView::default();
-        view.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        view.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80, 20);
         view.top = Some(40);
         view.wheel(true, 20).unwrap();
         assert_eq!(view.top, Some(39));
@@ -729,7 +755,7 @@ mod tests {
     #[test]
     fn selection_snapshot_uses_scrolled_rows_without_changing_position() {
         let mut view = HistoryView::default();
-        view.refresh(&[], &(0..30).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        view.refresh(&[], &(0..30).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80, 5);
         view.move_page(KeyCode::PageUp, 5);
         let top = view.top;
         let snapshot = view.screen_rows(6, &["prompt".into()]);
@@ -758,7 +784,7 @@ mod tests {
     fn history_page_keys_and_control_home_end_navigate_without_editing() {
         let mut history = HistoryView::default();
         let lines: Vec<Line> = (0..100).map(|row| change_view::body(&format!("line {row}"))).collect();
-        history.refresh(&lines, &[], 40);
+        history.refresh(&lines, &[], 40, 10);
         assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)));
         assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
         assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)));
@@ -786,7 +812,7 @@ mod tests {
     #[test]
     fn history_paging_uses_content_height_and_clamps_at_top() {
         let mut history = HistoryView::default();
-        history.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        history.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80, 20);
         history.set_pinned("prompt", 80);
         history.move_page(KeyCode::PageUp, 11);
         assert_eq!(history.top, Some(82));
@@ -804,7 +830,7 @@ mod tests {
     fn history_draw_keeps_the_composer_on_the_bottom_and_clamps_after_resize() {
         let mut history = HistoryView::default();
         let lines: Vec<Line> = (0..20).map(|row| change_view::body(&format!("line {row}"))).collect();
-        history.refresh(&lines, &[], 40);
+        history.refresh(&lines, &[], 40, 10);
         history.move_page(KeyCode::Home, 6);
         let composer = vec!["border".into(), "prompt draft".into(), "border".into(), "footer".into()];
         let mut output = Vec::new();
@@ -841,7 +867,7 @@ mod tests {
     fn history_draw_with_overlay_replaces_covered_rows_in_one_frame() {
         let mut history = HistoryView::default();
         let logged: Vec<String> = (0..10).map(|i| format!("history {i}")).collect();
-        history.refresh(&[], &logged, 40);
+        history.refresh(&[], &logged, 40, 6);
         history.top = Some(0);
         let composer = vec![
             "border".into(),
@@ -873,7 +899,7 @@ mod tests {
         history.move_page(KeyCode::PageUp, 10);
         history.move_page(KeyCode::Home, 10);
         assert_eq!(history.top, None);
-        history.refresh(&[change_view::body("first")], &["\x1b[32m中文中文中文\x1b[0m".into()], 4);
+        history.refresh(&[change_view::body("first")], &["\x1b[32m中文中文中文\x1b[0m".into()], 4, 10);
         assert!(history.all.len() >= 4);
         history.move_page(KeyCode::Home, 10);
         assert_eq!(history.top, Some(0));

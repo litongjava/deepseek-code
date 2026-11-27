@@ -1606,7 +1606,8 @@ impl Frame {
 
     fn refresh_history(&mut self, state: &State, width: usize, height: u16) {
         self.history_view.set_pinned(&self.pinned.text, width);
-        self.history_view.refresh(&[], &self.scrollback.presentation(), width);
+        let page = (height as usize).saturating_sub(self.composer_height);
+        self.history_view.refresh(&[], &self.scrollback.presentation(), width, page);
         if state.activity.starts_with("Running Bash") {
             self.history_view.append(&format!("\n{}", state.activity), width);
         }
@@ -1637,7 +1638,6 @@ impl Frame {
         // The height comes from the caller: the live frame's own size is still
         // (0, 0) on the first compact frame, before `place` has run.
         let room = if super::scrollback::compact() {
-            let page = (height as usize).saturating_sub(self.composer_height);
             let trailing = state
                 .notices
                 .iter()
