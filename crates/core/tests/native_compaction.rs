@@ -12,6 +12,7 @@ use deepseek_code_core::{
     native_engine::{
         engine_core::ChatRequest,
         provider_manager::{ApiFormat, Provider, ProviderManager},
+        request_context::ContextUsage,
         token_counter::TokenCounter,
         NativeEngine,
     },
@@ -21,6 +22,9 @@ use deepseek_code_core::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
+
+const PRESSURE_WINDOW: u32 = 96_000;
+const PRESSURE_OUTPUT: u32 = 1_000;
 
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
@@ -104,6 +108,16 @@ async fn fixture(mode: u8) -> Fixture {
     let captured = seen.clone();
     let read_fixture = dir.path().join("host-evidence.txt");
     let app = app.route("/tools/codex/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+        let over_budget = if mode == 8 && headers["x-dcl-request-kind"] == "turn" {
+            let usage = ContextUsage::from_body("openai-responses", &body, Some(PRESSURE_WINDOW), PRESSURE_OUTPUT);
+            let reserve = usage.sent_output_reserve.unwrap_or(u64::from(PRESSURE_OUTPUT));
+            (usage.text_subtotal() + reserve > u64::from(PRESSURE_WINDOW)).then(|| format!(
+                "mock rejected over-budget main request: history={}, full input={}, reserve={reserve}",
+                usage.history.estimated_tokens, usage.text_subtotal()
+            ))
+        } else {
+            None
+        };
         let (host_summary, next_read) = if mode == 8 {
             let input = body["input"].to_string();
             let summary = headers.get("x-dcl-request-kind").is_some_and(|kind| kind == "compaction");
@@ -146,6 +160,10 @@ async fn fixture(mode: u8) -> Fixture {
         }
         captured.lock().unwrap().push(body);
         async move {
+            if let Some(message) = over_budget {
+                eprintln!("{message}");
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
             if matches!(mode, 1 | 6) {
                 return (StatusCode::BAD_GATEWAY, [("retry-after", "0")], "unavailable").into_response();
             }
@@ -180,7 +198,7 @@ async fn fixture(mode: u8) -> Fixture {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider: Provider = serde_json::from_value(json!({"id":"gateway","name":"gateway","builtin_id":"openai","api_format":"openai","base_url":format!("http://{}/tools/codex/v1",listener.local_addr().unwrap()),"api_key":"gateway-key","enabled":true,"models":[{"id":"gpt-6-astra","name":"model","api":"openai-responses","enabled":true,"supports_web_search":false,"max_tokens":8192,"context_window":if matches!(mode,3|7) {16000} else if mode == 8 {96000} else {256000}}]})).unwrap();
+    let provider: Provider = serde_json::from_value(json!({"id":"gateway","name":"gateway","builtin_id":"openai","api_format":"openai","base_url":format!("http://{}/tools/codex/v1",listener.local_addr().unwrap()),"api_key":"gateway-key","enabled":true,"models":[{"id":"gpt-6-astra","name":"model","api":"openai-responses","enabled":true,"supports_web_search":false,"max_tokens":8192,"context_window":if matches!(mode,3|7) {16000} else if mode == 8 {PRESSURE_WINDOW} else {256000}}]})).unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -387,6 +405,88 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
             steer.len(), calls.len());
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn protected_exchange_must_fit_with_the_host_boundary_and_request_overhead() {
+    use deepseek_code_core::{
+        native_engine::tool_loop::EngineEvent,
+        services::input_queue::{enqueue, QueueMode, QueueOrigin},
+    };
+
+    let Fixture {
+        dir,
+        store,
+        id,
+        engine,
+        seen,
+        server,
+        ..
+    } = fixture(8).await;
+    std::fs::write(dir.path().join("host-evidence.txt"), "HOST_READ_ZERO\n").unwrap();
+    let prefix = format!("HOST_ORIGINAL {}", "a".repeat(185_000));
+    let request = serde_json::from_value(json!({
+        "conversation_id":id, "messages":[{"role":"user","content":prefix}],
+        "provider_id":"gateway", "model":"gpt-6-astra", "workspace_path":dir.path(),
+        "max_tokens":PRESSURE_OUTPUT, "max_turns":5,
+        "response_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"],"additionalProperties":false}
+    })).unwrap();
+    // Admitted after Read zero. These rows fit within the 95,000-token input
+    // budget, but the instructions, tools and schema take the full wire over it.
+    let steer = format!("PROTECTED_STEER {}", "s".repeat(247_500));
+    enqueue(
+        &store.db,
+        &id,
+        "large-steer",
+        json!(steer),
+        QueueMode::Steer,
+        QueueOrigin::User,
+    )
+    .unwrap();
+    let mut events = engine.send_message(request).await.unwrap();
+    let mut error = None;
+    let mut reads = Vec::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            EngineEvent::ToolUseDone {
+                tool_name,
+                output,
+                is_error,
+                ..
+            } => {
+                assert!(!is_error && output.contains("HOST_READ_ZERO"));
+                reads.push(tool_name);
+            }
+            EngineEvent::Error(message) => error = Some(message),
+            _ => {}
+        }
+    }
+    let error = error.expect("expected a local capacity error after the Read");
+    assert!(
+        error.contains("only 95000 fit") && error.contains("/compact"),
+        "{error}"
+    );
+    assert_eq!(reads, ["Read"]);
+    eprintln!("protected exchange stopped locally: {error}");
+    let calls = seen.lock().unwrap();
+    let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
+    let [merge, final_summary, main] =
+        assert_pressure_fragments(&calls, attempts, &[&prefix], &["PROTECTED_STEER"])
+    else {
+        panic!("expected one main request after the host boundary was installed");
+    };
+    assert!(summary_prompt(merge).starts_with("Merge these summaries"));
+    assert!(summary_prompt(final_summary).starts_with("Write one continuation summary"));
+    let rows = main["input"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("# Experience"));
+    assert_eq!(rows[1]["content"][0]["text"], "HOST_SNAPSHOT_SUMMARY");
+    assert!(main["text"]["format"]["schema"].is_object());
+    assert_eq!(compaction::count(&store.db, &id).unwrap().proven(), 0);
+    server.abort();
 }
 
 #[tokio::test]

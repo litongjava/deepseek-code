@@ -342,15 +342,8 @@ impl ToolLoopExecutor {
             .max(estimated_messages.saturating_add(self.last_request_overhead_tokens))
     }
 
-    async fn check_uncompressed_request<M: serde::Serialize>(
-        &mut self,
-        cause: &str,
-        window: &[M],
-    ) -> Result<()> {
-        if self.event_tx.is_closed() {
-            anyhow::bail!("Compaction cancelled");
-        }
-        let wire = self.build_mid_turn_summary_wire(window)?;
+    fn ensure_request_fits(&self, rows: &[Value], cause: &str) -> Result<()> {
+        let wire = self.build_mid_turn_summary_wire(rows)?;
         let model = &self.provider.model;
         let usage = super::super::request_context::ContextUsage::from_body(
             &wire.api,
@@ -358,12 +351,8 @@ impl ToolLoopExecutor {
             model.context_window,
             self.max_tokens,
         );
-        let rows = window
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<Vec<_>>>()?;
         let estimated = self
-            .estimated_input_tokens(TokenCounter::estimate(&rows) as u64)
+            .estimated_input_tokens(TokenCounter::estimate(rows) as u64)
             .max(usage.text_subtotal());
         let limit = model
             .context_window
@@ -373,6 +362,22 @@ impl ToolLoopExecutor {
         if estimated > capacity {
             anyhow::bail!("Automatic compaction failed. The next request needs about {estimated} input tokens and only {capacity} fit. Resume and run /compact or select a model with a larger context window. Cause: {cause}");
         }
+        Ok(())
+    }
+
+    async fn check_uncompressed_request<M: serde::Serialize>(
+        &mut self,
+        cause: &str,
+        window: &[M],
+    ) -> Result<()> {
+        if self.event_tx.is_closed() {
+            anyhow::bail!("Compaction cancelled");
+        }
+        let rows = window
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        self.ensure_request_fits(&rows, cause)?;
         if !self.auto_compaction_warned {
             let _ = self
                 .event_tx
@@ -843,6 +848,26 @@ impl ToolLoopExecutor {
             _ => false,
         };
         let estimated = TokenCounter::estimate(&rows);
+        let host_cut = if let Some(live) = &self.in_flight_window {
+            // Protect the newest complete exchange. If only the preceding
+            // boundary could be summarized, keep sending it while it fits.
+            let end = self
+                .messages
+                .iter()
+                .rposition(|row| row["role"] == "assistant")
+                .filter(|at| TokenCounter::estimate(&rows[*at..]) <= capacity)
+                .unwrap_or(self.messages.len());
+            if end <= live.boundary_len && estimated <= capacity {
+                self.ensure_request_fits(
+                    &rows,
+                    "Only the previously compacted host boundary precedes the protected exchange",
+                )?;
+                return Ok(false);
+            }
+            Some(end)
+        } else {
+            None
+        };
         if autocompact_off || mid_turn_managed {
             if estimated <= capacity {
                 return Ok(false);
@@ -856,18 +881,7 @@ impl ToolLoopExecutor {
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
         let mut explicit_history = None;
-        if let Some(live) = &self.in_flight_window {
-            // Protect the newest complete exchange. If only the preceding
-            // boundary could be summarized, keep sending it while it fits.
-            let end = self
-                .messages
-                .iter()
-                .rposition(|row| row["role"] == "assistant")
-                .filter(|at| TokenCounter::estimate(&rows[*at..]) <= capacity)
-                .unwrap_or(self.messages.len());
-            if end <= live.boundary_len && estimated <= capacity {
-                return Ok(false);
-            }
+        if let Some(end) = host_cut {
             explicit_history = Some(ExplicitHistory {
                 source: self.compaction_history(..end),
                 rendered_len: end,
