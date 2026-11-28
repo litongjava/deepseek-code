@@ -1804,7 +1804,7 @@ mod tests {
             release.send(()).unwrap();
             holder.join().unwrap();
             calls.fetch_add(1, Ordering::Relaxed);
-            crate::worktree::session::common_dir(cwd)
+            identity::GitDirs::lookup(cwd)
         });
         owner
             .delivery
@@ -1872,7 +1872,7 @@ mod tests {
             .unwrap();
         let db = context.db.clone();
         let resolver = identity::Resolver::new(move |cwd| {
-            let common = crate::worktree::session::common_dir(cwd)?;
+            let common = identity::GitDirs::lookup(cwd)?;
             // Another host commits a new mapping after this lookup has started.
             let db = db.clone();
             let session = sender.clone();

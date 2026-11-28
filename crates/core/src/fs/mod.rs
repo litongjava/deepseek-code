@@ -9,6 +9,45 @@ pub mod directories;
 mod file_lock;
 pub use file_lock::{lock_file, try_lock_file, unlock_file};
 
+#[cfg(windows)]
+pub(crate) fn windows_file_id(file: &fs::File) -> Result<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
+    ))
+}
+
+pub(crate) fn directory_id(path: &Path) -> Result<(u64, u64)> {
+    let metadata = fs::metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "Expected a directory at {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        let file = fs::File::options()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)?;
+        windows_file_id(&file)
+    }
+}
+
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///
 /// A child process forked by any thread inherits a copy of the descriptor

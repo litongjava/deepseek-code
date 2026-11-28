@@ -7,7 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
-pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
+pub(crate) fn git_command(cwd: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     let cwd_text = cwd.to_string_lossy();
     let cwd_text = super::git_path_text(&cwd_text);
@@ -26,6 +26,10 @@ pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
         command.creation_flags(0x08000000);
     }
     command
+}
+
+pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
+    git_command(cwd, args)
         .output()
         .context("Could not run Git. Check that Git is installed")
 }

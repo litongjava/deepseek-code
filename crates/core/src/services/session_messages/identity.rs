@@ -8,68 +8,164 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use rusqlite::Connection;
 use std::{
-    collections::HashMap,
+    collections::VecDeque,
     fs,
+    io::{Read, Seek},
     path::{Path, PathBuf},
-    time::SystemTime,
+    process::{Command, Stdio},
+    time::{Duration, Instant, SystemTime},
 };
+
+const CACHE_CAPACITY: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Git worktree identity lookup timed out")]
+pub(crate) struct GitLookupTimeout;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitDirs {
+    git: PathBuf,
+    common: PathBuf,
+}
+
+impl GitDirs {
+    pub(crate) fn lookup(cwd: &Path) -> Result<Self> {
+        let mut command = session::git_command(
+            cwd,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "--absolute-git-dir",
+            ],
+        );
+        let output = git_output(&mut command, Duration::from_secs(2))?;
+        let mut lines = std::str::from_utf8(&output)?.lines();
+        let common = Path::new(lines.next().context("Git returned no common directory")?);
+        let git = Path::new(lines.next().context("Git returned no Git directory")?);
+        ensure!(
+            lines.next().is_none() && common.is_absolute() && git.is_absolute(),
+            "Invalid Git directory response"
+        );
+        Ok(Self {
+            git: git.canonicalize()?,
+            common: common.canonicalize()?,
+        })
+    }
+}
+
+fn git_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>> {
+    // A regular output file lets us wait on just the owned process. A wrapper
+    // that leaves a descendant holding stdout cannot stall a pipe reader.
+    let mut output = tempfile::tempfile()?;
+    let until = Instant::now() + timeout;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(output.try_clone()?)
+        .spawn()?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                ensure!(
+                    status.success(),
+                    "Git could not resolve the worktree directories"
+                );
+                break;
+            }
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
+            result => {
+                let _ = child.kill();
+                child.wait()?;
+                result?;
+                return Err(GitLookupTimeout.into());
+            }
+        }
+    }
+    output.rewind()?;
+    let mut bytes = Vec::new();
+    output.take(65537).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 65536, "Oversized Git directory response");
+    Ok(bytes)
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct GitKey {
     marker: PathBuf,
-    git_dir: PathBuf,
+    cwd_id: (u64, u64),
+    root_id: (u64, u64),
+    dirs: GitDirs,
+    git_id: (u64, u64),
+    common_id: (u64, u64),
     head: SystemTime,
-    common: PathBuf,
     modified: SystemTime,
+    config: Option<SystemTime>,
+    worktree_config: Option<SystemTime>,
+    standard_layout: bool,
+    discovery_env: Vec<Option<std::ffi::OsString>>,
 }
 
 impl GitKey {
-    // Unsupported layouts still go through Git, but never populate the cache.
-    fn read(cwd: &Path) -> Option<Self> {
-        if [
-            "GIT_DIR",
-            "GIT_COMMON_DIR",
-            "GIT_WORK_TREE",
-            "GIT_CEILING_DIRECTORIES",
-            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        ]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some())
-        {
-            return None;
-        }
-        let cwd = cwd.canonicalize().ok()?;
-        let marker = cwd
+    fn read(cwd: &Path) -> Result<Self> {
+        let cwd = cwd.canonicalize()?;
+        let root = cwd
             .ancestors()
-            .map(|dir| dir.join(".git"))
-            .find(|path| path.exists())?;
-        let git_dir = if marker.is_dir() {
-            marker.canonicalize().ok()?
+            .take_while(|dir| {
+                !(dir.join("HEAD").is_file()
+                    && (dir.join("objects").is_dir() || dir.join("commondir").is_file()))
+            })
+            .find(|dir| dir.join(".git").exists())
+            .context("Missing worktree Git marker")?;
+        let marker = root.join(".git");
+        let git = if marker.is_dir() {
+            marker.canonicalize()?
         } else {
-            if !marker.is_file() {
-                return None;
+            ensure!(marker.is_file(), "Invalid worktree Git marker");
+            let link = fs::read_to_string(&marker)?;
+            root.join(
+                link.trim_end_matches(['\r', '\n'])
+                    .strip_prefix("gitdir: ")
+                    .context("Invalid gitdir link")?,
+            )
+            .canonicalize()?
+        };
+        let common = match fs::read_to_string(git.join("commondir")) {
+            Ok(link) => git
+                .join(link.trim_end_matches(['\r', '\n']))
+                .canonicalize()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => git.clone(),
+            Err(e) => return Err(e.into()),
+        };
+        let standard_layout = common.join("objects").is_dir() && common.join("refs").is_dir();
+        fn modified(path: &Path) -> Result<Option<SystemTime>> {
+            match fs::metadata(path) {
+                Ok(meta) => Ok(Some(meta.modified()?)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
             }
-            let link = fs::read_to_string(&marker).ok()?;
-            marker
-                .parent()?
-                .join(link.trim_end().strip_prefix("gitdir: ")?)
-                .canonicalize()
-                .ok()?
-        };
-        let common = match fs::read_to_string(git_dir.join("commondir")) {
-            Ok(link) => git_dir.join(link.trim_end()).canonicalize().ok()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
-            Err(_) => return None,
-        };
-        if !common.join("objects").is_dir() || !common.join("refs").is_dir() {
-            return None;
         }
-        Some(Self {
+        Ok(Self {
             marker,
-            head: fs::metadata(git_dir.join("HEAD")).ok()?.modified().ok()?,
-            git_dir,
-            modified: fs::metadata(&common).ok()?.modified().ok()?,
-            common,
+            cwd_id: crate::fs::directory_id(&cwd)?,
+            root_id: crate::fs::directory_id(root)?,
+            git_id: crate::fs::directory_id(&git)?,
+            common_id: crate::fs::directory_id(&common)?,
+            head: fs::metadata(git.join("HEAD"))?.modified()?,
+            modified: fs::metadata(&common)?.modified()?,
+            config: modified(&common.join("config"))?,
+            worktree_config: modified(&git.join("config.worktree"))?,
+            dirs: GitDirs { git, common },
+            standard_layout,
+            discovery_env: [
+                "GIT_DIR",
+                "GIT_COMMON_DIR",
+                "GIT_WORK_TREE",
+                "GIT_CEILING_DIRECTORIES",
+                "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            ]
+            .iter()
+            .map(std::env::var_os)
+            .collect(),
         })
     }
 }
@@ -122,7 +218,11 @@ impl ProjectBinding {
             worktree.validate(&self.path, lookup)?;
         }
         let source = self.path.canonicalize()?.to_string_lossy().into_owned();
-        Ok(if cfg!(windows) { source.to_lowercase() } else { source })
+        Ok(if cfg!(windows) {
+            source.to_lowercase()
+        } else {
+            source
+        })
     }
 }
 
@@ -131,7 +231,7 @@ pub(crate) struct PeerProject {
     binding: ProjectBinding,
     // Linkage checked by Git during preparation. A retarget while waiting for
     // the writer invalidates the evidence without launching another process.
-    git_keys: Vec<(PathBuf, Option<GitKey>, PathBuf)>,
+    git_keys: Vec<(PathBuf, GitKey)>,
 }
 
 impl PeerProject {
@@ -141,62 +241,75 @@ impl PeerProject {
             "Message project changed during authorization"
         );
         let source = self.binding.validate_source(|cwd| {
-            let (_, key, common) = self.git_keys.iter().find(|(path, _, _)| path == cwd)
+            let (_, key) = self
+                .git_keys
+                .iter()
+                .find(|(path, _)| path == cwd)
                 .context("Missing verified Git identity")?;
-            ensure!(GitKey::read(cwd) == *key, "Git worktree identity changed during authorization");
-            Ok(common.clone())
+            ensure!(
+                GitKey::read(cwd)? == *key,
+                "Git worktree identity changed during authorization"
+            );
+            Ok(key.dirs.common.clone())
         })?;
-        ensure!(source == self.source, "Message project source changed during authorization");
+        ensure!(
+            source == self.source,
+            "Message project source changed during authorization"
+        );
         Ok(&self.source)
     }
 }
 
 pub(crate) struct Resolver {
-    lookup: Box<dyn Fn(&Path) -> Result<PathBuf> + Send + Sync>,
-    verified: HashMap<PathBuf, GitKey>,
+    lookup: Box<dyn Fn(&Path) -> Result<GitDirs> + Send + Sync>,
+    verified: VecDeque<(PathBuf, GitKey)>,
 }
 
 impl Default for Resolver {
     fn default() -> Self {
-        Self::new(session::common_dir)
+        Self::new(GitDirs::lookup)
     }
 }
 
 impl Resolver {
-    pub(crate) fn new(lookup: impl Fn(&Path) -> Result<PathBuf> + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(lookup: impl Fn(&Path) -> Result<GitDirs> + Send + Sync + 'static) -> Self {
         Self {
             lookup: Box::new(lookup),
-            verified: HashMap::new(),
+            verified: VecDeque::new(),
         }
     }
 
-    fn common_dir(&mut self, path: &Path, key: Option<&GitKey>) -> Result<PathBuf> {
-        if let Some(key) = key {
-            if self.verified.get(path) == Some(key) {
-                return Ok(key.common.clone());
+    fn resolve_git(&mut self, path: &Path) -> Result<GitKey> {
+        let before = GitKey::read(path);
+        if let Some(index) = self.verified.iter().position(|(cwd, _)| cwd == path) {
+            let (cwd, cached) = self.verified.remove(index).expect("existing cache entry");
+            if before.as_ref().is_ok_and(|key| key == &cached) {
+                self.verified.push_back((cwd, cached.clone()));
+                return Ok(cached);
             }
         }
-        self.verified.remove(path);
         let actual = (self.lookup)(path)?;
-        if let Some(key) = key {
-            ensure!(
-                GitKey::read(path).as_ref() == Some(key),
-                "Git worktree identity changed during lookup"
-            );
-            if key.common == actual {
-                self.verified.insert(path.into(), key.clone());
+        let key = GitKey::read(path)?;
+        ensure!(
+            before? == key && actual == key.dirs,
+            "Git worktree identity changed during lookup"
+        );
+        if key.standard_layout && key.discovery_env.iter().all(Option::is_none) {
+            if self.verified.len() == CACHE_CAPACITY {
+                self.verified.pop_front();
             }
+            self.verified.push_back((path.into(), key.clone()));
         }
-        Ok(actual)
+        Ok(key)
     }
 
     pub(crate) fn project(&mut self, conn: &Connection, id: &str) -> Result<PeerProject> {
         let binding = ProjectBinding::read(conn, id)?;
         let mut git_keys = Vec::new();
         let source = binding.validate_source(|cwd| {
-            let key = GitKey::read(cwd);
-            let common = self.common_dir(cwd, key.as_ref())?;
-            git_keys.push((cwd.to_owned(), key, common.clone()));
+            let key = self.resolve_git(cwd)?;
+            let common = key.dirs.common.clone();
+            git_keys.push((cwd.to_owned(), key));
             Ok(common)
         })?;
         Ok(PeerProject {
