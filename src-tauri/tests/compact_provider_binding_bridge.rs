@@ -75,8 +75,13 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
         })
         .collect();
     for (provider, ids) in providers.iter_mut().zip([
-        &["first::shared", "first-only"][..],
-        &["first::shared", "second::raw-only", "second::shared"][..],
+        &["first::shared", "first-only", "second::shared"][..],
+        &[
+            "first::shared",
+            "second::raw-only",
+            "second::shared",
+            "catalog::raw",
+        ][..],
     ]) {
         for id in ids {
             let mut model = provider["models"][0].clone();
@@ -336,7 +341,8 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
 
     for (raw, recorded, expected_model) in [
         ("se%63ond::shared", Some("second"), Some("shared")),
-        ("first::shared", Some("second"), Some("first::shared")),
+        ("first::shared", Some("second"), None),
+        ("catalog::raw", Some("second"), Some("catalog::raw")),
         ("second::raw-only", Some("second"), Some("second::raw-only")),
         ("second::shared", Some("second"), None),
         ("first::unknown", Some("second"), None),
@@ -391,6 +397,19 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
     assert_eq!(calls().0, prior.0);
     assert_eq!(&calls().1[prior.1.len()..], ["turn"]);
 
+    // A disabled provider still claims its picker prefix. The other provider
+    // serves the same literal ID and handled the latest turn.
+    let disabled_prefix = uuid::Uuid::new_v4().to_string();
+    db.create(
+        &disabled_prefix,
+        CreateOptions {
+            title: Some("Disabled picker prefix".into()),
+            model: Some("second::shared".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    chat(&disabled_prefix, "first", "shared").await;
     let before = calls();
     client
         .patch(format!("{base}/api/providers/second"))
@@ -413,6 +432,15 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
             "{body}"
         );
     }
+
+    let conflict = compact(&disabled_prefix).await.unwrap();
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+    assert!(conflict
+        .text()
+        .await
+        .unwrap()
+        .contains("Pick a model in Desktop"));
+    assert_eq!(calls(), before);
 
     let disabled_chat = chat_with_model(&opaque, "first::shared").await.unwrap();
     assert_eq!(disabled_chat.status(), reqwest::StatusCode::BAD_REQUEST);

@@ -467,6 +467,16 @@ impl QueryEngine {
         .await
     }
 
+    /// Disabled providers still own their Desktop picker prefix.
+    pub async fn has_configured_provider(&self, id: &str) -> bool {
+        self.provider_manager
+            .lock()
+            .await
+            .list_providers()
+            .iter()
+            .any(|provider| provider.id == id)
+    }
+
     /// The resolved provider/model pair this session would use, for hosts that
     /// must pin a child session to exactly the same selection.
     pub async fn resolved_provider(

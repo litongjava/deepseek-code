@@ -65,15 +65,21 @@ impl StoredBinding {
             .provider
             .or(recorded)
             .ok_or_else(|| anyhow::anyhow!(PICK))?;
+        let picker = if legacy {
+            Self::desktop_selection(&self.model).ok()
+        } else {
+            None
+        };
+        if let Some(prefix) = picker.as_ref().and_then(|key| key.provider.as_deref()) {
+            if prefix != id {
+                ensure!(!engine.has_configured_provider(prefix).await, "{PICK}");
+            }
+        }
         let raw = engine.resolved_provider(&id, &self.model).await.ok();
-        if legacy {
-            if let Ok(key) = Self::desktop_selection(&self.model) {
-                if key.provider.as_ref() == Some(&id) {
-                    if let Ok(qualified) = engine.resolved_provider(&id, &key.model).await {
-                        ensure!(raw.is_none(), "Ambiguous legacy model selection. {PICK}");
-                        return Ok((qualified, key.model));
-                    }
-                }
+        if let Some(key) = picker.filter(|key| key.provider.as_ref() == Some(&id)) {
+            if let Ok(qualified) = engine.resolved_provider(&id, &key.model).await {
+                ensure!(raw.is_none(), "Ambiguous legacy model selection. {PICK}");
+                return Ok((qualified, key.model));
             }
         }
         let selected = raw.ok_or_else(|| {
