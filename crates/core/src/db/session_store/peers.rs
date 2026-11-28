@@ -68,10 +68,15 @@ impl super::SessionDb {
         &self,
         resolver: &mut session_messages::identity::Resolver,
     ) -> Result<()> {
+        self.read_peer_endpoint(|c| resolver.project(c, self.id()).map(drop))
+    }
+
+    pub(super) fn read_peer_endpoint<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
         let _guard = self.stores.key_lock(&self.key, false, false)?;
         self.check_directory()?;
-        self.stores
-            .global()
-            .read(|c| resolver.project(c, self.id()).map(drop))
+        self.stores.global().read(read)
     }
 }

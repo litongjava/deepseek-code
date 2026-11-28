@@ -8,8 +8,7 @@ use crate::services::{
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use session_messages::identity::{PeerProject, Resolver};
-use std::collections::HashMap;
+use session_messages::identity::{GitLookupTimeout, PeerProject, Resolver};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
 
@@ -635,6 +634,7 @@ impl SessionDb {
             _lease: lease,
             _consumer: consumer,
             peer_resolver: Resolver::default(),
+            blocked_cursor: 0,
             live_handoffs: Default::default(),
             deferred_steer: false,
         })
@@ -700,9 +700,19 @@ fn peer_projects<'a>(
     }
     Ok((source, destination))
 }
-struct PeerBatch {
-    claims: std::vec::IntoIter<(Claim, usize)>,
-    projects: HashMap<String, Option<PeerProject>>,
+fn authorized_project(project: Result<PeerProject>) -> Result<Option<PeerProject>> {
+    match project {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.is::<rusqlite::Error>() || e.is::<GitLookupTimeout>() => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+struct PeerCandidate {
+    claim: Claim,
+    size: usize,
+    rowid: i64,
+    blocked: bool,
 }
 
 pub struct DeliveryOwner {
@@ -710,6 +720,7 @@ pub struct DeliveryOwner {
     _lease: std::sync::Arc<ExecutionLease>,
     _consumer: ExecutionLease,
     peer_resolver: Resolver,
+    blocked_cursor: i64,
     live_handoffs: std::collections::HashMap<String,String>,
     deferred_steer: bool,
 }
@@ -752,9 +763,8 @@ impl DeliveryOwner {
     }
 
     pub(crate) fn poll_peer_context(&mut self, limit: usize) -> Result<Vec<DeliveredInput>> {
-        self.session
-            .validate_peer_endpoint(&mut self.peer_resolver)?;
-        self.poll_turn(true, limit)
+        self.session.check_directory()?;
+        self.poll_inputs(true, limit, true)
     }
 
     /// Start at most one durable generation per acknowledged user delivery.
@@ -912,27 +922,24 @@ impl DeliveryOwner {
         crate::db::turn_repo::TurnTimer::from_dispatch(self.session.clone(), &turn)
     }
     pub fn next_peer(&mut self) -> Result<Option<Handoff>> {
-        let mut batch = self.prepare_peers()?;
-        self.peer_before(
-            &mut batch,
-            usize::MAX,
-            std::time::Instant::now() + super::WRITE_DEADLINE,
-            false,
-        )
+        let mut batch = self.peer_candidates(1)?;
+        let mut until = std::time::Instant::now() + super::WRITE_DEADLINE;
+        self.peer_before(&mut batch, usize::MAX, &mut until, false, false)
     }
 
-    fn prepare_peers(&mut self) -> Result<PeerBatch> {
+    fn peer_candidates(&self, limit: usize) -> Result<std::vec::IntoIter<PeerCandidate>> {
         let s = &self.session;
-        let claims = s.stores.global().read(|c| {
+        s.stores.global().read(|c| {
             let mut q = c.prepare(
-                "SELECT id,payload,sender,coalesce(generation,0),size FROM session_inbox
+                "SELECT id,payload,sender,coalesce(generation,0),size,rowid,state='blocked' FROM session_inbox
                 WHERE recipient=?1 AND state IN ('claimed','queued','blocked')
-                ORDER BY CASE state WHEN 'claimed' THEN 0 ELSE 1 END,rowid",
+                ORDER BY CASE state WHEN 'claimed' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                         CASE WHEN state='blocked' AND rowid<=?2 THEN 1 ELSE 0 END,rowid LIMIT ?3",
             )?;
             let result = q
-                .query_map([&s.id], |r| {
-                    Ok((
-                        Claim {
+                .query_map(params![s.id, self.blocked_cursor, limit.min(8)], |r| {
+                    Ok(PeerCandidate {
+                        claim: Claim {
                             origin: "peer".into(),
                             prompt_origin: "peer".into(),
                             id: r.get(0)?,
@@ -942,57 +949,86 @@ impl DeliveryOwner {
                             steer: false,
                             revision: r.get(3)?,
                         },
-                        r.get::<_, usize>(4)?,
-                    ))
+                        size: r.get(4)?,
+                        rowid: r.get(5)?,
+                        blocked: r.get(6)?,
+                    })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(result)
-        })?;
-        let mut projects = HashMap::new();
-        if !claims.is_empty() {
-            s.stores.global().read(|c| {
-                for id in std::iter::once(s.id.as_str()).chain(
-                    claims
-                        .iter()
-                        .filter_map(|(claim, _)| claim.sender.as_deref()),
-                ) {
-                    if !projects.contains_key(id) {
-                        let project = match self.peer_resolver.project(c, id) {
-                            Ok(project) => Some(project),
-                            Err(err) if err.downcast_ref::<rusqlite::Error>().is_some() => {
-                                return Err(err)
-                            }
-                            Err(_) => None,
-                        };
-                        projects.insert(id.to_owned(), project);
-                    }
-                }
-                Ok(())
-            })?;
-        }
-        Ok(PeerBatch {
-            claims: claims.into_iter(),
-            projects,
+            Ok(result.into_iter())
         })
     }
 
     fn peer_before(
         &mut self,
-        batch: &mut PeerBatch,
+        batch: &mut std::vec::IntoIter<PeerCandidate>,
         max_bytes: usize,
-        until: std::time::Instant,
+        until: &mut std::time::Instant,
         live: bool,
+        validate_recipient: bool,
     ) -> Result<Option<Handoff>> {
         let s = &self.session;
-        for (mut claim, size) in batch.claims.by_ref() {
+        for PeerCandidate {
+            mut claim,
+            size,
+            rowid,
+            blocked,
+        } in batch.by_ref()
+        {
+            if std::time::Instant::now() >= *until {
+                return Ok(None);
+            }
             if size > max_bytes {
                 return Ok(None);
             }
             if self.has_receipt(&claim)? {
+                // A pure acknowledgement needs no endpoint lookup. Returning a
+                // previously committed body to this public consumer still needs
+                // the same recipient authorization as a fresh public delivery.
+                if validate_recipient && self.live_handoffs.contains_key(&claim.id) {
+                    let budget = until.saturating_duration_since(std::time::Instant::now());
+                    match s.validate_peer_endpoint(&mut self.peer_resolver) {
+                        Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
+                        result => result?,
+                    }
+                    *until = std::time::Instant::now() + budget;
+                }
                 // The authorized generation already committed its local effect.
                 // Its frozen claim is sufficient for the acknowledgement CAS.
-                return self.complete(claim, until, live).map(Some);
+                return self.complete(claim, *until, live).map(Some);
             }
+            if blocked {
+                // Rotate bounded rechecks so an unchanged blocked row cannot
+                // permanently hide another sender whose authorization recovered.
+                self.blocked_cursor = rowid;
+            }
+            let sender_id = claim.sender.as_deref().expect("peer claim has a sender");
+            // Start this candidate's writer deadline after its potentially slow
+            // identity lookup, carrying only the unused part of the batch budget.
+            let budget = until.saturating_duration_since(std::time::Instant::now());
+            let prepare = |c: &Connection| {
+                let recipient = self.peer_resolver.project(c, &s.id);
+                let recipient = if validate_recipient {
+                    Some(recipient?)
+                } else {
+                    authorized_project(recipient)?
+                };
+                let Some(recipient) = recipient else {
+                    return Ok(None);
+                };
+                let sender = authorized_project(self.peer_resolver.project(c, sender_id))?;
+                Ok(sender.map(|sender| (recipient, sender)))
+            };
+            let projects = if validate_recipient {
+                s.read_peer_endpoint(prepare)
+            } else {
+                s.stores.global().read(prepare)
+            };
+            *until = std::time::Instant::now() + budget;
+            let projects = match projects {
+                Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
+                other => other?,
+            };
             let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
                 let sender_live: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM session_inbox i JOIN conversations c ON c.id=i.sender AND c.incarnation=i.sender_incarnation WHERE i.id=?1)", [&claim.id], |r| r.get(0))?;
                 if !sender_live {
@@ -1000,9 +1036,8 @@ impl DeliveryOwner {
                     return Ok(None);
                 }
                 let expected: (String,String) = c.query_row("SELECT project_source,coalesce(recipient_source,project_source) FROM session_inbox WHERE id=?1", [&claim.id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-                let sender_id = claim.sender.as_deref().expect("peer claim has a sender");
-                let allowed = match (batch.projects[sender_id].as_ref(), batch.projects[&s.id].as_ref()) {
-                    (Some(sender), Some(recipient)) => match peer_projects(c, sender_id, &s.id, sender, recipient) {
+                let allowed = match &projects {
+                    Some((recipient, sender)) => match peer_projects(c, sender_id, &s.id, sender, recipient) {
                         Ok((from, to)) => from == expected.0 && to == expected.1,
                         Err(e) if e.downcast_ref::<rusqlite::Error>().is_some() => return Err(e),
                         Err(_) => false,
@@ -1032,7 +1067,7 @@ impl DeliveryOwner {
                 continue;
             };
             claim.revision = generation;
-            return self.complete(claim, until, live).map(Some);
+            return self.complete(claim, *until, live).map(Some);
         }
         Ok(None)
     }
@@ -1044,15 +1079,21 @@ impl DeliveryOwner {
     /// while completing a live claim gets a fresh bounded wait at each writer.
     /// An ack-only retry injects content only if this same live owner committed it.
     pub(crate) fn poll_turn(&mut self, peers: bool, limit: usize) -> Result<Vec<DeliveredInput>> {
+        self.poll_inputs(peers, limit, false)
+    }
+
+    fn poll_inputs(
+        &mut self,
+        peers: bool,
+        limit: usize,
+        validate_recipient: bool,
+    ) -> Result<Vec<DeliveredInput>> {
         use crate::db::message_repo;
         if !peers {
             self.deferred_steer = false;
         }
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         let mut peer_batch = if peers {
-            match self.prepare_peers() {
+            match self.peer_candidates(limit) {
                 Ok(batch) => Some(batch),
                 Err(error) if crate::db::is_contention(&error) => return Ok(Vec::new()),
                 Err(error) => return Err(error),
@@ -1060,7 +1101,13 @@ impl DeliveryOwner {
         } else {
             None
         };
-        let until = std::time::Instant::now() + TURN_POLL_WAIT;
+        if validate_recipient && peer_batch.as_ref().is_some_and(|batch| batch.len() == 0) {
+            match self.session.validate_peer_endpoint(&mut self.peer_resolver) {
+                Err(e) if e.is::<GitLookupTimeout>() => return Ok(Vec::new()),
+                result => result?,
+            }
+        }
+        let mut until = std::time::Instant::now() + TURN_POLL_WAIT;
         let mut remaining = 128 * 1024;
         let mut inputs = Vec::new();
         for _ in 0..limit.min(8) {
@@ -1068,7 +1115,7 @@ impl DeliveryOwner {
                 break;
             }
             let next = if let Some(batch) = &mut peer_batch {
-                self.peer_before(batch, remaining, until, true)
+                self.peer_before(batch, remaining, &mut until, true, validate_recipient)
             } else {
                 self.queue_before(QueueMode::Steer, None, until, true, None)
             };
