@@ -1201,6 +1201,7 @@ env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
 ```
 
 - I49：运行 `slow_managed_sender_validation_delivers_once_and_rechecks_changed_git_identity` 和 `a_busy_shard_preserves_the_claim_generation_until_delivery`。发送者和接收者的 Git 身份校验先于目录写事务与批次计时；每次校验耗时 300ms 时仍须投递一次、历史一条、重放为空。缓存命中不启动 Git，更换工作树 Git 指向后拒绝投递。分片写者持续占用时多次轮询须保留同一 claim generation，释放后只确认一次。目录 claim 和分片写入分别限制取锁等待。
+- I49 二轮：`cargo test --locked -p deepseek-code-core --lib session_messages` 覆盖写事务内的可信目录重定向、hook 工作树重建、同路径 Git 身份失效和 64 项 LRU。九个受管发送者、冷缓存、一次只取一条时，记录两次 Git 查询（该发送者的工作树和仓库），其余八条保持排队。另查字节预算、仅确认已有回执时的零查询，以及 Git 超时后 generation 仍为空、重试只投递一次。
 - `an_empty_drain_does_not_take_the_writer_lock`：第二个真实 SQLite 连接持有 `BEGIN IMMEDIATE` 时，空收件箱轮询不等待写者、不报错。空收件箱的授权检查在只读快照中完成，仍验证消费者 generation 以及 `project()`/`resolve_workspace` 的归档、Code 模式、项目信任和来源映射。
 - `an_empty_inbox_still_enforces_project_authorization`：空收件箱下分别归档会话、改成非 Code 模式、撤销项目信任且 generation 不变，三种情况都必须像旧路径一样拒绝，且不消费任何消息。
 - `a_pending_drain_defers_under_a_held_writer_and_delivers_once_after_release`：有排队消息但写者被占用时，轮询在限定时间内返回空；队列行保持 `queued`，`consumer_generation`/`committed_at` 保持空，历史为空。释放写者后同一条消息只投递一次，状态变为 `context_committed`，历史恰好一行，再轮询为空。

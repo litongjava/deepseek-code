@@ -92,11 +92,11 @@ fn git_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct GitKey {
     marker: PathBuf,
-    cwd_id: (u64, u64),
-    root_id: (u64, u64),
+    cwd_id: crate::fs::DirectoryId,
+    root_id: crate::fs::DirectoryId,
     dirs: GitDirs,
-    git_id: (u64, u64),
-    common_id: (u64, u64),
+    git_id: crate::fs::DirectoryId,
+    common_id: crate::fs::DirectoryId,
     head: SystemTime,
     modified: SystemTime,
     config: Option<SystemTime>,
@@ -110,10 +110,9 @@ impl GitKey {
         let cwd = cwd.canonicalize()?;
         let root = cwd
             .ancestors()
-            .take_while(|dir| {
-                !(dir.join("HEAD").is_file()
-                    && (dir.join("objects").is_dir() || dir.join("commondir").is_file()))
-            })
+            // A generated tree can itself live below the source's .git.
+            // Losing its marker must not bind it to that outer repository.
+            .take_while(|dir| dir.file_name() != Some(std::ffi::OsStr::new(".git")))
             .find(|dir| dir.join(".git").exists())
             .context("Missing worktree Git marker")?;
         let marker = root.join(".git");
@@ -129,12 +128,18 @@ impl GitKey {
             )
             .canonicalize()?
         };
-        let common = match fs::read_to_string(git.join("commondir")) {
-            Ok(link) => git
-                .join(link.trim_end_matches(['\r', '\n']))
-                .canonicalize()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => git.clone(),
-            Err(e) => return Err(e.into()),
+        // Git resolves a relative GIT_COMMON_DIR from its invocation directory.
+        // Explicit discovery settings require a fresh lookup on every poll.
+        let common = if let Some(override_dir) = std::env::var_os("GIT_COMMON_DIR") {
+            cwd.join(override_dir).canonicalize()?
+        } else {
+            match fs::read_to_string(git.join("commondir")) {
+                Ok(link) => git
+                    .join(link.trim_end_matches(['\r', '\n']))
+                    .canonicalize()?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => git.clone(),
+                Err(e) => return Err(e.into()),
+            }
         };
         let standard_layout = common.join("objects").is_dir() && common.join("refs").is_dir();
         fn modified(path: &Path) -> Result<Option<SystemTime>> {
@@ -326,5 +331,111 @@ impl Resolver {
         to: &str,
     ) -> Result<(PeerProject, PeerProject)> {
         Ok((self.project(conn, from)?, self.project(conn, to)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn repo(path: &Path) -> Result<GitDirs> {
+        ensure!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(path)
+            .status()?
+            .success());
+        GitDirs::lookup(path)
+    }
+
+    #[test]
+    fn successful_git_without_matching_filesystem_evidence_cannot_authorize() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let actual = repo(&temp.path().join("actual"))?;
+        let other = temp.path().join("other");
+        let no_marker = temp.path().join("no-marker");
+        fs::create_dir(&no_marker)?;
+        repo(&other)?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let lookups = calls.clone();
+        let mut resolver = Resolver::new(move |_| {
+            lookups.fetch_add(1, Ordering::Relaxed);
+            Ok(actual.clone())
+        });
+        assert!(resolver.resolve_git(&no_marker).is_err());
+        assert!(resolver.resolve_git(&other).is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(resolver.verified.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn recreating_a_worktree_at_the_same_path_misses_the_cache() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dirs = repo(&temp.path().join("repo"))?;
+        let tree = temp.path().join("tree");
+        fs::create_dir(&tree)?;
+        let link = format!("gitdir: {}\n", dirs.git.display());
+        fs::write(tree.join(".git"), &link)?;
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let calls = lookups.clone();
+        let mut resolver = Resolver::new(move |cwd| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            GitDirs::lookup(cwd)
+        });
+        let before = resolver.resolve_git(&tree)?;
+        assert_eq!(before, resolver.resolve_git(&tree)?);
+        fs::remove_file(tree.join(".git"))?;
+        fs::remove_dir(&tree)?;
+        fs::create_dir(&tree)?;
+        fs::write(tree.join(".git"), &link)?;
+        let after = resolver.resolve_git(&tree)?;
+        assert_eq!(before.dirs, after.dirs);
+        assert_ne!(before.root_id, after.root_id);
+        assert_eq!(lookups.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn the_owner_cache_evicts_the_least_recently_used_path() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dirs = repo(temp.path())?;
+        let mut paths = Vec::new();
+        for i in 0..=CACHE_CAPACITY {
+            let path = temp.path().join(format!("dir-{i}"));
+            fs::create_dir(&path)?;
+            paths.push(path);
+        }
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let calls = lookups.clone();
+        let mut resolver = Resolver::new(move |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(dirs.clone())
+        });
+        for path in &paths[..CACHE_CAPACITY] {
+            resolver.resolve_git(path)?;
+        }
+        resolver.resolve_git(&paths[0])?;
+        resolver.resolve_git(&paths[CACHE_CAPACITY])?;
+        resolver.resolve_git(&paths[0])?;
+        assert_eq!(lookups.load(Ordering::Relaxed), CACHE_CAPACITY + 1);
+        resolver.resolve_git(&paths[1])?;
+        assert_eq!(lookups.load(Ordering::Relaxed), CACHE_CAPACITY + 2);
+        assert_eq!(resolver.verified.len(), CACHE_CAPACITY);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_git_subprocess_returns_the_timeout_error() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let err = git_output(&mut cmd, Duration::from_millis(75)).unwrap_err();
+        assert!(err.is::<GitLookupTimeout>(), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

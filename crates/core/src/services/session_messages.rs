@@ -749,6 +749,8 @@ mod lock_observer {
 
 #[cfg(test)]
 mod tests {
+    mod peer_validation;
+
     #[test]
     fn family_excludes_unrelated_saved_sessions_and_notices_include_body_once() {
         let (_temp, context, store, parent, other) = fixture();
