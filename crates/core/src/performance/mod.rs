@@ -62,6 +62,32 @@ pub fn classify(error: &anyhow::Error) -> ErrorClass {
     classify_raw(error)
 }
 
+/// Recognize the same overflow before and after a host serializes the failure.
+pub fn is_context_overflow(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    if error.is::<crate::services::compaction::GenerationFailure>()
+        || text.contains("Automatic compaction failed.")
+    {
+        return false;
+    }
+    if find_failure(error).is_some() || error.is::<ApiError>() {
+        return classify(error) == ErrorClass::ContextLimit;
+    }
+    if let Some(summary) = parse_failure_summary(&text) {
+        return summary.class == ErrorClass::ContextLimit.as_str();
+    }
+    let text = text.to_ascii_lowercase();
+    [
+        "exceeds the configured context window",
+        "prompt is too long",
+        "context_length_exceeded",
+        "maximum context length",
+        "input is too long",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 pub(crate) fn classify_raw(error: &anyhow::Error) -> ErrorClass {
     if let Some(api) = request_failure::find_in_chain::<ApiError>(error) {
         // A recognized permanent quota/billing error is not a temporary limit:
@@ -73,7 +99,11 @@ pub(crate) fn classify_raw(error: &anyhow::Error) -> ErrorClass {
             401 | 403 => ErrorClass::Authentication,
             429 => ErrorClass::RateLimit,
             408 | 500..=599 => ErrorClass::Transient,
-            400 | 413 if api.message.to_lowercase().contains("context") || api.status == 413 => {
+            413 => ErrorClass::ContextLimit,
+            400 | 422
+                if classify_remote_code(api.remote_code.as_deref()) == ErrorClass::ContextLimit
+                    || (api.status == 400 && api.message.to_lowercase().contains("context")) =>
+            {
                 ErrorClass::ContextLimit
             }
             _ => ErrorClass::Permanent,
