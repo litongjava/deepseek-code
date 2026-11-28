@@ -109,14 +109,14 @@ fn provider_overflow_remembers_the_exhausted_budget_after_cooldown() {
     gate.record_failure("HTTP 429".into());
     gate.begin_iteration(4);
     assert!(gate.may_start());
-    gate.defer_threshold();
-    assert!(!gate.may_start());
-    assert!(gate.blocking_failure().is_none());
     assert!(gate
         .provider_rejection()
         .unwrap()
         .to_string()
         .contains("HTTP 429"));
+    gate.defer_threshold();
+    assert!(!gate.may_start());
+    assert!(gate.blocking_failure().is_none());
 }
 
 pub struct GeneratedSummary {

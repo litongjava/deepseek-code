@@ -535,3 +535,6 @@ async fn manual_fallback_replays_the_same_twelve_read_results_as_native() {
     );
     server.abort();
 }
+
+#[path = "compaction_summary_stream/entry_matrix.rs"]
+mod entry_matrix;
