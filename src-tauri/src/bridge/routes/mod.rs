@@ -2,6 +2,7 @@ use super::AppState;
 
 pub mod system;
 pub mod chat;
+mod chat_admission;
 pub mod generation_runs;
 mod input_queue;
 mod permission_watch;

@@ -52,61 +52,20 @@ pub(super) async fn start_authorized_chat(
     let span = tracing::info_span!("chat_stream", conversation_id = %id);
     let _ = span;
 
-    {
-        let rate_limiter = &state.rate_limiter;
-        if !rate_limiter.check("chat_handler").await {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("X-RateLimit-Remaining", "0"), ("Retry-After", "60")],
-                Json(serde_json::json!({"error": "Rate limit exceeded"})),
-            ).into_response();
-        }
-    }
-
-    tracing::info!(module = "Chat", "Handler ENTRY POINT");
-
-    // Reject invalid Code/project requests before persisting messages or invoking a model.
-    let db = state.db_manager.clone();
-    let project_conversation_id = req.conversation_id.clone();
-    match tokio::task::spawn_blocking(move ||db.validate_chat_project(&project_conversation_id)).await {
-        Ok(Ok(()))=>{},
-        Ok(Err(error))=>return (StatusCode::BAD_REQUEST,Json(serde_json::json!({"error":error.to_string()}))).into_response(),
-        Err(_)=>return (StatusCode::INTERNAL_SERVER_ERROR,Json(serde_json::json!({"error":"Could not validate conversation project"}))).into_response(),
-    }
-
     let user_content = req
         .messages
         .last()
         .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"))
         .and_then(|m| m.get("content"))
         .cloned();
-    if let Some(content) = &user_content {
-        if !content.is_string() {
-            if let Err(error) = crate::runtime::normalize_user_content(content) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error":error.to_string()})),
-                )
-                    .into_response();
-            }
-        }
-    }
-    let user_content = if queued.is_some() { None } else { user_content };
-    let (execution_lease, sealed_first) = match state.db_manager.admit_chat_execution(
-        &req.conversation_id,
-        &req.model,
-        user_content.as_ref(),
-        "typed",
-    ) {
-        Ok((lease, sealed)) => (std::sync::Arc::new(lease), sealed),
-        Err(error) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({"error":error.to_string()})),
-            )
-                .into_response()
-        }
+    let admission = super::chat_admission::Operation::Chat {
+        model: &req.model, content: user_content.as_ref(), queued: queued.is_some(),
     };
+    let (execution_lease, sealed_first) = match super::chat_admission::admit(&state, &id, admission).await {
+        Ok((lease, sealed)) => (std::sync::Arc::new(lease), sealed),
+        Err(response) => return response,
+    };
+    let user_content = if queued.is_some() { None } else { user_content };
     let native_engine = state.native_engine.clone();
     let config_manager = state.config_manager.clone();
     let conv_id = req.conversation_id.clone();
@@ -207,28 +166,13 @@ pub(super) async fn start_authorized_chat(
             // Sync latest providers
             engine.sync_providers(providers_to_sync).await;
 
-            let model = if model.is_empty() {
-                "claude-sonnet-4-6"
-            } else {
-                &model
+            let selected = match super::chat_admission::resolve_model(
+                &state, engine, &conv_id, &model, req.provider_id.as_deref(),
+            ).await {
+                Ok(selection) => selection,
+                Err(response) => return response,
             };
-            let format = match queued.as_ref() {
-                Some((_, format)) => format.clone(),
-                None => {
-                    let provider = match req.provider_id.as_deref() {
-                        Some(id) => engine.resolved_provider(id, model).await.ok(),
-                        None => engine.resolve_provider(model).await,
-                    };
-                    let Some(provider) = provider else {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({"error":"Chat model unavailable"})),
-                        )
-                            .into_response();
-                    };
-                    provider.provider.api_format
-                }
-            };
+            let format = queued.as_ref().map_or(selected.api_format, |(_, format)| format.clone());
             let (messages, context_boundary) =
                 match crate::runtime::SessionStore::new(state.db_manager.clone())
                     .model_history_with_boundary(&conv_id, &format)
@@ -246,12 +190,12 @@ pub(super) async fn start_authorized_chat(
             let chat_req = crate::native_engine::engine_core::ChatRequest {
                 max_turns: None,
                 response_schema: None,
-                provider_id: req.provider_id.clone(), effort: req.effort.clone(),
+                provider_id: selected.explicit_provider.then_some(selected.provider_id), effort: req.effort.clone(),
                 conversation_id: conv_id.clone(),
                 context_boundary,
                 assistant_message_id: Some(first_assistant_id.clone()),
                 messages,
-                model: model.to_owned(),
+                model: selected.selector,
                 system_prompt: req.system_prompt.clone(),
                 standalone_frontend: false,
                 max_tokens: req.max_tokens,

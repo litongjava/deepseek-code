@@ -1,8 +1,11 @@
+use super::super::chat_admission::{self, error, Operation};
 use super::AppState;
 use anyhow::Context;
 use axum::{
-    extract::{Path, State},
+    body::Bytes,
+    extract::{FromRequest, Path, Request, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use deepseek_code_core::{
@@ -21,65 +24,56 @@ use std::sync::Arc;
 pub(super) struct Body {
     #[serde(default, alias = "focus", alias = "instructions")]
     instruction: Option<String>,
-}
-
-type Error = (StatusCode, Json<Value>);
-
-fn error(status: StatusCode, reason: impl std::fmt::Display) -> Error {
-    (status, Json(json!({"error":reason.to_string()})))
+    #[serde(default, rename = "env_token")]
+    _env_token: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "env_base_url")]
+    _env_base_url: Option<serde::de::IgnoredAny>,
+    #[serde(flatten)]
+    unknown: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
 }
 
 pub(super) async fn handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
-    body: Option<Json<Body>>,
-) -> Result<Json<Value>, Error> {
+    request: Request,
+) -> Result<Json<Value>, Response> {
+    // An omitted body means no focus. Nonempty bytes require JSON even when
+    // the caller forgot Content-Type; never silently discard a supplied focus.
+    let body = if request
+        .headers()
+        .contains_key(axum::http::header::CONTENT_TYPE)
+    {
+        Json::<Body>::from_request(request, &state)
+            .await
+            .map_err(IntoResponse::into_response)?
+            .0
+    } else {
+        let bytes = Bytes::from_request(request, &state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        if !bytes.is_empty() {
+            return Err(error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Expected application/json",
+            ));
+        }
+        Body::default()
+    };
+    if let Some(field) = body.unknown.keys().next() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            format!("Unknown compact field: {field}"),
+        ));
+    }
     let db = &state.db_manager;
     let internal = |e: anyhow::Error| error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
     let gate = super::super::input_queue::gate(&state, &id).await;
     if state.generation_runs.is_active(&id) {
         return Err(error(StatusCode::CONFLICT, "Conversation is running"));
     }
-    let metadata = db
-        .conversation_metadata(&id)
-        .map_err(internal)?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-    let session = db.open_session(&id).map_err(internal)?;
-    // Includes other processes and the executor tail after the SSE stream ends.
-    let _lease = session
-        .acquire_execution()
-        .map_err(|e| error(StatusCode::CONFLICT, e))?;
+    let (_lease, _) = chat_admission::admit(&state, &id, Operation::Compact).await?;
     drop(gate);
-
-    let desktop = match db.desktop_context(&id) {
-        Ok(req) => Some(req),
-        Err(e)
-            if matches!(
-                e.downcast_ref::<rusqlite::Error>(),
-                Some(rusqlite::Error::QueryReturnedNoRows)
-            ) =>
-        {
-            None
-        }
-        Err(e) => return Err(internal(e)),
-    };
-    // The model can be changed in the UI after the last chat request.
-    let model = metadata
-        .model
-        .as_deref()
-        .filter(|model| !model.is_empty())
-        .or_else(|| {
-            desktop
-                .as_ref()
-                .map(|req| req.model.as_str())
-                .filter(|model| !model.is_empty())
-        })
-        .unwrap_or("claude-sonnet-4-6");
-    let provider = desktop
-        .as_ref()
-        .filter(|req| req.model == model)
-        .and_then(|req| req.provider_id.as_deref())
-        .or(metadata.provider.as_deref());
+    let session = db.open_session(&id).map_err(internal)?;
     let paths = RuntimePaths::new(state.data_dir.as_ref().clone()).map_err(internal)?;
     let providers = state
         .config_manager
@@ -97,17 +91,6 @@ pub(super) async fn handler(
     // global engine mutex across provider backoff would block unrelated chats.
     let manager =
         ProviderManager::in_memory(providers, paths.layout().config_file("providers.json"));
-    let selected = match provider {
-        Some(_) if model.contains("::") => manager.resolve_provider(model).await,
-        Some(provider) => manager.resolve_selected(provider, model),
-        None => manager.resolve_provider(model).await,
-    }
-    .ok_or_else(|| {
-        error(
-            StatusCode::BAD_REQUEST,
-            format!("Compaction model unavailable: {model}"),
-        )
-    })?;
     let workspace = session.workspace().map_err(internal)?;
     let engine = NativeEngine::new(
         Arc::new(tokio::sync::Mutex::new(manager)),
@@ -116,24 +99,30 @@ pub(super) async fn handler(
         state.permission_manager.clone(),
         Arc::new(FileCache::new()),
     );
+    let selected = chat_admission::resolve_model(&state, &engine, &id, "", None).await?;
     let context = ServiceContext {
         paths,
         db: db.clone(),
         credentials: Arc::new(EnvironmentCredentials),
     };
     let store = SessionStore::new(db.clone());
-    let tokens = || context_usage::estimated_tokens(&store, &id, model, provider);
+    let tokens = || {
+        context_usage::estimated_tokens(
+            &store,
+            &id,
+            &selected.selector,
+            Some(&selected.provider_id),
+        )
+    };
     let before = tokens().map_err(internal)?.unwrap_or_default();
-    let instruction = body
-        .and_then(|Json(body)| body.instruction)
-        .unwrap_or_default();
+    let instruction = body.instruction.unwrap_or_default();
     let report = compact_with_hooks(
         &engine,
         &context,
         &workspace,
         &id,
-        &selected.provider.id,
-        &selected.model.id,
+        &selected.provider_id,
+        &selected.selector,
         instruction.trim(),
         "manual",
     )

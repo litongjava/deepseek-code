@@ -61,12 +61,35 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
             axum::routing::post(fixture_response),
         )
         .with_state(compactions.clone());
+    let second_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let second = axum::Router::new()
+        .route(
+            "/second/v1/chat/completions",
+            axum::routing::post(fixture_response),
+        )
+        .with_state(second_requests.clone());
+    let app = app.merge(second);
     let model_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let model_addr = model_listener.local_addr().unwrap();
     let model = tokio::spawn(async move {
         axum::serve(model_listener, app).await.unwrap();
     });
-    let config = json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{model_addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"context_window":64000,"supports_vision":false,"supports_tools":true,"supports_streaming":true}]}]});
+    let mut config = json!({"providers":[{"id":"fixture","name":"Fixture","provider_type":"openai","api_key":"test","base_url":format!("http://{model_addr}"),"enabled":true,"is_default":true,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"max_tokens":1000,"context_window":64000,"supports_vision":false,"supports_tools":true,"supports_streaming":true}]}]});
+    let mut second_provider = config["providers"][0].clone();
+    second_provider["id"] = json!("second/provider");
+    second_provider["base_url"] = json!(format!("http://{model_addr}/second/v1"));
+    second_provider["is_default"] = json!(false);
+    let mut tiny_model = second_provider["models"][0].clone();
+    tiny_model["id"] = json!("small-window");
+    tiny_model["context_window"] = json!(256);
+    second_provider["models"]
+        .as_array_mut()
+        .unwrap()
+        .push(tiny_model);
+    config["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_provider.clone());
     deepseek_code_core::data_layout::write_config_file(
         dir.path().join("config/config.json"),
         config.to_string(),
@@ -180,6 +203,14 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         .append(&seeded, "assistant", "Keep the fixture decision.")
         .unwrap();
     let history = sessions.history(&seeded).unwrap();
+    let typo = compact(seeded.clone(), json!({"foucs":"misspelled"})).await;
+    assert_eq!(typo.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(typo.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("foucs"));
+    assert!(compactions.lock().unwrap().is_empty());
+    assert_eq!(sessions.history(&seeded).unwrap(), history);
     let failure = compact(seeded.clone(), json!({"focus":"FAIL_FOCUS"})).await;
     assert_eq!(failure.status(), reqwest::StatusCode::BAD_GATEWAY);
     assert!(failure.json::<Value>().await.unwrap()["error"]
@@ -188,7 +219,11 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         .contains("401"));
     assert_eq!(sessions.history(&seeded).unwrap(), history);
 
-    let success = compact(seeded.clone(), json!({"instruction":"KEEP_FOCUS"})).await;
+    let success = compact(
+        seeded.clone(),
+        json!({"instruction":"KEEP_FOCUS", "env_base_url":"unused", "env_token":"fixture-only"}),
+    )
+    .await;
     let status = success.status();
     let result: Value = success.json().await.unwrap();
     assert!(status.is_success(), "{result}");
@@ -383,6 +418,125 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
     );
     assert_eq!(stop(conversation.clone()).await["stopped"], false);
 
+    // The queued request still refers to the first Desktop chat. Publish a
+    // same-model switch through the same binding transaction used by the CLI.
+    let shard = db.open_session(&conversation).unwrap();
+    let binding = deepseek_code_core::native_engine::session_binding::BindingSnapshot {
+        generation: 0,
+        observation_only: false,
+        provider_id: "second/provider".into(),
+        model: "fixture-model".into(),
+        environment: Default::default(),
+        providers: vec![deepseek_code_core::runtime::provider_from_config(
+            &serde_json::from_value(second_provider).unwrap(),
+        )],
+    };
+    shard
+        .publish_provider(
+            shard.observe_provider().unwrap().generation,
+            &binding,
+            None,
+            "fixture",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        db.desktop_context(&conversation)
+            .unwrap()
+            .provider_id
+            .as_deref(),
+        Some("fixture")
+    );
+    assert_eq!(
+        db.conversation_metadata(&conversation)
+            .unwrap()
+            .unwrap()
+            .provider
+            .as_deref(),
+        Some("second/provider")
+    );
+    let abandoned = shard.write(|w| w.start_turn()).unwrap();
+    let switched = compact(conversation.clone(), json!({"focus":"SWITCH_FOCUS"})).await;
+    assert!(
+        switched.status().is_success(),
+        "{}",
+        switched.text().await.unwrap()
+    );
+    assert_eq!(compactions.lock().unwrap().len(), 2);
+    assert_eq!(second_requests.lock().unwrap().len(), 1);
+    assert!(second_requests.lock().unwrap()[0]
+        .to_string()
+        .contains("SWITCH_FOCUS"));
+
+    let settled = shard
+        .repository()
+        .observed_turn(&abandoned)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        settled.status,
+        deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
+    );
+
+    // A Desktop picker persists its encoded model key, including the window override.
+    let picker = db.open_session(&seeded).unwrap();
+    picker
+        .edit_conversation(&json!({"model":"second%2Fprovider::small-window"}))
+        .unwrap();
+    sessions
+        .append(&seeded, "user", &"Keep the test input. ".repeat(512))
+        .unwrap();
+    let too_small = compact(seeded.clone(), json!({"focus":"SAME_WINDOW_TEST"})).await;
+    assert_eq!(too_small.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert_eq!(second_requests.lock().unwrap().len(), 1);
+    picker
+        .edit_conversation(&json!({"model":"second%2Fprovider::small-window[1m]"}))
+        .unwrap();
+    let qualified = compact(seeded.clone(), json!({"instructions":"SAME_WINDOW_TEST"})).await;
+    assert!(
+        qualified.status().is_success(),
+        "{}",
+        qualified.text().await.unwrap()
+    );
+    assert_eq!(second_requests.lock().unwrap().len(), 2);
+    assert_eq!(compactions.lock().unwrap().len(), 2);
+
+    shard
+        .edit_conversation(&json!({"project_id":null,"workspace_mode":"code"}))
+        .unwrap();
+    let invalid = compact(conversation.clone(), json!({})).await;
+    let chat_request = || {
+        client
+            .post(format!("http://127.0.0.1:{port}/api/chat"))
+            .header("x-api-key", &key)
+            .json(&json!({"conversation_id":conversation,"messages":[],"model":"fixture-model"}))
+    };
+    let chat = chat_request().send().await.unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(chat.status(), invalid.status());
+    assert_eq!(
+        chat.json::<Value>().await.unwrap(),
+        invalid.json::<Value>().await.unwrap()
+    );
+    assert_eq!(second_requests.lock().unwrap().len(), 2);
+    // Exhaust the shared chat quota with invalid project requests (zero model calls).
+    let mut limited = false;
+    for _ in 0..=60 {
+        let rejected = compact(conversation.clone(), json!({})).await;
+        if rejected.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(rejected.headers()["retry-after"], "60");
+            limited = true;
+            break;
+        }
+        assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+    assert!(limited);
+    let limited_chat = chat_request().send().await.unwrap();
+    assert_eq!(
+        limited_chat.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(second_requests.lock().unwrap().len(), 2);
     server.abort();
     model.abort();
 }

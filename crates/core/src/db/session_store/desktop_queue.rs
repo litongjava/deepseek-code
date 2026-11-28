@@ -88,6 +88,14 @@ impl super::SessionRead<'_> {
     }
 }
 
+impl super::SessionDb {
+    pub fn acquire_settled_execution(&self) -> Result<ExecutionLease> {
+        let lease = self.acquire_execution()?;
+        self.settle_abandoned(&lease)?;
+        Ok(lease)
+    }
+}
+
 impl Stores {
     pub fn chat_execution_lease(&self, id: &str, model: &str) -> Result<ExecutionLease> {
         Ok(self
@@ -111,8 +119,7 @@ impl Stores {
             return self.create_chat_with_lease(id, options);
         };
         let session = self.open_listed(&row)?;
-        let lease = session.acquire_execution()?;
-        session.settle_abandoned(&lease)?;
+        let lease = session.acquire_settled_execution()?;
         let options = super::conversations::first_chat_options(model, first, origin)?;
         let sealed_first = session.consume_sealed_first(options.first_message.as_ref())?;
         Ok((lease, sealed_first))
