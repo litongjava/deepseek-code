@@ -668,12 +668,12 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
     assert!(!text(0).contains("project marker"));
     assert_eq!(text(1), crate::prompt::standalone_frontend_reminder());
     assert!(text(2).starts_with("<system-reminder>\n") && text(2).contains("project marker"));
-    assert!(text(3).contains("MEMORY.md index marker"));
-    assert!(text(4).starts_with("<system-reminder>\nTools you can load with ToolLoad"));
-    assert!(text(5).starts_with("<system-reminder>\nAvailable skills:"));
-    assert!(text(6).starts_with("<system-reminder>\n# Working environment\n"));
-    assert!(text(6).contains(" - Project: Demo\n - Primary working directory: "));
-    assert!(text(6).contains(" - Platform: "));
+    assert!(text(3).starts_with("<system-reminder>\nTools you can load with ToolLoad"));
+    assert!(text(4).starts_with("<system-reminder>\nAvailable skills:"));
+    assert!(text(5).starts_with("<system-reminder>\n# Working environment\n"));
+    assert!(text(5).contains(" - Project: Demo\n - Primary working directory: "));
+    assert!(text(5).contains(" - Platform: "));
+    assert!(text(6).contains("MEMORY.md index marker"));
     assert_eq!(text(7), crate::prompt::date_reminder("2026-11-19"));
     assert!(text(8).starts_with("<system-reminder>\n# gitStatus"));
     assert_eq!(text(9), crate::prompt::session_tips_reminder());

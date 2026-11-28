@@ -453,6 +453,30 @@ pub fn redact(value: &mut Value) {
     }
 }
 
+pub(crate) fn memory_switches(paths: &RuntimePaths) -> Result<Value> {
+    let config = deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)?;
+    Ok(json!({
+        "global_enabled": config.global_enabled,
+        "project_enabled": config.project_enabled,
+        "team_enabled": config.team_enabled,
+        "session_enabled": config.session_enabled,
+    }))
+}
+
+pub(crate) fn set_memory_switch(paths: &RuntimePaths, scope: &str, enabled: bool) -> Result<()> {
+    use deepseek_code_core::services::memory_files;
+    let context = crate::services::context(paths)?;
+    let mut config = memory_files::config(&context)?;
+    match scope {
+        "global" => config.global_enabled = enabled,
+        "project" => config.project_enabled = enabled,
+        "team" => config.team_enabled = enabled,
+        "session" => config.session_enabled = enabled,
+        _ => bail!("Expected global, project, team, or session"),
+    }
+    memory_files::save_config(&context, &config)
+}
+
 pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
@@ -468,7 +492,7 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
             }
         }
         ConfigCommands::Show => {
-            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"python":deepseek_code_core::services::python_settings::load(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"memory":deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)?,"experience":json!({"enabled":deepseek_code_core::experience::enabled(&crate::services::context(paths)?)}),"tools":crate::tool_settings::rows(paths)?});
+            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"python":deepseek_code_core::services::python_settings::load(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"memory":memory_switches(paths)?,"experience":json!({"enabled":deepseek_code_core::experience::enabled(&crate::services::context(paths)?)}),"tools":crate::tool_settings::rows(paths)?});
             value[deepseek_code_core::config::command_output::KEY] =
                 json!(deepseek_code_core::config::command_output::enabled(
                     Some(&paths.data_dir),
@@ -505,12 +529,9 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
                 eprintln!("Updated {key}");
                 return Ok(());
             }
-            if key == "memory.enabled" {
+            if let Some(scope) = key.strip_prefix("memory.").and_then(|field| field.strip_suffix("_enabled")) {
                 let enabled = value.parse::<bool>().context("Expected true or false")?;
-                let context = crate::services::context(paths)?;
-                let mut config = deepseek_code_core::services::memory_files::config(&context)?;
-                config.enabled = enabled;
-                deepseek_code_core::services::memory_files::save_config(&context, &config)?;
+                set_memory_switch(paths, scope, enabled)?;
                 eprintln!("Updated {key}");
                 return Ok(());
             }
@@ -611,18 +632,17 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
             save_preferences(paths, &prefs)?;
             eprintln!("Updated {key}");
         }
-        ConfigCommands::Memory { state } => {
-            let context = crate::services::context(paths)?;
-            let mut config = deepseek_code_core::services::memory_files::config(&context)?;
-            if let Some(state) = state {
-                config.enabled = match state.trim().to_ascii_lowercase().as_str() {
-                    "on" | "enable" | "enabled" | "true" => true,
-                    "off" | "disable" | "disabled" | "false" => false,
-                    _ => bail!("Expected on or off"),
-                };
-                deepseek_code_core::services::memory_files::save_config(&context, &config)?;
+        ConfigCommands::Memory { scope, state } => {
+            if let (Some(scope), Some(state)) = (scope, state) {
+                set_memory_switch(paths, scope, state == "on")?;
             }
-            crate::services::print(&config)?;
+            let switches = memory_switches(paths)?;
+            if let Some(scope) = scope {
+                let key = format!("{scope}_enabled");
+                crate::services::print(&json!({ &key: switches[&key] }))?;
+            } else {
+                crate::services::print(&switches)?;
+            }
         }
         ConfigCommands::Reset => {
             ConfigManager::new(paths.data_dir.clone()).remove_provider("cli")?;

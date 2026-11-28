@@ -1605,6 +1605,11 @@ impl Session {
             let state =
                 crate::worker_binding::observe_row(paths, id, shard.observe_provider()?, candidate)
                     .await?;
+            if mode != PermissionMode::PlanMode && !state.observation_only {
+                deepseek_code_core::services::memory_files::initialize_startup_indexes(
+                    &self.hook_service_context(), &shard,
+                )?;
+            }
             let target = self.prepare_resumed_binding(&shard, state)?;
             deepseek_code_core::services::session_permission_mode::set(
                 &shard,
@@ -6224,6 +6229,8 @@ mod missing_workspace_tests {
             .db
             .resume_code(&fixture.second)
             .is_err());
+        let session_memory = fixture.session.selected_session().unwrap().memory_directory();
+        assert!(!session_memory.exists());
         // Read-only admission never writes the target's permission mode.
         assert_eq!(
             deepseek_code_core::services::session_permission_mode::load(
@@ -6257,6 +6264,7 @@ mod missing_workspace_tests {
             second_path.canonicalize().unwrap()
         );
         assert_ne!(fixture.session.permission_mode(), "read-only");
+        assert_eq!(std::fs::read(session_memory.join("MEMORY.md")).unwrap(), b"");
         assert!(fixture.session.lifecycle_owned);
         assert!(fixture.session.set_permission_mode("ask").await.is_ok());
 

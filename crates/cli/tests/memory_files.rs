@@ -82,6 +82,58 @@ fn listing_an_authored_index_without_topics_preserves_all_39_bytes() {
         preview["after"].as_str().unwrap()
     );
 }
+#[test]
+fn startup_indexes_before_input_follow_scope_switches_and_skip_observers() {
+    use deepseek_code_core::services::{memory_files, session_messages::ExecutionLease};
+    use std::{fs, process::Command};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let context = ServiceContext::open(paths.clone(), Arc::new(EnvironmentCredentials)).unwrap();
+    let project = FileMemory::workspace(&context, &workspace).unwrap().directory;
+    let id = uuid::Uuid::new_v4().to_string();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_dcl"))
+            .current_dir(&workspace)
+            .arg("--data-dir").arg(&paths.data_dir)
+            .arg("--init-only").args(args).stdin(Stdio::null()).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    let mut config = memory_files::config(&context).unwrap();
+    config.session_enabled = false;
+    memory_files::save_config(&context, &config).unwrap();
+    run(&["--session-id", &id]);
+    let shard = context.db.open_session(&id).unwrap();
+    let session = shard.memory_directory();
+    assert_eq!(fs::read(project.join("MEMORY.md")).unwrap(), b"");
+    assert!(!session.exists());
+    fs::remove_file(project.join("MEMORY.md")).unwrap();
+    config.project_enabled = false;
+    config.session_enabled = true;
+    memory_files::save_config(&context, &config).unwrap();
+    run(&["--resume", &id, "--permission-mode", "plan"]);
+    assert!(!session.exists());
+    let lease = ExecutionLease::acquire(&paths.data_dir, shard.incarnation()).unwrap().unwrap();
+    run(&["--resume", &id]);
+    assert!(!session.exists());
+    drop(lease);
+    run(&["--resume", &id]);
+    assert!(!project.join("MEMORY.md").exists());
+    assert_eq!(fs::read(session.join("MEMORY.md")).unwrap(), b"");
+    config.project_enabled = true;
+    memory_files::save_config(&context, &config).unwrap();
+    for dir in [&session, &project] {
+        fs::write(dir.join("MEMORY.md"), b"authored\r\n").unwrap();
+        fs::write(dir.join("topic.md"), b"keep").unwrap();
+    }
+    run(&["--resume", &id]);
+    for dir in [&session, &project] {
+        assert_eq!(fs::read(dir.join("MEMORY.md")).unwrap(), b"authored\r\n");
+        assert_eq!(fs::read(dir.join("topic.md")).unwrap(), b"keep");
+    }
+}
+
 async fn respond(
     State(mock): State<Arc<Mock>>,
     Json(body): Json<Value>,
@@ -223,9 +275,13 @@ async fn scenario(protocol: &'static str, plan: bool) {
             None,
         )
         .unwrap();
+    let global = paths.data_dir.join("data/memory/global");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(global.join("MEMORY.md"), "global-index-row\n").unwrap();
+    const PROJECT_ROW: &str = "- [中文 preferences](preferences.md)";
     std::fs::write(
         memory.directory.join("MEMORY.md"),
-        "- [中文 preferences](preferences.md)\n",
+        format!("{PROJECT_ROW}\n"),
     )
     .unwrap();
     let legacy = deepseek_code_core::memory::MemExClient::with_path(
@@ -297,11 +353,13 @@ async fn scenario(protocol: &'static str, plan: bool) {
                     && !system.contains("unique-body-recall-marker")
             );
             let project = first.find("project-layout-marker").unwrap();
+            let global = first.find("<global_memory>").unwrap();
             let index = first.find("<project_memory>").unwrap();
-            assert!(
-                project < index && first[index..].contains("中文 preferences"),
-                "{first}"
-            );
+            let date = first.find("Today's date is").unwrap();
+            assert!(project < global && global < index && index < date);
+            assert!(first[global..index].contains("global-index-row"));
+            assert!(first[index..date].contains(PROJECT_ROW));
+            assert!(!first.contains("<session_memory>"));
             assert_eq!(first.matches("Relevant project memory files:").count(), 0);
             assert_eq!(
                 first,
@@ -355,7 +413,7 @@ async fn scenario(protocol: &'static str, plan: bool) {
     std::fs::write(
         memory.directory.join("MEMORY.md"),
         format!(
-            "manual-index-edit-on-resume\n{}hidden-tail",
+            "{PROJECT_ROW}\nmanual-index-edit-on-resume\n{}hidden-tail",
             "x".repeat(8 * 1024 * 1024)
         ),
     )
@@ -382,6 +440,8 @@ async fn scenario(protocol: &'static str, plan: bool) {
         assert!(content.contains("Continue toward the goal"));
         assert!(!content.contains("Relevant project memory files:"));
         assert!(content.contains("manual-index-edit-on-resume"));
+        assert!(!content.contains(PROJECT_ROW));
+        assert!(!content.contains("global-index-row"));
     }
     run(
         &paths.data_dir,

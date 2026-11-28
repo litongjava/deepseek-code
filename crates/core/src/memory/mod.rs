@@ -63,7 +63,12 @@ pub struct MemoryStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
+    /// Applies only to the legacy archive, not managed files or prompt scopes.
     pub enabled: bool,
+    pub global_enabled: bool,
+    pub project_enabled: bool,
+    pub team_enabled: bool,
+    pub session_enabled: bool,
     pub search_top_k: usize,
     pub compression_threshold_tokens: usize,
     pub min_importance_threshold: f64,
@@ -84,6 +89,10 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            global_enabled: true,
+            project_enabled: true,
+            team_enabled: false,
+            session_enabled: true,
             search_top_k: 5,
             compression_threshold_tokens: 2_500_000,
             min_importance_threshold: 0.3,

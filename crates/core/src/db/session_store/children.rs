@@ -341,22 +341,15 @@ impl SessionRepository<'_> {
             )
         })
     }
-    pub(crate) fn record_worker_report(&self, report: &str, text: &str) -> Result<bool> {
-        self.write("record finished worker report", |c, id| {
-            if message_repo::get_message(c, report)?.is_some() {
+}
+
+impl super::SessionDb {
+    pub(crate) fn record_worker_report(&self, report: &str, notification: String) -> Result<bool> {
+        self.write_named("record finished worker report", |w| {
+            if message_repo::get_message(w.0, report)?.is_some() {
                 return Ok(false);
             }
-            let order = c.query_row(
-                "SELECT COALESCE(MAX(sort_order),-1)+1 FROM messages WHERE conversation_id=?1",
-                [id],
-                |r| r.get(0),
-            )?;
-            let now = chrono::Utc::now().to_rfc3339();
-            message_repo::insert_message(c, report, id, "system", text, None, &now, false, order)?;
-            if matches!(self.0, Backend::Shared(..)) {
-                crate::db::conversation_repo::increment_message_count(c, id)?;
-                crate::db::conversation_repo::update_conversation_timestamp(c, id, &now)?;
-            }
+            w.append_user(report, &Value::String(notification.clone()), "task_notification", None)?;
             Ok(true)
         })
     }

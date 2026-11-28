@@ -36,6 +36,37 @@ pub fn config(context: &ServiceContext) -> Result<crate::memory::MemoryConfig> {
     context.db.global().initialize_setting(key, &imported)
 }
 
+pub fn initialize_global_index(context: &ServiceContext) -> Result<()> {
+    if config(context)?.global_enabled {
+        let root = context.paths.data_dir.canonicalize()?;
+        let dir = crate::data_layout::DataLayout::from_root(&root).memory_files().join("global");
+        crate::memory::files::ensure_empty_index(&root, &dir)?;
+    }
+    Ok(())
+}
+
+/// Bootstrap only the resident files; opening a writable catalog would also run recovery.
+pub fn initialize_startup_indexes(context: &ServiceContext, shard: &SessionDb) -> Result<()> {
+    let root = context.paths.data_dir.canonicalize()?;
+    if super::session_messages::execution_active(&root, shard.incarnation())?
+        || super::background_sessions::executing_in(&root, shard.id())?.iter().any(|job| {
+            matches!(job.status.as_str(), "starting" | "running" | "unresponsive")
+        })
+    {
+        return Ok(());
+    }
+    initialize_global_index(context)?;
+    let config = config(context)?;
+    if config.project_enabled {
+        let project = FileMemory::from_session(context, shard.clone(), None)?;
+        crate::memory::files::ensure_empty_index(&root, &project.directory)?;
+    }
+    if config.session_enabled {
+        crate::memory::files::ensure_empty_index(&root, &shard.memory_directory())?;
+    }
+    Ok(())
+}
+
 fn archive_config(data_dir: &Path) -> Result<Option<crate::memory::MemoryConfig>> {
     let archive = data_dir.join("data/memory.sqlite3");
     if archive.is_file() {
@@ -59,22 +90,14 @@ pub fn save_config(context: &ServiceContext, config: &crate::memory::MemoryConfi
     )
 }
 
-/// Only the user-level settings file can grant access to a shared memory directory.
-fn team_directory(data: &Path) -> Result<Option<PathBuf>> {
-    let raw = match std::fs::read(
-        crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
-    ) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        other => other?,
+/// Bind shared memory to the session's agent team, never a model-supplied name.
+fn team_directory(data: &Path, session: &str) -> Result<Option<PathBuf>> {
+    let Some(team) = super::teams::team_for_session(data, session)? else {
+        return Ok(None);
     };
-    let settings: Value = serde_json::from_slice(&raw)?;
-    let directory: Option<PathBuf> =
-        serde_json::from_value(settings["memory"]["team_dir"].clone())?;
-    ensure!(
-        directory.as_ref().is_none_or(|d| d.is_absolute()),
-        "memory.team_dir must be absolute"
-    );
-    Ok(directory)
+    let name = super::teams::sanitize_name(&team.name);
+    ensure!(!name.is_empty() && name == team.name, "Invalid team name");
+    Ok(Some(data.canonicalize()?.join("data/memory/teams").join(name)))
 }
 
 fn private_roots(roots: &[PathBuf]) -> bool {
@@ -274,14 +297,17 @@ impl FileMemory {
         };
         let agent = session.read(|r| r.setting(settings::MEMORY_AGENT))?;
         self.directories(
-            team_directory(&self.context.paths.data_dir)?.as_deref(),
+            team_directory(&self.context.paths.data_dir, session.id())?.as_deref(),
             agent.as_deref(),
             &session.memory_directory(),
         )
     }
 
     pub fn active(&self) -> bool {
-        config(&self.context).is_ok_and(|config| config.enabled)
+        // Prompt preferences do not disable managed file operations.
+        self.context
+            .global_setting::<bool>(GlobalSetting::MachinePreference("memory.files.active"))
+            .is_ok_and(|active| active == Some(true))
     }
 
     fn validate_scope(&self) -> Result<()> {
@@ -459,7 +485,7 @@ impl FileMemory {
                             .ok()
                             .zip(dir.canonicalize().ok())
                             .is_some_and(|(left, right)| left == right)
-                            || parent == dir.as_path()
+                            || dunce::simplified(parent) == dunce::simplified(dir)
                     })
                 })
                 .context("Only the current session's memory scopes are accessible")?;
@@ -471,20 +497,22 @@ impl FileMemory {
                 name == "MEMORY.md" || super::super::memory::files::valid_filename(name),
                 "Invalid memory filename"
             );
-            managed = Some(if directory
-                .canonicalize()
-                .ok()
-                .zip(self.directory.canonicalize().ok())
-                .is_some_and(|(left, right)| left == right)
-                || directory == &self.directory
-            {
-                name.to_owned()
-            } else {
-                normalized
-                    .to_str()
-                    .context("Invalid memory path")?
-                    .to_owned()
-            });
+            managed = Some(
+                if directory
+                    .canonicalize()
+                    .ok()
+                    .zip(self.directory.canonicalize().ok())
+                    .is_some_and(|(left, right)| left == right)
+                    || directory == &self.directory
+                {
+                    name.to_owned()
+                } else {
+                    normalized
+                        .to_str()
+                        .context("Invalid memory path")?
+                        .to_owned()
+                },
+            );
         }
         if managed.is_some() {
             ensure!(
@@ -556,12 +584,12 @@ impl FileMemory {
                         .ok()
                         .zip(dir.canonicalize().ok())
                         .is_some_and(|(left, right)| left == right)
-                        || parent == dir.as_path()
+                        || dunce::simplified(parent) == dunce::simplified(dir)
                 })
             })
             .context("Memory scope changed")?;
         let data = self.context.paths.data_dir.canonicalize()?;
-        let root = if *scope == "team" { directory } else { &data };
+        let root = &data;
         let is_index = filename == "MEMORY.md";
         let current = Self::from_session(&self.context, session.clone(), None)?;
         ensure!(
@@ -729,7 +757,10 @@ mod tests {
             INSERT INTO memory_settings VALUES(1,'{"enabled":false,"search_top_k":3}')"#,
         )
         .unwrap();
-        assert!(!config(&context).unwrap().enabled);
+        let imported = config(&context).unwrap();
+        assert!(!imported.enabled);
+        assert!(imported.global_enabled && imported.project_enabled && imported.session_enabled);
+        assert!(!imported.team_enabled);
         drop(conn);
         std::fs::remove_file(&archive).unwrap();
         assert_eq!(config(&context).unwrap().search_top_k, 3);
@@ -1041,6 +1072,78 @@ mod tests {
             .is_err());
         memory.tool("Read", &json!({}), "test.md", true).unwrap();
     }
+    #[test]
+    fn global_memory_first_use_with_plain_path() {
+        let (root, memory) = fixture();
+        let dir = dunce::simplified(root.path()).join("data/data/memory/global");
+        let call = |tool, file: &str, mut input: Value| -> Result<Value> {
+            input["file_path"] = json!(dir.join(file));
+            let target = memory.target(tool, &input, "")?.expect("managed path");
+            memory.tool(tool, &input, &target, false)
+        };
+        let mut cfg = config(&memory.context).unwrap();
+        cfg.global_enabled = false;
+        save_config(&memory.context, &cfg).unwrap();
+        initialize_global_index(&memory.context).unwrap();
+        assert!(!dir.exists());
+        cfg.global_enabled = true;
+        save_config(&memory.context, &cfg).unwrap();
+        initialize_global_index(&memory.context).unwrap();
+        assert_eq!(call("Read", "MEMORY.md", json!({})).unwrap()["content"], "");
+        call("Write", "test.md", json!({"content":note("Original fact")})).unwrap();
+        call("Read", "MEMORY.md", json!({})).unwrap();
+        call(
+            "Write",
+            "MEMORY.md",
+            json!({"content":"- [Test](test.md): A saved fact.\n"}),
+        )
+        .unwrap();
+        assert!(call("Read", "MEMORY.md", json!({})).unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("test.md"));
+        let index = std::fs::read(dir.join("MEMORY.md")).unwrap();
+        initialize_global_index(&memory.context).unwrap();
+        assert_eq!(std::fs::read(dir.join("MEMORY.md")).unwrap(), index);
+        cfg.global_enabled = false;
+        cfg.project_enabled = false;
+        cfg.session_enabled = false;
+        save_config(&memory.context, &cfg).unwrap();
+        call("Read", "test.md", json!({})).unwrap();
+        call(
+            "Edit",
+            "test.md",
+            json!({"old_string":"Original fact","new_string":"Updated fact"}),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(dir.join("test.md"))
+            .unwrap()
+            .contains("Updated fact"));
+    }
+
+    #[test]
+    fn team_memory_requires_matching_agent_team_membership() -> Result<()> {
+        let (_root, memory) = fixture();
+        let data = &memory.context.paths.data_dir;
+        let session = memory.session.as_ref().unwrap().id();
+        let target = |team: &str| {
+            let path = data.join("data/memory/teams").join(team).join("fact.md");
+            memory.target("Write", &json!({"file_path": path}), "")
+        };
+        assert!(target("alpha").is_err());
+        for (team, lead) in [("alpha", session), ("beta", "other-session")] {
+            let path = super::super::teams::team_path(data, team);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(path, serde_json::to_vec(&json!({
+                "name": team, "createdAt": 1, "leadAgentId": format!("team-lead@{team}"),
+                "leadSessionId": lead, "members": []
+            }))?)?;
+        }
+        assert!(target("alpha")?.is_some());
+        assert!(target("beta").is_err());
+        Ok(())
+    }
+
     #[test]
     fn file_memory_target_rejects_other_scopes_traversal_and_mixed_patches() {
         let (_root, memory) = fixture();

@@ -17,6 +17,9 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+#[path = "runtime_background_replay.rs"]
+mod background_replay;
+
 #[path = "runtime_user_content.rs"]
 mod user_content;
 pub(crate) use user_content::attachment_text;
@@ -454,6 +457,7 @@ pub(crate) fn replay_rows(
         .get(start)
         .filter(|(m, _)| m.is_compact_boundary)
         .map(|(m, _)| m.id.clone());
+    let mut reports = Vec::new();
     for (message, collapsed) in messages.iter().skip(start) {
         if let Some(mut native) = native(&message.id)? {
             crate::native_engine::tool_loop::prepare_native_window(
@@ -461,6 +465,7 @@ pub(crate) fn replay_rows(
                 crate::db::model_results::data_root(conn)?.as_deref(),
                 id,
             );
+            background_replay::native_fallbacks(&mut native);
             let mut row =
                 json!({"role":message.role,"content":message.content,"provider_content":native});
             if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
@@ -472,6 +477,18 @@ pub(crate) fn replay_rows(
             }
             history.push(row);
             continue;
+        }
+        if message.role == "system" && !message.is_compact_boundary {
+            if let Some(report) = background_replay::Report::parse(&message.content) {
+                reports.push((history.len(), report));
+                let mut row = json!({"role":"user", "content":report.notification()});
+                if include_provenance {
+                    row["id"] = json!(message.id);
+                    row["origin"] = json!("task_notification");
+                }
+                history.push(row);
+                continue;
+            }
         }
         let mut calls = crate::db::model_results::replay_calls(conn, &message.id, id)?;
         // Nested ToolScript calls are history, not provider protocol:
@@ -632,6 +649,7 @@ pub(crate) fn replay_rows(
         }
         history.push(item);
     }
+    background_replay::merge(&mut history, reports);
     crate::native_engine::mcp_output::restore_history(&mut history, conn, id)?;
     Ok((history, boundary))
 }

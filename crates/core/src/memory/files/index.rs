@@ -102,10 +102,21 @@ fn pointer(entry: &Entry) -> String {
     )
 }
 
-/// Only canonical catalog rows are managed by explicit repair. All other text,
-/// including arbitrary Markdown links and original line endings, stays authored.
 pub(super) fn repair(entries: &[Entry], previous: &str) -> String {
-    let mut remaining: BTreeMap<_, _> = entries.iter().map(|e| (e.filename.as_str(), e)).collect();
+    rewrite_rows(previous, entries.iter(), |_| true)
+}
+
+pub(super) fn update_row(previous: &str, filename: &str, entry: Option<&Entry>) -> String {
+    rewrite_rows(previous, entry.into_iter(), |file| file == filename)
+}
+
+/// Only selected canonical catalog rows are managed. Everything else is copied verbatim.
+fn rewrite_rows<'a>(
+    previous: &str,
+    entries: impl Iterator<Item = &'a Entry>,
+    selected: impl Fn(&str) -> bool,
+) -> String {
+    let mut remaining: BTreeMap<_, _> = entries.map(|e| (e.filename.as_str(), e)).collect();
     let mut result = String::new();
     for line in previous.split_inclusive('\n') {
         let row = line.trim_end_matches(['\r', '\n']);
@@ -123,7 +134,7 @@ pub(super) fn repair(entries: &[Entry], previous: &str) -> String {
                 })?;
                 label[end + 2..].split_once(") — ").map(|(file, _)| file)
             })
-            .filter(|file| super::memory_filename(file).is_ok());
+            .filter(|file| selected(file) && super::memory_filename(file).is_ok());
         match file {
             Some(file) => {
                 if let Some(entry) = remaining.remove(file) {

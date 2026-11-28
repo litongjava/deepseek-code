@@ -340,6 +340,8 @@ cargo test --locked -p deepseek-code-cli --bin dcl resume_tests
 
 ### F. /tasks
 
+后台报告回归：`cargo test --locked -p deepseek-code-core --lib runtime::background_replay::tests:: -- agent_report_is_delivered_once_as_the_notification_result completion_receipt_is_atomic_and_survives_reopen`。检查旧记录只合并到同一任务的生成通知，普通用户输入保持原样；通知缺失时保留一份用户角色报告。新任务在重新打开会话、投递及重复收集后也只保留一份报告。
+
 有两个后台命令时输入 `/tasks`：
 
 1. 显示 `Background`、`2 active shells`，每个任务一行（`● 命令  running`），最新的在前。
@@ -380,9 +382,9 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 2. `/memory` 菜单有 Long-term memories；列表可以搜索，`+ Add a memory` 能添加。
 3. 详情里 `e` 编辑后列表立即更新并保留重要性，`x` 删除，`←` 返回，`Esc` 关闭。
 4. `/memory` 的说明文件选项和 `/memory show` 不受影响。
-5. `dcl config memory` 输出当前开关；`dcl config memory off` 后 `config show` 的 `memory.enabled` 为 `false`，CLI 与 Desktop 新请求的系统提示词不再包含 `<memory_guidance>`，MEMORY.md 索引和记忆目录写入同时停止；`dcl config memory on` 和 `dcl config set memory.enabled true/false` 作用于同一开关。`cargo test --locked -p deepseek-code-cli --test peripheral config_memory_switch` 覆盖这些分支。
+5. 使用隔离 data-dir 检查 `/config`：Global、Project、Session 默认开启，Team 默认关闭；分别修改并重启，确认四个选择独立持久化。关闭只停止对应提示词和索引注入，不删除文件或改变受管文件权限。Global 开启时首次启动创建 `data/memory/global/MEMORY.md`，再次启动不覆盖原文。
 
-提示词分段由 `cargo test --locked -p deepseek-code-core --lib prompt::` 覆盖：Code 与 Desktop 都按“身份行、`code.md`、`behavior.md`、`memory.md`”组装，记忆关闭时省略第四段，`cache_blocks` 同时识别四段和三段布局并在 Anthropic 请求中分别设置缓存断点。
+提示词分段运行 `cargo test --locked -p deepseek-code-core --lib prompt::`：共有 `memory.md` 始终存在；逐项启用 Global、Team、Project、Session 时，只增加对应模板和开启状态说明。检查 Code、Desktop 的共享组装，以及 Anthropic 缓存块拼接后是否保留原文。
 
 #### 文件记忆（独立 core 模块）
 
@@ -399,8 +401,8 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 
 #### M3 常驻索引（替代逐消息正文召回）
 
-- 用独立临时 data-dir 和本地模型端点；给 global、team、project、subagent、session 的索引和正文各写不同标记。捕获主会话与子代理的实际请求：首条用户消息里先项目指令再按上述顺序放 scope/路径；主会话无 subagent，子代理无父 session，team 未配置或索引空缺时无对应块。搜索所有消息，确认正文标记从未自动出现。
-- 同时改两个索引，下次请求应只有一条新提醒，只含改动的 scope；原首条前缀逐字节不变。再发一轮，不新增提醒。用普通文件工具写索引再重复；用 CRLF、多字节字符、200/201 行和 25 KiB 临界值检查截断和路径提示。
+- 用隔离 data-dir 和本地模型端点，给四类索引及正文写不同标记。首条用户消息在日期前按 global、team、project 放独立索引块，只含开启且已绑定的作用域；空索引仍显示路径。首次请求不含 session 索引或条目正文；启用 session 后，仅在压缩边界的摘要前看到本会话的索引。另测已开启但未绑定团队，不注入其他团队的索引。
+- 用普通文件工具保存条目，核对磁盘索引自动新增链接；下次模型请求在尾部仅提醒新增行，原首条前缀逐字节不变，再发一轮不重复。仅编辑正文时不产生索引提醒。用 CRLF、多字节字符、200/201 行和 25 KiB 临界值检查截断和路径提示。
 - 对 summary/native、自动/手动、partial、plan clear context 和 overflow recovery，各在边界前改索引并发送一次，边界后独立改另一个。比较请求与从会话库恢复的重放：当前索引各一次，不重复边界前提醒；仅边界后的改动有新提醒。退出并用同一 data-dir 恢复，比较相同历史前缀的序列化字节。另核对 fork 复制、删除清理及 home/private 项目隔离。
 - 运行 core 的 `resident_indexes` 单测、`--test compaction_history --test native_compaction` 及 CLI 的 `--test memory_files --test memory_compaction`；分别记录实际覆盖的边界、协议、请求层和进程层。仅重放测试不能替代真实 provider 请求或 Desktop 验收。
 

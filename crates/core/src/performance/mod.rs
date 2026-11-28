@@ -746,8 +746,7 @@ pub fn apply_prompt_cache(body: &mut serde_json::Value) {
 
 /// For agent conversations: the system breakpoints plus a rolling breakpoint on
 /// the last user block, so the next turn reuses the conversation so far. One-shot
-/// requests skip it because a cache write nobody reads only costs more. At most
-/// three of the four allowed breakpoints are used.
+/// requests skip it because a cache write nobody reads only costs more.
 pub fn apply_conversation_cache(body: &mut serde_json::Value) {
     apply_prompt_cache(body);
     let ephemeral = || serde_json::json!({"type":"ephemeral"});
@@ -762,6 +761,17 @@ pub fn apply_conversation_cache(body: &mut serde_json::Value) {
         _ => false,
     })) {
         block["cache_control"] = ephemeral();
+    } else {
+        return;
+    }
+    // Reserve the fourth breakpoint for the user. The next system breakpoint
+    // still caches the identity prefix along with the coding instructions.
+    if let Some(system) = body["system"].as_array_mut() {
+        if system.iter().filter(|b| b.get("cache_control").is_some()).count() >= 4 {
+            if let Some(first) = system.iter_mut().find(|b| b.get("cache_control").is_some()) {
+                first.as_object_mut().unwrap().remove("cache_control");
+            }
+        }
     }
 }
 
@@ -999,7 +1009,7 @@ mod tests {
         apply_conversation_cache(&mut body);
         let blocks = body["system"].as_array().unwrap();
         assert_eq!(blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<String>().len() + 8, system.len());
-        assert_eq!(blocks.iter().map(|b| !b["cache_control"].is_null()).collect::<Vec<_>>(), [true, true, true, true, false]);
+        assert_eq!(blocks.iter().map(|b| !b["cache_control"].is_null()).collect::<Vec<_>>(), [false, true, true, true, false]);
         assert_eq!(body["messages"][0]["content"], "first");
         assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
         assert!(body["messages"][2]["content"][1].get("cache_control").is_none());

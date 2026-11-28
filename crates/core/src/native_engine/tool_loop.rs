@@ -3809,10 +3809,19 @@ impl ToolLoopExecutor {
                 .enumerate()
                 .map(|(index, after)| {
                     (
-                        if Some(index) == target {
-                            self.context_reminders.clone()
-                        } else {
-                            Vec::new()
+                        {
+                            let mut before = if Some(index) == target {
+                                self.context_reminders.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            if let Some(id) = self.messages[index]["id"].as_str() {
+                                let key = format!("before-message:{id}");
+                                for entry in self.turn_context.iter().filter(|e| e.key == key) {
+                                    before.extend(entry.blocks.iter().cloned());
+                                }
+                            }
+                            before
                         },
                         after,
                     )
@@ -8142,7 +8151,8 @@ impl ToolLoopExecutor {
             })
             .collect();
         // Responses replays the compact window verbatim and ignores the display
-        // text of its boundary row. Put the index immediately after that window.
+        // text of its boundary row. A compact-time session reminder goes before
+        // the opaque window, without changing any provider-issued item.
         if built.first().is_some_and(|m| {
             m.provider_content
                 .as_ref()
@@ -8155,8 +8165,9 @@ impl ToolLoopExecutor {
                 .map(String::as_str)
                 .collect();
             if !indexes.is_empty() {
+                let before_summary = indexes.iter().any(|block| block.starts_with("<system-reminder>\n<session_memory>"));
                 built.insert(
-                    1,
+                    if before_summary { 0 } else { 1 },
                     OpenAIMessage {
                         role: "user".into(),
                         content: OpenAIContent::Text(indexes.join("\n\n")),

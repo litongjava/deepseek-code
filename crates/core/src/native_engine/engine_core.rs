@@ -1111,11 +1111,11 @@ impl QueryEngine {
             .await?;
         }
         let customization = crate::services::customization::load(&plugin_context.paths.data_dir)?;
-        let memory_enabled = match crate::services::memory_files::config(&plugin_context) {
-            Ok(config) => config.enabled,
+        let memory = match crate::services::memory_files::config(&plugin_context) {
+            Ok(config) => config,
             Err(error) => {
-                tracing::warn!(module = "Prompt", error = %error, "Memory setting unavailable; keeping memory guidance");
-                true
+                tracing::warn!(module = "Prompt", error = %error, "Memory settings unavailable; using default prompt scopes");
+                Default::default()
             }
         };
         let standalone_frontend = request.standalone_frontend;
@@ -1123,7 +1123,7 @@ impl QueryEngine {
             request.system_prompt.as_deref(),
             prompt_profile,
             &customization.system_prompt,
-            memory_enabled,
+            &memory,
         ));
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
@@ -1570,11 +1570,11 @@ impl QueryEngine {
         let memory_session = selected.clone();
         let memory_context = plugin_context.clone();
         let (file_memory, resident_indexes, turn_context) = {
-            use crate::services::memory_files::{self, FileMemory};
-            let memory = memory_files::config(&memory_context)?
-                .enabled
-                .then(|| FileMemory::session(&memory_context, memory_session.id()))
-                .transpose()?;
+            use crate::services::memory_files::FileMemory;
+            let memory = Some(FileMemory::session(&memory_context, memory_session.id())?);
+            if applied_compaction.is_none() {
+                crate::services::memory_files::prompt::Admission::ensure_first_prefix(&memory_session)?;
+            }
             let (index, turns) = crate::services::turn_context::replay(
                 &memory_session,
                 applied_compaction.as_deref(),

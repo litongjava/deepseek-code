@@ -751,6 +751,7 @@ pub(super) fn copy_snapshot(
         } else {
             super::super::boundary::freeze_retained_prefix(dst, memory)?;
             let message = crate::db::transcript::MessageIds::for_shard(dst)?.issue();
+            memory.freeze_summary(dst, &message)?;
             message_repo::insert_message(
                 dst,
                 &message,

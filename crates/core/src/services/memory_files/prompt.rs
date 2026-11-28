@@ -17,11 +17,11 @@ struct Index {
     excerpt: String,
 }
 
-const SCOPES: [&str; 5] = ["global", "team", "project", "subagent", "session"];
+const SCOPES: [&str; 3] = ["global", "team", "project"];
 const INDEX: Setting<IndexState> = Setting::new("memory.prompt.index");
 const NEXT_INPUT: Setting<String> = Setting::new("memory.prompt.next-input");
 const EPOCH: Setting<u64> = Setting::new("memory.prompt.epoch");
-const CHANGE: &str = "MEMORY.md changed. The current index follows.\n";
+const CHANGE: &str = "MEMORY.md changed.\n";
 const TRUNCATED: &str = "[MEMORY.md truncated; read the full index at the path above.]\n";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -30,6 +30,8 @@ pub(crate) struct IndexState {
     epoch: u64,
     #[serde(default)]
     indexes: Vec<Index>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_index_path: Option<PathBuf>,
     // Frozen prefixes written by the single-project format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     first: Option<String>,
@@ -73,6 +75,10 @@ fn index_key(boundary: Option<&str>) -> Setting<IndexState> {
     })
 }
 
+fn summary_index(id: &str) -> Setting<IndexState> {
+    Setting::memory_receipt(format!("prompt.summary.{id}"))
+}
+
 fn change(id: &str) -> Setting<IndexState> {
     Setting::memory_receipt(format!("prompt.change.{id}"))
 }
@@ -80,7 +86,11 @@ fn change(id: &str) -> Setting<IndexState> {
 impl Index {
     fn block(&self) -> String {
         let path = xml(&self.path.to_string_lossy());
-        let excerpt = xml(&self.excerpt);
+        let excerpt = if self.excerpt.is_empty() {
+            "[Empty MEMORY.md index]".into()
+        } else {
+            xml(&self.excerpt)
+        };
         format!(
             "<{scope}_memory>\nIndex: {path}\n{excerpt}\n</{scope}_memory>",
             scope = self.scope
@@ -90,6 +100,9 @@ impl Index {
 
 impl IndexState {
     fn with_session_dir(mut self, directory: &std::path::Path) -> Self {
+        if self.session_index_path.is_some() {
+            self.session_index_path = Some(directory.join("MEMORY.md"));
+        }
         if let Some(index) = self
             .indexes
             .iter_mut()
@@ -112,13 +125,24 @@ impl IndexState {
     }
 
     pub(crate) fn render(&self) -> Vec<String> {
-        if self.indexes.is_empty() {
-            return self.first.iter().cloned().collect();
-        }
-        self.indexes
-            .iter()
-            .map(|index| format!("<system-reminder>\n{}\n</system-reminder>", index.block()))
-            .collect()
+        let mut blocks: Vec<_> = self.first.iter().cloned().collect();
+        blocks.extend(
+            self.indexes
+                .iter()
+                .map(Index::block)
+                .chain(self.session_location())
+                .map(|block| format!("<system-reminder>\n{block}\n</system-reminder>")),
+        );
+        blocks
+    }
+
+    fn session_location(&self) -> Option<String> {
+        self.session_index_path.as_ref().map(|path| {
+            format!(
+                "<session_memory_location>\nIndex: {}\n</session_memory_location>",
+                xml(&path.to_string_lossy())
+            )
+        })
     }
 
     fn changed(&self, previous: &Self) -> Option<String> {
@@ -130,13 +154,43 @@ impl IndexState {
                 continue;
             }
             if let Some(index) = new {
-                blocks.push(index.block());
+                if let Some(old) = old.filter(|old| old.path == index.path) {
+                    let prior: std::collections::HashSet<_> = old.excerpt.lines().collect();
+                    let added = index
+                        .excerpt
+                        .lines()
+                        .filter(|line| !prior.contains(line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if added.is_empty() {
+                        blocks.push(format!(
+                            "{scope} index changed (no new rows): {}",
+                            xml(&index.path.to_string_lossy())
+                        ));
+                    } else {
+                        blocks.push(
+                            Index {
+                                excerpt: added,
+                                ..index.clone()
+                            }
+                            .block(),
+                        );
+                    }
+                } else {
+                    blocks.push(index.block());
+                }
             } else if let Some(index) = old {
                 blocks.push(format!(
                     "{scope} index removed: {}",
                     xml(&index.path.to_string_lossy())
                 ));
             }
+        }
+        if self.session_index_path != previous.session_index_path {
+            blocks.push(
+                self.session_location()
+                    .unwrap_or_else(|| "Session memory disabled.".into()),
+            );
         }
         (!blocks.is_empty()).then(|| {
             format!(
@@ -206,6 +260,7 @@ pub(crate) fn copy_message(
     dst.execute("INSERT OR REPLACE INTO peripheral_settings(key,value) SELECT 'prompt.pending.'||?1,'true' WHERE ?2",rusqlite::params![new,src.prepare_cached("SELECT 1 FROM peripheral_settings WHERE key='prompt.pending.'||?1 OR (key='memory.prompt.message.'||?1 AND json_extract(value,'$.pending')=1)")?.exists([old])?])?;
     for (from, to) in [
         (change(old), change(new)),
+        (summary_index(old), summary_index(new)),
         (index_key(Some(old)), index_key(Some(new))),
     ] {
         if let Some(state) = from.read(src)? {
@@ -216,11 +271,11 @@ pub(crate) fn copy_message(
 }
 
 pub(crate) struct Admission {
-    memory: Option<FileMemory>,
+    memory: FileMemory,
+    config: crate::memory::MemoryConfig,
     team: Option<PathBuf>,
     session_dir: PathBuf,
     stage: Option<PathBuf>,
-    agent: Option<String>,
 }
 
 impl Admission {
@@ -235,16 +290,17 @@ impl Admission {
     pub(crate) fn session(shard: &SessionDb) -> Result<Self> {
         let context = Self::context(shard.scoped_stores())?;
         let config = super::config(&context)?;
-        let memory = config
-            .enabled
-            .then(|| FileMemory::from_session(&context, shard.clone(), None))
-            .transpose()?;
+        let memory = FileMemory::from_session(&context, shard.clone(), None)?;
         Ok(Self {
             memory,
             stage: None,
-            team: super::team_directory(&context.paths.data_dir)?,
+            team: if config.team_enabled {
+                super::team_directory(&context.paths.data_dir, shard.id())?
+            } else {
+                None
+            },
+            config,
             session_dir: shard.memory_directory(),
-            agent: shard.read(|r| r.setting(super::settings::MEMORY_AGENT))?,
         })
     }
 
@@ -252,27 +308,27 @@ impl Admission {
         stores: &crate::db::session_store::Stores,
         roots: &[std::path::PathBuf],
         owner: &str,
+        session_id: &str,
         session_dir: PathBuf,
-        agent: Option<String>,
     ) -> Result<Self> {
         let context = Self::context(stores.clone())?;
         let config = super::config(&context)?;
-        let memory = if config.enabled {
-            let scope = if super::private_roots(roots) {
-                super::MemoryScope::private(owner)?
-            } else {
-                super::MemoryScope::project(roots, true)?
-            };
-            Some(FileMemory::new(&context, scope, None)?)
+        let scope = if super::private_roots(roots) {
+            super::MemoryScope::private(owner)?
         } else {
-            None
+            super::MemoryScope::project(roots, true)?
         };
+        let memory = FileMemory::new(&context, scope, None)?;
         Ok(Self {
             memory,
             stage: None,
-            team: super::team_directory(&context.paths.data_dir)?,
+            team: if config.team_enabled {
+                super::team_directory(&context.paths.data_dir, session_id)?
+            } else {
+                None
+            },
+            config,
             session_dir,
-            agent,
         })
     }
 
@@ -282,39 +338,53 @@ impl Admission {
     }
 
     pub(crate) fn frozen_index(&self) -> Result<IndexState> {
+        let mut current = self.snapshot(false)?;
+        if self.config.session_enabled {
+            current.session_index_path = Some(self.session_dir.join("MEMORY.md"));
+        }
+        Ok(current)
+    }
+
+    pub(crate) fn freeze_summary(&self, tx: &Connection, id: &str) -> Result<()> {
+        summary_index(id).write(tx, &self.snapshot(true)?)
+    }
+
+    fn snapshot(&self, session_only: bool) -> Result<IndexState> {
         let mut current = IndexState::default();
-        let Some(memory) = &self.memory else {
-            return Ok(current);
-        };
+        let memory = &self.memory;
         let data = memory.context.paths.data_dir.canonicalize()?;
-        for (scope, directory) in memory.directories(
-            self.team.as_deref(),
-            self.agent.as_deref(),
-            &self.session_dir,
-        )? {
-            let root = if scope == "team" {
-                directory.as_path()
-            } else {
-                data.as_path()
-            };
-            if let Some((raw, hash)) = crate::memory::files::resident_index(
-                root,
+        for (scope, directory) in
+            memory.directories(self.team.as_deref(), None, &self.session_dir)?
+        {
+            if session_only != (scope == "session")
+                || !match scope {
+                    "global" => self.config.global_enabled,
+                    "team" => self.config.team_enabled,
+                    "project" => self.config.project_enabled,
+                    "session" => self.config.session_enabled,
+                    _ => false,
+                }
+            {
+                continue;
+            }
+            let observed = crate::memory::files::resident_index(
+                &data,
                 if scope == "session" {
                     self.stage.as_ref().unwrap_or(&directory)
                 } else {
                     &directory
                 },
-            )? {
-                if raw.is_empty() {
-                    continue;
-                }
-                current.indexes.push(Index {
-                    scope: scope.into(),
-                    path: directory.join("MEMORY.md"),
-                    hash,
-                    excerpt: index_excerpt(&raw),
-                });
+            )?;
+            if session_only && observed.is_none() {
+                continue;
             }
+            let (raw, hash) = observed.unwrap_or_default();
+            current.indexes.push(Index {
+                scope: scope.into(),
+                path: directory.join("MEMORY.md"),
+                hash,
+                excerpt: index_excerpt(&raw),
+            });
         }
         Ok(current)
     }
@@ -334,6 +404,22 @@ impl Admission {
             return self.freeze(tx, None);
         }
         NEXT_INPUT.write(tx, &id.to_owned())
+    }
+
+    // Some API callers supply history directly instead of using durable admission.
+    // Freeze their first prefix before rendering; a subsequent reload would
+    // otherwise replace the supplied messages with the (possibly empty) shard.
+    pub(crate) fn ensure_first_prefix(shard: &SessionDb) -> Result<()> {
+        if shard.read(|r| Ok(r.setting(INDEX)?.is_none()))? {
+            let snapshot = Self::session(shard)?.frozen_index()?;
+            shard.write(|w| {
+                if w.setting(INDEX)?.is_none() {
+                    w.set_setting(INDEX, &snapshot)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn refresh(shard: &SessionDb) -> Result<bool> {
@@ -356,9 +442,12 @@ impl Admission {
         }
         let Some(previous) = latest(tx)? else {
             INDEX.write(tx, &current)?;
-            return Ok(!current.indexes.is_empty());
+            return Ok(!current.indexes.is_empty() || current.session_index_path.is_some());
         };
-        if current.indexes == previous.indexes && previous.first.is_none() {
+        if current.indexes == previous.indexes
+            && current.session_index_path == previous.session_index_path
+            && previous.first.is_none()
+        {
             return Ok(false);
         }
         // Sync or rewind may have removed the latest admitted input.
@@ -413,6 +502,20 @@ pub(crate) fn replay_at(
         let Some(id) = row["id"].as_str() else {
             continue;
         };
+        if let Some(summary) = r.setting(summary_index(id))?.filter(|summary| {
+            row["provider_content"]["compaction"] != true
+                || summary
+                    .indexes
+                    .iter()
+                    .any(|index| !index.excerpt.is_empty())
+        }) {
+            entries.push(Entry {
+                key: format!("before-message:{id}"),
+                occurrence: 0,
+                blocks: summary.render(),
+                skill: None,
+            });
+        }
         if let Some(next) = r
             .setting(change(id))?
             .filter(|next| next.epoch >= state.epoch)

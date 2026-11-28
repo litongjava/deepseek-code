@@ -149,9 +149,13 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
     let display = crate::display_commands::load(session)?;
     let effort = crate::session_commands::session_effort(session)?.unwrap_or_else(|| "default".into());
     let autocompact = crate::session_commands::autocompact_label(session)?;
-    let memory = deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)
-        .map(|config| config.enabled)
-        .unwrap_or(true);
+    let memory = deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)?;
+    let on_off = |on| if on { "on" } else { "off" }.to_owned();
+    let team_label = if memory.team_enabled && deepseek_code_core::services::teams::team_for_session(&paths.data_dir, &session.id)?.is_none() {
+        "Team memory (no bound team)"
+    } else {
+        "Team memory"
+    };
     let experience = deepseek_code_core::experience::enabled(&crate::services::context(paths)?);
     let saved = paths.read_config()?;
     let settings: Vec<(&str, &str, String)> = vec![
@@ -160,7 +164,10 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         ("permissions", "Permission mode", session.permission_mode().to_owned()),
         ("effort", "Effort", effort),
         ("autocompact", "Auto-compact", autocompact),
-        ("memory", "Long-term memory", if memory { "on" } else { "off" }.into()),
+        ("memory.global", "Global memory", on_off(memory.global_enabled)),
+        ("memory.project", "Project memory", on_off(memory.project_enabled)),
+        ("memory.team", team_label, on_off(memory.team_enabled)),
+        ("memory.session", "Session memory", on_off(memory.session_enabled)),
         ("experience", "Experience", if experience { "on" } else { "off" }.into()),
         ("theme", "Theme", display.theme.clone()),
         // As in the reference CLI; /vim toggles the same setting.
@@ -191,7 +198,7 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         "permissions" => &["ask", "accept-edits", "plan", "auto", "dont-ask"],
         "effort" => &crate::session_commands::EFFORTS,
         "autocompact" => &["default", "off", "70%", "80%", "90%"],
-        "memory" => &["on", "off"],
+        key if key.starts_with("memory.") => &["on", "off"],
         "experience" => &["on", "off"],
         "theme" => &["dark", "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi"],
         "color" => &["default", "red", "orange", "yellow", "green", "blue", "purple", "pink", "cyan"],
@@ -226,12 +233,7 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
             Some(choice) if choices[choice] != value => match *key {
                 "permissions" => session.set_permission_mode(choices[choice]).await,
                 "editor" => crate::terminal::vim::set_enabled(&paths.data_dir, choices[choice] == "vim").map(|()| input.set_vim(choices[choice] == "vim")),
-                "memory" => {
-                    let context = crate::services::context(paths)?;
-                    let mut config = deepseek_code_core::services::memory_files::config(&context)?;
-                    config.enabled = choices[choice] == "on";
-                    deepseek_code_core::services::memory_files::save_config(&context, &config)
-                }
+                key if key.starts_with("memory.") => crate::config::set_memory_switch(paths, &key["memory.".len()..], choices[choice] == "on"),
                 "experience" => deepseek_code_core::experience::set_enabled(
                     &crate::services::context(paths)?,
                     choices[choice] == "on",

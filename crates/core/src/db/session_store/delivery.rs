@@ -220,7 +220,7 @@ impl SessionDb {
         if request.starts_with("internal-cli:") {
             return Err(QueueError::InvalidContent.into());
         }
-        self.enqueue_content(request, content, mode, origin)
+        self.enqueue_content(request, content, mode, origin).map(|(item, _)| item)
     }
 
     pub fn enqueue_cli_input(&self, origin: input_queue::QueueOrigin, text: &str) -> Result<()> {
@@ -267,13 +267,24 @@ impl SessionDb {
         })
     }
 
+    pub(crate) fn worker_notice_queued(&self, task: &str) -> Result<bool> {
+        self.stores.global().read(|c| Ok(c.prepare_cached(
+            "SELECT 1 FROM session_input_queue WHERE session_id=?1 AND request_id=?2",
+        )?.exists(params![self.id, format!("internal-cli:notice:worker:{task}")])?))
+    }
+
+    pub(crate) fn enqueue_worker_notice(&self, task: &str, text: String) -> Result<bool> {
+        self.enqueue_content(&format!("internal-cli:notice:worker:{task}"), &Value::String(text),
+            QueueMode::Steer, input_queue::QueueOrigin::TaskNotification).map(|(_, inserted)| inserted)
+    }
+
     fn enqueue_content(
         &self,
         request: &str,
         content: &Value,
         mode: QueueMode,
         origin: input_queue::QueueOrigin,
-    ) -> Result<Admission> {
+    ) -> Result<(Admission, bool)> {
         if request.trim().is_empty() {
             return Err(QueueError::InvalidContent.into());
         }
@@ -306,7 +317,7 @@ impl SessionDb {
                 if prior != original || (prior_origin != "legacy_queue" && prior_origin != origin.tag()) {
                     return Err(QueueError::Conflict.into());
                 }
-                return admission(c, id, &self.id);
+                return Ok((admission(c, id, &self.id)?, false));
             }
             c.execute(
                 "INSERT INTO session_input_queue(session_id,request_id,admission_digest,payload,mode,delivery_id,prompt_origin) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -320,7 +331,7 @@ impl SessionDb {
                     origin.tag()
                 ],
             )?;
-            admission(c, c.last_insert_rowid(), &self.id)
+            Ok((admission(c, c.last_insert_rowid(), &self.id)?, true))
         })
     }
     pub(super) fn desktop_dispatch_candidate(&self) -> Result<Option<input_queue::QueueItem>> {

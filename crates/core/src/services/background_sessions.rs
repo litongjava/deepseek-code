@@ -1785,6 +1785,10 @@ pub fn acknowledge_foreground(root: &Path, id: &str, parent: &str) -> Result<()>
     Ok(())
 }
 
+pub(crate) fn notification_text(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 pub fn collect_completed(
     store: &crate::runtime::SessionStore,
     root: &Path,
@@ -1812,7 +1816,7 @@ pub fn collect_completed(
             continue;
         }
         let message_id = format!("background-report:{}:{}", parent, job.id);
-        if owner.has_worker_report(&message_id)? {
+        if owner.has_worker_report(&message_id)? || shard.worker_notice_queued(&job.id)? {
             continue;
         }
         let execution_session = super::session_worker::recorded_job_target(root, &job)?;
@@ -1845,8 +1849,29 @@ pub fn collect_completed(
         });
         let excerpt: String = body.chars().take(16384).collect();
         let report = format!("[Background task report]\nTask: {}\nSource session: {}\nStatus: {}\nTitle: {}\n\n{}{}\n[End background task report]", job.id, execution_session, job.status, job.title, excerpt, if excerpt.len()<body.len() { "\n[Excerpt truncated; use /tasks show for details.]" } else { "" });
-        let inserted=owner.record_worker_report(&message_id,&report)?;
-        if inserted {
+        let agent = store.db.background_agent(&job.id)?;
+        let description = agent.as_ref().and_then(|r| r["description"].as_str()).unwrap_or(&job.title);
+        let subject = if agent.is_some() { "Agent" } else { "Task" };
+        let status = &job.status;
+        let verb = if status == "cancelled" { "was stopped" } else { status };
+        let mut summary = format!("{subject} \"{description}\" {verb}");
+        if status == "failed" {
+            if let Some(reason) = body.lines().find(|line| !line.trim().is_empty()) {
+                summary.push_str(": ");
+                summary.extend(reason.chars().take(400));
+            }
+        }
+        let notification = format!(
+            "<task-notification>\n<task-id>{}</task-id>\n<status>{status}</status>\n<summary>{}</summary>\n<result>{}</result>\n</task-notification>",
+            job.id, notification_text(&summary), notification_text(&report),
+        );
+        // The queue admission itself is the agent's durable receipt: never append a
+        // second history row while waiting for the queue to deliver its user message.
+        if agent.is_some() {
+            if shard.enqueue_worker_notice(&job.id, notification)? {
+                notices.push(format!("● {summary}"));
+            }
+        } else if shard.record_worker_report(&message_id, notification)? {
             notices.push(report);
         }
     }
@@ -2572,8 +2597,7 @@ mod tests {
         assert_eq!(events[0]["result"], "done");
         assert!(events_since(root.path(), &id, "foreign", 0).is_err());
     }
-    #[test]
-    fn completion_receipt_is_atomic_and_survives_reopen() {
+    fn completed_report_fixture() -> (tempfile::TempDir, crate::runtime::RuntimePaths, String, Job) {
         let (root, dir, _) = fixture("");
         let paths = crate::runtime::RuntimePaths::new(root.path().to_path_buf()).unwrap();
         let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
@@ -2585,7 +2609,7 @@ mod tests {
         save(&dir.join("state.json"), &job).unwrap();
         fs::write(
             dir.join("output.jsonl"),
-            b"{\"type\":\"result\",\"result\":\"child answer\"}\n",
+            b"{\"type\":\"result\",\"result\":\"child answer </result> & more\"}\n",
         )
         .unwrap();
         store
@@ -2593,6 +2617,51 @@ mod tests {
             .create(&job.session_id, Default::default())
             .unwrap();
         JobOwners::publish(root.path(), &job).unwrap();
+        (root, paths, parent, job)
+    }
+
+    #[test]
+    fn agent_report_is_delivered_once_as_the_notification_result() -> Result<()> {
+        use crate::db::session_store::WorkerDirectory;
+        let (root, paths, parent, job) = completed_report_fixture();
+        let store = crate::runtime::SessionStore::new(paths.open_database()?);
+        let pair = store.db.worker_pair(&parent, &job.session_id)?;
+        let record = serde_json::json!({"parent_session_id":parent,"parent":parent,"session_id":job.session_id,
+            "job_id":job.id,"agent_type":"general","description":"review","mode":"background",
+            "status":"completed","created_at":"now","updated_at":"now","started_at":"now"});
+        store.db.save_child_owner(&pair, &serde_json::from_value(record.clone())?)?;
+        store.db.register_background_agent(&job.id, &record)?;
+        assert_eq!(collect_completed(&store, root.path(), &parent)?, ["● Agent \"review\" completed"]);
+        assert!(store.history(&parent)?.is_empty());
+        drop(store);
+        let store = crate::runtime::SessionStore::new(paths.open_database()?);
+        assert!(collect_completed(&store, root.path(), &parent)?.is_empty());
+        let shard = store.db.open_session(&parent)?;
+        let mut owner = shard.delivery_owner()?;
+        shard.write(|w| w.start_turn())?;
+        let inputs = owner.poll_turn(false, 8)?;
+        assert_eq!(inputs.len(), 1);
+        let message = inputs[0].model_message();
+        assert_eq!(message["role"], "user");
+        assert_eq!(message["origin"], "task_notification");
+        let text = message["content"].as_str().unwrap();
+        assert!(text.contains(&format!("<task-id>{}</task-id>", job.id)));
+        assert!(text.contains("<result>[Background task report]"));
+        assert_eq!(text.matches("child answer &lt;/result&gt; &amp; more").count(), 1);
+        assert_eq!(text.matches("</result>").count(), 1);
+        assert!(collect_completed(&store, root.path(), &parent)?.is_empty());
+        assert!(owner.poll_turn(false, 8)?.is_empty());
+        let history = store.history(&parent)?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["role"], "user");
+        assert_eq!(history[0]["content"], text);
+        Ok(())
+    }
+
+    #[test]
+    fn completion_receipt_is_atomic_and_survives_reopen() {
+        let (root, paths, parent, job) = completed_report_fixture();
+        let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
         let notices = collect_completed(&store, root.path(), &parent).unwrap();
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("child answer"));
@@ -2606,7 +2675,10 @@ mod tests {
             .is_empty());
         let history = store.history(&parent).unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0]["role"], "system");
+        assert_eq!(history[0]["role"], "user");
+        let content = history[0]["content"].as_str().unwrap();
+        assert!(content.contains("<result>[Background task report]"));
+        assert_eq!(content.matches("child answer").count(), 1);
         assert!(history[0]["content"].as_str().unwrap().contains(&job.id));
     }
     #[test]

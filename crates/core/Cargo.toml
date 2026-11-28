@@ -34,6 +34,7 @@ notify = { version = "6", default-features = false, features = ["macos_fsevent"]
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
 dirs = "5"
+dunce = "1"
 rusqlite = { version = "0.31", features = ["bundled", "chrono", "blob", "backup"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
