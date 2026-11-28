@@ -242,38 +242,53 @@ pub(in crate::native_engine) fn conversation_input(
                         let issued_here = native["provider"].as_str() == Some(provider_id)
                             && native["model"].as_str() == Some(model_id);
                         if api == "openai-responses" {
-                            // Compact windows are replayed verbatim. Other stateless requests
-                            // can replay only native reasoning with self-contained opaque state.
-                            let window = native["compaction"] == true;
-                            input.extend(
-                                items
-                                    .iter()
-                                    .filter(|item| {
-                                        window
-                                            || item["type"] != "reasoning"
-                                            || (issued_here
-                                                && item["encrypted_content"]
-                                                    .as_str()
-                                                    .is_some_and(|s| !s.trim().is_empty()))
-                                    })
-                                    .cloned(),
-                            );
-                            if window {
-                                compact_prefix = input.len();
+                            if native["reasoning_only"] == true {
+                                if issued_here {
+                                    input.extend(
+                                        items
+                                            .iter()
+                                            .filter(|item| {
+                                                item["type"] == "reasoning"
+                                                    && has_replayable_responses_reasoning(item)
+                                            })
+                                            .cloned(),
+                                    );
+                                }
+                            } else {
+                                // Compact windows are replayed verbatim. Other stateless requests
+                                // replay same-issuer native reasoning carrying opaque encrypted state
+                                // or non-empty plaintext summary/content, while dropping empty shells
+                                // and foreign reasoning items.
+                                let window = native["compaction"] == true;
+                                input.extend(
+                                    items
+                                        .iter()
+                                        .filter(|item| {
+                                            window
+                                                || item["type"] != "reasoning"
+                                                || (issued_here
+                                                    && has_replayable_responses_reasoning(item))
+                                        })
+                                        .cloned(),
+                                );
+                                if window {
+                                    compact_prefix = input.len();
+                                }
+                                continue;
+                            }
+                        } else {
+                            let items = if native["compaction"] == true || issued_here {
+                                items.clone()
+                            } else {
+                                foreign_items(api, items)
+                            };
+                            if api == "google-generative-ai" {
+                                input.push(json!({"role":"model","parts":items}));
+                            } else {
+                                input.push(json!({"role":"assistant","content":items}));
                             }
                             continue;
                         }
-                        let items = if native["compaction"] == true || issued_here {
-                            items.clone()
-                        } else {
-                            foreign_items(api, items)
-                        };
-                        if api == "google-generative-ai" {
-                            input.push(json!({"role":"model","parts":items}));
-                        } else {
-                            input.push(json!({"role":"assistant","content":items}));
-                        }
-                        continue;
                     }
                 }
                 // Existing pi-ai sessions must not silently drop signed thinking.
@@ -309,9 +324,13 @@ pub(in crate::native_engine) fn conversation_input(
                 });
             }
         }
+        let skip_empty_tool_assistant = api == "openai-responses"
+            && message.role == "assistant"
+            && message.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            && matches!(&message.content, OpenAIContent::Text(s) if s.is_empty());
         if api == "google-generative-ai" {
             input.push(json!({"role":if message.role == "assistant" {"model"} else {"user"},"parts":content}));
-        } else if !content.is_empty() {
+        } else if !content.is_empty() && !skip_empty_tool_assistant {
             input.push(json!({"role":message.role,"content":content}));
         }
         if api == "openai-responses" {
@@ -364,6 +383,22 @@ fn foreign_items(api: &str, items: &[Value]) -> Vec<Value> {
         }
     }
     kept
+}
+
+fn has_replayable_responses_reasoning(item: &Value) -> bool {
+    if item["encrypted_content"]
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return true;
+    }
+    ["summary", "content"].into_iter().any(|field| {
+        item[field].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part["text"].as_str().is_some_and(|s| !s.trim().is_empty()))
+        })
+    })
 }
 
 fn bedrock_input(messages: Vec<OpenAIMessage>) -> Result<Vec<Value>> {

@@ -1850,3 +1850,39 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 3. 空闲 REPL 等待数个采样周期：不得发起请求、不得显示提示；随后发送消息，告警只在该回合注入。两个同时空闲的 `dcl` 进程都不能被资源告警唤醒。
 4. 将 `enabled` 设为 false 或设置 `DEEPSEEK_CODE_RESOURCE_MONITOR=0` 后不再采样。恢复会话（resume）和 EnterWorktree/ExitWorktree 后，监控的磁盘目标应跟随新的工作区。
 5. Desktop 用同一配置对话时，Bridge SSE 应出现 `resource_alert`。本次未运行真实 Desktop 窗口，Windows 亦未验证。
+
+### I44. Responses 明文 summary reasoning 回放（同源透传）
+
+改动范围：`crates/core/src/native_engine/provider_runtime/messages.rs`、`crates/core/src/native_engine/provider_runtime/tests.rs`、`.agents/experience/responses-stateless-reasoning-replay.md`。
+
+1. 同源（`provider` 与 `model` 一致）的 `openai-responses` `provider_content` 中，若原生 `reasoning` item 携带非空 `encrypted_content` 或非空明文 `summary` / `content`（例如通过透传代理的 `deepseek-v4.1-flash`），工具循环中的后续请求必须原样回放该 item。
+2. 空壳 `reasoning` item（`summary: []` 或空白文本且无 `encrypted_content`）、异源/切换模型后的明文 `summary` `reasoning` item、以及没有原生 `provider_content` 的纯文本 `reasoning_content` 仍必须省略，不能伪造本地 `reasoning` ID。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib native_engine::provider_runtime::tests
+cargo test --locked -p deepseek-code-core --test native_compaction
+cargo test --locked -p deepseek-code-cli --test sdk prompt_suggestion
+cargo check --locked -p deepseek-code-desktop --all-targets
+```
+
+### I45. `openai-responses` `encrypted_content` 跨用户轮次持久化与回放
+
+改动范围：`crates/core/src/native_engine/request_trace.rs`、`crates/core/src/native_engine/tool_loop.rs`、`crates/core/src/native_engine/history_replay.rs`、`crates/core/src/runtime.rs`、`crates/core/src/db/session_store/compaction.rs`、`crates/core/src/services/compaction.rs`、`crates/core/src/native_engine/provider_runtime/messages.rs`、`crates/core/src/native_engine/provider_runtime/tests.rs`、`crates/core/tests/responses_cross_turn_reasoning.rs`。
+
+1. `openai-responses` 请求完成（`status == "completed"`）时，将携带非空 `encrypted_content` 的同源 `reasoning` item 记录到快照 `providerReasoning`（`reasoning_only: true`），经 `message_trajectory.requests_json` 持久化；错误响应与无 `encrypted_content` 的明文 `summary` 不写入。
+2. 跨用户轮次重建历史（`replay_rows` / `SessionStore::model_history`）以及会话 fork 后，工具调用步、最终回复步和 0 工具调用回合均按各自步骤恢复 `provider_content`，`apply_persisted_boundary` 保留当前会话库已验证的 `reasoning_only` 并继续剥离伪造状态，同源（`provider` 与 `model` 一致）请求原样回放 `encrypted_content` 且不产生空 `output_text` assistant 包装；切换模型/提供商时安全省略。
+3. 引擎在 `flush_replay_segment`（例如轮内中途 steer / 排队消息、peer 消息或自动压缩触发 `reload_session_history`）前，统一将当轮已完成请求快照（合并宿主已写入快照，不覆盖）同步刷新进 `session.db`，使 CLI/Desktop/Subagent/SDK 均不丢失当轮已完成步的 `encrypted_content` 与前缀缓存。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib native_engine::request_trace::tests
+cargo test --locked -p deepseek-code-core --lib native_engine::provider_runtime::tests
+cargo test --locked -p deepseek-code-core --lib runtime::
+cargo test --locked -p deepseek-code-core --test responses_cross_turn_reasoning
+cargo test --locked -p deepseek-code-core --test session_db_delivery -- round2_partial_and_full_forks_preserve_snapshot_shapes
+cargo check --locked -p deepseek-code-cli --all-targets
+cargo check --locked -p deepseek-code-desktop --all-targets
+```

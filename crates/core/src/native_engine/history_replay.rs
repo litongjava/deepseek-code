@@ -89,6 +89,24 @@ impl ToolLoopExecutor {
         }
     }
 
+    pub(super) fn retain_replay_snapshot(&mut self, snapshot: &Value) {
+        if self.executor_history.is_none() || self.parent_message_id.is_none() {
+            return;
+        }
+        let id = snapshot["id"].as_str().filter(|id| !id.is_empty());
+        if let Some(id) = id {
+            if let Some(existing) = self
+                .replay_snapshots
+                .iter_mut()
+                .find(|entry| entry["id"].as_str() == Some(id))
+            {
+                *existing = snapshot.clone();
+                return;
+            }
+        }
+        self.replay_snapshots.push(snapshot.clone());
+    }
+
     fn flush_replay_segment(
         &mut self,
         shard: &crate::db::session_store::SessionDb,
@@ -98,20 +116,44 @@ impl ToolLoopExecutor {
             return Ok(());
         };
         let text = text.filter(|value| !value.is_empty());
-        if self.replay_tools.is_empty() && text.is_none() {
+        if self.replay_tools.is_empty() && self.replay_snapshots.is_empty() && text.is_none() {
             return Ok(());
         }
+        let merged_snapshots = if self.replay_snapshots.is_empty() {
+            None
+        } else {
+            let mut merged = shard
+                .read(|r| r.requests(segment))?
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for snapshot in &self.replay_snapshots {
+                if let Some(id) = snapshot["id"].as_str().filter(|id| !id.is_empty()) {
+                    if let Some(existing) = merged
+                        .iter_mut()
+                        .find(|entry| entry["id"].as_str() == Some(id))
+                    {
+                        *existing = snapshot.clone();
+                        continue;
+                    }
+                }
+                merged.push(snapshot.clone());
+            }
+            Some(Value::Array(merged))
+        };
         ExecutorHistory::Session(shard.clone()).save_segment(
             segment,
             crate::db::session_store::SegmentUpdate {
                 text,
                 tools: &self.replay_tools,
                 request_links: Some(&self.replay_request_links),
+                snapshots: merged_snapshots.as_ref(),
                 ..Default::default()
             },
         )?;
         self.replay_tools.clear();
         self.replay_request_links.clear();
+        self.replay_snapshots.clear();
         Ok(())
     }
 
@@ -636,6 +678,7 @@ impl ToolLoopExecutor {
         self.tool_order = 0;
         self.replay_tools.clear();
         self.replay_request_links.clear();
+        self.replay_snapshots.clear();
         self.stop_hook_active = false;
         self.last_reported_input_tokens = None;
         self.last_request_message_tokens = None;
@@ -706,10 +749,12 @@ impl ToolLoopExecutor {
                 // In-flight rows are already rendered, including this prefix.
                 if self.in_flight_window.is_none() {
                     if let Some(first) = rows.iter().position(|row| row["role"] == "user") {
-                        if let Some((offset, reminders)) = project_memory_context::boundary_reminders(
-                            &self.context_reminders,
-                            &rows[first]["provider_content"],
-                        ) {
+                        if let Some((offset, reminders)) =
+                            project_memory_context::boundary_reminders(
+                                &self.context_reminders,
+                                &rows[first]["provider_content"],
+                            )
+                        {
                             rows.insert(first + offset, serde_json::to_value(reminders)?);
                         }
                     }
@@ -982,7 +1027,10 @@ impl ToolLoopExecutor {
                     &self.context_reminders,
                     &live[0]["provider_content"],
                 ) {
-                    live.insert(if at == 0 { 0 } else { live.len() }, serde_json::to_value(reminders)?);
+                    live.insert(
+                        if at == 0 { 0 } else { live.len() },
+                        serde_json::to_value(reminders)?,
+                    );
                 }
                 let boundary_len = live.len();
                 live.extend(rows.into_iter().skip(explicit.rendered_len));

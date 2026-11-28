@@ -1,10 +1,10 @@
 //! Model-generated, append-only compaction shared by CLI and Desktop.
+#[cfg(test)]
+use crate::db::DbManager;
 use crate::{
     db::{conversation_repo, message_repo},
     native_engine::NativeEngine,
 };
-#[cfg(test)]
-use crate::db::DbManager;
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -270,21 +270,22 @@ fn legacy_marked(conn: &rusqlite::Connection, session: &str) -> Result<bool> {
 /// Successful compactions committed by this session. A session from before
 /// the counter existed reports only what it can prove; a branch that copied an
 /// ancestor's boundaries never claims them as its own.
-pub fn count(db: &impl crate::db::session_store::SessionAccess, session: &str) -> Result<CompactionCount> {
+pub fn count(
+    db: &impl crate::db::session_store::SessionAccess,
+    session: &str,
+) -> Result<CompactionCount> {
     db.select_session(session)?.compaction_total()
 }
 pub(crate) fn legacy_count(conn: &rusqlite::Connection, session: &str) -> Result<CompactionCount> {
-        let (own, inherited) = boundary_attribution(conn, session)?;
-        Ok(match saved_count(conn, session)? {
-            // An explicit counter (including a branch's initial zero) is
-            // authoritative; the marker only carries unprovable older history.
-            Some(count) if legacy_marked(conn, session)? => {
-                CompactionCount::LegacyAfterUpgrade(count)
-            }
-            Some(count) => CompactionCount::Exact(count),
-            None if inherited == 0 => CompactionCount::Exact(own),
-            None => CompactionCount::LegacyAfterUpgrade(own),
-        })
+    let (own, inherited) = boundary_attribution(conn, session)?;
+    Ok(match saved_count(conn, session)? {
+        // An explicit counter (including a branch's initial zero) is
+        // authoritative; the marker only carries unprovable older history.
+        Some(count) if legacy_marked(conn, session)? => CompactionCount::LegacyAfterUpgrade(count),
+        Some(count) => CompactionCount::Exact(count),
+        None if inherited == 0 => CompactionCount::Exact(own),
+        None => CompactionCount::LegacyAfterUpgrade(own),
+    })
 }
 
 /// A committed compaction's report, available to a caller that cancels while
@@ -333,7 +334,10 @@ impl CompactionTracker {
     }
 
     pub fn for_claim(claim: &crate::db::session_store::CompactionClaim) -> Self {
-        Self { expected_request: Some(claim.id.clone()), ..Self::default() }
+        Self {
+            expected_request: Some(claim.id.clone()),
+            ..Self::default()
+        }
     }
 
     /// The committed result, if the boundary transaction has already run.
@@ -731,16 +735,41 @@ pub struct PreparedPart {
 }
 
 /// The messages `part` summarizes, as the transcript the summary is made from.
-pub fn prepare_part(db: &crate::db::session_store::Stores, id: &str, message: &str, part: Part) -> Result<PreparedPart> {
-    db.open_session(id)?.prepare_summary_part(message,part)
+pub fn prepare_part(
+    db: &crate::db::session_store::Stores,
+    id: &str,
+    message: &str,
+    part: Part,
+) -> Result<PreparedPart> {
+    db.open_session(id)?.prepare_summary_part(message, part)
 }
 
-pub fn commit_part(db: &crate::db::session_store::Stores, id: &str, message: &str, part: Part, prepared: PreparedPart, summary: &str) -> Result<(String,usize)> {
-    ensure!(!summary.trim().is_empty() && summary.chars().count() <= 32_000, "Empty or oversized summary");
-    let source=db.open_recorded(id, &prepared.incarnation).context("Summary source was replaced")?;
-    let branch=uuid::Uuid::new_v4().to_string();
-    source.branch(&branch,crate::db::session_store::Branch::Summary { message, part, fingerprint:&prepared.fingerprint, text:summary.trim() })?;
-    Ok((branch,prepared.count))
+pub fn commit_part(
+    db: &crate::db::session_store::Stores,
+    id: &str,
+    message: &str,
+    part: Part,
+    prepared: PreparedPart,
+    summary: &str,
+) -> Result<(String, usize)> {
+    ensure!(
+        !summary.trim().is_empty() && summary.chars().count() <= 32_000,
+        "Empty or oversized summary"
+    );
+    let source = db
+        .open_recorded(id, &prepared.incarnation)
+        .context("Summary source was replaced")?;
+    let branch = uuid::Uuid::new_v4().to_string();
+    source.branch(
+        &branch,
+        crate::db::session_store::Branch::Summary {
+            message,
+            part,
+            fingerprint: &prepared.fingerprint,
+            text: summary.trim(),
+        },
+    )?;
+    Ok((branch, prepared.count))
 }
 
 /// Summarizes part of a conversation into a new branch; see [`Part`].
@@ -986,7 +1015,11 @@ where
 
 /// Apply the same boundary to host-supplied histories without dropping unsaved input.
 /// A stale Desktop tab must reload, rather than accidentally resending pre-compact history.
-pub fn apply_boundary(db: &impl crate::db::session_store::SessionAccess, id: &str, messages: &mut Vec<Value>) -> Result<()> {
+pub fn apply_boundary(
+    db: &impl crate::db::session_store::SessionAccess,
+    id: &str,
+    messages: &mut Vec<Value>,
+) -> Result<()> {
     apply_persisted_boundary(db, id, messages).map(|_| ())
 }
 
@@ -1001,13 +1034,32 @@ pub(crate) fn apply_persisted_boundary(
     id: &str,
     messages: &mut Vec<Value>,
 ) -> Result<Option<String>> {
-    // Native blocks are accepted only from the persisted boundary, never host-supplied JSON.
+    let session = db.select_session(id)?;
+    let has_reasoning_only = messages.iter().any(|message| {
+        message["role"] == "assistant"
+            && message
+                .get("provider_content")
+                .is_some_and(|value| value["reasoning_only"] == true)
+    });
+    let persisted_reasonings = if has_reasoning_only {
+        session.persisted_provider_reasonings()?
+    } else {
+        Vec::new()
+    };
+    // Native blocks are accepted only from persisted DB records, never host-supplied JSON.
     for message in messages.iter_mut() {
-        if let Some(object) = message.as_object_mut() {
-            object.remove("provider_content");
+        let keep_reasoning = message["role"] == "assistant"
+            && message
+                .get("provider_content")
+                .and_then(crate::runtime::valid_trajectory_provider_reasoning)
+                .is_some_and(|candidate| persisted_reasonings.contains(&candidate));
+        if !keep_reasoning {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("provider_content");
+            }
         }
     }
-    let boundary = db.select_session(id)?.latest_compact_content()?;
+    let boundary = session.latest_compact_content()?;
     if let Some((message_id, content, native, git)) = boundary {
         let start = messages
             .iter()
@@ -1118,10 +1170,16 @@ mod microcompact_tests {
         let results = history[2]["content"].as_array().unwrap();
         for (i, block) in results.iter().enumerate() {
             if i < 5 {
-                assert_eq!(block["content"], CLEARED_TOOL_RESULT, "slot {i} should be cleared");
+                assert_eq!(
+                    block["content"], CLEARED_TOOL_RESULT,
+                    "slot {i} should be cleared"
+                );
             } else {
                 assert!(
-                    block["content"].as_str().unwrap().starts_with(&format!("slot-{i}-")),
+                    block["content"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(&format!("slot-{i}-")),
                     "recent slot {i} should stay intact"
                 );
             }
@@ -1155,7 +1213,16 @@ mod hook_tests {
         let id = store.create(dir.path(), "model", "provider").unwrap();
         store.append(&id, "user", "Finish task").unwrap();
         store.append(&id, "assistant", "Tests pending").unwrap();
-        service.db.open_session(&id).unwrap().write(|w| w.set_setting(crate::db::session_store::settings::SESSION_START_CONTEXT, &"old-context".to_owned()))
+        service
+            .db
+            .open_session(&id)
+            .unwrap()
+            .write(|w| {
+                w.set_setting(
+                    crate::db::session_store::settings::SESSION_START_CONTEXT,
+                    &"old-context".to_owned(),
+                )
+            })
             .unwrap();
         std::fs::write(dir.path().join("hook.cjs"), r#"let text='';process.stdin.on('data',x=>text+=x);process.stdin.on('end',()=>{const fs=require('fs'),v=JSON.parse(text);fs.appendFileSync('events.jsonl',JSON.stringify(v)+'\n');const mode=process.argv[2];if(mode==='fail'){process.stderr.write('expected failure');process.exit(2)}if(mode==='slow'){fs.writeFileSync('started','yes');setTimeout(()=>{},30000);return}if(mode==='delay'){setTimeout(()=>{console.log('post notice')},400);return}console.log(v.hook_event_name==='PreCompact'?'keep exact paths':v.hook_event_name==='SessionStart'?'fresh-context':'post notice');});"#).unwrap();
         (dir, service, store, id)
@@ -1552,7 +1619,10 @@ mod part_tests {
         let contents = |branch: &str| -> Vec<(String, bool)> {
             service
                 .db
-                .open_session(branch).unwrap().read(|r|r.messages()).unwrap()
+                .open_session(branch)
+                .unwrap()
+                .read(|r| r.messages())
+                .unwrap()
                 .into_iter()
                 .map(|m| (m.content, m.is_compact_boundary))
                 .collect()
@@ -1648,10 +1718,10 @@ mod count_tests {
         let db = DbManager::new(dir.path().join("pre-counter.sqlite")).unwrap();
         db.init().unwrap();
         let store = SessionStore::new(std::sync::Arc::new(db));
-        let id = store.create(dir.path(),"model","provider").unwrap();
-        store.append(&id,"user","Task").unwrap();
-        store.append(&id,"assistant","Progress").unwrap();
-        (dir,store,id)
+        let id = store.create(dir.path(), "model", "provider").unwrap();
+        store.append(&id, "user", "Task").unwrap();
+        store.append(&id, "assistant", "Progress").unwrap();
+        (dir, store, id)
     }
 
     #[test]
@@ -1762,7 +1832,9 @@ mod fingerprint_tests {
         let before = digest(&store, &id);
         store
             .db
-            .fixture_shard(&id, |conn| message_repo::update_message_content(conn, &ids[0], "Edited task"))
+            .fixture_shard(&id, |conn| {
+                message_repo::update_message_content(conn, &ids[0], "Edited task")
+            })
             .unwrap()
             .unwrap();
         let after = digest(&store, &id);

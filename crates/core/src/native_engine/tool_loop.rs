@@ -400,6 +400,7 @@ pub struct ToolLoopExecutor {
     pending_inputs: Vec<String>,
     replay_tools: Vec<crate::db::message_repo::ReplayToolRow>,
     replay_request_links: crate::services::tool_history::ToolRequestLinks,
+    replay_snapshots: Vec<Value>,
     tool_order: i64,
     standalone_frontend: bool,
     /// Hook context and skill content recorded for earlier user messages.
@@ -2012,6 +2013,7 @@ impl ToolLoopExecutor {
             pending_inputs: Vec::new(),
             replay_tools: Vec::new(),
             replay_request_links: Default::default(),
+            replay_snapshots: Vec::new(),
             tool_order: 0,
             standalone_frontend: false,
             turn_context: Vec::new(),
@@ -3623,8 +3625,8 @@ impl ToolLoopExecutor {
         {
             input["__report_cwd"] = json!(true);
         }
-        let hint_claim = foreground_bash
-            .then(|| BashHintClaim::try_acquire(&self.shell_redundant_cd_cooldown));
+        let hint_claim =
+            foreground_bash.then(|| BashHintClaim::try_acquire(&self.shell_redundant_cd_cooldown));
         if hint_claim.as_ref().is_some_and(BashHintClaim::is_claimed) {
             input["__hint_redundant_cd"] = json!(true);
             if self
@@ -3701,11 +3703,10 @@ impl ToolLoopExecutor {
             if result.is_ok() {
                 self.shell_cwd_needs_report
                     .store(false, std::sync::atomic::Ordering::Release);
-                let hinted = result.as_ref().ok().is_some_and(|value| {
-                    value["note"]
-                        .as_str()
-                        .is_some_and(is_bash_coaching_note)
-                });
+                let hinted = result
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|value| value["note"].as_str().is_some_and(is_bash_coaching_note));
                 claim.finish(hinted);
             }
         }
@@ -4253,6 +4254,7 @@ impl ToolLoopExecutor {
             _ => None,
         };
         self.parent_message_id = next.clone();
+        self.replay_snapshots.clear();
         event.send(EngineEvent::ContextReset {
             session_id: self.conv_id.clone().unwrap_or_default(),
             boundary_id,
@@ -4435,7 +4437,10 @@ impl ToolLoopExecutor {
                 }
                 // DontAsk turns an unresolved prompt into a denial but preserves
                 // its origin. Only default/boundary decisions may use a grant.
-                if matches!(decision.origin, DecisionOrigin::DefaultPrompt | DecisionOrigin::NetworkBoundary) {
+                if matches!(
+                    decision.origin,
+                    DecisionOrigin::DefaultPrompt | DecisionOrigin::NetworkBoundary
+                ) {
                     match self.http_grant(&url.origin().ascii_serialization()) {
                         Ok(Some(_)) => return PermissionResult::Granted,
                         Ok(None) => {}
@@ -6690,6 +6695,7 @@ impl ToolLoopExecutor {
                 .to_string();
             if response_status == "completed" {
                 self.record_request_usage(&snapshot);
+                self.retain_replay_snapshot(&snapshot);
             }
             let step_request_id = snapshot["id"].as_str().map(str::to_owned);
             let _ = self
@@ -7460,6 +7466,7 @@ impl ToolLoopExecutor {
                                 object.insert("provider".into(), json!(self.provider.provider.id));
                                 object.insert("model".into(), json!(self.provider.model.id));
                             }
+                            request_trace.set_provider_reasoning(&native);
                             assistant_provider_content = Some(native);
                         }
                         // Usage-only final chunks have no choices and must still be recorded.
@@ -7643,6 +7650,7 @@ impl ToolLoopExecutor {
                     .to_string();
                 if response_status == "completed" {
                     self.record_request_usage(&snapshot);
+                    self.retain_replay_snapshot(&snapshot);
                 }
                 step_request_id = snapshot["id"].as_str().map(str::to_owned);
                 let _ = self
@@ -8261,7 +8269,10 @@ impl ToolLoopExecutor {
                 project_memory_context::boundary_reminders(&additions[0].0, native)
             {
                 // Keep the sealed Git row directly after the complete opaque window.
-                let after_git = at == 1 && messages.get(1).is_some_and(|m| m["origin"] == "compaction_git");
+                let after_git = at == 1
+                    && messages
+                        .get(1)
+                        .is_some_and(|m| m["origin"] == "compaction_git");
                 built.insert(at + usize::from(after_git), reminders);
             }
         }
@@ -8776,10 +8787,7 @@ struct TurnShellCwdBatch {
     outcomes: HashMap<String, ShellCwdCommitOutcome>,
 }
 
-fn read_shell_cwd_snapshot(
-    state_path: Option<&std::path::Path>,
-    workspace_cwd: &str,
-) -> String {
+fn read_shell_cwd_snapshot(state_path: Option<&std::path::Path>, workspace_cwd: &str) -> String {
     if let Some(saved) = state_path.and_then(|path| {
         std::fs::read_to_string(path)
             .ok()
@@ -9146,19 +9154,17 @@ fn is_standalone_grep_command(command: &str) -> bool {
     let mut escaped = false;
     let mut after_first_newline: Option<&str> = None;
 
-    let flush_word = |stage: &mut Vec<ShellToken>,
-                      word: &mut String,
-                      redir: &mut bool,
-                      in_w: &mut bool| {
-        if *in_w {
-            stage.push(ShellToken {
-                text: std::mem::take(word),
-                has_unquoted_redir: *redir,
-            });
-            *redir = false;
-            *in_w = false;
-        }
-    };
+    let flush_word =
+        |stage: &mut Vec<ShellToken>, word: &mut String, redir: &mut bool, in_w: &mut bool| {
+            if *in_w {
+                stage.push(ShellToken {
+                    text: std::mem::take(word),
+                    has_unquoted_redir: *redir,
+                });
+                *redir = false;
+                *in_w = false;
+            }
+        };
 
     let mut chars = trimmed.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
@@ -9337,9 +9343,10 @@ fn is_standalone_grep_command(command: &str) -> bool {
         return false;
     }
     if let Some(pipe_stage) = target_pipeline.get(1) {
-        if pipe_stage.iter().any(|tok| {
-            tok.has_unquoted_redir && tok.text != "2>/dev/null" && tok.text != "2>&1"
-        }) {
+        if pipe_stage
+            .iter()
+            .any(|tok| tok.has_unquoted_redir && tok.text != "2>/dev/null" && tok.text != "2>&1")
+        {
             return false;
         }
         let Some(pipe_cmd) = pipe_stage
@@ -9491,7 +9498,10 @@ fn is_standalone_grep_command(command: &str) -> bool {
                 if matches!(ch, 'v' | 'f' | 'L' | 'P' | 'z' | 'q') {
                     return false;
                 }
-                if matches!(ch, 'e' | 'm' | 'A' | 'B' | 'C' | 'd' | 'D' | 'g' | 't' | 'T' | 'M' | 'j') {
+                if matches!(
+                    ch,
+                    'e' | 'm' | 'A' | 'B' | 'C' | 'd' | 'D' | 'g' | 't' | 'T' | 'M' | 'j'
+                ) {
                     if ch == 'e' {
                         has_explicit_pattern = true;
                     }
@@ -9550,7 +9560,10 @@ fn has_wrapped_powershell_command(input: &Value, command: &str) -> bool {
             .next()
             .unwrap_or(cmd.as_str())
             .to_ascii_lowercase();
-        if !matches!(base.as_str(), "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe") {
+        if !matches!(
+            base.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        ) {
             continue;
         }
         if iter.any(|arg| {
@@ -9739,7 +9752,15 @@ fn has_foreground_sleep_command(command: &str) -> bool {
             }
             if matches!(
                 word,
-                "do" | "then" | "else" | "elif" | "!" | "time" | "command" | "builtin" | "exec" | "env"
+                "do" | "then"
+                    | "else"
+                    | "elif"
+                    | "!"
+                    | "time"
+                    | "command"
+                    | "builtin"
+                    | "exec"
+                    | "env"
             ) || is_shell_env_assignment(word)
             {
                 idx += 1;
@@ -10151,10 +10172,7 @@ mod shell_state_input_tests {
         );
         guard.commit();
         // c2 is last in call_order and succeeded in changing cwd.
-        assert_eq!(
-            std::fs::read_to_string(&state).unwrap().trim(),
-            sub_b_str
-        );
+        assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), sub_b_str);
         assert_eq!(
             read_shell_cwd_snapshot(Some(&state), workspace_str),
             sub_b_str
@@ -10184,10 +10202,7 @@ mod shell_state_input_tests {
             }),
         );
         guard.commit();
-        assert_eq!(
-            std::fs::read_to_string(&state).unwrap().trim(),
-            sub_a_str
-        );
+        assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), sub_a_str);
 
         // Prefer the last call that SUCCEEDED in changing cwd over a later failing call.
         let guard = TurnShellCwdGuard::begin(&slot, sub_a_str.to_owned(), &calls).unwrap();
@@ -10212,10 +10227,7 @@ mod shell_state_input_tests {
             }),
         );
         guard.commit();
-        assert_eq!(
-            std::fs::read_to_string(&state).unwrap().trim(),
-            sub_b_str
-        );
+        assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), sub_b_str);
 
         // Dropping the guard without commit clears the slot without modifying disk.
         {
@@ -10232,10 +10244,7 @@ mod shell_state_input_tests {
             );
         }
         assert!(slot.lock().unwrap().is_none());
-        assert_eq!(
-            std::fs::read_to_string(&state).unwrap().trim(),
-            sub_b_str
-        );
+        assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), sub_b_str);
     }
 
     #[test]
@@ -10346,7 +10355,10 @@ mod shell_state_input_tests {
         let calls = vec![
             call("Read", json!({"file_path": "a.rs"})),
             call("Bash", json!({"command": "ls src"})),
-            call("Bash", json!({"command": "sleep 5", "run_in_background": true})),
+            call(
+                "Bash",
+                json!({"command": "sleep 5", "run_in_background": true}),
+            ),
             call("Bash", json!({"command": "server", "detach": true})),
             call("Bash", json!({"command": "grep foo a.rs"})),
         ];
@@ -10428,8 +10440,8 @@ mod bash_coaching_tests {
         extract_redundant_cd_cwd, format_redundant_cd_coaching, has_foreground_sleep_command,
         has_wrapped_powershell_command, is_foreground_bash_call, is_standalone_grep_command,
         is_standalone_inline_python_command, BashCoachingState, BASH_COACHING_COOLDOWN_TURNS,
-        FOREGROUND_SLEEP_COACHING_TEXT, INLINE_PYTHON_COACHING_TEXT,
-        STANDALONE_GREP_COACHING_TEXT, WRAPPED_POWERSHELL_COACHING_TEXT,
+        FOREGROUND_SLEEP_COACHING_TEXT, INLINE_PYTHON_COACHING_TEXT, STANDALONE_GREP_COACHING_TEXT,
+        WRAPPED_POWERSHELL_COACHING_TEXT,
     };
     use serde_json::json;
 
@@ -10509,8 +10521,12 @@ mod bash_coaching_tests {
         assert!(!should_trigger(json!({"command": "echo 'sleep 5'"})));
         assert!(!should_trigger(json!({"command": "echo sleep 5"})));
         assert!(!should_trigger(json!({"command": "grep sleep file.rs"})));
-        assert!(!should_trigger(json!({"command": "asleep 5 && sleeper 10"})));
-        assert!(!should_trigger(json!({"command": "# sleep 5\necho ok # sleep 10"})));
+        assert!(!should_trigger(
+            json!({"command": "asleep 5 && sleeper 10"})
+        ));
+        assert!(!should_trigger(
+            json!({"command": "# sleep 5\necho ok # sleep 10"})
+        ));
         assert!(!should_trigger(json!({"command": "sleep --help"})));
         assert!(!should_trigger(
             json!({"command": "sleep 25 && tail -n 50 server.log", "run_in_background": true})
@@ -10677,7 +10693,9 @@ mod bash_coaching_tests {
         ));
         assert!(!is_standalone_grep_command("grep -rn foo a.vue b.vue"));
         assert!(!is_standalone_grep_command("grep -rn foo src; ls src"));
-        assert!(!is_standalone_grep_command("grep -rn foo src && biome check"));
+        assert!(!is_standalone_grep_command(
+            "grep -rn foo src && biome check"
+        ));
         assert!(!is_standalone_grep_command("grep -rnv foo src"));
         assert!(!is_standalone_grep_command("grep -f patterns.txt src"));
         assert!(!is_standalone_grep_command("echo \"grep foo bar\""));
