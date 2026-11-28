@@ -312,6 +312,7 @@ fn native_conversation(
     row: crate::db::conversation_repo::ConversationRow,
     workspace: std::path::PathBuf,
 ) -> Conversation {
+    let row = row.with_desktop_model_key();
     Conversation {
         id: row.id,
         title: row.title,
@@ -349,8 +350,7 @@ pub async fn native_create_conversation<R: tauri::Runtime>(
             &id,
             crate::db::session_store::CreateOptions {
                 title,
-                model: Some(model),
-                ..Default::default()
+                ..crate::db::session_store::CreateOptions::from_desktop_model(Some(&model))?
             },
         )?;
         let row = db

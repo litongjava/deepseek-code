@@ -28,7 +28,9 @@ async fn conversations_list(State(state): State<AppState>) -> Json<serde_json::V
         db.conversations()
     }).await;
     match result {
-        Ok(Ok(convs)) => Json(serde_json::json!({ "conversations": convs })),
+        Ok(Ok(convs)) => Json(
+            serde_json::json!({ "conversations": convs.into_iter().map(|row| row.with_desktop_model_key()).collect::<Vec<_>>() }),
+        ),
         _ => Json(serde_json::json!({ "conversations": [] })),
     }
 }
@@ -102,7 +104,7 @@ async fn conversation_get(Path(id): Path<String>, Query(query): Query<Conversati
     let result = tokio::task::spawn_blocking(move || db.conversation_detail(&id_clone)).await;
     let result = result.map(|r| r.map(|(conv,mut messages)| {
         let parts=share_parts.then(||share_snapshot_parts(&mut messages));
-        (conv,messages,parts)
+        (conv.map(|row| row.with_desktop_model_key()),messages,parts)
     }));
     let with_parts = |mut value: serde_json::Value, parts: Option<serde_json::Map<String, serde_json::Value>>| {
         if let Some(parts) = parts {

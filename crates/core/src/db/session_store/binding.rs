@@ -184,6 +184,32 @@ impl ClearBinding {
 }
 
 impl super::Stores {
+    /// Snapshot the published columns and the worker-retirement fence together.
+    pub fn stored_binding(
+        &self,
+        id: &str,
+    ) -> Result<(crate::db::stored_binding::StoredBinding, bool)> {
+        self.global()
+            .read_directory_row(id, |c| {
+                Ok(c.query_row(
+                    "SELECT c.provider,c.model,g.pending IS NOT NULL FROM conversations c
+                 LEFT JOIN cli_binding_generations g ON g.session_id=c.id WHERE c.id=?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            crate::db::stored_binding::StoredBinding::from_row(
+                                row.get(0)?,
+                                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            ),
+                            row.get(2)?,
+                        ))
+                    },
+                )
+                .optional()?)
+            })?
+            .context("Session not found")
+    }
+
     pub fn observed_binding(&self,id:&str)->Result<store::Observed>{
         self.global().read_directory_row(id,|c|store::read(c,id).map(Some))?.context("Session not found")
     }

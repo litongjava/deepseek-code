@@ -1,4 +1,5 @@
-use super::{Branch, CreateOptions, Stores};
+use super::{Branch, CreateOptions, FirstMessage, Stores};
+use crate::db::stored_binding::StoredBinding;
 use crate::db::{conversation_repo as conversations, message_repo as messages, transcript};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
@@ -27,30 +28,48 @@ pub(super) fn first_chat_options(
     content: Option<&Value>,
     origin: &str,
 ) -> Result<CreateOptions> {
-    let first_message = content
+    let binding = match provider {
+        Some(id) => StoredBinding::from_row(Some(id.to_owned()), model.to_owned()),
+        None => StoredBinding::desktop_selection(model)?,
+    };
+    Ok(CreateOptions {
+        model: Some(binding.model),
+        provider: binding.provider,
+        first_message: first_chat_message(content, origin)?,
+        ..Default::default()
+    })
+}
+
+pub(super) fn first_chat_message(
+    content: Option<&Value>,
+    origin: &str,
+) -> Result<Option<FirstMessage>> {
+    content
         .filter(|v| v.as_str() != Some(""))
         .map(|v| -> Result<_> {
             let (text, normalized) = messages::prepare_user_message(v)?;
-            Ok(super::FirstMessage {
+            Ok(FirstMessage {
                 origin: origin.to_owned(),
                 text,
                 typed: normalized.is_array().then_some(normalized),
             })
         })
-        .transpose()?;
-    // An explicitly supplied model ID is opaque. If it contains the Desktop
-    // selector delimiter, qualify it so later readers split off the real
-    // provider and keep the entire original ID.
-    let stored_model = match provider {
-        Some(id) if model.contains("::") => format!("{}::{model}", urlencoding::encode(id)),
-        _ => model.to_owned(),
-    };
-    Ok(CreateOptions {
-        model: Some(stored_model),
-        provider: provider.map(str::to_owned),
-        first_message,
-        ..Default::default()
-    })
+        .transpose()
+}
+
+impl CreateOptions {
+    /// A picker command is input from Desktop, not a stored model column.
+    pub fn from_desktop_model(key: Option<&str>) -> Result<Self> {
+        let binding = key.map(StoredBinding::desktop_selection).transpose()?;
+        Ok(match binding {
+            Some(b) => Self {
+                model: Some(b.model),
+                provider: b.provider,
+                ..Self::default()
+            },
+            None => Self::default(),
+        })
+    }
 }
 
 impl Stores {
@@ -100,10 +119,9 @@ impl Stores {
             id,
             CreateOptions {
                 title,
-                model,
                 research,
                 workspace_mode: Some(mode.as_str().into()),
-                ..Default::default()
+                ..CreateOptions::from_desktop_model(model.as_deref())?
             },
         )?;
         Ok(())
@@ -192,7 +210,8 @@ impl crate::db::DbManager {
             validate_chat(tx,id)?;
             let now=chrono::Utc::now().to_rfc3339();
             if conversations::conversation_metadata(tx,id)?.is_none(){
-                conversations::insert_conversation(tx,id,None,Some(model),None,None,None,false,false,false,&now,&now,0)?;
+                let binding = StoredBinding::desktop_selection(model)?;
+                conversations::insert_conversation(tx,id,None,Some(&binding.model),binding.provider.as_deref(),None,None,false,false,false,&now,&now,0)?;
             }
             if let Some(content)=content.filter(|v|v.as_str()!=Some("")) {
                 let order=tx.query_row("SELECT coalesce(max(sort_order),-1)+1 FROM messages WHERE conversation_id=?1",[id],|r|r.get(0))?;
@@ -213,6 +232,7 @@ impl crate::db::DbManager {
         research: bool,
         mode: conversations::WorkspaceMode,
     ) -> Result<()> {
+        let binding = CreateOptions::from_desktop_model(model.as_deref())?;
         self.with_conn(|c| {
             crate::db::write_tx(c, "create conversation", super::WRITE_DEADLINE, |tx| {
                 let now = chrono::Utc::now().to_rfc3339();
@@ -220,8 +240,8 @@ impl crate::db::DbManager {
                     tx,
                     id,
                     title.as_deref(),
-                    model.as_deref(),
-                    None,
+                    binding.model.as_deref(),
+                    binding.provider.as_deref(),
                     None,
                     None,
                     research,
@@ -379,9 +399,10 @@ pub(super) fn edit_metadata(conn: &rusqlite::Connection, id: &str, body: &Value)
         )?;
     }
     if let Some(model) = body.get("model").and_then(|v| v.as_str()) {
+        let binding = StoredBinding::desktop_selection(model)?;
         conn.execute(
-            "UPDATE conversations SET model = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![model, chrono::Utc::now().to_rfc3339(), id],
+            "UPDATE conversations SET model = ?1, provider = coalesce(?4, provider), updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![binding.model, chrono::Utc::now().to_rfc3339(), id, binding.provider],
         )?;
     }
     if let Some(workspace) = body.get("workspace_path").and_then(|v| v.as_str()) {

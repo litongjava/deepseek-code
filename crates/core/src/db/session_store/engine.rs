@@ -6,7 +6,9 @@ use anyhow::{ensure, Result};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
-type SavedHistory = (Option<String>, Vec<history::MessageRow>);
+use crate::db::stored_binding::StoredBinding;
+
+type SavedHistory = (StoredBinding, Vec<history::MessageRow>);
 type Workspace = (
     PathBuf,
     Option<project_repo::ProjectRow>,
@@ -57,21 +59,27 @@ impl Stores {
         let messages = self
             .open_listed(&entry)?
             .read(|r| crate::db::model_results::messages(r.0, id))?;
-        Ok(Some((entry.conversation.model, messages)))
+        Ok(Some((
+            StoredBinding::from_row(
+                entry.conversation.provider,
+                entry.conversation.model.unwrap_or_default(),
+            ),
+            messages,
+        )))
     }
 
     pub(crate) fn save_engine_state(
         &self,
         id: &str,
-        model: &str,
+        binding: &StoredBinding,
         activity: &str,
         _turn_count: i64,
     ) -> Result<()> {
         let key = super::layout::storage_key(id)?;
         if let Some(_guard) = self.resolved_key(&key)? {
             let updated = self.global().write("save engine state", id, false, |tx| Ok(tx.execute(
-                "UPDATE conversations SET model=?2, updated_at=CASE WHEN julianday(updated_at)<julianday(?3) THEN ?3 ELSE updated_at END,
-                metadata_revision=metadata_revision+1 WHERE id=?1", params![id,model,activity])?))?;
+                "UPDATE conversations SET model=?2,provider=?4, updated_at=CASE WHEN julianday(updated_at)<julianday(?3) THEN ?3 ELSE updated_at END,
+                metadata_revision=metadata_revision+1 WHERE id=?1", params![id,binding.model,activity,binding.provider])?))?;
             if updated == 1 {
                 return Ok(());
             }
@@ -81,7 +89,8 @@ impl Stores {
         self.create(
             id,
             CreateOptions {
-                model: Some(model.into()),
+                model: Some(binding.model.clone()),
+                provider: binding.provider.clone(),
                 ..Default::default()
             },
         )?;
@@ -106,41 +115,37 @@ impl DbManager {
             Ok(if row.is_none() && messages.is_empty() {
                 None
             } else {
-                Some((row.and_then(|r| r.model), messages))
+                Some((
+                    match row {
+                        Some(r) => StoredBinding::from_row(r.provider, r.model.unwrap_or_default()),
+                        None => StoredBinding::from_row(None, String::new()),
+                    },
+                    messages,
+                ))
             })
         })?
     }
     pub(crate) fn save_engine_state(
         &self,
         id: &str,
-        model: &str,
+        binding: &StoredBinding,
         at: &str,
         count: i64,
     ) -> Result<()> {
         self.with_conn(|c| {
             crate::db::write_tx(c, "save engine state", WRITE_DEADLINE, |tx| {
                 if catalog::conversation_metadata(tx, id)?.is_some() {
-                    catalog::update_conversation(
-                        tx,
-                        id,
-                        None,
-                        Some(model),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(at),
-                        Some(count),
+                    tx.execute(
+                        "UPDATE conversations SET model=?2, provider=?3, updated_at=CASE WHEN julianday(updated_at)>=julianday(?4) THEN updated_at ELSE ?4 END, message_count=?5 WHERE id=?1",
+                        params![id, binding.model, binding.provider, at, count],
                     )?;
                 } else {
                     catalog::insert_conversation(
                         tx,
                         id,
                         None,
-                        Some(model),
-                        None,
+                        Some(&binding.model),
+                        binding.provider.as_deref(),
                         None,
                         None,
                         false,
@@ -224,7 +229,12 @@ mod tests {
         let root = tempfile::tempdir()?;
         let stores = Stores::open(root.path())?;
         assert!(stores.engine_history("chat")?.is_none());
-        stores.save_engine_state("chat", "model", "2026-10-01T00:00:00Z", 99)?;
+        stores.save_engine_state(
+            "chat",
+            &StoredBinding::from_row(Some("p".into()), "model".into()),
+            "2026-10-01T00:00:00Z",
+            99,
+        )?;
         let shard = stores.open_session("chat")?;
         let history = stores.executor_history("chat")?;
         assert_eq!(
@@ -246,9 +256,21 @@ mod tests {
         assert!(history.publish_title("generated")?);
         assert!(!history.publish_title("stale")?);
         let (model, rows) = stores.engine_history("chat")?.unwrap();
-        assert_eq!(model.as_deref(), Some("model"));
+        assert_eq!(
+            model,
+            StoredBinding::from_row(Some("p".into()), "model".into())
+        );
         assert_eq!(rows.len(), 2);
-        stores.save_engine_state("chat", "new", "2026-10-01T00:00:00Z", 200)?;
+        stores.save_engine_state(
+            "chat",
+            &StoredBinding::from_row(Some("other".into()), "p::new".into()),
+            "2026-10-01T00:00:00Z",
+            200,
+        )?;
+        assert_eq!(
+            stores.engine_history("chat")?.unwrap().0,
+            StoredBinding::from_row(Some("other".into()), "p::new".into())
+        );
         assert_eq!(
             stores.global().conversation("chat")?.unwrap().message_count,
             2
