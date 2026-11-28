@@ -59,8 +59,8 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let provider = json!([{"id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"model","name":"Model","enabled":true,"context_window":window,"max_tokens":1024,"supports_web_search":false,"supports_vision":false}]}]);
-        fs::write(
-            self.root.path().join("data/providers.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            self.root.path().join("data/config/providers.json"),
             provider.to_string(),
         )
         .unwrap();
@@ -228,8 +228,11 @@ async fn compressed_chat(large: bool, edited: bool) {
     fs::write(&index, if edited { "INDEX_OLD_37" } else { &current }).unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let capture = requests.clone();
+    // Leave enough room for the complete resident index and protected prompt.
+    // Older replies still put this replay above the compression threshold.
+    let window = if large && !edited { 14_000 } else { 12_800 };
     let server = fixture
-        .serve(12_800, move |body, _| {
+        .serve(window, move |body, _| {
             assert_eq!(body["stream"], true);
             capture.lock().unwrap().push(body["messages"].to_string());
             if large {
