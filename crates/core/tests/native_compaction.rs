@@ -199,6 +199,53 @@ async fn fixture(mode: u8) -> Fixture {
     Fixture { dir, store, id, engine, seen, arrived, released, server }
 }
 
+// With the host context restored by 543b9515, this cut exceeds the single
+// replay budget. Consume the native retries and both fragments
+// before interpreting any remaining POST as a main request.
+fn assert_pressure_fragments<'a>(
+    calls: &'a [Value],
+    attempts: usize,
+    included: &[&str],
+    excluded: &[&str],
+) -> &'a [Value] {
+    let (native, calls) = calls.split_at(attempts);
+    for post in native {
+        assert!(post.get("stream").is_none());
+        assert_eq!(post, &native[0]);
+    }
+
+    let (fragments, remaining) = calls.split_at(2);
+    let mut cut = String::new();
+    for post in fragments {
+        let text = summary_prompt(post);
+        assert!(text.starts_with("Summarize this consecutive fragment"));
+        cut.push_str(text.split_once("\n\nConversation fragment:\n").unwrap().1);
+    }
+    let native_input = native[0]["input"].to_string();
+    for marker in included {
+        assert!(
+            native_input.contains(marker),
+            "native cut omitted required input"
+        );
+        assert!(cut.contains(marker), "text fallback omitted required input");
+    }
+    for marker in excluded {
+        assert!(
+            !native_input.contains(marker),
+            "native cut included {marker}"
+        );
+        assert!(!cut.contains(marker), "text fallback included {marker}");
+    }
+    remaining
+}
+
+fn summary_prompt(request: &Value) -> &str {
+    assert_eq!(request["stream"], true);
+    let input = request["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1);
+    input[0]["content"][0]["text"].as_str().unwrap()
+}
+
 #[tokio::test]
 async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input() {
     use deepseek_code_core::native_engine::tool_loop::EngineEvent;
@@ -263,40 +310,38 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
         assert_eq!(boundaries, u64::from(!in_flight));
         let calls = seen.lock().unwrap();
         let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
-        assert_eq!(
-            calls
-                .iter()
-                .take_while(|r| r.get("stream").is_none())
-                .count(),
-            attempts
-        );
-        let summary = &calls[attempts];
-        assert!(summary["input"].to_string().contains("ARCHIVED_EVIDENCE"));
-        assert!(!summary["input"].to_string().contains("KEEP_CURRENT_INPUT"));
+        let after_fragments =
+            assert_pressure_fragments(&calls, attempts, &[&prefix], &["KEEP_CURRENT_INPUT"]);
+        let [merge, final_summary, after_summary @ ..] = after_fragments else {
+            panic!("expected merge and final summary");
+        };
+        assert!(summary_prompt(merge).starts_with("Merge these summaries"));
+        assert!(summary_prompt(final_summary).starts_with("Write one continuation summary"));
         let main = calls.last().unwrap()["input"].to_string();
         if in_flight {
-            let after_summary = &calls[attempts + 1..];
-            let mut main_posts: Vec<_> = after_summary.iter().collect();
-            if repeats_compaction {
-                // The large steer arrives after the first Read. A later pressure
-                // check summarizes that exchange while protecting the second Read.
-                assert_eq!(after_summary.len(), 3 + attempts + 1);
-                for (index, post) in main_posts.drain(2..2 + attempts + 1).enumerate() {
-                    assert_eq!(post.get("stream").is_none(), index < attempts);
-                    let input = post["input"].to_string();
-                    for marker in ["HOST_SNAPSHOT_SUMMARY", "HOST_LIVE_STEER", "HOST_READ_ZERO"] {
-                        assert!(input.contains(marker), "repeat compaction omitted {marker}");
-                    }
-                    assert!(!input.contains("Tests remain pending"));
-                    assert!(!input.contains("HOST_READ_ONE"));
-                }
-            }
-            assert_eq!(
-                main_posts.len(),
-                3,
-                "initial main request and two Read continuations"
-            );
-            for (step, post) in main_posts.iter().enumerate() {
+            let [initial, first_read, rest @ ..] = after_summary else {
+                panic!("expected initial main request and first Read continuation");
+            };
+            let remaining = if repeats_compaction {
+                // The first exchange and steer now fit in the cut. Both fragment
+                // replies match the first compaction, so merge and final are cached.
+                assert_pressure_fragments(
+                    rest,
+                    attempts,
+                    &["HOST_SNAPSHOT_SUMMARY", steer, "HOST_READ_ZERO"],
+                    &["Tests remain pending", "HOST_READ_ONE"],
+                )
+            } else {
+                rest
+            };
+            let [second_read] = remaining else {
+                panic!(
+                    "expected exactly one final Read continuation, got {}",
+                    remaining.len()
+                );
+            };
+            for (step, post) in [initial, first_read, second_read].into_iter().enumerate() {
+                assert_eq!(post["stream"], true, "main {step}");
                 let input = post["input"].as_array().unwrap();
                 let text = post["input"].to_string();
                 assert!(text.contains("HOST_SNAPSHOT_SUMMARY"), "main {step}");
@@ -333,6 +378,7 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
                 }
             }
         } else {
+            assert_eq!(after_summary.len(), 1);
             assert!(main.contains("done"));
         }
         assert_eq!(main.contains("KEEP_CURRENT_INPUT"), !in_flight);
@@ -510,7 +556,38 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
     .await
     .unwrap();
     let first = seen.lock().unwrap()[0].clone();
-    assert_eq!(first["input"][0]["content"][0]["text"], "Finish 中文 tests");
+    // 543b9515 reattaches missing host context in its own user message.
+    let input = first["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3);
+    let reminders = &input[0];
+    assert_eq!(reminders["role"], "user");
+    assert_eq!(
+        reminders["content"][0],
+        json!({"type": "input_text", "text": deepseek_code_core::prompt::experience_reminder(&[])}),
+    );
+    let frozen = reminders["content"].as_array().unwrap();
+    let headings = [
+        "# Experience",
+        "Tools you can load with ToolLoad",
+        "Available skills:",
+        "# Skill: codegraph",
+        "# Working environment",
+        "Today's date is ",
+    ];
+    assert_eq!(frozen.len(), headings.len());
+    for (part, heading) in frozen.iter().zip(headings) {
+        assert_eq!(part["type"], "input_text");
+        let text = part["text"].as_str().unwrap();
+        assert!(text
+            .strip_prefix("<system-reminder>\n")
+            .unwrap()
+            .starts_with(heading));
+    }
+    assert_eq!(&input[1], &window()[0]);
+    assert_eq!(
+        input[2],
+        json!({"role":"assistant","content":[{"type":"output_text","text":"Tests remain pending"}]}),
+    );
     assert_eq!(first["instructions"], "Keep pending work");
     assert_eq!(store.history(&id).unwrap().len(), 3);
     store.append(&id, "user", "Continue").unwrap();
@@ -521,7 +598,7 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
             .unwrap(),
     );
     let fork = reopened.fork(&id).unwrap();
-    for session in [&id, &fork] {
+    for (step, session) in [&id, &fork].into_iter().enumerate() {
         let history = reopened.model_history(session, &ApiFormat::OpenAI).unwrap();
         assert_eq!(history[0]["provider_content"]["items"], window());
         assert!(TokenCounter::estimate(&history) >= 77);
@@ -534,27 +611,45 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
         })
         .await
         .unwrap();
-        let actual = seen.lock().unwrap().last().unwrap().clone();
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), step + 2);
+        let actual = &requests[step + 1];
         assert_eq!(first["prompt_cache_key"] == actual["prompt_cache_key"], session == &id);
+        let input = actual["input"].as_array().unwrap();
+        assert_eq!(input.len(), 5);
+        assert_eq!(&input[..3], window().as_array().unwrap());
+        assert_eq!(input[3]["role"], "user");
+        // Replay adds the current global and project indexes before the frozen date.
+        let parts = input[3]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 8);
+        assert_eq!(&parts[..5], &frozen[..5]);
+        for (part, scope) in parts[5..7].iter().zip(["global", "project"]) {
+            assert_eq!(part["type"], "input_text");
+            assert!(part["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("<system-reminder>\n<{scope}_memory>\n")));
+        }
+        assert_eq!(parts[7], frozen[5]);
         assert_eq!(
-            &actual["input"].as_array().unwrap()[..3],
-            window().as_array().unwrap()
+            input[4],
+            json!({"role":"user","content":[{"type":"input_text","text":"Continue"}]})
         );
-        assert!(actual["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item.to_string().contains("Continue")));
     }
     // A second native compact forwards the complete earlier window too.
     compaction::compact(&engine, &store.db, &id, "gateway", "gpt-6-astra", "")
         .await
         .unwrap();
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let input = requests[3]["input"].as_array().unwrap();
+    assert_eq!(input.len(), 6);
+    assert_eq!(&input[..3], window().as_array().unwrap());
+    assert_eq!(&input[3], reminders);
+    assert_eq!(input[4], requests[1]["input"][4]);
     assert_eq!(
-        &seen.lock().unwrap().last().unwrap()["input"]
-            .as_array()
-            .unwrap()[..3],
-        window().as_array().unwrap()
+        input[5],
+        json!({"role":"assistant","content":[{"type":"output_text","text":"done"}]})
     );
     server.abort();
 }

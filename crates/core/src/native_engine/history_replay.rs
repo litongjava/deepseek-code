@@ -121,7 +121,7 @@ impl ToolLoopExecutor {
         &mut self,
         window: &[M],
     ) -> Result<()> {
-        if self.in_flight_shard_users.is_some() {
+        if self.in_flight_window.is_some() {
             for message in window
                 .get(self.messages.len()..)
                 .context("Live conversation lost its compacted prefix")?
@@ -153,14 +153,14 @@ impl ToolLoopExecutor {
             shard.read(|r| {
                 let (mut messages, boundary) =
                     r.model_history(&self.provider.provider.api_format)?;
-                if let Some(seen) = &mut self.in_flight_shard_users {
+                if let Some(window) = &mut self.in_flight_window {
                     let mut live = self.messages.clone();
                     for mut row in messages {
                         if row["role"] == "user"
                             && row["id"].as_str() != boundary.as_deref()
                             && row["id"]
                                 .as_str()
-                                .is_some_and(|id| seen.insert(id.to_owned()))
+                                .is_some_and(|id| window.shard_users.insert(id.to_owned()))
                         {
                             row["content"] = match self.provider.provider.api_format {
                                 ApiFormat::OpenAI => serde_json::to_value(
@@ -182,7 +182,7 @@ impl ToolLoopExecutor {
                     &messages,
                 )?;
                 let protection = r.protected_inputs(&messages)?;
-                let cut = (capture_cut && self.in_flight_shard_users.is_none())
+                let cut = (capture_cut && self.in_flight_window.is_none())
                     .then(|| {
                         r.compaction_window(
                             &messages,
@@ -203,7 +203,7 @@ impl ToolLoopExecutor {
             None
         };
         let microcompact_changed =
-            if self.standalone_frontend && self.in_flight_shard_users.is_none() {
+            if self.standalone_frontend && self.in_flight_window.is_none() {
                 crate::services::compaction::microcompact(
                     shard,
                     boundary.as_deref(),
@@ -401,7 +401,7 @@ impl ToolLoopExecutor {
     ) -> Result<MidTurnCompact> {
         // Pressure on a host window is handled by replay_window, which can
         // compact in memory without committing a boundary over unrelated rows.
-        if self.in_flight_shard_users.is_some() {
+        if self.in_flight_window.is_some() {
             return Ok(MidTurnCompact::Unmanaged);
         }
         let (Some(ExecutorHistory::Session(shard)), Some(_previous_assistant), Some(conv_id)) = (
@@ -699,7 +699,7 @@ impl ToolLoopExecutor {
             None => {
                 // Durable rows lack the user-role host prefix used on main requests.
                 // In-flight rows are already rendered, including this prefix.
-                if self.in_flight_shard_users.is_none() {
+                if self.in_flight_window.is_none() {
                     if let Some(first) = rows.iter().position(|row| row["role"] == "user") {
                         if let Some((offset, reminders)) = project_memory_context::boundary_reminders(
                             &self.context_reminders,
@@ -856,7 +856,7 @@ impl ToolLoopExecutor {
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
         let mut explicit_history = None;
-        if self.in_flight_shard_users.is_some() {
+        if let Some(live) = &self.in_flight_window {
             // Protect the newest complete exchange. If only the preceding
             // boundary could be summarized, keep sending it while it fits.
             let end = self
@@ -865,7 +865,7 @@ impl ToolLoopExecutor {
                 .rposition(|row| row["role"] == "assistant")
                 .filter(|at| TokenCounter::estimate(&rows[*at..]) <= capacity)
                 .unwrap_or(self.messages.len());
-            if end <= 1 && estimated <= capacity {
+            if end <= live.boundary_len && estimated <= capacity {
                 return Ok(false);
             }
             explicit_history = Some(ExplicitHistory {
@@ -952,13 +952,6 @@ impl ToolLoopExecutor {
                         shard.id(),
                     );
                 }
-                self.in_flight_shard_users.get_or_insert_with(|| {
-                    self.messages
-                        .iter()
-                        .filter(|row| row["role"] == "user")
-                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
-                        .collect()
-                });
                 // This host-only boundary is frozen in the live window, not the shard.
                 if let Some(startup) = self.session_reminders.git.take() {
                     self.context_reminders.retain(|block| block != &startup);
@@ -977,12 +970,23 @@ impl ToolLoopExecutor {
                 ) {
                     live.insert(if at == 0 { 0 } else { live.len() }, serde_json::to_value(reminders)?);
                 }
+                let boundary_len = live.len();
                 live.extend(rows.into_iter().skip(explicit.rendered_len));
                 *window = live
                     .iter()
                     .cloned()
                     .map(serde_json::from_value)
                     .collect::<serde_json::Result<_>>()?;
+                let state = self.in_flight_window.get_or_insert_with(|| InFlightWindow {
+                    shard_users: self
+                        .messages
+                        .iter()
+                        .filter(|row| row["role"] == "user")
+                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                        .collect(),
+                    boundary_len,
+                });
+                state.boundary_len = boundary_len;
                 self.messages = live;
                 gate.committed();
                 return Ok(true);

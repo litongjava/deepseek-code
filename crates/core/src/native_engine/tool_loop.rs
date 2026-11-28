@@ -301,6 +301,13 @@ impl std::ops::Deref for LoadedTools {
     }
 }
 
+struct InFlightWindow {
+    /// Shard inputs already seen when reloading a compacted host conversation.
+    shard_users: std::collections::HashSet<String>,
+    /// Installed summary and host attachments, before the retained live suffix.
+    boundary_len: usize,
+}
+
 pub struct ToolLoopExecutor {
     /// Selected model including a virtual context suffix omitted from the wire ID.
     pub(super) model_selector: String,
@@ -387,8 +394,7 @@ pub struct ToolLoopExecutor {
     context_reminders: Vec<String>,
     session_system_rules: String,
     session_reminders: crate::prompt::SessionReminders,
-    /// Shard inputs already seen when reloading a compacted host-supplied conversation.
-    in_flight_shard_users: Option<std::collections::HashSet<String>>,
+    in_flight_window: Option<InFlightWindow>,
     /// The first typed input in the active turn, including later steers.
     protected_input: Option<usize>,
     pending_inputs: Vec<String>,
@@ -2001,7 +2007,7 @@ impl ToolLoopExecutor {
             context_reminders: Vec::new(),
             session_system_rules: String::new(),
             session_reminders: Default::default(),
-            in_flight_shard_users: None,
+            in_flight_window: None,
             protected_input,
             pending_inputs: Vec::new(),
             replay_tools: Vec::new(),
@@ -6130,7 +6136,7 @@ impl ToolLoopExecutor {
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
-                if self.in_flight_shard_users.is_some() {
+                if self.in_flight_window.is_some() {
                     self.messages = messages
                         .iter()
                         .map(serde_json::to_value)
@@ -6993,7 +6999,7 @@ impl ToolLoopExecutor {
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;
-                if self.in_flight_shard_users.is_some() {
+                if self.in_flight_window.is_some() {
                     self.messages = messages
                         .iter()
                         .map(serde_json::to_value)
@@ -7996,7 +8002,7 @@ impl ToolLoopExecutor {
     }
 
     fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
-        if self.in_flight_shard_users.is_some() {
+        if self.in_flight_window.is_some() {
             return Ok(self
                 .messages
                 .iter()
@@ -8110,7 +8116,7 @@ impl ToolLoopExecutor {
     }
 
     fn build_openai_messages(&self) -> Result<Vec<OpenAIMessage>> {
-        if self.in_flight_shard_users.is_some() {
+        if self.in_flight_window.is_some() {
             return Ok(self
                 .messages
                 .iter()
