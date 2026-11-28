@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createLocalConversation, updateLocalConversation } from '../services/localStorageService';
+import { createLocalConversation, getLocalConversation, updateLocalConversation } from '../services/localStorageService';
 
 vi.mock('../services/bridgeConnection', async importOriginal => ({
   ...await importOriginal<typeof import('../services/bridgeConnection')>(),
@@ -24,6 +24,21 @@ describe.each(['desktop', 'modular'] as const)('%s conversation mode restoration
     updateLocalConversation(conversation.id, { project_id: 'selected-project', workspace_path: 'D:/project' });
     const restored = await api.getConversation(conversation.id);
     expect(restored).toMatchObject({ workspace_mode: mode, project_id: 'selected-project', workspace_path: 'D:/project' });
+  });
+
+  it('restores picker keys from separate local fields after creation, branching and edits', async () => {
+    const api = implementation === 'desktop' ? await import('../api') : await import('./conversations');
+    const key = 'second%2Fprovider::first::shared';
+    const created = await api.createConversation('Selection', key);
+    expect(created.model).toBe(key);
+    expect(getLocalConversation(created.id)).toMatchObject({ provider: 'second/provider', model: 'first::shared' });
+    expect((await api.getConversation(created.id)).model).toBe(key);
+    expect(await api.getConversations()).toMatchObject([{ model: key }]);
+
+    const branch = await api.branchConversation(created.id);
+    expect(getLocalConversation(branch.new_conversation_id)).toMatchObject({ provider: 'second/provider', model: 'first::shared' });
+    await api.updateConversation(created.id, { model: 'other::first::shared' });
+    expect(getLocalConversation(created.id)).toMatchObject({ provider: 'other', model: 'first::shared' });
   });
 
   it('restores legacy Cowork as Work', async () => {
