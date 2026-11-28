@@ -21,45 +21,102 @@ pub(crate) mod native;
 pub struct GenerationFailure(#[source] anyhow::Error);
 
 /// Per-turn failure cooldown shared by CLI admission and both provider loops.
+#[derive(Clone, Default)]
+pub struct AutoCompactionGate(std::sync::Arc<std::sync::Mutex<GateState>>);
+
 #[derive(Default)]
-pub struct AutoCompactionGate {
+struct GateState {
     iteration: usize,
-    retry_at: usize,
+    threshold_retry_at: usize,
     completed_mid_turn: usize,
-    failure: Option<String>,
+    failure: Option<FailedGeneration>,
+}
+
+struct FailedGeneration {
+    cause: String,
+    retry_at: usize,
+}
+
+impl GateState {
+    fn blocking_failure(&self) -> Option<&FailedGeneration> {
+        self.failure
+            .as_ref()
+            .filter(|failure| self.iteration < failure.retry_at)
+    }
+
+    fn may_start(&self) -> bool {
+        const MAX_MID_TURN_COMPACTIONS: usize = 6;
+        self.iteration >= self.threshold_retry_at
+            && self.completed_mid_turn < MAX_MID_TURN_COMPACTIONS
+            && self.blocking_failure().is_none()
+    }
 }
 
 impl AutoCompactionGate {
-    pub(crate) fn begin_iteration(&mut self, iteration: usize) {
-        self.iteration = iteration;
-        if iteration >= self.retry_at {
-            self.failure = None;
-        }
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.0.lock().expect("compaction gate poisoned")
+    }
+
+    pub(crate) fn begin_iteration(&self, iteration: usize) {
+        self.state().iteration = iteration;
     }
 
     pub fn may_start(&self) -> bool {
-        const MAX_MID_TURN_COMPACTIONS: usize = 6;
-        self.iteration >= self.retry_at && self.completed_mid_turn < MAX_MID_TURN_COMPACTIONS
+        self.state().may_start()
     }
 
-    pub(crate) fn defer_threshold(&mut self) {
-        self.retry_at = self.iteration.saturating_add(3);
+    pub(crate) fn defer_threshold(&self) {
+        let mut state = self.state();
+        state.threshold_retry_at = state.iteration.saturating_add(3);
     }
 
-    pub(crate) fn committed_mid_turn(&mut self) {
-        self.completed_mid_turn += 1;
+    pub(crate) fn committed_mid_turn(&self) {
+        self.state().completed_mid_turn += 1;
     }
 
-    /// While blocked, the caller must still check the uncompressed request.
-    pub fn blocking_failure(&self) -> Option<&str> {
-        self.failure.as_deref()
+    pub fn blocking_failure(&self) -> Option<String> {
+        self.state()
+            .blocking_failure()
+            .map(|failure| failure.cause.clone())
     }
 
-    pub fn record_failure(&mut self, cause: String) {
+    pub fn record_failure(&self, cause: String) {
         const SKIPPED_ITERATIONS: usize = 3;
-        self.retry_at = self.iteration.saturating_add(SKIPPED_ITERATIONS + 1);
-        self.failure = Some(cause);
+        let mut state = self.state();
+        state.failure = Some(FailedGeneration {
+            cause,
+            retry_at: state.iteration.saturating_add(SKIPPED_ITERATIONS + 1),
+        });
     }
+
+    /// A provider rejection is a hard limit. Even after cooldown expires, use the
+    /// last exhausted budget from this turn instead of starting reactive recovery.
+    pub fn provider_rejection(&self) -> Option<anyhow::Error> {
+        let state = self.state();
+        let cause = match &state.failure {
+            Some(failure) => &failure.cause,
+            None if !state.may_start() => "Further automatic compaction is deferred for this turn",
+            None => return None,
+        };
+        Some(anyhow::anyhow!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {cause}"))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_overflow_remembers_the_exhausted_budget_after_cooldown() {
+    let gate = AutoCompactionGate::default();
+    gate.record_failure("HTTP 429".into());
+    gate.begin_iteration(4);
+    assert!(gate.may_start());
+    gate.defer_threshold();
+    assert!(!gate.may_start());
+    assert!(gate.blocking_failure().is_none());
+    assert!(gate
+        .provider_rejection()
+        .unwrap()
+        .to_string()
+        .contains("HTTP 429"));
 }
 
 pub struct GeneratedSummary {

@@ -2550,11 +2550,12 @@ impl Session {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
             None=>self.store.db.start_turn_timer(&self.id)?,
         };
+        let compaction_gate = Default::default();
         let mut recovery_requests = Vec::new();
         let mut result = async {
-            let first = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
+            let first = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone(), &compaction_gate).await;
             match first {
-                Err(error) if completion.stdout_failure.is_none() && !matches!(origin, TurnOrigin::HookWake | TurnOrigin::InitialHook) && crate::session_commands::is_context_overflow(&error) => {
+                Err(error) if completion.stdout_failure.is_none() && !matches!(origin, TurnOrigin::HookWake | TurnOrigin::InitialHook) && deepseek_code_core::performance::is_context_overflow(&error) => {
                     recovery_requests.extend(completion.requests.iter().cloned());
                     if let Err(log_error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &json!({
                         "type":"request_turn_attempt_end", "turnId":turn.record().turn_id,
@@ -2564,7 +2565,7 @@ impl Session {
                         crate::compaction::notice(&format!("Could not save request attempt log: {log_error}"));
                     }
                     // Recovery errors must reach the same finalization as requests.
-                    match crate::session_commands::reactive_compact(self, completion.admitted_message.as_deref(), &mut turn).await {
+                    match crate::session_commands::reactive_compact(self, completion.admitted_message.as_deref(), &mut turn, &compaction_gate).await {
                         Ok(None) => {
                             recovery_requests.clear();
                             Err(error)
@@ -2583,7 +2584,7 @@ impl Session {
                             // Retrying after compaction stays inside this turn and
                             // keeps its ownership; a failure here would mean the
                             // lease was lost, so it must not be ignored.
-                            let result = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
+                            let result = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone(), &compaction_gate).await;
                             completion.sdk_result = Some(merge_attempt_results(previous, completion.sdk_result.take()));
                             result
                         }
@@ -2694,6 +2695,7 @@ impl Session {
         execution_lease: Option<
             std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>,
         >,
+        compaction_gate: &deepseek_code_core::services::compaction::AutoCompactionGate,
     ) -> Result<()> {
         let hook_wake = origin == TurnOrigin::HookWake;
         let content = match origin {
@@ -2743,13 +2745,12 @@ impl Session {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;
         }
-        let mut compaction_gate = Default::default();
         if completion.admitted_message.is_none() {
             crate::session_commands::prepare_turn(
                 self,
                 self.context_window().await,
                 execution_lease.clone(),
-                &mut compaction_gate,
+                compaction_gate,
             )
             .await?;
         }
@@ -2970,7 +2971,7 @@ impl Session {
             hook_wake,
             execution_lease,
             if hook_wake { None } else { suggestion_capture },
-            compaction_gate,
+            compaction_gate.clone(),
         ));
         let worker_cancel =
             deepseek_code_core::services::background_sessions::wait_for_cancellation();

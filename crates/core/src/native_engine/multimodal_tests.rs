@@ -110,9 +110,9 @@ async fn first_send_raw_cli_images_reach_actual_model_requests() {
         // This is raw image_block_from_file format, not the normalized database copy.
         let (mut engine, _events) = executor(&base, format, mixed_content());
         let result = if anthropic {
-            engine.execute_anthropic_loop().await
+            engine.execute_anthropic_loop(&Default::default()).await
         } else {
-            engine.execute_openai_loop().await
+            engine.execute_openai_loop(&Default::default()).await
         };
         server.abort();
         assert_eq!(result.unwrap().0, "done");

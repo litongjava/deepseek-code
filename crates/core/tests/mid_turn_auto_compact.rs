@@ -691,6 +691,9 @@ async fn check_failure(
                 .then_some(i)
             })
             .collect();
+        assert!(calls[main_indexes[3]].2["input"]
+            .to_string()
+            .contains("BULKY_EVIDENCE_MARKER"));
         let budget = 2 * attempts();
         assert_eq!(
             main_indexes,

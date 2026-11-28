@@ -762,27 +762,16 @@ pub async fn context_status(session: &Session) -> Option<String> {
     context_note(left, threshold.is_some())
 }
 
-/// Whether a turn failed because the request no longer fits the model's
-/// context window, as reported by the engine or the provider.
-pub fn is_context_overflow(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    // An exhausted compaction has already tried to recover this request.
-    if error.is::<deepseek_code_core::services::compaction::GenerationFailure>()
-        || text.contains("automatic compaction failed.")
-    {
-        return false;
-    }
-    ["exceeds the configured context window", "prompt is too long", "context_length_exceeded", "maximum context length", "input is too long"]
-        .iter()
-        .any(|needle| text.contains(needle))
-}
-
 /// Summarize the prefix before the admitted input, then retry that same row.
 pub async fn reactive_compact(
     session: &Session,
     admitted: Option<&str>,
     turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
+    gate: &AutoCompactionGate,
 ) -> Result<Option<String>> {
+    if let Some(error) = gate.provider_rejection() {
+        return Err(error);
+    }
     let shard = session.selected_session()?;
     let input = match admitted {
         Some(id) => id.to_owned(),
@@ -801,10 +790,10 @@ pub async fn reactive_compact(
     }
     crate::compaction::notice("Context limit reached; compacting the conversation and retrying…");
     if let Err(error) =
-        compact_automatic(session, "", CompactionTracker::before_input(&input)).await
+        compact_automatic(gate, session, "", CompactionTracker::before_input(&input)).await
     {
-        if error.is::<deepseek_code_core::services::compaction::GenerationFailure>() {
-            anyhow::bail!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {error}");
+        if let Some(stop) = gate.provider_rejection() {
+            return Err(stop);
         }
         return Err(error);
     }
@@ -819,7 +808,7 @@ pub async fn prepare_turn(
     session: &Session,
     context_window: Option<u32>,
     lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
-    gate: &mut AutoCompactionGate,
+    gate: &AutoCompactionGate,
 ) -> Result<()> {
     if !gate.may_start() {
         return Ok(());
@@ -832,8 +821,13 @@ pub async fn prepare_turn(
         if let Some(claim)=claim {
             crate::compaction::notice("Compacting the conversation as the model requested…");
             return defer_generation_failure(
-                gate,
-                compact_automatic(session, &claim.keep, CompactionTracker::for_claim(&claim)).await,
+                compact_automatic(
+                    gate,
+                    session,
+                    &claim.keep,
+                    CompactionTracker::for_claim(&claim),
+                )
+                .await,
             );
         }
     }
@@ -855,30 +849,28 @@ pub async fn prepare_turn(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
     defer_generation_failure(
-        gate,
-        compact_automatic(session, "", CompactionTracker::default()).await,
+        compact_automatic(gate, session, "", CompactionTracker::default()).await,
     )
 }
 
 // Only a failed generation can be deferred. Cancellation, stale snapshots,
 // permissions and storage errors keep their existing disposition.
-fn defer_generation_failure(gate: &mut AutoCompactionGate, result: Result<()>) -> Result<()> {
+fn defer_generation_failure(result: Result<()>) -> Result<()> {
     match result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            gate.record_failure(error.downcast::<GenerationFailure>()?.to_string());
-            Ok(())
-        }
+        Err(error) if error.is::<GenerationFailure>() => Ok(()),
+        other => other,
     }
 }
 
 /// Both automatic entries retain the commit outcome across cancellation.
 async fn compact_automatic(
+    gate: &AutoCompactionGate,
     session: &Session,
     instructions: &str,
     tracker: CompactionTracker,
 ) -> Result<()> {
     use deepseek_code_core::services::compaction::compact_with_hooks_tracked;
+    anyhow::ensure!(gate.may_start(), "Automatic compaction is in cooldown");
     let context = crate::services::context(&session.paths)?;
     let state = session.binding_state();
     // The SDK frame reader owns stdin; terminal progress must not inspect it.
@@ -895,7 +887,11 @@ async fn compact_automatic(
         }
     };
     let (report, cancelled) = match result {
-        Some(result) => (result?, false),
+        Some(Err(error)) => {
+            if error.is::<GenerationFailure>() { gate.record_failure(error.to_string()); }
+            return Err(error);
+        }
+        Some(Ok(report)) => (report, false),
         None => (crate::repl::committed_after_cancel(
             &tracker, "Interrupted: automatic compaction cancelled before it was saved; original transcript retained",
         )?.report, true),
@@ -972,12 +968,12 @@ mod tests {
         assert_eq!(context_note(21, true), None);
         assert_eq!(context_note(12, true).as_deref(), Some("12% until auto-compact"));
         for overflow in ["Input plus output budget exceeds the configured context window; compact the conversation", "Model API error 400: prompt is too long: 210000 tokens > 200000 maximum", "This model's maximum context length is 65536 tokens"] {
-            assert!(is_context_overflow(&anyhow::anyhow!(overflow.to_owned())), "{overflow}");
+            assert!(deepseek_code_core::performance::is_context_overflow(&anyhow::anyhow!(overflow.to_owned())), "{overflow}");
         }
-        assert!(!is_context_overflow(&anyhow::anyhow!(
-            "Model API error 429: rate limited"
-        )));
-        assert!(!is_context_overflow(&anyhow::anyhow!(
+        assert!(!deepseek_code_core::performance::is_context_overflow(
+            &anyhow::anyhow!("Model API error 429: rate limited")
+        ));
+        assert!(!deepseek_code_core::performance::is_context_overflow(&anyhow::anyhow!(
             "Engine execution failed: Automatic compaction failed. Resume and run /compact. Cause: context_length_exceeded"
         )));
         assert_eq!(

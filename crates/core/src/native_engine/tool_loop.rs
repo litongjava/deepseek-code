@@ -47,6 +47,7 @@ use crate::native_engine::token_counter::TokenCounter;
 use crate::permissions::{PermissionManager, PermissionResult};
 use crate::prefetch::PrefetchEngine;
 use crate::prompt::{code::adapt_tools, PromptProfile};
+use crate::services::compaction::AutoCompactionGate;
 use crate::streaming::sse_parser::{
     consume_sse_payloads, merge_tool_args, recover_malformed_tool_input,
 };
@@ -459,7 +460,7 @@ pub struct ToolLoopExecutor {
     last_request_overhead_tokens: u64,
     /// Emit a single failure warning while this turn continues uncompressed.
     auto_compaction_warned: bool,
-    pub(super) compaction_gate: crate::services::compaction::AutoCompactionGate,
+    pub(super) compaction_gate: AutoCompactionGate,
     /// Transient cue appended once when rendering a freshly compacted mid-turn boundary.
     mid_turn_continuation_cue: bool,
 }
@@ -4789,7 +4790,13 @@ impl ToolLoopExecutor {
                 let mut messages = self.build_anthropic_messages()?;
                 self.apply_reasoning_prompt();
                 let _ = self
-                    .replay_window(&mut messages, None, false, Self::render_anthropic_messages)
+                    .replay_window(
+                        &self.compaction_gate.clone(),
+                        &mut messages,
+                        None,
+                        false,
+                        Self::render_anthropic_messages,
+                    )
                     .await?;
                 let prepared = self.prepare_request()?;
                 let body = self.anthropic_client.request_body(
@@ -4810,7 +4817,13 @@ impl ToolLoopExecutor {
                 let mut messages = self.build_openai_messages()?;
                 self.apply_reasoning_prompt();
                 let _ = self
-                    .replay_window(&mut messages, None, false, Self::render_openai_messages)
+                    .replay_window(
+                        &self.compaction_gate.clone(),
+                        &mut messages,
+                        None,
+                        false,
+                        Self::render_openai_messages,
+                    )
                     .await?;
                 let prepared = self.prepare_request()?;
                 self.openai_client.request_body(
@@ -4896,25 +4909,25 @@ impl ToolLoopExecutor {
                 })
                 .await;
         }
+        let gate = self.compaction_gate.clone();
         let loop_result = match user_skill {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
             Ok(None) => match self.provider.provider.api_format {
                 ApiFormat::Anthropic => {
                     tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
-                    self.execute_anthropic_loop().await
+                    self.execute_anthropic_loop(&gate).await
                 }
                 ApiFormat::OpenAI => {
                     tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
-                    self.execute_openai_loop().await
+                    self.execute_openai_loop(&gate).await
                 }
             },
         }
         .map_err(|error| {
-            if crate::performance::classify(&error) == crate::performance::ErrorClass::ContextLimit {
-                if let Some(cause) = self.compaction_gate.blocking_failure() {
-                    let rejection = crate::performance::request_diagnostic(&error);
-                    return anyhow!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {cause}. Provider response: {rejection}");
+            if crate::performance::is_context_overflow(&error) {
+                if let Some(stop) = gate.provider_rejection() {
+                    return stop;
                 }
             }
             error
@@ -5962,19 +5975,26 @@ impl ToolLoopExecutor {
         }
     }
 
-    async fn execute_anthropic_loop(&mut self) -> Result<(String, Option<String>)> {
+    async fn execute_anthropic_loop(
+        &mut self,
+        gate: &AutoCompactionGate,
+    ) -> Result<(String, Option<String>)> {
         let messages = self.build_anthropic_messages()?;
-        self.continue_anthropic(Continuation {
-            messages,
-            iteration: 0,
-            text: String::new(),
-            after_tools: false,
-        })
+        self.continue_anthropic(
+            gate,
+            Continuation {
+                messages,
+                iteration: 0,
+                text: String::new(),
+                after_tools: false,
+            },
+        )
         .await
     }
 
     async fn continue_anthropic(
         &mut self,
+        gate: &AutoCompactionGate,
         cursor: Continuation<AnthropicMessage>,
     ) -> Result<(String, Option<String>)> {
         let mut conversation_messages = cursor.messages;
@@ -5990,16 +6010,19 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
-            self.compaction_gate.begin_iteration(iteration);
+            gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
-                return Box::pin(self.continue_openai(Continuation {
-                    messages,
-                    iteration,
-                    text: full_text,
-                    after_tools: after_tool_results,
-                }))
+                return Box::pin(self.continue_openai(
+                    gate,
+                    Continuation {
+                        messages,
+                        iteration,
+                        text: full_text,
+                        after_tools: after_tool_results,
+                    },
+                ))
                 .await;
             }
             let base_url = self.provider.provider.base_url.clone();
@@ -6071,6 +6094,7 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
+                    gate,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
@@ -6099,6 +6123,7 @@ impl ToolLoopExecutor {
                 }
             }
             if Box::pin(self.replay_window(
+                gate,
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,
@@ -6788,19 +6813,26 @@ impl ToolLoopExecutor {
         Ok((full_text, stop_reason))
     }
 
-    async fn execute_openai_loop(&mut self) -> Result<(String, Option<String>)> {
+    async fn execute_openai_loop(
+        &mut self,
+        gate: &AutoCompactionGate,
+    ) -> Result<(String, Option<String>)> {
         let messages = self.build_openai_messages()?;
-        self.continue_openai(Continuation {
-            messages,
-            iteration: 0,
-            text: String::new(),
-            after_tools: false,
-        })
+        self.continue_openai(
+            gate,
+            Continuation {
+                messages,
+                iteration: 0,
+                text: String::new(),
+                after_tools: false,
+            },
+        )
         .await
     }
 
     async fn continue_openai(
         &mut self,
+        gate: &AutoCompactionGate,
         cursor: Continuation<OpenAIMessage>,
     ) -> Result<(String, Option<String>)> {
         let mut conversation_messages = cursor.messages;
@@ -6831,16 +6863,19 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
-            self.compaction_gate.begin_iteration(iteration);
+            gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;
-                return Box::pin(self.continue_anthropic(Continuation {
-                    messages,
-                    iteration,
-                    text: full_text,
-                    after_tools: after_tool_results,
-                }))
+                return Box::pin(self.continue_anthropic(
+                    gate,
+                    Continuation {
+                        messages,
+                        iteration,
+                        text: full_text,
+                        after_tools: after_tool_results,
+                    },
+                ))
                 .await;
             }
             let base_url = self.provider.provider.base_url.clone();
@@ -6924,6 +6959,7 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
+                    gate,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
@@ -6952,6 +6988,7 @@ impl ToolLoopExecutor {
                 }
             }
             if Box::pin(self.replay_window(
+                gate,
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,

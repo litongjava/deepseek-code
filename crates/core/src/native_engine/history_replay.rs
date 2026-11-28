@@ -323,6 +323,7 @@ impl ToolLoopExecutor {
         M: serde::Serialize + serde::de::DeserializeOwned + Clone,
     >(
         &mut self,
+        gate: &AutoCompactionGate,
         current_text: &str,
         window: &mut Vec<M>,
         durable_len: usize,
@@ -335,7 +336,7 @@ impl ToolLoopExecutor {
         ) else {
             return Ok(MidTurnCompact::Unmanaged);
         };
-        if self.compaction_gate.blocking_failure().is_some() {
+        if gate.blocking_failure().is_some() {
             self.flush_replay_segment(&shard, Some(current_text))?;
             return Ok(MidTurnCompact::Managed);
         }
@@ -391,7 +392,7 @@ impl ToolLoopExecutor {
             }
         }
 
-        if !self.compaction_gate.may_start() || self.messages.is_empty() {
+        if !gate.may_start() || self.messages.is_empty() {
             return Ok(if microcompact_changed {
                 MidTurnCompact::Synced
             } else {
@@ -434,7 +435,7 @@ impl ToolLoopExecutor {
                             "Mid-turn auto-compact skipped ({error:#}); continuing with existing context."
                         )))
                         .await;
-                    self.compaction_gate.defer_threshold();
+                    gate.defer_threshold();
                     return Ok(if microcompact_changed {
                         MidTurnCompact::Synced
                     } else {
@@ -452,7 +453,7 @@ impl ToolLoopExecutor {
             let input = self.compaction_history(crate::services::compaction::native::supports(
                 &self.provider,
             ))?;
-            self.generate_auto_compaction(&shard, input, window, &focus)
+            self.generate_auto_compaction(gate, &shard, input, window, &focus)
                 .await
         };
 
@@ -466,8 +467,7 @@ impl ToolLoopExecutor {
         };
         let (generated, mut record) = match result {
             Ok(pair) => pair,
-            Err(error) => {
-                self.compaction_gate.record_failure(format!("{error:#}"));
+            Err(_) => {
                 // replay_window checks capacity on this and each skipped iteration.
                 return Ok(MidTurnCompact::Synced);
             }
@@ -494,7 +494,7 @@ impl ToolLoopExecutor {
                         "Mid-turn auto-compact skipped ({error:#}); continuing with existing context."
                     )))
                     .await;
-                self.compaction_gate.defer_threshold();
+                gate.defer_threshold();
                 return Ok(if microcompact_changed {
                     MidTurnCompact::Synced
                 } else {
@@ -560,7 +560,7 @@ impl ToolLoopExecutor {
         self.stop_hook_active = false;
         self.last_reported_input_tokens = None;
         self.last_request_message_tokens = None;
-        self.compaction_gate.committed_mid_turn();
+        gate.committed_mid_turn();
 
         self.reload_history(&shard)?;
         self.mid_turn_continuation_cue = true;
@@ -583,7 +583,7 @@ impl ToolLoopExecutor {
         let post_compact = (TokenCounter::estimate(&post_compact_rows) as u64)
             .saturating_add(self.last_request_overhead_tokens);
         if post_compact >= threshold * 90 / 100 {
-            self.compaction_gate.defer_threshold();
+            gate.defer_threshold();
         }
         Ok(MidTurnCompact::Compacted)
     }
@@ -669,6 +669,7 @@ impl ToolLoopExecutor {
 
     async fn generate_auto_compaction<M: serde::Serialize>(
         &self,
+        gate: &AutoCompactionGate,
         shard: &crate::db::session_store::SessionDb,
         input: Vec<Value>,
         window: &[M],
@@ -677,36 +678,42 @@ impl ToolLoopExecutor {
         crate::services::compaction::GeneratedSummary,
         Option<super::super::request_recording::CompactionRecord>,
     )> {
-        let mut options = match self.provider.provider.api_format {
-            ApiFormat::Anthropic => self.anthropic_client.request_options.clone(),
-            ApiFormat::OpenAI => self.openai_client.request_options.clone(),
-        }
-        .compaction("auto");
-        let record = super::super::request_recording::CompactionRecord::start(
-            &mut options,
-            "auto",
-            &serde_json::to_string(&input)?,
-        );
-        let summary_only_wire = if crate::services::compaction::native::supports(&self.provider) {
-            None
-        } else {
-            Some(self.build_mid_turn_summary_wire(window)?)
+        anyhow::ensure!(gate.may_start(), "Automatic compaction is in cooldown");
+        let generation = async {
+            let mut options = match self.provider.provider.api_format {
+                ApiFormat::Anthropic => self.anthropic_client.request_options.clone(),
+                ApiFormat::OpenAI => self.openai_client.request_options.clone(),
+            }
+            .compaction("auto");
+            let record = super::super::request_recording::CompactionRecord::start(
+                &mut options,
+                "auto",
+                &serde_json::to_string(&input)?,
+            );
+            let summary_only_wire = if crate::services::compaction::native::supports(&self.provider)
+            {
+                None
+            } else {
+                Some(self.build_mid_turn_summary_wire(window)?)
+            };
+            let generated = self
+                .generate_compaction_snapshot(
+                    shard,
+                    input,
+                    summary_only_wire,
+                    crate::services::compaction::PROMPT,
+                    focus,
+                    true,
+                    options,
+                )
+                .await?;
+            Ok((generated, record))
         };
-        let generation = self.generate_compaction_snapshot(
-            shard,
-            input,
-            summary_only_wire,
-            crate::services::compaction::PROMPT,
-            focus,
-            true,
-            options,
-        );
-        let generated = tokio::select! {
+        tokio::select! {
             biased;
             _ = self.event_tx.closed() => anyhow::bail!("Interrupted during automatic compaction"),
-            result = generation => result,
-        }?;
-        Ok((generated, record))
+            result = generation => result.inspect_err(|error| gate.record_failure(format!("{error:#}"))),
+        }
     }
 
     // A live window can refresh its durable prefix. A summary already owns
@@ -715,18 +722,19 @@ impl ToolLoopExecutor {
     // window so the caller can synchronize its in-memory `conversation_messages`.
     pub(super) async fn replay_window<M: serde::Serialize + serde::de::DeserializeOwned>(
         &mut self,
+        gate: &AutoCompactionGate,
         window: &mut Vec<M>,
         durable_len: Option<usize>,
         mid_turn_managed: bool,
         render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
     ) -> Result<bool> {
-        if let Some(cause) = self.compaction_gate.blocking_failure().map(str::to_owned) {
+        if let Some(cause) = gate.blocking_failure() {
             self.check_uncompressed_request(&cause, window).await?;
             return Ok(false);
         }
         // Respect threshold deferrals here too. A previous generation failure
         // already took the stricter uncompressed-capacity path above.
-        let mid_turn_managed = mid_turn_managed || !self.compaction_gate.may_start();
+        let mid_turn_managed = mid_turn_managed || !gate.may_start();
         let model = &self.provider.model;
         let limit = model
             .context_window
@@ -817,6 +825,7 @@ impl ToolLoopExecutor {
             if let Some(provided) = durable_window {
                 let result = self
                     .generate_auto_compaction(
+                        gate,
                         &shard,
                         provided.clone(),
                         &provided,
@@ -827,7 +836,6 @@ impl ToolLoopExecutor {
                     Ok(pair) => pair,
                     Err(error) => {
                         let cause = format!("{error:#}");
-                        self.compaction_gate.record_failure(cause.clone());
                         self.check_uncompressed_request(&cause, &provided).await?;
                         *window = provided
                             .into_iter()
@@ -869,6 +877,7 @@ impl ToolLoopExecutor {
                 }
                 let result = self
                     .generate_auto_compaction(
+                        gate,
                         &shard,
                         rows,
                         &window[..end],
@@ -879,7 +888,6 @@ impl ToolLoopExecutor {
                     Ok(pair) => pair,
                     Err(error) => {
                         let cause = format!("{error:#}");
-                        self.compaction_gate.record_failure(cause.clone());
                         self.check_uncompressed_request(&cause, window).await?;
                         return Ok(microcompact_changed);
                     }

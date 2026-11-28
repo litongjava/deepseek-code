@@ -2236,9 +2236,9 @@ async fn every_transport_lists_only_loadable_mcp_tools_when_the_loader_is_presen
             }
             let (text, _) = timeout(Duration::from_secs(20), async {
                 if format == "anthropic" {
-                    executor.execute_anthropic_loop().await
+                    executor.execute_anthropic_loop(&Default::default()).await
                 } else {
-                    executor.execute_openai_loop().await
+                    executor.execute_openai_loop(&Default::default()).await
                 }
             })
             .await
