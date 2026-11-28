@@ -20,6 +20,34 @@ pub(crate) mod native;
 #[error("Compaction failed: {0:#}")]
 pub struct GenerationFailure(#[source] anyhow::Error);
 
+/// Per-turn failure cooldown shared by CLI admission and both provider loops.
+#[derive(Default)]
+pub struct AutoCompactionGate {
+    iteration: usize,
+    retry_at: usize,
+    failure: Option<String>,
+}
+
+impl AutoCompactionGate {
+    pub(crate) fn begin_iteration(&mut self, iteration: usize) {
+        self.iteration = iteration;
+        if iteration >= self.retry_at {
+            self.failure = None;
+        }
+    }
+
+    /// While blocked, the caller must still check the uncompressed request.
+    pub fn blocking_failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    pub fn record_failure(&mut self, cause: String) {
+        const SKIPPED_ITERATIONS: usize = 3;
+        self.retry_at = self.iteration.saturating_add(SKIPPED_ITERATIONS + 1);
+        self.failure = Some(cause);
+    }
+}
+
 pub struct GeneratedSummary {
     pub text: String,
     pub native: Option<Value>,

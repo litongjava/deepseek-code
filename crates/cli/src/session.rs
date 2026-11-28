@@ -2743,16 +2743,16 @@ impl Session {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;
         }
-        let deferred_compaction = if completion.admitted_message.is_none() {
+        let mut compaction_gate = Default::default();
+        if completion.admitted_message.is_none() {
             crate::session_commands::prepare_turn(
                 self,
                 self.context_window().await,
                 execution_lease.clone(),
+                &mut compaction_gate,
             )
-            .await?
-        } else {
-            None
-        };
+            .await?;
+        }
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
         // Read the history and its compaction boundary in one store view, so the
@@ -2970,7 +2970,7 @@ impl Session {
             hook_wake,
             execution_lease,
             if hook_wake { None } else { suggestion_capture },
-            deferred_compaction,
+            compaction_gate,
         ));
         let worker_cancel =
             deepseek_code_core::services::background_sessions::wait_for_cancellation();

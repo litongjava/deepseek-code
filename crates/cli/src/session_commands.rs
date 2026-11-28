@@ -1,7 +1,9 @@
 //! Interactive session settings persisted alongside the shared conversation.
 use deepseek_code_core::db::session_store::{settings, SessionAccess, Stores};
 use crate::session::Session;
-use deepseek_code_core::services::compaction::{CompactionTracker, GenerationFailure};
+use deepseek_code_core::services::compaction::{
+    AutoCompactionGate, CompactionTracker, GenerationFailure,
+};
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::runtime::RuntimePaths;
 #[cfg(test)]
@@ -817,7 +819,11 @@ pub async fn prepare_turn(
     session: &Session,
     context_window: Option<u32>,
     lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
-) -> Result<Option<GenerationFailure>> {
+    gate: &mut AutoCompactionGate,
+) -> Result<()> {
+    if gate.blocking_failure().is_some() {
+        return Ok(());
+    }
     // A request the model queued is honored before this prompt even when the
     // history is below the automatic threshold. It is consumed exactly once.
     let shard=session.selected_session()?;
@@ -826,6 +832,7 @@ pub async fn prepare_turn(
         if let Some(claim)=claim {
             crate::compaction::notice("Compacting the conversation as the model requested…");
             return defer_generation_failure(
+                gate,
                 compact_automatic(session, &claim.keep, CompactionTracker::for_claim(&claim)).await,
             );
         }
@@ -834,28 +841,34 @@ pub async fn prepare_turn(
     let window = match context_window.filter(|v| *v > 0) {
         Some(window) => window,
         // The default needs a window; an explicit percent asks for one.
-        None if settings.autocompact_percent.is_none() => return Ok(None),
+        None if settings.autocompact_percent.is_none() => return Ok(()),
         None => anyhow::bail!("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model"),
     };
     let Some(threshold) = settings.autocompact_tokens(window as u64) else {
-        return Ok(None);
+        return Ok(());
     };
     let (messages, estimated) = active_history(session)?;
     if messages < 2 || (estimated as u64) < threshold {
-        return Ok(None);
+        return Ok(());
     }
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
-    defer_generation_failure(compact_automatic(session, "", CompactionTracker::default()).await)
+    defer_generation_failure(
+        gate,
+        compact_automatic(session, "", CompactionTracker::default()).await,
+    )
 }
 
 // Only a failed generation can be deferred. Cancellation, stale snapshots,
 // permissions and storage errors keep their existing disposition.
-fn defer_generation_failure(result: Result<()>) -> Result<Option<GenerationFailure>> {
+fn defer_generation_failure(gate: &mut AutoCompactionGate, result: Result<()>) -> Result<()> {
     match result {
-        Ok(()) => Ok(None),
-        Err(error) => error.downcast::<GenerationFailure>().map(Some),
+        Ok(()) => Ok(()),
+        Err(error) => {
+            gate.record_failure(error.downcast::<GenerationFailure>()?.to_string());
+            Ok(())
+        }
     }
 }
 

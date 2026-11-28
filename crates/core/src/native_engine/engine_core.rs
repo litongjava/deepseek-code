@@ -10,7 +10,7 @@ use crate::permissions::{
     PermissionContext, PermissionManager, PermissionResult,
 };
 use crate::prefetch::PrefetchEngine;
-use crate::services::compaction::GenerationFailure;
+use crate::services::compaction::AutoCompactionGate;
 use crate::skills::SkillsManager;
 use anyhow::Context;
 use anyhow::{anyhow, Result};
@@ -717,7 +717,12 @@ impl QueryEngine {
             top_p: None,
         };
         let std::ops::ControlFlow::Continue(mut turn) = self
-            .prepare_turn(shard.clone(), request, TurnPurpose::Summary, None)
+            .prepare_turn(
+                shard.clone(),
+                request,
+                TurnPurpose::Summary,
+                Default::default(),
+            )
             .await?
         else {
             anyhow::bail!("Cannot prepare a summary request");
@@ -973,8 +978,15 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, None, None, None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            false,
+            None,
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// Internal hook feedback: no user prompt hooks, skill invocation or authority.
@@ -983,7 +995,7 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, None, None, None)
+        self.send_with_origin(request, save_response, true, None, None, Default::default())
             .await
     }
 
@@ -996,8 +1008,15 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, Some(lease), None, None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            false,
+            Some(lease),
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// Hook wakes share ownership the same way.
@@ -1007,8 +1026,15 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, Some(lease), None, None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            true,
+            Some(lease),
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// A CLI turn can retain its final provider request for a single follow-up.
@@ -1018,7 +1044,7 @@ impl QueryEngine {
         lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
         capture: Option<super::suggestion::SuggestionCapture>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_cli_turn(request, false, lease, capture, None)
+        self.send_cli_turn(request, false, lease, capture, Default::default())
             .await
     }
 
@@ -1030,17 +1056,10 @@ impl QueryEngine {
         hook_wake: bool,
         lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
         capture: Option<super::suggestion::SuggestionCapture>,
-        deferred_compaction: Option<GenerationFailure>,
+        compaction_gate: AutoCompactionGate,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(
-            request,
-            false,
-            hook_wake,
-            lease,
-            capture,
-            deferred_compaction,
-        )
-        .await
+        self.send_with_origin(request, false, hook_wake, lease, capture, compaction_gate)
+            .await
     }
 
     async fn prepare_turn(
@@ -1048,7 +1067,7 @@ impl QueryEngine {
         selected: crate::db::session_store::SessionDb,
         mut request: ChatRequest,
         purpose: TurnPurpose,
-        deferred_compaction: Option<GenerationFailure>,
+        compaction_gate: AutoCompactionGate,
     ) -> Result<std::ops::ControlFlow<mpsc::Receiver<EngineEvent>, PreparedTurn>> {
         let replay = matches!(purpose, TurnPurpose::Summary);
         let hook_wake = matches!(purpose, TurnPurpose::HookWake);
@@ -1790,7 +1809,7 @@ impl QueryEngine {
                 // fail when too little is left for a useful answer.
                 let remaining = (context as u64).saturating_sub(estimated);
                 if remaining < 4096 && !replay {
-                    if let Some(error) = deferred_compaction {
+                    if let Some(error) = compaction_gate.blocking_failure() {
                         anyhow::bail!("Automatic compaction failed. The next request cannot fit. Resume and run /compact or select a model with a larger context window. Cause: {error}");
                     }
                     anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens");
@@ -1912,7 +1931,7 @@ impl QueryEngine {
         } else {
             self.resource_monitor.clone()
         });
-        executor.deferred_compaction = deferred_compaction;
+        executor.compaction_gate = compaction_gate;
 
         if let Some(memory) = file_memory {
             executor = executor.with_file_memory(memory);
@@ -1943,7 +1962,7 @@ impl QueryEngine {
         hook_wake: bool,
         execution_lease: Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
         suggestion: Option<super::suggestion::SuggestionCapture>,
-        deferred_compaction: Option<GenerationFailure>,
+        compaction_gate: AutoCompactionGate,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         // Every submission owns the session for its whole attempt. A host that
         // already acquired (CLI, SDK, Desktop SSE) shares that same `Arc`; an
@@ -1990,7 +2009,7 @@ impl QueryEngine {
                 } else {
                     TurnPurpose::Submit
                 },
-                deferred_compaction,
+                compaction_gate,
             )
             .await?
         {
@@ -2900,7 +2919,7 @@ mod resource_monitor_tests {
 
         let selected = store.db.open_session(&id).unwrap();
         let flow = engine
-            .prepare_turn(selected, request, TurnPurpose::Submit, None)
+            .prepare_turn(selected, request, TurnPurpose::Submit, Default::default())
             .await
             .unwrap();
         assert!(matches!(flow, std::ops::ControlFlow::Continue(_)));

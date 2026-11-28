@@ -460,8 +460,7 @@ pub struct ToolLoopExecutor {
     /// Number of durable mid-turn auto-compactions committed during this turn.
     mid_turn_compactions: usize,
     auto_compaction_warned: bool,
-    compaction_failure_for_request: Option<String>,
-    pub(super) deferred_compaction: Option<crate::services::compaction::GenerationFailure>,
+    pub(super) compaction_gate: crate::services::compaction::AutoCompactionGate,
     /// Iteration index before which mid-turn auto-compaction is paused (failure or low-reduction cooldown).
     mid_turn_compact_cooldown_until: usize,
     /// Transient cue appended once when rendering a freshly compacted mid-turn boundary.
@@ -2015,8 +2014,7 @@ impl ToolLoopExecutor {
             last_request_overhead_tokens: 0,
             mid_turn_compactions: 0,
             auto_compaction_warned: false,
-            compaction_failure_for_request: None,
-            deferred_compaction: None,
+            compaction_gate: Default::default(),
             mid_turn_compact_cooldown_until: 0,
             mid_turn_continuation_cue: false,
         }
@@ -4919,7 +4917,7 @@ impl ToolLoopExecutor {
         }
         .map_err(|error| {
             if crate::performance::classify(&error) == crate::performance::ErrorClass::ContextLimit {
-                if let Some(cause) = self.compaction_failure_for_request.take() {
+                if let Some(cause) = self.compaction_gate.blocking_failure() {
                     let rejection = crate::performance::request_diagnostic(&error);
                     return anyhow!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {cause}. Provider response: {rejection}");
                 }
@@ -5997,7 +5995,7 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
-            self.compaction_failure_for_request = None;
+            self.compaction_gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
@@ -6839,7 +6837,7 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
-            self.compaction_failure_for_request = None;
+            self.compaction_gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;

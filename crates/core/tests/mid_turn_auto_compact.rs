@@ -89,6 +89,7 @@ enum Failure {
     Fallback,
     SoftLimit,
     HardLimit,
+    HardDuringCooldown,
     Cancel,
     BadRequest,
     Unauthorized,
@@ -170,6 +171,7 @@ async fn run_with_failure(
                     let status = match failure {
                         Failure::None => None,
                         Failure::RetryTwice if attempt >= 2 => None,
+                        Failure::SoftLimit if main_step.load(Ordering::SeqCst) >= 9 => None,
                         Failure::BadRequest => Some(StatusCode::BAD_REQUEST),
                         Failure::Unauthorized => Some(StatusCode::UNAUTHORIZED),
                         _ => Some(StatusCode::TOO_MANY_REQUESTS),
@@ -197,7 +199,7 @@ async fn run_with_failure(
                 }
 
                 if is_compact {
-                    if matches!(failure, Failure::SoftLimit | Failure::HardLimit) {
+                    if matches!(failure, Failure::SoftLimit | Failure::HardLimit | Failure::HardDuringCooldown) {
                         return (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "0")], "unavailable").into_response();
                     }
                     let summary = "MID_TURN_SUMMARY: Read evidence.txt (found BULKY_EVIDENCE_MARKER); next step is to report final conclusion.";
@@ -292,17 +294,17 @@ async fn run_with_failure(
                         }
                     }
                     Protocol::OpenAIResponses => {
-                        if step == 0 || (step == 1 && failure == Failure::SoftLimit) {
+                        if step == 0 || (step < 9 && failure == Failure::SoftLimit) || (step == 1 && failure == Failure::HardDuringCooldown) {
                             let output = json!([{
                                 "type": "function_call",
                                 "id": format!("fc-read-{step}"),
                                 "call_id": format!("call-read-{step}"),
                                 "name": "Read",
-                                "arguments": if step == 0 {read_args.to_string()} else {json!({"file_path":"missing.txt"}).to_string()}
+                                "arguments": if step == 0 {read_args.to_string()} else {json!({"file_path":format!("missing-{step}.txt")}).to_string()}
                             }]);
                             (
                                 [("content-type", "text/event-stream")],
-                                responses_sse(output, None, if failure == Failure::HardLimit { 47_000 } else { 300 }),
+                                responses_sse(output, None, if failure == Failure::HardLimit || (step == 1 && failure == Failure::HardDuringCooldown) { 47_000 } else { 300 }),
                             )
                                 .into_response()
                         } else {
@@ -401,7 +403,7 @@ async fn run_with_failure(
                 events.push(event);
                 break;
             }
-            if failure != Failure::HardLimit {
+            if !matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
                 assert!(!matches!(event, EngineEvent::Error(_)), "unexpected error: {event:?}");
             }
             events.push(event);
@@ -417,7 +419,7 @@ async fn run_with_failure(
             .await,
         deepseek_code_core::native_engine::engine_core::ExecutorWait::Completed
     ));
-    if failure == Failure::HardLimit {
+    if matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
         let rows = store
             .db
             .open_session(&id)
@@ -637,7 +639,7 @@ async fn check_failure(
         warnings,
         usize::from(matches!(
             failure,
-            Failure::SoftLimit | Failure::Unauthorized
+            Failure::SoftLimit | Failure::HardDuringCooldown | Failure::Unauthorized
         ))
     );
     if matches!(failure, Failure::RetryTwice | Failure::Cancel) {
@@ -670,9 +672,24 @@ async fn check_failure(
                 .then_some(i)
             })
             .collect();
-        assert_eq!(main_indexes, [0, 2 * attempts() + 1, 4 * attempts() + 2]);
+        let budget = 2 * attempts();
+        assert_eq!(
+            main_indexes,
+            [
+                0,
+                budget + 1,
+                budget + 2,
+                budget + 3,
+                budget + 4,
+                2 * budget + 5,
+                2 * budget + 6,
+                2 * budget + 7,
+                2 * budget + 8,
+                2 * budget + 10
+            ]
+        );
     }
-    if failure == Failure::HardLimit {
+    if matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
         let message = events
             .iter()
             .find_map(|e| match e {
@@ -691,7 +708,7 @@ async fn check_failure(
         assert!(events.iter().any(|e| matches!(e, EngineEvent::MessageStop { full_text, .. } if full_text.contains("FINAL_ANSWER"))));
         let final_body = calls.last().unwrap().2.to_string();
         let expected = match failure {
-            Failure::RetryTwice => "opaque-mid-turn-summary",
+            Failure::RetryTwice | Failure::SoftLimit => "opaque-mid-turn-summary",
             Failure::Fallback | Failure::BadRequest => "MID_TURN_SUMMARY",
             _ => "BULKY_EVIDENCE_MARKER",
         };
@@ -715,13 +732,25 @@ async fn exhausted_native_budget_uses_one_summary() {
 }
 
 #[tokio::test]
-async fn soft_limit_warns_once_and_retries_at_next_trigger() {
-    check_failure(Failure::SoftLimit, 0, 2 * attempts(), 2 * attempts(), 3).await;
+async fn soft_limit_skips_three_steps_then_recovers_after_eight_tool_steps() {
+    check_failure(
+        Failure::SoftLimit,
+        1,
+        2 * attempts() + 1,
+        2 * attempts(),
+        10,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn hard_limit_reports_both_failures_and_resumes_from_saved_tool_results() {
     check_failure(Failure::HardLimit, 0, attempts(), attempts(), 2).await;
+}
+
+#[tokio::test]
+async fn hard_capacity_stops_during_cooldown_without_another_attempt() {
+    check_failure(Failure::HardDuringCooldown, 0, attempts(), attempts(), 3).await;
 }
 
 #[tokio::test]

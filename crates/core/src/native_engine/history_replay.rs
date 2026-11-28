@@ -274,13 +274,13 @@ impl ToolLoopExecutor {
             .max(estimated_messages.saturating_add(self.last_request_overhead_tokens))
     }
 
-    async fn handle_compaction_failure<M: serde::Serialize>(
+    async fn check_uncompressed_request<M: serde::Serialize>(
         &mut self,
-        error: anyhow::Error,
+        cause: &str,
         window: &[M],
     ) -> Result<()> {
         if self.event_tx.is_closed() {
-            return Err(error);
+            anyhow::bail!("Compaction cancelled");
         }
         let wire = self.build_mid_turn_summary_wire(window)?;
         let model = &self.provider.model;
@@ -303,9 +303,8 @@ impl ToolLoopExecutor {
             .unwrap_or_else(|| TokenCounter::get_model_context_limit(&model.id) as u64);
         let capacity = limit.saturating_sub(u64::from(self.max_tokens));
         if estimated > capacity {
-            anyhow::bail!("Automatic compaction failed. The next request needs about {estimated} input tokens and only {capacity} fit. Resume and run /compact or select a model with a larger context window. Cause: {error:#}");
+            anyhow::bail!("Automatic compaction failed. The next request needs about {estimated} input tokens and only {capacity} fit. Resume and run /compact or select a model with a larger context window. Cause: {cause}");
         }
-        let cause = format!("{error:#}");
         if !self.auto_compaction_warned {
             let _ = self
                 .event_tx
@@ -315,7 +314,6 @@ impl ToolLoopExecutor {
                 .await;
             self.auto_compaction_warned = true;
         }
-        self.compaction_failure_for_request = Some(cause);
         Ok(())
     }
 
@@ -340,6 +338,10 @@ impl ToolLoopExecutor {
         ) else {
             return Ok(MidTurnCompact::Unmanaged);
         };
+        if self.compaction_gate.blocking_failure().is_some() {
+            self.flush_replay_segment(&shard, Some(current_text))?;
+            return Ok(MidTurnCompact::Managed);
+        }
         let prefs = shard
             .read(|r| r.setting(crate::db::session_store::settings::PREFERENCES))?
             .unwrap_or_default();
@@ -475,9 +477,8 @@ impl ToolLoopExecutor {
         let (generated, mut record) = match result {
             Ok(pair) => pair,
             Err(error) => {
-                self.handle_compaction_failure(error, window).await?;
-                // The refreshed window already passed the hard capacity check.
-                // A new tool iteration may trigger another compaction.
+                self.compaction_gate.record_failure(format!("{error:#}"));
+                // replay_window checks capacity on this and each skipped iteration.
                 return Ok(MidTurnCompact::Synced);
             }
         };
@@ -698,8 +699,8 @@ impl ToolLoopExecutor {
         mid_turn_managed: bool,
         render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
     ) -> Result<bool> {
-        if let Some(error) = self.deferred_compaction.take() {
-            self.handle_compaction_failure(error.into(), window).await?;
+        if let Some(cause) = self.compaction_gate.blocking_failure().map(str::to_owned) {
+            self.check_uncompressed_request(&cause, window).await?;
             return Ok(false);
         }
         let model = &self.provider.model;
@@ -801,7 +802,9 @@ impl ToolLoopExecutor {
                 let (mut generated, mut record) = match result {
                     Ok(pair) => pair,
                     Err(error) => {
-                        self.handle_compaction_failure(error, &provided).await?;
+                        let cause = format!("{error:#}");
+                        self.compaction_gate.record_failure(cause.clone());
+                        self.check_uncompressed_request(&cause, &provided).await?;
                         *window = provided
                             .into_iter()
                             .map(serde_json::from_value)
@@ -851,7 +854,9 @@ impl ToolLoopExecutor {
                 let (generated, mut record) = match result {
                     Ok(pair) => pair,
                     Err(error) => {
-                        self.handle_compaction_failure(error, window).await?;
+                        let cause = format!("{error:#}");
+                        self.compaction_gate.record_failure(cause.clone());
+                        self.check_uncompressed_request(&cause, window).await?;
                         return Ok(microcompact_changed);
                     }
                 };
