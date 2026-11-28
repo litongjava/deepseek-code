@@ -33,7 +33,7 @@ def seed_trust(data_dir, cwd):
     folder = os.path.abspath(cwd)
     if not folder.startswith("\\\\?\\"):
         folder = "\\\\?\\" + folder
-    path = os.path.join(data_dir, "startup-prompts.json")
+    path = os.path.join(data_dir, "config", "startup-prompts.json")
     current = {}
     if os.path.exists(path):
         try:
@@ -92,11 +92,11 @@ def main():
 
         data_dir = tempfile.mkdtemp(prefix="dcl-pty-")
     if data_dir:
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(os.path.join(data_dir, "config"), exist_ok=True)
     if args.config and data_dir:
         import shutil
 
-        shutil.copy(args.config, os.path.join(data_dir, "config.json"))
+        shutil.copy(args.config, os.path.join(data_dir, "config", "config.json"))
     if data_dir and args.config and not args.no_seed_trust:
         seed_trust(data_dir, cwd)
 
