@@ -457,12 +457,9 @@ pub struct ToolLoopExecutor {
     last_request_message_tokens: Option<u64>,
     /// Non-history request overhead (system prompt + tools + schema) observed in the previous request.
     last_request_overhead_tokens: u64,
-    /// Number of durable mid-turn auto-compactions committed during this turn.
-    mid_turn_compactions: usize,
+    /// Emit a single failure warning while this turn continues uncompressed.
     auto_compaction_warned: bool,
     pub(super) compaction_gate: crate::services::compaction::AutoCompactionGate,
-    /// Iteration index before which mid-turn auto-compaction is paused (failure or low-reduction cooldown).
-    mid_turn_compact_cooldown_until: usize,
     /// Transient cue appended once when rendering a freshly compacted mid-turn boundary.
     mid_turn_continuation_cue: bool,
 }
@@ -2012,10 +2009,8 @@ impl ToolLoopExecutor {
             last_reported_input_tokens: None,
             last_request_message_tokens: None,
             last_request_overhead_tokens: 0,
-            mid_turn_compactions: 0,
             auto_compaction_warned: false,
             compaction_gate: Default::default(),
-            mid_turn_compact_cooldown_until: 0,
             mid_turn_continuation_cue: false,
         }
     }
@@ -6076,7 +6071,6 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
-                    iteration,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
@@ -6930,7 +6924,6 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
-                    iteration,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,

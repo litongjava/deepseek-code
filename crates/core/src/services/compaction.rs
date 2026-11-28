@@ -25,6 +25,7 @@ pub struct GenerationFailure(#[source] anyhow::Error);
 pub struct AutoCompactionGate {
     iteration: usize,
     retry_at: usize,
+    completed_mid_turn: usize,
     failure: Option<String>,
 }
 
@@ -34,6 +35,19 @@ impl AutoCompactionGate {
         if iteration >= self.retry_at {
             self.failure = None;
         }
+    }
+
+    pub fn may_start(&self) -> bool {
+        const MAX_MID_TURN_COMPACTIONS: usize = 6;
+        self.iteration >= self.retry_at && self.completed_mid_turn < MAX_MID_TURN_COMPACTIONS
+    }
+
+    pub(crate) fn defer_threshold(&mut self) {
+        self.retry_at = self.iteration.saturating_add(3);
+    }
+
+    pub(crate) fn committed_mid_turn(&mut self) {
+        self.completed_mid_turn += 1;
     }
 
     /// While blocked, the caller must still check the uncompressed request.

@@ -821,7 +821,7 @@ pub async fn prepare_turn(
     lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
     gate: &mut AutoCompactionGate,
 ) -> Result<()> {
-    if gate.blocking_failure().is_some() {
+    if !gate.may_start() {
         return Ok(());
     }
     // A request the model queued is honored before this prompt even when the

@@ -1,8 +1,6 @@
 //! Rebuild provider input from the same session view used on resume.
 use super::*;
 
-const MAX_MID_TURN_COMPACTIONS: usize = 6;
-
 const MID_TURN_CONTINUATION_FOCUS: &str = "This automatic compaction runs mid-turn while the assistant is actively executing a task. Preserve the user's original request and constraints, all files modified or inspected, key tool outputs and test/verification results so far, unresolved errors, and the exact next concrete step so the assistant can continue executing immediately without waiting for another user message.";
 
 const NATIVE_MID_TURN_CONTINUATION_PROMPT: &str = "Context was automatically compacted mid-turn. Continue executing the current task immediately from where you left off without waiting for a new user prompt.";
@@ -325,7 +323,6 @@ impl ToolLoopExecutor {
         M: serde::Serialize + serde::de::DeserializeOwned + Clone,
     >(
         &mut self,
-        iteration: usize,
         current_text: &str,
         window: &mut Vec<M>,
         durable_len: usize,
@@ -394,10 +391,7 @@ impl ToolLoopExecutor {
             }
         }
 
-        if self.mid_turn_compactions >= MAX_MID_TURN_COMPACTIONS
-            || iteration < self.mid_turn_compact_cooldown_until
-            || self.messages.is_empty()
-        {
+        if !self.compaction_gate.may_start() || self.messages.is_empty() {
             return Ok(if microcompact_changed {
                 MidTurnCompact::Synced
             } else {
@@ -440,7 +434,7 @@ impl ToolLoopExecutor {
                             "Mid-turn auto-compact skipped ({error:#}); continuing with existing context."
                         )))
                         .await;
-                    self.mid_turn_compact_cooldown_until = iteration + 3;
+                    self.compaction_gate.defer_threshold();
                     return Ok(if microcompact_changed {
                         MidTurnCompact::Synced
                     } else {
@@ -500,7 +494,7 @@ impl ToolLoopExecutor {
                         "Mid-turn auto-compact skipped ({error:#}); continuing with existing context."
                     )))
                     .await;
-                self.mid_turn_compact_cooldown_until = iteration + 3;
+                self.compaction_gate.defer_threshold();
                 return Ok(if microcompact_changed {
                     MidTurnCompact::Synced
                 } else {
@@ -566,7 +560,7 @@ impl ToolLoopExecutor {
         self.stop_hook_active = false;
         self.last_reported_input_tokens = None;
         self.last_request_message_tokens = None;
-        self.mid_turn_compactions += 1;
+        self.compaction_gate.committed_mid_turn();
 
         self.reload_history(&shard)?;
         self.mid_turn_continuation_cue = true;
@@ -589,7 +583,7 @@ impl ToolLoopExecutor {
         let post_compact = (TokenCounter::estimate(&post_compact_rows) as u64)
             .saturating_add(self.last_request_overhead_tokens);
         if post_compact >= threshold * 90 / 100 {
-            self.mid_turn_compact_cooldown_until = iteration + 3;
+            self.compaction_gate.defer_threshold();
         }
         Ok(MidTurnCompact::Compacted)
     }
@@ -730,6 +724,9 @@ impl ToolLoopExecutor {
             self.check_uncompressed_request(&cause, window).await?;
             return Ok(false);
         }
+        // Respect threshold deferrals here too. A previous generation failure
+        // already took the stricter uncompressed-capacity path above.
+        let mid_turn_managed = mid_turn_managed || !self.compaction_gate.may_start();
         let model = &self.provider.model;
         let limit = model
             .context_window
