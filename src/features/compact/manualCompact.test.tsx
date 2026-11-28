@@ -23,7 +23,7 @@ it('submits dialog focus and refreshes the conversation, count and context estim
   render(<CompactDialog activeId="session" compactInstruction="  preserve tests  " onCompact={compact}
     setCompactInstruction={vi.fn()} setShowCompactDialog={vi.fn()} />);
   fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
-  await waitFor(() => expect(reload).toHaveBeenCalledWith('session'));
+  await waitFor(() => expect(reload).toHaveBeenCalledWith('session', expect.any(Function)));
   expect(compactConversation).toHaveBeenCalledWith('session', 'preserve tests');
   expect(useChatStore.getState().compactStatus).toEqual({ state: 'done', message: 'Compacted 3 messages, saved ~125 tokens' });
   expect(useProjectStore.getState().contextInfo).toEqual({ tokens: 75, limit: 1000 });

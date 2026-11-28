@@ -5,11 +5,11 @@ import { useProjectStore } from '../../stores/useProjectStore';
 export async function runManualCompact(
   id: string,
   instruction: string,
-  loadConversation: (id: string) => Promise<void>,
+  loadConversation: (id: string, isCurrent: () => boolean) => Promise<void>,
   isCurrent: () => boolean,
 ) {
   const { compactStatus, setCompactStatus } = useChatStore.getState();
-  if (compactStatus.state === 'compacting') return;
+  if (!isCurrent() || compactStatus.state === 'compacting') return;
   setCompactStatus({ state: 'compacting' });
 
   let result;
@@ -22,13 +22,14 @@ export async function runManualCompact(
     return;
   }
   if (!isCurrent()) return;
+  // A refresh failure cannot undo the committed boundary.
+  const [, context] = await Promise.allSettled([loadConversation(id, isCurrent), getContextSize(id)]);
+  if (!isCurrent()) return;
   setCompactStatus({
     state: 'done',
     message: `Compacted ${result.messagesCompacted} messages, saved ~${result.tokensSaved} tokens`,
   });
-  // A refresh failure cannot undo the committed boundary.
-  const [, context] = await Promise.allSettled([loadConversation(id), getContextSize(id)]);
-  if (context.status === 'fulfilled' && isCurrent()) {
+  if (context.status === 'fulfilled') {
     useProjectStore.getState().setContextInfo(context.value);
   }
 }

@@ -2,7 +2,7 @@ import { contentBlocks, hasUnavailableImages, readImageDataUrl, replaceUserText,
 import { useComposerDrop } from '../features/chat/useComposerDrop';
 import PlanApprovalController from '../features/chat/PlanApprovalController';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { planModeFromTool, approvedPermissionModeFromTool } from '../features/streaming/planMode';
 import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, AlertTriangle, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, Loader2, Smartphone, Terminal, Monitor } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
@@ -294,6 +294,20 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   // Per-conversation message buffer for multi-conversation streaming isolation
   const viewingIdRef = useRef<string | null>(null);
+  const viewGeneration = useRef(0);
+  useLayoutEffect(() => {
+    viewingIdRef.current = activeId || null;
+    return () => {
+      viewingIdRef.current = null;
+      viewGeneration.current++;
+    };
+  }, [activeId]);
+
+  const captureView = (id: string) => {
+    const generation = viewGeneration.current;
+    return () => viewingIdRef.current === id && viewGeneration.current === generation;
+  };
+
   const messagesBufferRef = useRef(new Map<string, any[]>());
 
   const {
@@ -682,7 +696,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setActiveTasks(new Map());
     setAskUserDialog(null);
     isCreatingRef.current = false;
-    viewingIdRef.current = activeId || null;
     setCompactStatus({ state: 'idle' });
     setReadyConversationId(null);
 
@@ -809,7 +822,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           }
         }).catch(() => {});
       }
-      getContextSize(activeId).then(setContextInfo).catch(() => { });
+      const isCurrent = captureView(activeId);
+      getContextSize(activeId).then(context => { if (isCurrent()) setContextInfo(context); }).catch(() => { });
       isAtBottomRef.current = true;
 
       // Handle initialMessage from Project page navigation
@@ -849,14 +863,15 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     };
   }, [abortStreamSession]);
 
-  const loadConversation = async (conversationId: string) => {
+  const loadConversation = async (conversationId: string, isCurrent = captureView(conversationId)) => {
+    if (!isCurrent()) return;
     let loaded = false;
     console.log('[MainContent] loadConversation called for:', conversationId);
     stopPolling();
     try {
       console.log('[MainContent] Calling getConversation...');
       const data = await getConversation(conversationId);
-      if (viewingIdRef.current !== conversationId) return;
+      if (!isCurrent()) return;
       console.log('[MainContent] getConversation returned:', data ? 'success' : 'null', 'messages:', data?.messages?.length);
       // Restore conversation model. If the stored model isn't available in the
       // current user_mode (typical case: user switched modes after the conv was
@@ -917,7 +932,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       // 检查是否有活跃的后台生成
       try {
         const genStatus = await getGenerationStatus(conversationId);
-        if (viewingIdRef.current !== conversationId) return;
+        if (!isCurrent()) return;
         if (genStatus.active && genStatus.status === 'generating') {
           // 追加占位 assistant 消息（如果最后一条不是 assistant）
           setMessages(prev => {
@@ -961,11 +976,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           pollingRef.current = setInterval(async () => {
             try {
               const s = await getGenerationStatus(conversationId);
-              if (viewingIdRef.current !== conversationId) return;
+              if (!isCurrent()) return;
               if (s.active && s.assistant_id && s.assistant_id !== polledAssistantId) {
                 polledAssistantId = s.assistant_id;
                 stopPolling();
-                await loadConversation(conversationId);
+                await loadConversation(conversationId, isCurrent);
                 return;
               }
               if (!s.active || s.status !== 'generating') {
@@ -973,17 +988,18 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 stopPolling();
                 setLoading(false);
                 const final_ = await getConversation(conversationId);
-                if (viewingIdRef.current !== conversationId) return;
+                if (!isCurrent()) return;
                 setMessages((final_.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg)));
                 isAtBottomRef.current = true;
                 scheduleScrollToBottomAfterRender();
                 if (final_.title) setConversationTitle(final_.title);
-                getContextSize(conversationId).then(setContextInfo).catch(() => { });
+                getContextSize(conversationId).then(context => { if (isCurrent()) setContextInfo(context); }).catch(() => { });
                 return;
               }
               // 跨进程轮询：内容在另一个进程，从数据库拉最新消息
               if (s.crossProcess) {
                 const fresh = await getConversation(conversationId);
+                if (!isCurrent()) return;
                 const freshMsgs = (fresh.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg));
                 isAtBottomRef.current = true;
                 scheduleScrollToBottomAfterRender();
@@ -1013,6 +1029,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 return newMsgs;
               });
             } catch (e) {
+              if (!isCurrent()) return;
               console.error('[Polling] error:', e);
               stopPolling();
               setLoading(false);
@@ -1023,13 +1040,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
       } catch {
         // generation-status 接口失败不影响正常加载
-        setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     } catch (err) {
       console.error(err);
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     } finally {
-      if (loaded && viewingIdRef.current === conversationId) setReadyConversationId(conversationId);
+      if (loaded && isCurrent()) setReadyConversationId(conversationId);
     }
   };
 
@@ -1132,7 +1149,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   };
 
   const handleManualCompact = (conversationId: string, instruction: string) =>
-    runManualCompact(conversationId, instruction, loadConversation, () => viewingIdRef.current === conversationId);
+    runManualCompact(conversationId, instruction, loadConversation, captureView(conversationId));
 
   const handleSend = async (overrideText?: string) => {
     if (requestCodeProject()) return;

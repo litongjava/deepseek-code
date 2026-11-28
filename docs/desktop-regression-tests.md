@@ -112,7 +112,7 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 4. 恢复期间取消（停止当前回复）后历史不变；再次压缩时已完成的分段直接复用，进度显示复用计数。
 5. 在隔离数据目录里用本地 mock 保存带唯一值的 Read 结果，再生成省略该值的摘要并继续。新会话请求的工具目录可发现 `ContextSearch`。同一会话压缩后，即使 Desktop 发出的请求没有边界元数据，应用已保存边界后也会提示通过 `ToolLoad` 加载。核对该值首次出现在检索结果里，引用的消息和工具调用 ID 与压缩前的 SQLite 记录一致。关闭两个工具开关后复验提示和调用均不可用。
 
-用 `cargo test --locked -p deepseek-code-desktop --test conversation_generation_bridge` 检查手动压缩接口返回的摘要和计数、进行中回合的 409，以及提供商失败后历史保持原样。用 `npm run test:run -- src/features/compact/manualCompact.test.tsx` 检查对话框与 `/compact` 的焦点参数、刷新及错误提示。
+用 `cargo test --locked -p deepseek-code-desktop --test conversation_generation_bridge` 检查手动压缩接口返回的摘要和计数、进行中回合的 409，以及提供商失败后历史保持原样。用 `npm run test:run -- src/features/compact/manualCompact.test.tsx` 检查对话框与 `/compact` 的焦点参数、刷新及错误提示。 Bridge 测试还覆盖同模型切换提供商、带编码的提供商 ID 与 [1m]、共用准入检查和拼错的请求字段。用 `npm run test:run -- src/components/review-navigation.test.tsx` 检查切换对话或卸载后，旧请求返回的历史、标题、上下文和错误不会覆盖当前对话。
 
 ### D4. 技能目录（共享 core 路径）
 
