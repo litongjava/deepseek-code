@@ -137,25 +137,26 @@ pub(crate) async fn generate_messages_with_options(
         .headers(options.headers(provider)?)
         .headers(identity.headers())
         .json(&body);
-    let mut response = crate::native_engine::request_recording::send(
-        request,
-        &options,
-        provider,
-        "openai-responses-compact",
-        false,
-    )
+    let bytes = crate::performance::retry_with_backoff(|| async {
+        let attempt = request.try_clone().context("Cannot replay native compaction request")?;
+        let response = crate::native_engine::request_recording::send(
+            attempt, &options, provider, "openai-responses-compact", false,
+        )
+        .await?;
+        let mut response = crate::performance::checked_response(response).await?;
+        const LIMIT: usize = 32 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(bytes.len() + chunk.len() <= LIMIT, "Native compaction response exceeds 32 MiB");
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    })
     .await
-    .context("Native compaction gateway request failed")?;
-    ensure!(response.status().is_success(), "Native compaction gateway returned HTTP {}; verify /responses/compact support and input context size", response.status().as_u16());
-    const LIMIT: usize = 32 * 1024 * 1024;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            bytes.len() + chunk.len() <= LIMIT,
-            "Native compaction response exceeds 32 MiB"
-        );
-        bytes.extend_from_slice(&chunk);
-    }
+    .map_err(|error| {
+        let message = format!("Native compaction gateway request failed: {error}");
+        error.context(message)
+    })?;
     let result: Value = serde_json::from_slice(&bytes).context("Invalid native compaction JSON")?;
     if let Some(metrics) = &mut metrics {
         metrics.observe_usage(&result["usage"]);
