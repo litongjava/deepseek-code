@@ -59,7 +59,10 @@ pub(super) async fn start_authorized_chat(
         .and_then(|m| m.get("content"))
         .cloned();
     let admission = super::chat_admission::Operation::Chat {
-        model: &req.model, content: user_content.as_ref(), queued: queued.is_some(),
+        model: &req.model,
+        provider: req.provider_id.as_deref(),
+        content: user_content.as_ref(),
+        queued: queued.is_some(),
     };
     let (execution_lease, sealed_first) = match super::chat_admission::admit(&state, &id, admission).await {
         Ok((lease, sealed)) => (std::sync::Arc::new(lease), sealed),

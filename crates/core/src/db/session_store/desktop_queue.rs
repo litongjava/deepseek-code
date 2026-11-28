@@ -111,16 +111,27 @@ impl Stores {
         first: Option<&serde_json::Value>,
         origin: &str,
     ) -> Result<(ExecutionLease, bool)> {
+        self.admit_chat_execution_with_provider(id, model, None, first, origin)
+    }
+
+    pub fn admit_chat_execution_with_provider(
+        &self,
+        id: &str,
+        model: &str,
+        provider: Option<&str>,
+        first: Option<&serde_json::Value>,
+        origin: &str,
+    ) -> Result<(ExecutionLease, bool)> {
         let row = self
             .global()
             .read_directory_row(id, |c| super::directory::one(c, id))?;
         let Some(row) = row else {
-            let options = super::conversations::first_chat_options(model, first, origin)?;
+            let options = super::conversations::first_chat_options(model, provider, first, origin)?;
             return self.create_chat_with_lease(id, options);
         };
         let session = self.open_listed(&row)?;
         let lease = session.acquire_settled_execution()?;
-        let options = super::conversations::first_chat_options(model, first, origin)?;
+        let options = super::conversations::first_chat_options(model, provider, first, origin)?;
         let sealed_first = session.consume_sealed_first(options.first_message.as_ref())?;
         Ok((lease, sealed_first))
     }

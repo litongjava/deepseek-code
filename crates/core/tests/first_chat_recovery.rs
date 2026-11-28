@@ -13,15 +13,31 @@ fn first_chat_recovery() -> Result<()> {
         Ok(())
     });
     let content = json!("first turn");
-    let result = fault.admit_chat_execution("publication", "model", Some(&content), "typed");
+    let result = fault.admit_chat_execution_with_provider(
+        "publication",
+        "model",
+        Some("original"),
+        Some(&content),
+        "typed",
+    );
     let error = result.err().expect("first admission should fail");
     println!("First admission returned: {error:#}");
     assert_eq!(stores.conversation_detail("publication")?.1.len(), 1);
-    let (lease, sealed) =
-        stores.admit_chat_execution("publication", "model", Some(&content), "typed")?;
+    let (lease, sealed) = stores.admit_chat_execution_with_provider(
+        "publication",
+        "model",
+        Some("stale-retry"),
+        Some(&content),
+        "typed",
+    )?;
     if !sealed {
         stores.admit_chat_message("publication", "model", Some(&content), "typed")?;
     }
+    let binding = stores.observed_binding("publication")?;
+    assert_eq!(
+        (binding.provider.as_str(), binding.model.as_str()),
+        ("original", "model")
+    );
     drop(lease);
     let (_, messages) = stores.conversation_detail("publication")?;
     let texts: Vec<_> = messages.iter().map(|m| &m["content"]).collect();

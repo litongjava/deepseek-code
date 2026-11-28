@@ -23,6 +23,7 @@ fn validate_chat(c: &rusqlite::Connection, id: &str) -> Result<()> {
 
 pub(super) fn first_chat_options(
     model: &str,
+    provider: Option<&str>,
     content: Option<&Value>,
     origin: &str,
 ) -> Result<CreateOptions> {
@@ -37,8 +38,16 @@ pub(super) fn first_chat_options(
             })
         })
         .transpose()?;
+    // An explicitly supplied model ID is opaque. If it contains the Desktop
+    // selector delimiter, qualify it so later readers split off the real
+    // provider and keep the entire original ID.
+    let stored_model = match provider {
+        Some(id) if model.contains("::") => format!("{}::{model}", urlencoding::encode(id)),
+        _ => model.to_owned(),
+    };
     Ok(CreateOptions {
-        model: Some(model.into()),
+        model: Some(stored_model),
+        provider: provider.map(str::to_owned),
         first_message,
         ..Default::default()
     })
@@ -73,7 +82,7 @@ impl Stores {
                 }
             }
             None => {
-                self.create(id, first_chat_options(model, content, origin)?)?;
+                self.create(id, first_chat_options(model, None, content, origin)?)?;
             }
         }
         Ok(())

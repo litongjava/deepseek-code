@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 pub(super) enum Operation<'a> {
     Chat {
         model: &'a str,
+        provider: Option<&'a str>,
         content: Option<&'a Value>,
         queued: bool,
     },
@@ -54,6 +55,7 @@ pub(super) async fn admit(
     match operation {
         Operation::Chat {
             model,
+            provider,
             content,
             queued,
         } => {
@@ -61,7 +63,13 @@ pub(super) async fn admit(
                 crate::runtime::normalize_user_content(typed)
                     .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
             }
-            db.admit_chat_execution(id, model, content.filter(|_| !queued), "typed")
+            db.admit_chat_execution_with_provider(
+                id,
+                model,
+                provider,
+                content.filter(|_| !queued),
+                "typed",
+            )
         }
         Operation::Compact => {
             if db
