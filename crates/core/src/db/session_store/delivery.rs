@@ -5,6 +5,8 @@ use crate::services::{
     input_queue::{self, DeliveredInput, QueueError, QueueMode},
     session_messages::{self, ExecutionLease},
 };
+use session_messages::identity::{PeerProject, Resolver};
+use std::collections::HashMap;
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -441,9 +443,7 @@ impl SessionDb {
             Ok(c.query_row("SELECT id,sender,recipient,?2,created_at,state,read,blocked_reason FROM session_inbox WHERE id=?1",
                 [id,text], session_messages::row)?)
         };
-        self.stores
-            .global()
-            .write("send peer", &self.id, false, |c| {
+        let replay = |c: &Connection| -> Result<Option<session_messages::Message>> {
                 if let Some((id, s, r, h)) = c
                     .query_row("SELECT i.id,i.sender_incarnation,i.recipient,i.payload FROM session_inbox_operations o JOIN session_inbox i ON i.id=o.message_id WHERE operation_id=?1", [operation], |r| {
                         Ok((
@@ -459,9 +459,19 @@ impl SessionDb {
                         s == self.incarnation && r == to.id && h == hash,
                         "Peer operation conflict"
                     );
-                    return message(c, &id);
+                    return message(c, &id).map(Some);
                 }
-                let (source, destination) = peer_projects(c, &self.stores.root.path, &self.id, &to.id)?;
+            Ok(None)
+        };
+        if let Some(existing) = self.stores.global().read(replay)? {
+            return Ok(existing);
+        }
+        let (from, dest) = self.stores.global().read(|c| Resolver::default().pair(c, &self.id, &to.id))?;
+        self.stores.global().write("send peer", &self.id, false, |c| {
+                if let Some(existing) = replay(c)? {
+                    return Ok(existing);
+                }
+                let (source, destination) = peer_projects(c, &self.id, &to.id, &from, &dest)?;
                 let (count, bytes): (i64, i64) =
                     c.query_row("SELECT count(*),coalesce(sum(size),0) FROM session_inbox WHERE recipient=?1 AND state IN ('queued','claimed','blocked')", [&to.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 ensure!(
@@ -621,6 +631,7 @@ impl SessionDb {
             session: self.clone(),
             _lease: lease,
             _consumer: consumer,
+            peer_resolver: Resolver::default(),
             live_handoffs: Default::default(),
             deferred_steer: false,
         })
@@ -663,9 +674,9 @@ fn paused(c: &Connection, id: &str) -> Result<bool> {
         |r| r.get(0),
     )?)
 }
-fn peer_projects(c: &Connection, root: &Path, from: &str, to: &str) -> Result<(String, String)> {
-    let source = session_messages::project(c, root, from)?;
-    let destination = session_messages::project(c, root, to)?;
+fn peer_projects<'a>(c: &Connection, from: &str, to: &str, sender: &'a PeerProject, recipient: &'a PeerProject) -> Result<(&'a str, &'a str)> {
+    let source = sender.confirm(c, from)?;
+    let destination = recipient.confirm(c, to)?;
     if source != destination {
         let paired: bool = c.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_member_sessions a
@@ -680,10 +691,16 @@ fn peer_projects(c: &Connection, root: &Path, from: &str, to: &str) -> Result<(S
     }
     Ok((source, destination))
 }
+struct PeerBatch {
+    claims: std::vec::IntoIter<(Claim, usize)>,
+    projects: HashMap<String, Option<PeerProject>>,
+}
+
 pub struct DeliveryOwner {
     pub(super) session: SessionDb,
     _lease: std::sync::Arc<ExecutionLease>,
     _consumer: ExecutionLease,
+    peer_resolver: Resolver,
     live_handoffs: std::collections::HashMap<String,String>,
     deferred_steer: bool,
 }
@@ -704,10 +721,10 @@ struct Claim {
 }
 pub(crate) const TURN_POLL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Bound each writer acquisition for live queue delivery. Resolving memory,
+/// Bound each writer acquisition for live delivery. Resolving memory,
 /// hashing files and flushing a committed WAL can each outlast a poll interval.
-fn write_wait(until: std::time::Instant, live_input: bool) -> std::time::Duration {
-    if live_input {
+fn write_wait(until: std::time::Instant, live: bool) -> std::time::Duration {
+    if live {
         TURN_POLL_WAIT
     } else {
         until.saturating_duration_since(std::time::Instant::now())
@@ -720,8 +737,13 @@ impl DeliveryOwner {
         self._consumer.duplicate_descriptor()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_peer_resolver(&mut self, resolver: Resolver) {
+        self.peer_resolver = resolver;
+    }
+
     pub(crate) fn poll_peer_context(&mut self, limit:usize) -> Result<Vec<DeliveredInput>> {
-        self.session.validate_peer_endpoint()?;
+        self.session.validate_peer_endpoint(&mut self.peer_resolver)?;
         self.poll_turn(true,limit)
     }
 
@@ -880,20 +902,11 @@ impl DeliveryOwner {
         crate::db::turn_repo::TurnTimer::from_dispatch(self.session.clone(), &turn)
     }
     pub fn next_peer(&mut self) -> Result<Option<Handoff>> {
-        self.peer_before(
-            usize::MAX,
-            std::time::Instant::now() + super::WRITE_DEADLINE,
-            false,
-        )
+        let mut batch = self.prepare_peers()?;
+        self.peer_before(&mut batch, usize::MAX, std::time::Instant::now() + super::WRITE_DEADLINE, false)
     }
 
-    fn peer_before(
-        &mut self,
-        max_bytes: usize,
-        until: std::time::Instant,
-        live: bool,
-    ) -> Result<Option<Handoff>> {
-        layout::allow_entry()?;
+    fn prepare_peers(&mut self) -> Result<PeerBatch> {
         let s = &self.session;
         let claims = s.stores.global().read(|c| {
             let mut q = c.prepare(
@@ -920,7 +933,30 @@ impl DeliveryOwner {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(result)
         })?;
-        for (mut claim, size) in claims {
+        let mut projects = HashMap::new();
+        if !claims.is_empty() {
+            s.stores.global().read(|c| {
+                for id in std::iter::once(s.id.as_str()).chain(claims.iter().filter_map(|(claim, _)| claim.sender.as_deref())) {
+                    if !projects.contains_key(id) {
+                        let project = match self.peer_resolver.project(c, id) {
+                            Ok(project) => Some(project),
+                            Err(err) if err.downcast_ref::<rusqlite::Error>().is_some() => return Err(err),
+                            Err(_) => None,
+                        };
+                        projects.insert(id.to_owned(), project);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(PeerBatch { claims: claims.into_iter(), projects })
+    }
+
+    fn peer_before(
+        &mut self, batch: &mut PeerBatch, max_bytes: usize, until: std::time::Instant, live: bool,
+    ) -> Result<Option<Handoff>> {
+        let s = &self.session;
+        for (mut claim, size) in batch.claims.by_ref() {
             if size > max_bytes {
                 return Ok(None);
             }
@@ -936,19 +972,26 @@ impl DeliveryOwner {
                     return Ok(None);
                 }
                 let expected: (String,String) = c.query_row("SELECT project_source,coalesce(recipient_source,project_source) FROM session_inbox WHERE id=?1", [&claim.id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-                let allowed = match peer_projects(
-                    c,
-                    &s.stores.root.path,
-                    claim.sender.as_ref().unwrap(),
-                    &s.id,
-                ) {
-                    Ok(project) => project == expected,
-                    Err(e) if e.downcast_ref::<rusqlite::Error>().is_some() => return Err(e),
-                    Err(_) => false,
+                let sender_id = claim.sender.as_deref().expect("peer claim has a sender");
+                let allowed = match (batch.projects[sender_id].as_ref(), batch.projects[&s.id].as_ref()) {
+                    (Some(sender), Some(recipient)) => match peer_projects(c, sender_id, &s.id, sender, recipient) {
+                        Ok((from, to)) => from == expected.0 && to == expected.1,
+                        Err(e) if e.downcast_ref::<rusqlite::Error>().is_some() => return Err(e),
+                        Err(_) => false,
+                    },
+                    _ => false,
                 };
                 if !allowed {
                     c.execute("UPDATE session_inbox SET state='blocked',blocked_reason='Sender or recipient project/trust changed' WHERE id=?1 AND state<>'blocked'", [&claim.id])?;
                     return Ok(None);
+                }
+                // The inbox lease excludes other consumers. Revalidate trust above,
+                // then retry an unfinished claim with its original generation.
+                if let Some(generation) = c.query_row(
+                    "SELECT generation FROM session_inbox WHERE id=?1 AND state='claimed'",
+                    [&claim.id], |r| r.get::<_, i64>(0),
+                ).optional()? {
+                    return Ok(Some(generation));
                 }
                 let generation: i64 = c.query_row("INSERT INTO session_inbox_consumers VALUES(?1,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1 RETURNING generation", [&s.id], |r| r.get(0))?;
                 ensure!(
@@ -970,22 +1013,34 @@ impl DeliveryOwner {
     }
 
     /// A batch contains at most eight items. Peers share a discovery deadline,
-    /// while live queue entries each get a bounded wait at the next writer.
+    /// while completing a live claim gets a fresh bounded wait at each writer.
     /// An ack-only retry injects content only if this same live owner committed it.
     pub(crate) fn poll_turn(&mut self, peers: bool, limit: usize) -> Result<Vec<DeliveredInput>> {
         use crate::db::message_repo;
-        let until = std::time::Instant::now() + TURN_POLL_WAIT;
         if !peers {
             self.deferred_steer = false;
         }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut peer_batch = if peers {
+            match self.prepare_peers() {
+                Ok(batch) => Some(batch),
+                Err(error) if crate::db::is_contention(&error) => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let until = std::time::Instant::now() + TURN_POLL_WAIT;
         let mut remaining = 128 * 1024;
         let mut inputs = Vec::new();
         for _ in 0..limit.min(8) {
             if peers && std::time::Instant::now() >= until {
                 break;
             }
-            let next = if peers {
-                self.peer_before(remaining, until, true)
+            let next = if let Some(batch) = &mut peer_batch {
+                self.peer_before(batch, remaining, until, true)
             } else {
                 self.queue_before(QueueMode::Steer, None, until, true, None)
             };
@@ -1061,7 +1116,6 @@ impl DeliveryOwner {
     }
     fn complete(&mut self, claim: Claim, until: std::time::Instant, live: bool) -> Result<Handoff> {
         let s = &self.session;
-        let live_input = live && claim.sender.is_none();
         s.stores.step(Phase::DeliveryClaimed)?;
         let fresh = if self.has_receipt(&claim)? {
             false
@@ -1079,7 +1133,7 @@ impl DeliveryOwner {
             let memory = typed
                 .then(|| crate::services::memory_files::prompt::Admission::session(s))
                 .transpose()?;
-            let delivered = s.write_locked_with_deadline("deliver input", write_wait(until, live_input), |tx| {
+            let delivered = s.write_locked_with_deadline("deliver input", write_wait(until, live), |tx| {
                 ensure!(claim.sender.is_none() || !tx.3.retiring_here,"Provider switch pending; inbox retained");
                 if let Some(tool) = &claim.target {
                     let exists: bool = tx.0.query_row(
@@ -1144,7 +1198,7 @@ impl DeliveryOwner {
             if !delivered {
                 s.stores
                     .global()
-                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, write_wait(until, live_input), |c| {
+                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, write_wait(until, live), |c| {
                         ensure!(
                             c.execute("UPDATE session_input_queue SET state='cancelled', revision=revision+1 WHERE session_id=?1 AND delivery_id=?2 AND revision=?3 AND state='claimed'", params![s.id, claim.id, claim.revision])? == 1,
                             "Stale tool claim"
@@ -1180,7 +1234,7 @@ impl DeliveryOwner {
         // durable in G, flush the committed receipt (also on ack-only replay).
         // A pinned reader can postpone the checkpoint; the G claim stays live.
         s.connection_under_lock(rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE, |c| {
-            let _wait = crate::db::BusyTimeoutGuard::within(c, write_wait(until, live_input))?;
+            let _wait = crate::db::BusyTimeoutGuard::within(c, write_wait(until, live))?;
             let busy: i64 = c.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| r.get(0))?;
             if busy != 0 {
                 return Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
@@ -1194,7 +1248,7 @@ impl DeliveryOwner {
         s.stores.step(Phase::DeliveryCommitted)?;
         s.stores
             .global()
-            .write_with_deadline("acknowledge delivery", &s.id, true, write_wait(until, live_input), |c| {
+            .write_with_deadline("acknowledge delivery", &s.id, true, write_wait(until, live), |c| {
                 let changed = if claim.sender.is_some() {
                     c.execute("UPDATE session_inbox SET state='context_committed',blocked_reason=NULL,committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND recipient=?2 AND state='claimed' AND generation=?3", params![claim.id, s.id, claim.revision])?
                 } else {

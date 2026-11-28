@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+pub(crate) mod identity;
+
 const MAX_PENDING: i64 = 256;
 const MAX_PENDING_BYTES: i64 = 1024 * 1024;
 
@@ -45,43 +47,8 @@ fn valid_id(id: &str) -> Result<()> {
     );
     Ok(())
 }
-pub(crate) fn project(conn: &Connection, root: &Path, id: &str) -> Result<String> {
-    valid_id(id)?;
-    let row =
-        conversation_repo::conversation_metadata(conn, id)?.context("Message session not found")?;
-    ensure!(!row.archived, "Message session is archived");
-    ensure!(
-        row.workspace_mode == "code",
-        "Messages require a Code session"
-    );
-    let project_id = row
-        .project_id
-        .as_deref()
-        .context("Message session has no source project")?;
-    // Resolve validates trust and the managed-worktree mapping, but returns an
-    // adapted worktree project. Identity must come from the original project.
-    crate::native_engine::workspace::resolve_workspace(
-        conn,
-        &root.join("data/workspaces"),
-        id,
-        None,
-    )?;
-    let project = crate::db::project_repo::get_project(conn, project_id)?
-        .context("Message project not found")?;
-    ensure!(!project.is_archived, "Message project is archived");
-    let source = Path::new(
-        project
-            .workspace_path
-            .as_deref()
-            .context("Message project has no source directory")?,
-    )
-    .canonicalize()?;
-    let source = source.to_string_lossy().into_owned();
-    Ok(if cfg!(windows) {
-        source.to_lowercase()
-    } else {
-        source
-    })
+pub(crate) fn project(conn: &Connection, id: &str) -> Result<String> {
+    Ok(identity::Resolver::default().project(conn, id)?.source)
 }
 pub(crate) fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -229,7 +196,9 @@ impl PeerMailbox for ServiceContext<crate::db::DbManager> {
         );
         let digest = content_digest(content);
         self.db.with_conn(|conn|->Result<_>{
-        schema(conn)?;let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
+        schema(conn)?;
+        let projects = identity::Resolver::default().pair(conn, sender, recipient);
+        let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
         if let Some(operation_id) = operation_id {
             if let Some((message_id, stored_sender, stored_recipient, stored_digest)) = tx
                 .query_row(
@@ -250,8 +219,9 @@ impl PeerMailbox for ServiceContext<crate::db::DbManager> {
                 return Ok(message);
             }
         }
-        let source=project(&tx,&self.paths.data_dir,sender)?;
-        let recipient_source=project(&tx,&self.paths.data_dir,recipient)?;
+        let (from, to) = projects?;
+        let source = from.confirm(&tx, sender)?;
+        let recipient_source = to.confirm(&tx, recipient)?;
         // A Super Agent task deliberately pairs a Router with sessions in
         // isolated workspaces. The durable task record is the authorization for
         // exactly those pairs; arbitrary cross-project messages stay rejected.
@@ -677,7 +647,7 @@ impl Consumer {
         let Some(row)=ctx.db.conversation_metadata(id)? else {return Ok(None);};
         if row.workspace_mode!="code" || row.project_id.is_none(){return Ok(None);}
         let session=ctx.db.open_session(id)?;
-        session.validate_peer_endpoint()?;
+        session.validate_peer_endpoint(&mut identity::Resolver::default())?;
         let delivery=std::sync::Arc::new(std::sync::Mutex::new(Some(session.delivery_owner()?)));
         Ok(Some(Self{owner:std::process::id(), target:Target{generation:std::process::id(),live:std::sync::Arc::downgrade(&delivery)},delivery}))
     }
@@ -700,8 +670,8 @@ impl crate::db::DbManager {
         if family {return self.family_peers(session);}
         let root=self.data_dir();
         self.with_conn(|conn|->Result<_>{
-        let source=project(conn,root,session)?;let rows=conversation_repo::list_conversations(conn)?;let mut result=Vec::new();
-        for row in rows {if project(conn,root,&row.id).is_ok_and(|p|p==source) {result.push(serde_json::json!({"id":row.id,"title":row.title,"current":row.id==session,"receiver_active":receiver_active_by_key(root,&row.id)?,"saved":true}));}}
+        let source=project(conn,session)?;let rows=conversation_repo::list_conversations(conn)?;let mut result=Vec::new();
+        for row in rows {if project(conn,&row.id).is_ok_and(|p|p==source) {result.push(serde_json::json!({"id":row.id,"title":row.title,"current":row.id==session,"receiver_active":receiver_active_by_key(root,&row.id)?,"saved":true}));}}
         Ok(result)
     })?
 }
@@ -709,7 +679,7 @@ impl crate::db::DbManager {
 fn family_peers(&self,session:&str)->Result<Vec<serde_json::Value>>{
     let root=self.data_dir();
     self.with_conn(|conn| -> Result<_> {
-        let source = project(conn, root, session)?;
+        let source = project(conn, session)?;
         let mut links = Vec::new();
         let mut query = conn.prepare("SELECT key,value FROM peripheral_settings WHERE key LIKE 'delegation.%' OR key LIKE 'background-agent.%'")?;
         for row in query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
@@ -729,7 +699,7 @@ fn family_peers(&self,session:&str)->Result<Vec<serde_json::Value>>{
         }
         let mut result = Vec::new();
         for id in members {
-            if project(conn, root, &id).is_ok_and(|other| other == source) {
+            if project(conn, &id).is_ok_and(|other| other == source) {
                 if let Some(row) = conversation_repo::get_conversation(conn, &id)? {
                     result.push(serde_json::json!({"id":id,"title":row.title,"current":id==session,"receiver_active":receiver_active_by_key(root,&id)?,"saved":true}));
                 }

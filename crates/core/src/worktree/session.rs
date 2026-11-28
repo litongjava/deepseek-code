@@ -305,6 +305,23 @@ pub fn resolve(
     project_id: &str,
     source: &Path,
 ) -> Result<Option<PathBuf>> {
+    resolve_with(conn, id, project_id, source, |path, repo| {
+        ensure!(common_dir(path)? == common_dir(repo)?, "Conversation worktree no longer belongs to this repository");
+        Ok(())
+    })
+}
+
+pub(crate) fn common_dir(cwd: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize()?)
+}
+
+pub(crate) fn resolve_with(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    source: &Path,
+    check_git: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<Option<PathBuf>> {
     let saved: Option<(String, String, String)> = conn.query_row(
         "SELECT source_path, repo_path, path FROM conversation_worktrees WHERE conversation_id = ?1 AND project_id = ?2",
         params![id, project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
@@ -323,17 +340,7 @@ pub fn resolve(
     if super::hooks::resolve(conn, id, &path)? {
         return Ok(Some(path));
     }
-    let common = |cwd: &Path| -> Result<PathBuf> {
-        Ok(PathBuf::from(git(
-            cwd,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?)
-        .canonicalize()?)
-    };
-    ensure!(
-        common(&path)? == common(Path::new(&repo))?,
-        "Conversation worktree no longer belongs to this repository"
-    );
+    check_git(&path, Path::new(&repo))?;
     Ok(Some(path))
 }
 
