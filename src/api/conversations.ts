@@ -478,7 +478,7 @@ export async function respondToolPermission(
   conversationId: string,
   requestId: string,
   toolUseId: string,
-  behavior: 'allow' | 'deny'
+  behavior: import('../components/ToolPermissionPrompt').ToolPermissionChoice
 ): Promise<{ ok: boolean }> {
   const res = await request(`/conversations/${conversationId}/permission`, {
     method: 'POST',

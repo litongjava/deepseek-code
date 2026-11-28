@@ -456,6 +456,17 @@ pub fn redact(value: &mut Value) {
 pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
+        ConfigCommands::HttpGrants { action } => {
+            use crate::args::HttpGrantCommands;
+            use deepseek_code_core::permissions::http_grants;
+            match action {
+                HttpGrantCommands::List => return crate::services::print(&http_grants::list(&paths.data_dir)?),
+                HttpGrantCommands::Revoke { id } => {
+                    ensure!(http_grants::revoke(&paths.data_dir, *id)?, "No HTTP grant with ID {id}");
+                    command_eprintln!("Revoked HTTP grant {id}");
+                }
+            }
+        }
         ConfigCommands::Show => {
             let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"python":deepseek_code_core::services::python_settings::load(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"memory":deepseek_code_core::services::memory_files::config(&crate::services::context(paths)?)?,"experience":json!({"enabled":deepseek_code_core::experience::enabled(&crate::services::context(paths)?)}),"tools":crate::tool_settings::rows(paths)?});
             value[deepseek_code_core::config::command_output::KEY] =

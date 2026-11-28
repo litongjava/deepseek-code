@@ -823,30 +823,32 @@ mod tests {
         .with_user_skill(Some(
             json!({"skill":"deep-research","args":"What does the local fixture establish?"}),
         ));
-        // The fixture host explicitly approves each local fetch; research grants
-        // alone no longer authorize access to loopback services.
-        let shell = if cfg!(windows) { "powershell" } else { "sh" };
-        let emit = |output: &str| {
-            if cfg!(windows) {
-                format!("Write-Output '{output}'")
-            } else {
-                format!("printf '%s' '{output}'")
-            }
-        };
-        let allow = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
-        let mut hooks = json!({"PermissionRequest":[{"matcher":"WebFetch","hooks":[{"type":"command","shell":shell,"command":emit(allow)}]}]});
-        if mode == "hook_permission" {
-            let ask = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
-            hooks["PreToolUse"] = json!([{"matcher":"WebSearch","hooks":[{"type":"command","shell":shell,"command":emit(ask)}]}]);
-        }
-        crate::data_layout::write_config_file(
-            paths.layout().config_file("settings.json"),
-            serde_json::to_vec(&json!({"hooks":hooks})).unwrap(),
+        // Each child can use plaintext only at the fixture's exact origin.
+        crate::permissions::http_grants::grant(
+            &paths.data_dir,
+            temp.path(),
+            "",
+            &fixture.base_url,
+            crate::permissions::http_grants::GrantScope::Project,
         )
         .unwrap();
-        executor = executor.with_hooks(
-            crate::services::tool_hooks::HookRunner::load(&paths.data_dir, temp.path()).unwrap(),
-        );
+        if mode == "hook_permission" {
+            let ask = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
+            let (shell, command) = if cfg!(windows) {
+                ("powershell", format!("Write-Output '{ask}'"))
+            } else {
+                ("sh", format!("printf '%s' '{ask}'"))
+            };
+            let hooks = json!({"PreToolUse":[{"matcher":"WebSearch","hooks":[{"type":"command","shell":shell,"command":command}]}]});
+            crate::data_layout::write_config_file(
+                paths.layout().config_file("settings.json"),
+                serde_json::to_vec(&json!({"hooks":hooks})).unwrap(),
+            )
+            .unwrap();
+            executor = executor.with_hooks(
+                crate::services::tool_hooks::HookRunner::load(&paths.data_dir, temp.path()).unwrap(),
+            );
+        }
         TestRun {
             _temp: temp,
             context,
@@ -893,9 +895,8 @@ mod tests {
         assert_eq!(state.dropped_sources, 0);
         assert_eq!(run.fixture.requests.lock().unwrap().len(), 22);
         assert_eq!(run.fixture.searches.load(Ordering::SeqCst), 6);
-        // Every fetch task reads the same fixture URL; WebFetch's 15-minute
-        // cache serves the repeats without another download.
-        assert_eq!(run.fixture.fetches.load(Ordering::SeqCst), 1);
+        // One extraction plus three independent verification reads; plaintext is not cached.
+        assert_eq!(run.fixture.fetches.load(Ordering::SeqCst), 4);
         assert!(state
             .tasks
             .iter()

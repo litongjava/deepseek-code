@@ -71,9 +71,13 @@ fn full_access_ignores_deny_rules_and_the_sandbox_only_in_bypass_mode() {
         manager.check_permission(&context),
         PermissionResult::Granted
     );
-    // Full Access ignores the deny rule for a local fetch too.
-    assert_eq!(
+    // Full Access still honors an HTTP deny, without changing HTTPS behavior.
+    assert!(matches!(
         manager.check_permission(&fetch("fetch", "http://localhost:3000/")),
+        PermissionResult::Denied(_)
+    ));
+    assert_eq!(
+        manager.check_permission(&fetch("fetch", "https://localhost:3000/")),
         PermissionResult::Granted
     );
     assert!(deepseek_code_core::tools::sandbox::effective_policy(

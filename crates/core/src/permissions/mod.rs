@@ -1,6 +1,7 @@
 pub mod auto_config;
 pub mod decision;
 pub use decision::{DecisionOrigin, PermissionDecision};
+pub mod http_grants;
 pub mod manager;
 pub mod rules;
 pub mod patterns;

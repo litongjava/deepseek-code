@@ -4,6 +4,8 @@ mod fixture_sql;
 use fixture_sql::FixtureSql;
 #[path = "sdk/prompt_suggestion.rs"]
 mod prompt_suggestion;
+#[path = "sdk/http_scopes.rs"]
+mod http_scopes;
 #[path = "sdk/toolscript_approval.rs"]
 mod toolscript_approval;
 #[path = "sdk/interrupt_usage.rs"]

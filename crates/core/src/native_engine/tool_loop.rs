@@ -11,6 +11,8 @@ mod history_replay;
 #[cfg(test)]
 #[path = "hook_lifecycle_tests.rs"]
 mod hook_lifecycle_tests;
+#[path = "http_fetch.rs"]
+mod http_fetch;
 #[cfg(test)]
 #[path = "permission_denied_tests.rs"]
 mod permission_denied_tests;
@@ -873,25 +875,58 @@ fn is_effort_rejection(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+fn is_http_fetch_input(input: &Value) -> bool {
+    input["url"]
+        .as_str()
+        .and_then(|s| reqwest::Url::parse(s).ok())
+        .is_some_and(|url| url.scheme() == "http")
+}
+
+async fn fetch_web_page(
+    input: Value,
+    proxy: Option<&str>,
+    approved: Option<(&str, bool)>,
+) -> Result<Value> {
+    match approved {
+        Some((scope, exact)) => {
+            crate::tools::execute_approved_http_fetch_async(input, proxy, scope, exact).await
+        }
+        None => crate::tools::execute_web_fetch_async(input, proxy).await,
+    }
+}
+
 /// WebFetch like the reference CLI: fetch the page as text, then answer the
 /// prompt against it with the session's model when the page is long enough to
 /// need summarizing. Reading is bounded per call; `next_offset` continues a
 /// long page.
 async fn web_fetch_with_prompt(
-    input: Value,
+    mut input: Value,
     provider: &ResolvedProvider,
     proxy: Option<&str>,
+    approved: Option<(&str, bool)>,
     options: super::request_options::RequestOptions,
 ) -> Result<Value> {
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
-    let page = crate::tools::execute_web_fetch_async(
-        json!({"url":input["url"],"offset":input["offset"],"max_chars":50_000}),
-        proxy,
-    )
-    .await?;
+    input["max_chars"] = json!(50_000);
+    let page = fetch_web_page(input, proxy, approved).await?;
+    let mut result = deliver_web_page(&page, &prompt, provider, options).await?;
+    for key in ["transport", "warning"] {
+        if let Some(value) = page.get(key) {
+            result[key] = value.clone();
+        }
+    }
+    Ok(result)
+}
+
+async fn deliver_web_page(
+    page: &Value,
+    prompt: &str,
+    provider: &ResolvedProvider,
+    options: super::request_options::RequestOptions,
+) -> Result<Value> {
     // A redirect result carries no page body; let the model follow it.
     if page["redirect_url"].is_string() {
-        return Ok(page);
+        return Ok(page.clone());
     }
     let content = page["content"].as_str().unwrap_or_default();
     let offset = page["offset"].as_u64().unwrap_or(0);
@@ -1752,6 +1787,7 @@ async fn execute_builtin_tool(
             input,
             provider,
             web_fetch_proxy.as_deref(),
+            None,
             options.clone(),
         ))
         .await;
@@ -2425,7 +2461,9 @@ impl ToolLoopExecutor {
     /// Whether a call only reads, so it may run alongside neighbouring calls.
     fn is_concurrency_safe(&self, name: &str, input: &Value) -> bool {
         match name {
-            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "ToolLoad" => true,
+            // An HTTP call may prompt after its HTTPS upgrade attempt.
+            "WebFetch" => !is_http_fetch_input(input),
+            "Read" | "Glob" | "Grep" | "ListDir" | "WebSearch" | "ToolLoad" => true,
             "Bash" => {
                 !self.skill_shell_active
                     && input["run_in_background"] != true
@@ -3492,6 +3530,29 @@ impl ToolLoopExecutor {
             .await
     }
 
+    async fn fetch_http_attempt(
+        &self,
+        input: &Value,
+        approved: Option<(&str, bool)>,
+    ) -> Result<Value> {
+        let proxy = configured_web_fetch_proxy(self.search_config_path.as_deref());
+        if !self.raw_web_fetch
+            && input["prompt"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Box::pin(web_fetch_with_prompt(
+                input.clone(),
+                &self.provider.current()?,
+                proxy.as_deref(),
+                approved,
+                self.openai_client.request_options.clone(),
+            ))
+            .await;
+        }
+        fetch_web_page(input.clone(), proxy.as_deref(), approved).await
+    }
+
     async fn run_builtin_inner_with_id(
         &self,
         tool_name: &str,
@@ -3500,6 +3561,19 @@ impl ToolLoopExecutor {
         cwd: &str,
         approved: bool,
     ) -> Result<Value> {
+        if tool_name == "WebFetch" && is_http_fetch_input(tool_input) {
+            return crate::tools::path_scope::with_permissions(
+                self.permission_manager.clone(),
+                crate::tools::path_scope::approved_auto_call(
+                    tool_name,
+                    tool_input,
+                    cwd,
+                    approved,
+                    Box::pin(self.run_http_fetch(tool_input, tool_use_id.unwrap_or_default())),
+                ),
+            )
+            .await;
+        }
         let mut input = shell_state_input(
             tool_name,
             &self.tool_run_input(tool_name, tool_input),
@@ -4317,11 +4391,32 @@ impl ToolLoopExecutor {
                 workspace_path,
             };
             if memory_target.is_some() {
-                pm.check_memory_document_permission(&context)
-            } else if self.is_plan_document_tool(tool_name, tool_input) {
-                pm.check_plan_document_permission(&context)
-            } else if pm.get_mode() == crate::permissions::PermissionMode::Auto {
-                let decision = pm.evaluate_permission(&context);
+                return pm.check_memory_document_permission(&context);
+            }
+            if self.is_plan_document_tool(tool_name, tool_input) {
+                return pm.check_plan_document_permission(&context);
+            }
+            let decision = pm.evaluate_permission(&context);
+            if let Some(url) = crate::permissions::PermissionManager::http_fetch_url(&context) {
+                use crate::permissions::DecisionOrigin;
+                // Local HTTP gets a single combined review in run_http_fetch. It
+                // must honor explicit asks even when the origin has a saved grant.
+                if matches!(decision.result, PermissionResult::RequiresConfirmation(_))
+                    && crate::permissions::web_fetch::requires_local_approval(url.as_str())
+                {
+                    return PermissionResult::Granted;
+                }
+                // DontAsk turns an unresolved prompt into a denial but preserves
+                // its origin. Only default/boundary decisions may use a grant.
+                if matches!(decision.origin, DecisionOrigin::DefaultPrompt | DecisionOrigin::NetworkBoundary) {
+                    match self.http_grant(&url.origin().ascii_serialization()) {
+                        Ok(Some(_)) => return PermissionResult::Granted,
+                        Ok(None) => {}
+                        Err(error) => return PermissionResult::Denied(error.to_string()),
+                    }
+                }
+            }
+            if pm.get_mode() == crate::permissions::PermissionMode::Auto {
                 if !decision.classifier_eligible {
                     return decision.result;
                 }
@@ -4360,7 +4455,7 @@ impl ToolLoopExecutor {
                 }
                 authorization.result
             } else {
-                pm.check_permission(&context)
+                decision.result
             }
         } else {
             PermissionResult::Granted
@@ -10658,6 +10753,7 @@ mod web_fetch_with_prompt_tests {
             input.clone(),
             provider,
             proxy,
+            url.starts_with("http://").then_some((url, true)),
             crate::native_engine::request_options::RequestOptions::for_session(None),
         );
         crate::tools::path_scope::approved_auto_call("WebFetch", &input, ".", true, future).await
@@ -10771,6 +10867,7 @@ mod web_fetch_with_prompt_tests {
         assert_eq!(result["summarized"], false);
         assert_eq!(result["truncated"], true);
         assert_eq!(result["next_offset"], 20_000);
+        assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
         assert_eq!(result["result"].as_str().unwrap().chars().count(), 20_000);
         assert!(result["note"]
             .as_str()
@@ -10808,6 +10905,7 @@ mod web_fetch_with_prompt_tests {
         assert_eq!(result["summarized"], false);
         assert_eq!(result["truncated"], true);
         assert_eq!(result["next_offset"], 20_000);
+        assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
         assert_eq!(result["result"].as_str().unwrap().chars().count(), 20_000);
         assert!(
             result["note"].as_str().unwrap().contains("empty"),

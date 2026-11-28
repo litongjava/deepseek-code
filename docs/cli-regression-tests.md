@@ -1035,7 +1035,9 @@ SDK 用例通过真实 CLI、本地 OpenAI mock、ToolLoad 与私有 worker 验�
 - `services/input_queue.rs`：B、E4，以及“第十一轮：SDK 回合内引导”的全部自动用例
 - `sdk.rs`（SDK stream-json 输入与回合控制）：E6、SDK 全套，以及“第十一轮：SDK 回合内引导”
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
-- `permissions/manager.rs`、`tools/path_scope.rs` 的 WebFetch 本地/私有地址：bypass 模式（含 Full Access）直接放行，其他模式仍逐次确认，显式 deny 在非 Full Access 的 bypass 下仍拒绝。自动检查：`cargo test --locked -p deepseek-code-core --lib -- permissions`、`-- tool_approval` 和 `cargo test --locked -p deepseek-code-core --test full_access`。真实终端复验：以 bypass 让 WebFetch 读取 `http://127.0.0.1:<port>/`，确认没有任何权限提示、请求到达本地服务，结果是 `prompt` 的答案而不是原始响应体；切回 default 后同一地址重新出现确认。
+- WebFetch 本地/私有 HTTPS 仍按本地网络权限处理（`cargo test --locked -p deepseek-code-core --lib -- permissions`、`-- tool_approval` 和 `cargo test --locked -p deepseek-code-core --test full_access`）。明文 HTTP 单独验收：在隔离数据目录启动回环 HTTP 服务，用真实终端分别在 default、bypass 中读取不同路径。无匹配授权时应提示 URL、origin 和明文风险；拒绝或取消后服务端未收到该路径。不要用缓存命中或通用工具批准证明明文授权生效。
+- `cargo test --locked -p deepseek-code-cli --test sdk http_scopes::`：分别核对仅本次、同会话、同项目新会话和跨项目的提示次数与服务端实际收到的路径。SDK `WebFetchHttp` 请求列出 `request.httpScopes`；允许需回 `behavior: allow` 并指定 `httpScope`。检查缺失或非法范围、修改输入、附带权限更新、拒绝、EOF、中断后的迟到回复均不发送明文请求。
+- `cargo test --locked -p deepseek-code-cli --test http_grants`：从 `dcl config http-grants list` 的 JSON 核对项目授权的 origin、scope、数字 id；用 `dcl config http-grants revoke ID` 撤销后不再匹配，重复撤销同一 ID 应失败。`cargo test --locked -p deepseek-code-core --lib permissions::http_grants` 另查端口、子域、会话身份和数据目录隔离；如有重叠授权，撤销一条不应删除其他范围。
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
 - `scripts/sync-opencode-go-catalog.mjs`、`src/data/providerCatalog.json`：M，以及 `npm run test:run -- modelCapabilities`
 - `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示，以及 N 的刷新命令解析、增删同步、替代模型、默认模型失效、取消不保存和保存失败回滚

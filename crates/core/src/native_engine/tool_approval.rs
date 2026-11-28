@@ -127,7 +127,13 @@ impl ToolLoopExecutor {
             manager.check_plan_document_permission(&context)
         } else {
             let decision = manager.evaluate_permission(&context);
-            if pre_tool_hook && decision.origin == crate::permissions::DecisionOrigin::DefaultPrompt
+            if matches!(decision.result, PermissionResult::Denied(_))
+                && matches!(decision.origin, crate::permissions::DecisionOrigin::DefaultPrompt | crate::permissions::DecisionOrigin::NetworkBoundary)
+                && crate::permissions::PermissionManager::http_fetch_url(&context)
+                    .is_some_and(|url| self.http_grant(&url.origin().ascii_serialization()).is_ok_and(|grant| grant.is_some()))
+            {
+                PermissionResult::Granted
+            } else if pre_tool_hook && decision.origin == crate::permissions::DecisionOrigin::DefaultPrompt
             {
                 PermissionResult::Granted
             } else {

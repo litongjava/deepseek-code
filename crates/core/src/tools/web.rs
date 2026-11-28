@@ -33,23 +33,118 @@ fn http_url(url: &str) -> Result<reqwest::Url> {
     if !matches!(parsed.scheme(), "http" | "https") {
         bail!("Only HTTP(S) URLs are supported");
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("WebFetch refuses URLs containing credentials");
+    }
     Ok(parsed)
 }
 
-/// Public HTTP URLs are upgraded to HTTPS. Local HTTP(S) URLs retain their
-/// scheme and require a capability issued for the reviewed call.
+/// Ordinary execution only sends HTTPS. Local plaintext needs a separate grant.
 pub(super) fn model_url(url: &str, local_approved: bool) -> Result<String> {
     let mut parsed = http_url(url)?;
     let local = crate::permissions::web_fetch::requires_local_approval(url);
     if local && !local_approved {
         bail!("WebFetch requires approval to access this local or private address");
     }
-    if parsed.scheme() == "http" && !local {
+    if parsed.scheme() == "http" && local {
+        bail!("WebFetch requires plaintext HTTP approval for this address");
+    }
+    if parsed.scheme() == "http" {
+        if sensitive_query(&parsed) {
+            bail!("WebFetch refuses credential parameters in HTTP URLs");
+        }
         parsed
             .set_scheme("https")
             .map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
     }
     Ok(parsed.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("HTTPS upgrade failed ({0}); plaintext HTTP requires user approval")]
+pub(crate) struct HttpFallbackRequired(&'static str);
+
+fn upgrade_failure(error: &anyhow::Error, url: &reqwest::Url) -> Option<HttpFallbackRequired> {
+    let request = error.downcast_ref::<reqwest::Error>()?;
+    if request.url() != Some(url) || !request.is_connect() {
+        return None;
+    }
+    // Return only a category; the cause chain may include the full request URL.
+    let reason = if request.is_timeout() {
+        "connection timeout"
+    } else if error
+        .chain()
+        .skip(1)
+        .any(|e| e.to_string().to_ascii_lowercase().contains("certificate"))
+    {
+        "TLS certificate validation"
+    } else {
+        "connection or TLS handshake"
+    };
+    Some(HttpFallbackRequired(reason))
+}
+
+fn sensitive_query(url: &reqwest::Url) -> bool {
+    url.query_pairs().any(|(name, _)| {
+        let key = name.to_ascii_lowercase().replace('-', "_");
+        matches!(
+            key.as_str(),
+            "key"
+                | "apikey"
+                | "api_key"
+                | "authorization"
+                | "auth"
+                | "password"
+                | "passwd"
+                | "signature"
+                | "sig"
+                | "session"
+                | "sessionid"
+                | "cookie"
+        ) || key.contains("token")
+            || key.contains("secret")
+            || key.ends_with("_signature")
+            || key.ends_with("_credential")
+    })
+}
+
+pub(crate) fn validate_plaintext_http_input(input: &Value) -> Result<()> {
+    plaintext_url(input).map(|_| ())
+}
+
+fn plaintext_url(input: &Value) -> Result<reqwest::Url> {
+    let url = http_url(
+        input["url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("url required"))?,
+    )?;
+    if url.scheme() != "http" || !is_cacheable(input) || sensitive_query(&url) {
+        bail!("Plaintext HTTP requires an HTTP URL without credentials or custom headers");
+    }
+    Ok(url)
+}
+
+/// Scope comes from the engine, not the tool JSON. Plaintext pages never enter the shared cache or reader.
+pub(crate) async fn execute_approved_http_fetch_async(
+    input: Value,
+    proxy: Option<&str>,
+    approved_scope: &str,
+    exact_request: bool,
+) -> Result<Value> {
+    let url = plaintext_url(&input)?;
+    let origin = url.origin().ascii_serialization();
+    if approved_scope != if exact_request { url.as_str() } else { &origin } {
+        bail!("Plaintext HTTP request outside the approved scope");
+    }
+    let local = crate::permissions::web_fetch::requires_local_approval(url.as_str());
+    let client = async_client(proxy, local, Some((origin, exact_request)))?;
+    let page = direct_page_async(&client, &url, &input)
+        .await
+        .map_err(|_| anyhow!("Approved plaintext HTTP request failed or redirect refused"))?;
+    let mut result = render_page(page, input).await?;
+    result["transport"] = json!("plaintext_http");
+    result["warning"] = json!("Fetched over unencrypted HTTP.");
+    Ok(result)
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -116,7 +211,10 @@ fn remember(url: &str, page: &Page) {
 /// Redirects up to ten hops are followed, including cross-host ones. A local
 /// or private target is refused unless the original URL was itself local, so a
 /// public page cannot bounce the request onto the internal network.
-fn redirect_policy(allow_local_target: bool) -> reqwest::redirect::Policy {
+fn redirect_policy(
+    allow_local_target: bool,
+    plaintext: Option<(String, bool)>,
+) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > MAX_REDIRECTS {
             return attempt.error("too many redirects");
@@ -130,6 +228,28 @@ fn redirect_policy(allow_local_target: bool) -> reqwest::redirect::Policy {
             return attempt.error(
                 "WebFetch refuses to follow a redirect from a public address to a local or private address",
             );
+        }
+        let target = attempt.url();
+        if !target.username().is_empty() || target.password().is_some() {
+            return attempt.error("Redirect contains credentials");
+        }
+        if let Some((origin, exact)) = &plaintext {
+            if *exact || target.origin().ascii_serialization() != *origin || sensitive_query(target)
+            {
+                return attempt
+                    .error("Redirect outside the plaintext HTTP grant or contains credentials");
+            }
+        } else if attempt.previous().iter().any(|u| u.scheme() == "https")
+            && target.scheme() == "http"
+        {
+            return attempt.error("WebFetch refuses HTTPS to HTTP redirects");
+        } else if allow_local_target
+            && attempt
+                .previous()
+                .first()
+                .is_some_and(|u| u.origin() != target.origin())
+        {
+            return attempt.error("Redirect outside the reviewed local origin");
         }
         attempt.follow()
     })
@@ -338,6 +458,7 @@ fn is_cacheable(input: &Value) -> bool {
 /// that may hold credentials: those must not be forwarded to a third party.
 fn jina_fallback_allowed(input: &Value, url: &reqwest::Url) -> bool {
     is_cacheable(input)
+        && !sensitive_query(url)
         && !input["raw"].as_bool().unwrap_or(false)
         && !crate::permissions::web_fetch::requires_local_approval(url.as_str())
         && url.host_str().map_or(true, |host| {
@@ -393,13 +514,17 @@ fn is_thin_html(page: &Page, result: &Value, input: &Value) -> bool {
         && result["total_extracted_chars"].as_u64().unwrap_or(0) < THIN_HTML_CHARS
 }
 
-fn async_client(proxy: Option<&str>, allow_local_target: bool) -> Result<reqwest::Client> {
+fn async_client(
+    proxy: Option<&str>,
+    allow_local_target: bool,
+    plaintext: Option<(String, bool)>,
+) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .default_headers(fetch_headers())
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
-        .redirect(redirect_policy(allow_local_target));
+        .redirect(redirect_policy(allow_local_target, plaintext));
     if allow_local_target {
         // A host proxy variable must not hijack a loopback or private request,
         // and a local URL must never be sent to an external proxy either.
@@ -419,7 +544,7 @@ fn blocking_client(
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)
-        .redirect(redirect_policy(allow_local_target));
+        .redirect(redirect_policy(allow_local_target, None));
     if allow_local_target {
         builder = builder.no_proxy();
     } else if let Some(proxy) = proxy.map(str::trim).filter(|value| !value.is_empty()) {
@@ -494,10 +619,16 @@ async fn jina_page_async(
 
 /// `fetch`, plus a proxy fixed by configuration and a reader endpoint that
 /// tests can point at a local mock.
-pub(crate) async fn fetch_with_options(
+#[cfg(test)]
+async fn fetch_with_options(input: Value, proxy: Option<&str>, jina_base: &str) -> Result<Value> {
+    fetch_with_policy(input, proxy, jina_base, false).await
+}
+
+async fn fetch_with_policy(
     input: Value,
     proxy: Option<&str>,
     jina_base: &str,
+    upgraded: bool,
 ) -> Result<Value> {
     let url = http_url(
         input["url"]
@@ -506,17 +637,23 @@ pub(crate) async fn fetch_with_options(
     )?;
     let cacheable = is_cacheable(&input);
     if cacheable {
-        if let Some(page) = cached(url.as_str()) {
+        if let Some(page) = cached(url.as_str()).filter(|page| !upgraded || page.via.is_none()) {
             return render_page(page, input).await;
         }
     }
     let allow_local_target = crate::permissions::web_fetch::requires_local_approval(url.as_str());
-    let client = async_client(proxy, allow_local_target)?;
+    let client = async_client(proxy, allow_local_target, None)?;
 
     let direct_page = match direct_page_async(&client, &url, &input).await {
         Ok(page) => page,
         Err(error) => {
-            if jina_fallback_allowed(&input, &url) && should_fallback_on_error(&error) {
+            if upgraded && cacheable && !sensitive_query(&url) {
+                if let Some(reason) = upgrade_failure(&error, &url) {
+                    return Err(reason.into());
+                }
+            }
+            if !upgraded && jina_fallback_allowed(&input, &url) && should_fallback_on_error(&error)
+            {
                 match jina_page_async(&client, &url, jina_base).await {
                     Ok(page) => {
                         let result = render_page(page.clone(), input).await?;
@@ -544,7 +681,10 @@ pub(crate) async fn fetch_with_options(
         .await
         .map_err(|error| anyhow!(error_chain(&error)))?;
 
-    if jina_fallback_allowed(&input, &url) && is_thin_html(&direct_page, &result, &input) {
+    if !upgraded
+        && jina_fallback_allowed(&input, &url)
+        && is_thin_html(&direct_page, &result, &input)
+    {
         if let Ok(page) = jina_page_async(&client, &url, jina_base).await {
             if let Ok(reader_result) = render_page(page.clone(), input).await {
                 if cacheable {
@@ -560,18 +700,29 @@ pub(crate) async fn fetch_with_options(
     Ok(result)
 }
 
-pub(crate) async fn fetch_with_proxy(input: Value, proxy: Option<&str>) -> Result<Value> {
-    fetch_with_options(input, proxy, JINA_READER_BASE).await
+pub(super) async fn fetch_model(
+    input: Value,
+    proxy: Option<&str>,
+    upgraded: bool,
+) -> Result<Value> {
+    fetch_with_policy(input, proxy, JINA_READER_BASE, upgraded).await
 }
 
-pub(super) async fn fetch(input: Value) -> Result<Value> {
+#[cfg(test)]
+async fn fetch_with_proxy(input: Value, proxy: Option<&str>) -> Result<Value> {
+    fetch_model(input, proxy, false).await
+}
+
+#[cfg(test)]
+async fn fetch(input: Value) -> Result<Value> {
     fetch_with_proxy(input, None).await
 }
 
-pub(crate) fn fetch_blocking_with_options(
+fn fetch_blocking_with_options(
     input: Value,
     proxy: Option<&str>,
     jina_base: &str,
+    upgraded: bool,
 ) -> Result<Value> {
     let url = http_url(
         input["url"]
@@ -580,7 +731,7 @@ pub(crate) fn fetch_blocking_with_options(
     )?;
     let cacheable = is_cacheable(&input);
     if cacheable {
-        if let Some(page) = cached(url.as_str()) {
+        if let Some(page) = cached(url.as_str()).filter(|page| !upgraded || page.via.is_none()) {
             return page.render(&input);
         }
     }
@@ -590,7 +741,13 @@ pub(crate) fn fetch_blocking_with_options(
     let direct_page = match direct_page_blocking(&client, &url, &input) {
         Ok(page) => page,
         Err(error) => {
-            if jina_fallback_allowed(&input, &url) && should_fallback_on_error(&error) {
+            if upgraded && cacheable && !sensitive_query(&url) {
+                if let Some(reason) = upgrade_failure(&error, &url) {
+                    return Err(reason.into());
+                }
+            }
+            if !upgraded && jina_fallback_allowed(&input, &url) && should_fallback_on_error(&error)
+            {
                 match jina_page_blocking(&client, &url, jina_base) {
                     Ok(page) => {
                         let result = page.render(&input)?;
@@ -616,7 +773,10 @@ pub(crate) fn fetch_blocking_with_options(
         .render(&input)
         .map_err(|error| anyhow!(error_chain(&error)))?;
 
-    if jina_fallback_allowed(&input, &url) && is_thin_html(&direct_page, &result, &input) {
+    if !upgraded
+        && jina_fallback_allowed(&input, &url)
+        && is_thin_html(&direct_page, &result, &input)
+    {
         if let Ok(page) = jina_page_blocking(&client, &url, jina_base) {
             if let Ok(reader_result) = page.render(&input) {
                 if cacheable {
@@ -632,12 +792,8 @@ pub(crate) fn fetch_blocking_with_options(
     Ok(result)
 }
 
-pub(crate) fn fetch_blocking_with_proxy(input: Value, proxy: Option<&str>) -> Result<Value> {
-    fetch_blocking_with_options(input, proxy, JINA_READER_BASE)
-}
-
-pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
-    fetch_blocking_with_proxy(input, None)
+pub(super) fn fetch_blocking(input: Value, upgraded: bool) -> Result<Value> {
+    fetch_blocking_with_options(input, None, JINA_READER_BASE, upgraded)
 }
 
 fn direct_page_blocking(
@@ -992,7 +1148,7 @@ mod tests {
         assert_eq!(async_page["content"], "page body");
         let url = format!("{base}/page?blocking");
         let blocking_page =
-            tokio::task::spawn_blocking(move || fetch_blocking(json!({"url": url})))
+            tokio::task::spawn_blocking(move || fetch_blocking(json!({"url": url}), false))
                 .await
                 .unwrap()
                 .unwrap();
@@ -1113,14 +1269,9 @@ mod tests {
             model_url("https://docs.rs/", false).unwrap(),
             "https://docs.rs/"
         );
-        assert_eq!(
-            model_url("http://127.0.0.1:8080/", true).unwrap(),
-            "http://127.0.0.1:8080/"
-        );
-        assert_eq!(
-            model_url("http://localhost/", true).unwrap(),
-            "http://localhost/"
-        );
+        // Generic local-network approval is not a plaintext grant.
+        assert!(model_url("http://127.0.0.1:8080/", true).is_err());
+        assert!(model_url("http://localhost/", true).is_err());
         for url in [
             "http://localhost:3000/",
             "https://intranet/",
@@ -1259,6 +1410,85 @@ mod tests {
             }
         });
         (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test]
+    async fn plaintext_grant_binds_redirects_and_bypasses_cache_and_reader() {
+        let (proxy, seen) = spawn_mock_proxy(|target| match target.rsplit('/').next().unwrap() {
+            "same" => (302, vec![("Location".into(), "/ok".into())], vec![]),
+            "other" => (
+                302,
+                vec![("Location".into(), "http://other.example/ok".into())],
+                vec![],
+            ),
+            "private" => (
+                302,
+                vec![("Location".into(), "http://127.0.0.1/secret".into())],
+                vec![],
+            ),
+            "credential" => (
+                302,
+                vec![("Location".into(), "/ok?access_token=redactme".into())],
+                vec![],
+            ),
+            "fail" => (503, vec![], vec![]),
+            _ => (200, vec![], b"ok".to_vec()),
+        })
+        .await;
+        let origin = "http://grant.example";
+        let once_url = format!("{origin}/same");
+        let run = |path: &str, scope: &str, exact: bool| {
+            let input = json!({"url":format!("{origin}/{path}")});
+            let scope = scope.to_owned();
+            let proxy = proxy.clone();
+            async move { execute_approved_http_fetch_async(input, Some(&proxy), &scope, exact).await }
+        };
+        assert!(run("ok", &once_url, true).await.is_err());
+        assert!(run("same", "http://other.example", false).await.is_err());
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(run("same", &once_url, true).await.is_err());
+        for path in ["other", "private", "credential", "fail"] {
+            let error = run(path, origin, false).await.unwrap_err().to_string();
+            assert!(!error.contains("redactme"));
+        }
+        assert_eq!(seen.lock().unwrap().len(), 5);
+        for _ in 0..2 {
+            let page = run("same", origin, false).await.unwrap();
+            assert_eq!(page["transport"], "plaintext_http");
+            assert_eq!(page["warning"], "Fetched over unencrypted HTTP.");
+            assert_eq!(page["content"], "ok");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 9);
+        assert!(cached(&once_url).is_none());
+    }
+
+    #[tokio::test]
+    async fn plaintext_rejects_model_grants_and_credential_inputs() {
+        let forged = json!({"url":"http://localhost/", "approved_scope":"http://localhost", "exact_request":false});
+        assert!(super::super::execute_web_fetch_async(forged, None)
+            .await
+            .is_err());
+        for input in [
+            json!({"url":"http://user:redactme@example.org/"}),
+            json!({"url":"http://example.org/?api%5fkey=redactme"}),
+            json!({"url":"http://example.org/", "headers":{"Authorization":"redactme"}}),
+        ] {
+            let err = validate_plaintext_http_input(&input).unwrap_err();
+            assert!(!err.to_string().contains("redactme"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_upgrade_only_probes_https_and_signals_engine() {
+        let (proxy, seen) = spawn_mock_proxy(|_| (403, vec![], vec![])).await;
+        let input = json!({"url":"http://upgrade.example/page", "approved":true});
+        let error = super::super::execute_web_fetch_async(input, Some(&proxy))
+            .await
+            .unwrap_err();
+        assert!(error.is::<HttpFallbackRequired>(), "{error:#}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].starts_with("upgrade.example:443"));
     }
 
     #[tokio::test]
@@ -1581,6 +1811,7 @@ mod tests {
                 json!({"url":"http://public.example/blocking"}),
                 Some(&proxy),
                 "http://jina.test/",
+                false,
             )
         })
         .await

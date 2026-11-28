@@ -4,6 +4,34 @@ import ToolPermissionPrompt from './ToolPermissionPrompt';
 
 describe('tool permission prompt', () => {
   const request = { request_id: 'r', tool_use_id: 't', tool_name: 'Bash', input: { command: 'cd repo && npm test', description: 'Run tests' }, allow_session: true };
+  const http = { ...request, tool_name: 'WebFetchHttp', input: { origin: 'http://localhost:8080', url: 'http://localhost:8080/docs', local: true, reason: '<b>certificate mismatch</b>' } };
+  it.each([
+    ['Allow once', 'http_once'], ['Allow for this session', 'http_session'],
+    ['Allow for this project', 'http_project'], ['Allow across projects for this user', 'http_user'],
+    ['Deny', 'deny'], ['Cancel turn', 'cancel'],
+  ])('routes the HTTP decision %s without a generic approval', async (name, choice) => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    render(<ToolPermissionPrompt request={http} onRespond={respond} onCancel={cancel} />);
+    expect(screen.getByText(http.input.origin)).toBeVisible();
+    expect(screen.getByText(`Requested URL: ${http.input.url}`)).toBeVisible();
+    expect(screen.getByText(/local or private network access within the scope you choose/)).toBeVisible();
+    expect(screen.getByText(`HTTPS upgrade failed: ${http.input.reason}`)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name }));
+    await waitFor(() => expect(screen.getByRole('button', { name })).toBeEnabled());
+    if (choice === 'cancel') {
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(respond).not.toHaveBeenCalled();
+    } else {
+      expect(respond.mock.calls).toEqual([[choice]]);
+      expect(cancel).not.toHaveBeenCalled();
+    }
+  });
+  it('does not warn about private access or an upgrade error for public HTTP without a reason', () => {
+    render(<ToolPermissionPrompt request={{ ...http, input: { origin: 'http://example.com', url: 'http://example.com/', local: false } }} onRespond={vi.fn()} />);
+    expect(screen.queryByText(/local or private network|HTTPS upgrade failed/)).toBeNull();
+  });
   it('shows a readable compound command and sends a session choice', async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
     render(<ToolPermissionPrompt request={request} onRespond={respond} />);

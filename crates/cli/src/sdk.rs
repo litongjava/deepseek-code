@@ -23,9 +23,17 @@ use tokio::sync::{oneshot, Mutex};
 #[path = "sdk_permission_updates.rs"]
 mod permission_updates;
 
+enum RequestKind {
+    Tool,
+    Question(String),
+    WebFetchHttp,
+}
+
+const HTTP_SCOPES: [&str; 4] = ["http_once", "http_session", "http_project", "http_user"];
+
 #[derive(Default)]
 pub struct Permissions {
-    pending: Mutex<HashMap<String, (Value, Option<String>, oneshot::Sender<Result<Reply>>)>>,
+    pending: Mutex<HashMap<String, (Value, RequestKind, oneshot::Sender<Result<Reply>>)>>,
     cancelled: Mutex<VecDeque<String>>,
     closed: AtomicBool,
     updates: Option<Arc<permission_updates::Updates>>,
@@ -111,15 +119,18 @@ impl Permissions {
         question: Option<String>,
         description: Option<&str>,
     ) -> Result<Reply> {
+        let mut pending = self.pending.lock().await;
         ensure!(
             !self.closed.load(Ordering::SeqCst),
             "SDK input closed before tool approval"
         );
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .await
-            .insert(id.into(), (input.clone(), question, tx));
+        let kind = match question {
+            Some(question) => RequestKind::Question(question),
+            None if tool == "WebFetchHttp" => RequestKind::WebFetchHttp,
+            None => RequestKind::Tool,
+        };
+        pending.insert(id.into(), (input.clone(), kind, tx));
         let mut frame = json!({"type":"control_request","request_id":id,"request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":tool_use_id}});
         if let Some(origin) =
             deepseek_code_core::native_engine::permission_response::toolscript_origin(id)
@@ -130,20 +141,27 @@ impl Permissions {
                 origin.parent_tool_use_id
             ));
         }
+        if tool == "WebFetchHttp" {
+            frame["request"]["httpScopes"] = json!(HTTP_SCOPES);
+        }
         if let Some(description) = description {
             frame["request"]["description"] = json!(description);
         }
         crate::session::emit_json(&frame)?;
+        drop(pending);
         rx.await.context("SDK permission channel closed")?
+    }
+    async fn remember_cancelled(&self, id: &str) {
+        let mut cancelled = self.cancelled.lock().await;
+        cancelled.push_back(id.into());
+        while cancelled.len() > 256 {
+            cancelled.pop_front();
+        }
     }
     pub async fn cancel_one(&self, id: &str) {
         let mut pending = self.pending.lock().await;
         if let Some((_, _, tx)) = pending.remove(id) {
-            let mut cancelled = self.cancelled.lock().await;
-            cancelled.push_back(id.into());
-            while cancelled.len() > 256 {
-                cancelled.pop_front();
-            }
+            self.remember_cancelled(id).await;
             let _ = tx.send(Err(anyhow::anyhow!(
                 "SDK permission resolved by another source"
             )));
@@ -154,6 +172,7 @@ impl Permissions {
     }
     pub async fn cancel(&self) {
         for (id, (_, _, tx)) in self.pending.lock().await.drain() {
+            self.remember_cancelled(&id).await;
             // Keep the common cancellation prefix when Session adds context.
             let _ = tx.send(Err(anyhow::anyhow!("Interrupted by SDK host")));
             let _ = crate::session::emit_json(
@@ -166,7 +185,7 @@ impl Permissions {
         let id = response["request_id"]
             .as_str()
             .context("Missing response request_id")?;
-        let Some((input, question, tx)) = self.pending.lock().await.remove(id) else {
+        let Some((input, kind, tx)) = self.pending.lock().await.remove(id) else {
             // The host may have sent its answer before receiving our cancel
             // frame. Its prepared policy patch must be discarded, not treated
             // as a fatal protocol error that interrupts the winning tool.
@@ -190,7 +209,22 @@ impl Permissions {
             let result = &response["response"];
             match result["behavior"].as_str() {
                 Some("allow") => {
-                    if let Some(question) = question.as_deref() {
+                    if matches!(kind, RequestKind::WebFetchHttp) {
+                        let scope = result["httpScope"]
+                            .as_str()
+                            .filter(|s| HTTP_SCOPES.contains(s));
+                        let unchanged = result.get("updatedInput").is_none_or(|v| v == &input);
+                        return Ok(Reply::Permission(match scope {
+                            Some(scope) if unchanged && result.get("updatedPermissions").is_none() => {
+                                PermissionResponse::Text(scope.to_owned())
+                            }
+                            _ => PermissionResponse::Deny {
+                                message: "HTTP approval requires an explicit httpScope and cannot update input or permissions".into(),
+                                interrupt: false,
+                            },
+                        }));
+                    }
+                    if let RequestKind::Question(question) = &kind {
                         let answer = question_answer(&input, question, &result["updatedInput"])?;
                         if let Some(updates) = result.get("updatedPermissions") {
                             self.updates
@@ -223,7 +257,9 @@ impl Permissions {
                         }))
                     }
                 }
-                Some("deny") if question.is_some() => bail!("SDK host declined the user question"),
+                Some("deny") if matches!(kind, RequestKind::Question(_)) => {
+                    bail!("SDK host declined the user question")
+                }
                 Some("deny") => {
                     let message = result
                         .get("message")
@@ -302,11 +338,10 @@ mod question_tests {
             ..Permissions::default()
         };
         let (tx, rx) = oneshot::channel();
-        permissions
-            .pending
-            .lock()
-            .await
-            .insert("request".into(), (json!({"path":"first"}), None, tx));
+        permissions.pending.lock().await.insert(
+            "request".into(),
+            (json!({"path":"first"}), RequestKind::Tool, tx),
+        );
         permissions.respond(&json!({"response":{"subtype":"success","request_id":"request","response":{"behavior":"allow","updatedInput":{"path":"second"},"updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow","rules":[{"toolName":"Write"}]}]}}})).await.unwrap();
         assert!(matches!(
             rx.await.unwrap(),
@@ -325,6 +360,49 @@ mod question_tests {
             PermissionResult::RequiresConfirmation(_)
         ));
     }
+    #[tokio::test]
+    async fn webfetch_http_requires_explicit_scope_without_policy_or_target_changes() {
+        let permissions = Permissions::default();
+        let input = json!({"origin":"http://example.org", "local":false});
+        for (result, expected) in HTTP_SCOPES
+            .iter()
+            .map(|scope| {
+                (
+                    json!({"behavior":"allow", "httpScope":scope, "updatedInput":input}),
+                    Some(*scope),
+                )
+            })
+            .chain([
+                (json!({"behavior":"deny", "httpScope":"http_user"}), None),
+                (json!({"behavior":"allow"}), None),
+                (json!({"behavior":"allow", "httpScope":"always"}), None),
+                (
+                    json!({"behavior":"allow", "httpScope":"http_user", "updatedInput":{}}),
+                    None,
+                ),
+                (
+                    json!({"behavior":"allow", "httpScope":"http_user", "updatedPermissions":[]}),
+                    None,
+                ),
+            ])
+        {
+            let (tx, rx) = oneshot::channel();
+            permissions
+                .pending
+                .lock()
+                .await
+                .insert("id".into(), (input.clone(), RequestKind::WebFetchHttp, tx));
+            permissions.respond(&json!({"response":{"subtype":"success", "request_id":"id", "response":result}})).await.unwrap();
+            match (rx.await.unwrap().unwrap(), expected) {
+                (Reply::Permission(PermissionResponse::Text(actual)), Some(want)) => {
+                    assert_eq!(actual, want)
+                }
+                (Reply::Permission(PermissionResponse::Deny { .. }), None) => (),
+                _ => panic!("unexpected decision for {result}"),
+            }
+        }
+    }
+
     #[test]
     fn answer_requires_exact_question_and_unchanged_input() {
         let input =

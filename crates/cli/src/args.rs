@@ -880,12 +880,25 @@ pub enum ConfigCommands {
     /// search.api_key, search.base_url, search.model and search.provider configure web search (provider: deepseek, openai, anthropic);
     /// fetch.proxy (alias web_fetch.proxy) sets or clears the WebFetch HTTP proxy.
     Set { key: String, value: String },
+    /// Review or revoke saved plaintext HTTP origin approvals for this user.
+    HttpGrants {
+        #[command(subcommand)]
+        action: HttpGrantCommands,
+    },
     /// Remove only the CLI-managed provider and CLI preferences.
     Reset,
     /// Import an old .claude-code/settings.json; the source is read-only.
     ImportLegacy { source: PathBuf },
     /// Show or set the global long-term memory switch: on or off.
     Memory { state: Option<String> },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HttpGrantCommands {
+    /// List all saved HTTP grants in this application data directory, including their IDs.
+    List,
+    /// Remove the grant with this ID (from list); other scopes remain unchanged.
+    Revoke { id: i64 },
 }
 
 #[derive(Debug, Subcommand)]

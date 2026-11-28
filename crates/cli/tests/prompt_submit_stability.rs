@@ -24,6 +24,9 @@ use std::{
 };
 use tokio::sync::Notify;
 
+#[path = "support/web_fetch_http_prompt.rs"]
+mod web_fetch_http_prompt;
+
 const ROWS: u16 = 36;
 const COLS: u16 = 100;
 const SYNC_END: &[u8] = b"\x1b[?2026l";

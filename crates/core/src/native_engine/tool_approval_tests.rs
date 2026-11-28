@@ -1,13 +1,74 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn http_executor(
+    root: &std::path::Path,
+) -> (
+    ToolLoopExecutor,
+    mpsc::Receiver<EngineEvent>,
+    Arc<crate::permissions::PermissionManager>,
+) {
+    let (mut executor, events, manager) = hook_executor(root, "PreToolUse", vec![]);
+    let data = root.join("data");
+    crate::data_layout::write_config_file(
+        crate::data_layout::DataLayout::from_root(&data).config_file("customization.json"),
+        json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
+    )
+    .unwrap();
+    let paths = crate::runtime::RuntimePaths::new(data).unwrap();
+    let db = paths.open_database().unwrap();
+    let id = crate::runtime::SessionStore::new(db.clone())
+        .create(root, "fixture", "fixture")
+        .unwrap();
+    let history = db.executor_history(&id).unwrap();
+    executor = executor
+        .with_conv_id(id)
+        .with_executor_history(history)
+        .unwrap();
+    executor.permission_host_available = true;
+    executor.raw_web_fetch = true;
+    manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
+    (executor, events, manager)
+}
+
+// Drive the real tool and its mailbox together, failing immediately on any unexpected prompt.
+async fn http_call(
+    executor: &mut ToolLoopExecutor,
+    events: &mut mpsc::Receiver<EngineEvent>,
+    url: &str,
+    mut answer: Option<PermissionResponse>,
+) -> (String, bool) {
+    let mailbox = executor.permission_mailbox.clone();
+    let args = json!({"url":url,"prompt":"Read page"});
+    let call = executor.execute_tool_call("WebFetch", &args, "fetch-id");
+    tokio::pin!(call);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop { tokio::select! {
+            (_,out,failed) = &mut call => { assert!(answer.is_none(), "missing HTTP prompt: {out}"); return (out,failed); },
+            event = events.recv() => if let EngineEvent::ToolPermission {request_id, tool_use_id, tool_name, input} = event.unwrap() {
+                let parsed = reqwest::Url::parse(url).unwrap();
+                let local = parsed.host_str() == Some("127.0.0.1");
+                assert_eq!(tool_name,"WebFetchHttp");
+                assert_eq!(tool_use_id,"fetch-id");
+                assert_eq!(input["url"],url);
+                assert_eq!(input["origin"],parsed.origin().ascii_serialization());
+                assert_eq!(input["local"],local);
+                assert_eq!(input["reason"].as_str().is_some_and(|s| !s.is_empty()), !local);
+                crate::native_engine::permission_response::respond(&mailbox,&request_id,answer.take().expect("unexpected HTTP prompt")).await.unwrap();
+            }
+        }}
+    }).await.expect("WebFetch stalled")
+}
+
 #[tokio::test]
-async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
+async fn http_scope_decisions_and_denials_control_local_transport() {
+    use crate::permissions::http_grants::{lookup, GrantScope};
     use axum::{routing::get, Router};
     let hits = Arc::new(AtomicUsize::new(0));
     let captured = hits.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/page", listener.local_addr().unwrap());
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("{origin}/page");
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -22,127 +83,150 @@ async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
         .await
         .unwrap();
     });
-    let root = tempfile::tempdir().unwrap();
-    let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
-    executor = executor.with_search_config_path(
-        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
-    );
-    // Isolate local-address approval from the separate discovery gate.
-    crate::data_layout::write_config_file(
-        crate::data_layout::DataLayout::from_root(&root.path()).config_file("customization.json"),
-        json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
-    )
-    .unwrap();
-    executor.permission_host_available = true;
-    executor.raw_web_fetch = true;
-    for (index, (mode, allow)) in [
-        (crate::permissions::PermissionMode::PlanMode, false),
-        (crate::permissions::PermissionMode::PlanMode, true),
-        (crate::permissions::PermissionMode::Auto, false),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        manager.set_mode(mode);
-        let mailbox = executor.permission_mailbox.clone();
-        let input = json!({"url":format!("{url}?call={index}"),"prompt":"Read local page"});
-        let task = tokio::spawn(async move {
-            let result = executor
-                .execute_tool_call("WebFetch", &input, "local")
-                .await;
-            (executor, result)
-        });
-        let request = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap()
-                {
-                    break request_id;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        let response = if allow {
-            PermissionResponse::Allow {
+    for (choice, scope) in [
+        ("http_once", None),
+        ("http_session", Some(GrantScope::Session)),
+        ("http_project", Some(GrantScope::Project)),
+        ("http_user", Some(GrantScope::User)),
+        ("no", None),
+        ("yes", None),
+        ("http_once ", None),
+        ("structured allow", None),
+        ("structured deny", None),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (mut ex, mut events, manager) = http_executor(root.path());
+        let session = ex
+            .file_state
+            .session
+            .as_ref()
+            .unwrap()
+            .incarnation()
+            .to_owned();
+        let before = hits.load(Ordering::SeqCst);
+        let answer = match choice {
+            "structured allow" => PermissionResponse::Allow {
                 updated_input: None,
                 commit: None,
                 note: None,
-            }
-        } else {
-            PermissionResponse::Deny {
-                message: "local denied".into(),
+            },
+            "structured deny" => PermissionResponse::Deny {
+                message: "fixture denied".into(),
                 interrupt: false,
-            }
+            },
+            _ => PermissionResponse::Text(choice.into()),
         };
-        crate::native_engine::permission_response::respond(&mailbox, &request, response)
-            .await
-            .unwrap();
-        let (returned, (_, output, failed)) = task.await.unwrap();
-        executor = returned;
-        assert_eq!(failed, !allow, "{output}");
-        if allow {
-            assert!(output.contains("LOCAL_FETCH_OK"), "{output}");
+        let (out, failed) = http_call(&mut ex, &mut events, &url, Some(answer)).await;
+        let allowed = scope.is_some() || choice == "http_once";
+        assert_eq!(failed, !allowed, "{choice}: {out}");
+        assert_eq!(out.contains("LOCAL_FETCH_OK"), allowed, "{choice}: {out}");
+        assert_eq!(
+            lookup(&root.path().join("data"), root.path(), &session, &origin).unwrap(),
+            scope,
+            "{choice}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), before + usize::from(allowed));
+        ex.permission_host_available = false;
+        let (out, failed) = http_call(&mut ex, &mut events, &url, None).await;
+        assert_eq!(failed, scope.is_none(), "{choice}: {out}");
+        if failed {
+            assert!(out.contains("no approval host"), "{out}");
+        }
+        let expected_hits = before + usize::from(allowed) + usize::from(scope.is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+        if scope.is_some() {
+            manager.set_mode(crate::permissions::PermissionMode::AskPermissions);
+            let (out, failed) = http_call(&mut ex, &mut events, &url, None).await;
+            assert!(!failed && out.contains("LOCAL_FETCH_OK"), "{out}");
+            let expected_hits = expected_hits + 1;
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+
+            ex.permission_host_available = true;
+            manager.set_session_rules(
+                ex.conv_id.as_deref().unwrap(),
+                std::collections::HashMap::from([(
+                    "WebFetch".into(),
+                    crate::permissions::rules::PermissionAction::Confirm,
+                )]),
+            );
+            let (out, failed) = http_call(
+                &mut ex,
+                &mut events,
+                &url,
+                Some(PermissionResponse::Text("no".into())),
+            )
+            .await;
+            assert!(failed, "saved grant overrode explicit ask: {out}");
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+
+            manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
+            manager.set_session_rules(
+                ex.conv_id.as_deref().unwrap(),
+                std::collections::HashMap::from([(
+                    "WebFetch".into(),
+                    crate::permissions::rules::PermissionAction::Deny,
+                )]),
+            );
+            ex.permission_host_available = true;
+            let (out, failed) = http_call(&mut ex, &mut events, &url, None).await;
+            assert!(failed, "saved grant overrode explicit denial: {out}");
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+        } else {
+            manager.set_mode(crate::permissions::PermissionMode::PlanMode);
+            let (out, failed) = http_call(&mut ex, &mut events, &url, None).await;
+            assert!(failed, "{out}");
+            assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
         }
     }
-    executor.permission_host_available = false;
-    let (_, output, failed) = executor
-        .execute_tool_call("WebFetch", &json!({"url":url,"prompt":"Read"}), "no-host")
-        .await;
-    assert!(failed && output.contains("no approval host"), "{output}");
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
     server.abort();
 }
 
 #[tokio::test]
-async fn bypass_mode_fetches_a_local_address_without_a_prompt() {
-    use axum::{routing::get, Router};
-    let hits = Arc::new(AtomicUsize::new(0));
-    let captured = hits.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/page", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/page",
-                get(move || {
-                    captured.fetch_add(1, Ordering::SeqCst);
-                    async { "BYPASS_LOCAL_FETCH_OK" }
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-    });
+async fn public_http_retries_plaintext_only_after_https_failure_and_scope_approval() {
+    use axum::{
+        http::{Method, StatusCode, Uri},
+        Router,
+    };
+    const URL: &str = "http://retry.example/page";
     let root = tempfile::tempdir().unwrap();
-    let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
-    executor = executor.with_search_config_path(
-        crate::data_layout::DataLayout::from_root(&root.path()).config_file("config.json"),
-    );
+    let (mut ex, mut events, _) = http_executor(root.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
     crate::data_layout::write_config_file(
-        crate::data_layout::DataLayout::from_root(&root.path()).config_file("customization.json"),
-        json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
+        ex.search_config_path.as_ref().unwrap(),
+        json!({"providers":[],"web_fetch":{"proxy":proxy}}).to_string(),
     )
     .unwrap();
-    // No approval host exists, so a prompt could not be answered.
-    executor.permission_host_available = false;
-    executor.raw_web_fetch = true;
-    manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
-    let (_, output, failed) = executor
-        .execute_tool_call(
-            "WebFetch",
-            &json!({"url":url,"prompt":"Read local page"}),
-            "bypass-local",
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    let server = tokio::spawn(async move {
+        let app = Router::new().fallback(move |method: Method, uri: Uri| {
+            recorded.lock().unwrap().push(format!("{method} {uri}"));
+            async move {
+                if method == Method::CONNECT {
+                    (StatusCode::FORBIDDEN, "")
+                } else {
+                    (StatusCode::OK, "PROXY_PAGE_OK")
+                }
+            }
+        });
+        axum::serve(listener, app).await.unwrap();
+    });
+    for (choice, allowed) in [("no", false), ("http_once", true)] {
+        let (out, failed) = http_call(
+            &mut ex,
+            &mut events,
+            URL,
+            Some(PermissionResponse::Text(choice.into())),
         )
         .await;
-    assert!(!failed, "{output}");
-    assert!(output.contains("BYPASS_LOCAL_FETCH_OK"), "{output}");
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    while let Ok(event) = events.try_recv() {
-        assert!(
-            !matches!(event, EngineEvent::ToolPermission { .. }),
-            "Bypass local fetch must not request permission"
-        );
+        assert_eq!(failed, !allowed, "{out}");
+        assert_eq!(out.contains("PROXY_PAGE_OK"), allowed, "{out}");
+        let mut expected = vec!["CONNECT retry.example:443".to_owned()];
+        if allowed {
+            expected.push(format!("GET {URL}"));
+        }
+        assert_eq!(std::mem::take(&mut *seen.lock().unwrap()), expected);
     }
     server.abort();
 }

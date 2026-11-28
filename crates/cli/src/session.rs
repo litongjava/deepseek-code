@@ -3386,11 +3386,16 @@ impl Session {
                             continue;
                         }
                         // The remote client may answer first; a local answer cancels its prompt.
-                        let mut remote = self.remote_relay().map(|relay| relay.request_permission(&request_id, &tool_name, &tool_input, &tool_use_id, &question));
+                        use crate::terminal::tool_view::http_approval;
+                        // The remote relay only supports yes/no, not an explicit HTTP scope.
+                        let mut remote = self.remote_relay().filter(|_| tool_name != http_approval::TOOL).map(|relay| relay.request_permission(&request_id, &tool_name, &tool_input, &tool_use_id, &question));
                         let (answer, remote_decided) = {
                             let tool = json!({"tool_name": tool_name, "input": tool_input, "tool_use_id": tool_use_id});
                             let answering = async {
                                 if let Some(answer) = deepseek_code_core::services::background_sessions::worker_permission(&self.paths.data_dir, &self.id, &request_id, &question, tool).await? { Ok(answer) } else {
+                                    if input.is_none() && tool_name == http_approval::TOOL {
+                                        return Ok(String::new()); // No interactive scope selection.
+                                    }
                                     anyhow::ensure!(input.is_some(), "Tool approval required in non-interactive mode; choose --permission-mode explicitly");
                                     match (&approval, progress.live.as_ref()) {
                                         (Some(approval), Some(live)) => {
@@ -3411,6 +3416,11 @@ impl Session {
                         if let Some(answer) = answer {
                             use deepseek_code_core::native_engine::permission_response::PermissionResponse;
                             use crate::terminal::tool_view::{Decision, Remember};
+                            if tool_name == http_approval::TOOL {
+                                let _ = self.engine.resume_with_answer(&request_id, http_approval::answer(&answer).into()).await;
+                                progress.set_activity("Working");
+                                continue;
+                            }
                             let decision = match &approval {
                                 Some(approval) => approval.decide(&answer),
                                 None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
