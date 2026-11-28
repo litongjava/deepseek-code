@@ -144,6 +144,10 @@ Desktop 与 CLI 共用 `crates/core` 的监控服务。Bridge 在 `src-tauri/src
 
    `src/features/streaming/resourceAlert.test.ts` 覆盖两条 `onSystemEvents` 路径的告警分发、空/缺失 `summary`、非活动会话，以及流式正文和工具状态保持不变。本轮的 Desktop/WebView 手工场景未运行。
 
+### D5b. 自动压缩告警
+
+`npm run test:run -- src/api/streaming-order.test.ts src/features/streaming/resourceAlert.test.ts` 分别检查实时和重连续流的 `compaction_notice`。两套客户端都只转发一次；两种回调都更新压缩提示并保留聊天正文。在真实 Desktop 窗口中，可用本地网关持续返回压缩错误，检查页面显示提示后仍接收剩余内容。
+
 ### E. 浏览器和手机（dcd-server）
 
 用独立数据目录启动：`DEEPSEEK_CODE_DATA_DIR=<测试目录>/data target/debug/dcd-server --port 30185 --web-dir dist`（先 `npm run build`）。

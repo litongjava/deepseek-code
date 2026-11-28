@@ -636,8 +636,9 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 
 全部使用本地模拟接口和临时数据库，不发真实请求。
 
-- `cargo test --locked -p deepseek-code-core --test mid_turn_auto_compact --test native_compaction`：本地 Responses 网关模拟 429、503、400 和 401，逐次统计原生、文本摘要及主请求。核对 Retry-After 与退避时取消、单次边界提交、仍能装下时仅提示一次并在下个工具迭代重试，以及硬上限失败中的状态码、/compact 提示和工具结果续接。
-- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream manual_compact`：用临时会话实际执行 `/compact`。429 后成功只新增一个边界；两条路径持续 429 时命令返回错误，历史保持原样。
+- `cargo test --locked -p deepseek-code-core --test mid_turn_auto_compact --test native_compaction`：本地 Responses 网关模拟 429、503、400 和 401，逐次统计原生、文本摘要及主请求。核对 Retry-After 与退避时取消、单次边界提交、仍能装下时仅提示一次。连续 8 个工具迭代只在第 1、5 步用尽两条路径的预算，第 9 步恢复并提交一次。冷却中的每一步仍校验硬上限，超限立即报告状态码、/compact 恢复方法并保留工具结果。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream manual_`：用临时会话实际执行 `/compact`。429 后成功只新增一个边界；两条路径持续 429 时命令返回错误，历史保持原样。12 条 Read 结果跨过微压缩阈值时，逐项对比原生请求与摘要请求追加指令前的全部输入。
+- `cargo test --locked -p deepseek-code-cli --bin dcl attached_worker_shows_compaction_notice_and_keeps_recovery_footer`：附着终端只显示一次软限制提示；最终错误保留原生和摘要的 HTTP 状态码及恢复操作，不输出原始响应正文。
 - `cargo test --locked -p deepseek-code-core --test compaction_cache_prefix`：主回合完成后重开引擎，通过本地 Chat、Anthropic Messages 和非 GPT Responses 接口比较完整请求体。摘要须保留主回合的系统指令、工具定义、首条消息的提醒和后续回答，末尾只追加一条含 keep 的用户指令。即使回复同时含正文与写文件调用，也只能提交正文；历史只增加摘要边界。按请求 ID 核对 SQLite 的输入和缓存读取 token 数，包括截断后的各次恢复请求。
 - `cargo test --locked -p deepseek-code-core --test compaction_history`：检查本地压缩和首轮收件箱投递后的历史完整性、Responses 不透明窗口的分段回退、结构化输出约束、Claude 推理模式下的前缀复用，以及原生网关的路由和鉴权。核对每日缓存分项、跨分支的物理请求数和 Bedrock 缓存读写。
 - `cargo test --locked -p deepseek-code-core --test native_compaction`：同一 GPT Responses 会话的主请求与原生压缩请求使用相同的 `prompt_cache_key`；分支使用自身会话的键。核对压缩请求可用字段和会话请求指标。真实服务端的命中率需用已启用记录的代理另行测量。
