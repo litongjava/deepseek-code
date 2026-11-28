@@ -735,7 +735,8 @@ impl ToolLoopExecutor {
         has_main_turn: bool,
         mut options: super::super::request_options::RequestOptions,
     ) -> Result<crate::services::compaction::GeneratedSummary> {
-        use crate::services::compaction::{checkpoint::Checkpoint, native};
+        use crate::services::compaction::{checkpoint::Checkpoint, native, STATE_INSTRUCTIONS};
+        let system = format!("{system}\n\n{STATE_INSTRUCTIONS}");
         let mut rows = multimodal::normalize_messages(&history.0)?;
         rows.retain(|row| row["origin"] != "memory_change");
         let selected = shard.scoped_stores();
@@ -765,7 +766,7 @@ impl ToolLoopExecutor {
                     &rows,
                     shard.id(),
                     &self.provider,
-                    focus,
+                    &format!("{focus}\n\n{STATE_INSTRUCTIONS}"),
                     Some(selected.data_dir()),
                     options.clone(),
                 )
@@ -775,15 +776,15 @@ impl ToolLoopExecutor {
         };
         let summary = async {
             wire.allow_text_summary();
-            let opaque = self.opaque_responses_window(&rows, system, shard.id())?;
+            let opaque = self.opaque_responses_window(&rows, &system, shard.id())?;
             if opaque.is_some() {
                 rows.remove(0);
             }
-            let mut checkpoint = Checkpoint::open(&selected, shard.id(), &self.provider, system)?;
+            let mut checkpoint = Checkpoint::open(&selected, shard.id(), &self.provider, &system)?;
             checkpoint.options = options;
             super::super::generation::replay::summarize_replay(
                 self.provider.clone(),
-                system,
+                &system,
                 rows,
                 focus,
                 has_main_turn,

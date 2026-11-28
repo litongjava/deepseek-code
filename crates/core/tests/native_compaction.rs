@@ -688,7 +688,9 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
         input[2],
         json!({"role":"assistant","content":[{"type":"output_text","text":"Tests remain pending"}]}),
     );
-    assert_eq!(first["instructions"], "Keep pending work");
+    let instructions = first["instructions"].as_str().unwrap();
+    assert!(instructions.contains("Keep pending work"));
+    assert!(instructions.contains("Completed / Verified / Remaining / Not done"));
     assert_eq!(store.history(&id).unwrap().len(), 3);
     store.append(&id, "user", "Continue").unwrap();
     let reopened = SessionStore::new(
