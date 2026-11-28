@@ -460,6 +460,7 @@ pub struct ToolLoopExecutor {
     /// Number of durable mid-turn auto-compactions committed during this turn.
     mid_turn_compactions: usize,
     auto_compaction_warned: bool,
+    compaction_failure_for_request: Option<String>,
     pub(super) deferred_compaction: Option<crate::services::compaction::GenerationFailure>,
     /// Iteration index before which mid-turn auto-compaction is paused (failure or low-reduction cooldown).
     mid_turn_compact_cooldown_until: usize,
@@ -2014,6 +2015,7 @@ impl ToolLoopExecutor {
             last_request_overhead_tokens: 0,
             mid_turn_compactions: 0,
             auto_compaction_warned: false,
+            compaction_failure_for_request: None,
             deferred_compaction: None,
             mid_turn_compact_cooldown_until: 0,
             mid_turn_continuation_cue: false,
@@ -4914,7 +4916,16 @@ impl ToolLoopExecutor {
                     self.execute_openai_loop().await
                 }
             },
-        };
+        }
+        .map_err(|error| {
+            if crate::performance::classify(&error) == crate::performance::ErrorClass::ContextLimit {
+                if let Some(cause) = self.compaction_failure_for_request.take() {
+                    let rejection = crate::performance::request_diagnostic(&error);
+                    return anyhow!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {cause}. Provider response: {rejection}");
+                }
+            }
+            error
+        });
 
         if api_request {
             let failure = match &loop_result {
@@ -5986,6 +5997,7 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
+            self.compaction_failure_for_request = None;
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
@@ -6827,6 +6839,7 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
+            self.compaction_failure_for_request = None;
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;

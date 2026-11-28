@@ -305,15 +305,17 @@ impl ToolLoopExecutor {
         if estimated > capacity {
             anyhow::bail!("Automatic compaction failed. The next request needs about {estimated} input tokens and only {capacity} fit. Resume and run /compact or select a model with a larger context window. Cause: {error:#}");
         }
+        let cause = format!("{error:#}");
         if !self.auto_compaction_warned {
             let _ = self
                 .event_tx
                 .send(EngineEvent::CompactionNotice(format!(
-                    "Automatic compaction failed: {error:#}. Continuing with the existing context."
+                    "Automatic compaction failed: {cause}. Continuing with the existing context."
                 )))
                 .await;
             self.auto_compaction_warned = true;
         }
+        self.compaction_failure_for_request = Some(cause);
         Ok(())
     }
 
