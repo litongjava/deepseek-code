@@ -9,6 +9,7 @@ use anyhow::{ensure, Context, Result};
 use rusqlite::Connection;
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     fs,
     io::{Read, Seek},
     path::{Path, PathBuf},
@@ -18,7 +19,8 @@ use std::{
 
 const CACHE_CAPACITY: usize = 64;
 const GIT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
-const REDIRECTS: [&str; 3] = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"];
+const DISCOVERY_CONTROLS: [&str; 2] =
+    ["GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"];
 
 pub(crate) const GIT_OVERRIDE_REASON: &str =
     "Git directory override in effect: peer identity cannot be verified";
@@ -27,11 +29,35 @@ pub(crate) const GIT_OVERRIDE_REASON: &str =
 #[error("{GIT_OVERRIDE_REASON}")]
 pub(crate) struct GitDirectoryOverride;
 
-fn reject_git_redirects() -> Result<()> {
-    if REDIRECTS.iter().any(|key| std::env::var_os(key).is_some()) {
-        return Err(GitDirectoryOverride.into());
+// Take one environment snapshot. An explicit child environment also closes
+// the gap between checking a variable and inheriting it at spawn.
+fn git_environment(mut child: Option<&mut Command>) -> Result<[Option<OsString>; 2]> {
+    let mut discovery = [None, None];
+    if let Some(cmd) = child.as_deref_mut() {
+        cmd.env_clear();
     }
-    Ok(())
+    for (name, value) in std::env::vars_os() {
+        let key = name.to_string_lossy();
+        #[cfg(windows)]
+        let key = key.to_ascii_uppercase();
+        if key.starts_with("GIT_") {
+            if let Some(i) = DISCOVERY_CONTROLS.iter().position(|&k| k == key) {
+                discovery[i] = Some(value.clone());
+            } else if matches!(key.as_ref(), "GIT_TRACE" | "GIT_PAGER") {
+                // Harmless for admission, but keep display/trace out of the lookup.
+                continue;
+            } else {
+                return Err(GitDirectoryOverride.into());
+            }
+        }
+        if let Some(cmd) = child.as_deref_mut() {
+            cmd.env(name, value);
+        }
+    }
+    if let Some(cmd) = child {
+        cmd.env("LC_ALL", "C");
+    }
+    Ok(discovery)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +68,7 @@ pub(crate) struct GitLookupTimeout;
 pub(crate) struct GitDirs {
     git: PathBuf,
     common: PathBuf,
+    top: PathBuf,
 }
 
 impl GitDirs {
@@ -53,21 +80,24 @@ impl GitDirs {
                 "--path-format=absolute",
                 "--git-common-dir",
                 "--absolute-git-dir",
+                "--show-toplevel",
             ],
         );
-        // A concurrent environment change cannot redirect the spawned command.
-        for key in REDIRECTS {
-            command.env_remove(key);
-        }
+        git_environment(Some(&mut command))?;
         let output = git_output(&mut command, deadline)?;
         let mut lines = std::str::from_utf8(&output)?.lines();
         let common = Path::new(lines.next().context("Git returned no common directory")?);
         let git = Path::new(lines.next().context("Git returned no Git directory")?);
+        let top = Path::new(lines.next().context("Git returned no worktree root")?);
         ensure!(
-            lines.next().is_none() && common.is_absolute() && git.is_absolute(),
+            lines.next().is_none()
+                && common.is_absolute()
+                && git.is_absolute()
+                && top.is_absolute(),
             "Invalid Git directory response"
         );
         Ok(Self {
+            top: top.canonicalize()?,
             git: git.canonicalize()?,
             common: common.canonicalize()?,
         })
@@ -125,15 +155,39 @@ struct GitKey {
     common_id: crate::fs::DirectoryId,
     head: SystemTime,
     modified: SystemTime,
-    config: Option<SystemTime>,
-    worktree_config: Option<SystemTime>,
+    config: Option<(SystemTime, [u8; 32])>,
+    worktree_config: Option<(SystemTime, [u8; 32])>,
     standard_layout: bool,
-    discovery_env: Vec<Option<std::ffi::OsString>>,
+    discovery_env: [Option<OsString>; 2],
+}
+
+// Git reads these local files for core.worktree and extensions.worktreeConfig.
+// An in-place edit can preserve the timestamp and all directory IDs.
+fn config_fingerprint(path: &Path) -> Result<Option<(SystemTime, [u8; 32])>> {
+    use sha2::{Digest, Sha256};
+    let mut options = fs::File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let meta = file.metadata()?;
+    ensure!(meta.is_file(), "Invalid Git configuration file");
+    let mut digest = Sha256::new();
+    let len = std::io::copy(&mut file.take(meta.len().saturating_add(1)), &mut digest)?;
+    ensure!(len == meta.len(), "Git configuration changed during lookup");
+    Ok(Some((meta.modified()?, digest.finalize().into())))
 }
 
 impl GitKey {
     fn read(cwd: &Path) -> Result<Self> {
-        reject_git_redirects()?;
+        let discovery_env = git_environment(None)?;
         let cwd = cwd.canonicalize()?;
         let root = cwd
             .ancestors()
@@ -163,13 +217,6 @@ impl GitKey {
             Err(e) => return Err(e.into()),
         };
         let standard_layout = common.join("objects").is_dir() && common.join("refs").is_dir();
-        fn modified(path: &Path) -> Result<Option<SystemTime>> {
-            match fs::metadata(path) {
-                Ok(meta) => Ok(Some(meta.modified()?)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e.into()),
-            }
-        }
         Ok(Self {
             marker,
             cwd_id: crate::fs::directory_id(&cwd)?,
@@ -178,17 +225,15 @@ impl GitKey {
             common_id: crate::fs::directory_id(&common)?,
             head: fs::metadata(git.join("HEAD"))?.modified()?,
             modified: fs::metadata(&common)?.modified()?,
-            config: modified(&common.join("config"))?,
-            worktree_config: modified(&git.join("config.worktree"))?,
-            dirs: GitDirs { git, common },
+            config: config_fingerprint(&common.join("config"))?,
+            worktree_config: config_fingerprint(&git.join("config.worktree"))?,
+            dirs: GitDirs {
+                git,
+                common,
+                top: root.to_owned(),
+            },
             standard_layout,
-            discovery_env: [
-                "GIT_CEILING_DIRECTORIES",
-                "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-            ]
-            .iter()
-            .map(std::env::var_os)
-            .collect(),
+            discovery_env,
         })
     }
 }
@@ -231,11 +276,15 @@ impl ProjectBinding {
         })
     }
 
-    fn validate_source(&self, lookup: impl FnMut(&Path) -> Result<PathBuf>) -> Result<String> {
+    fn validate_source(&self, mut lookup: impl FnMut(&Path) -> Result<GitDirs>) -> Result<String> {
         project_repo::validate_trusted_folders(&self.folders)?;
         workspace::validate_source(&self.path)?;
         if let Some(worktree) = &self.worktree {
-            worktree.validate(&self.path, lookup)?;
+            worktree.validate(&self.path, |cwd| {
+                let dirs = lookup(cwd)?;
+                worktree.validate_git_root(cwd, &dirs.top)?;
+                Ok(dirs.common)
+            })?;
         }
         let source = self.path.canonicalize()?.to_string_lossy().into_owned();
         Ok(if cfg!(windows) {
@@ -270,7 +319,7 @@ impl PeerProject {
                 GitKey::read(cwd)? == *key,
                 "Git worktree identity changed during authorization"
             );
-            Ok(key.dirs.common.clone())
+            Ok(key.dirs.clone())
         })?;
         ensure!(
             source == self.source,
@@ -347,9 +396,9 @@ impl Resolver {
         let mut git_keys = Vec::new();
         let source = binding.validate_source(|cwd| {
             let key = self.resolve_git(cwd, prepare_until)?;
-            let common = key.dirs.common.clone();
+            let dirs = key.dirs.clone();
             git_keys.push((cwd.to_owned(), key));
-            Ok(common)
+            Ok(dirs)
         })?;
         Ok(PeerProject {
             source,

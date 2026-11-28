@@ -353,6 +353,24 @@ impl SavedWorktree {
         }))
     }
 
+    /// The saved working directory preserves the project's path relative to
+    /// its source repository, even when the project is below the checkout root.
+    pub(crate) fn validate_git_root(&self, cwd: &Path, top: &Path) -> Result<()> {
+        let repo = self.repo.canonicalize()?;
+        let matches = if cwd == self.repo {
+            top == repo
+        } else {
+            let source = self.source.canonicalize()?;
+            let relative = source.strip_prefix(&repo)?;
+            top.join(relative) == cwd.canonicalize()?
+        };
+        ensure!(
+            matches,
+            "Git worktree root does not match the saved session"
+        );
+        Ok(())
+    }
+
     pub(crate) fn validate(
         &self,
         source: &Path,

@@ -329,9 +329,151 @@ fn retargeting_the_recipient_gitfile_within_one_repository_blocks_the_claim() {
     assert_blocked(&context, &store, &recipient, &message);
 }
 
+#[test]
+fn a_local_worktree_redirect_blocks_prepared_claims_and_new_enqueues() -> Result<()> {
+    use crate::worktree::session::git;
+    let (temp, ctx, store, sender, recipient) = fixture();
+    let from = bind_managed_worktree(&ctx, &store, &sender);
+    let to = bind_managed_worktree(&ctx, &store, &recipient);
+    let other = temp.path().join("other");
+    fs::create_dir(&other)?;
+    git(&to, &["config", "extensions.worktreeConfig", "true"])?;
+    git(
+        &to,
+        &[
+            "config",
+            "--worktree",
+            "core.worktree",
+            to.to_str().unwrap(),
+        ],
+    )?;
+    let config =
+        PathBuf::from(git(&to, &["rev-parse", "--absolute-git-dir"])?).join("config.worktree");
+    let modified = fs::metadata(&config)?.modified()?;
+    let message = send(&ctx, &sender, &recipient, "prepared recipient")?;
+    let owner = Consumer::attach(&ctx.paths.data_dir, &recipient)?.unwrap();
+    let changed = Arc::new(AtomicBool::new(false));
+    let changed_in_lookup = changed.clone();
+    install_lookup(&owner, move |cwd, deadline| {
+        let dirs = GitDirs::lookup(cwd, deadline)?;
+        if cwd == from {
+            // Recipient preparation has finished. Preserve config metadata so
+            // a timestamp-only writer check would still accept its snapshot.
+            let before = git(
+                &to,
+                &["rev-parse", "--absolute-git-dir", "--git-common-dir"],
+            )?;
+            git(
+                &to,
+                &[
+                    "config",
+                    "--worktree",
+                    "core.worktree",
+                    other.to_str().unwrap(),
+                ],
+            )?;
+            fs::File::options()
+                .write(true)
+                .open(&config)?
+                .set_modified(modified)?;
+            assert_eq!(
+                git(
+                    &to,
+                    &["rev-parse", "--absolute-git-dir", "--git-common-dir"]
+                )?,
+                before
+            );
+            assert_eq!(
+                PathBuf::from(git(&to, &["rev-parse", "--show-toplevel"])?).canonicalize()?,
+                other.canonicalize()?
+            );
+            changed_in_lookup.store(true, Ordering::SeqCst);
+        }
+        Ok(dirs)
+    });
+    assert!(owner.target.drain(1)?.is_empty());
+    assert!(changed.load(Ordering::SeqCst));
+    assert_blocked(&ctx, &store, &recipient, &message);
+    let generation: Option<i64> = ctx.db.fixture_directory(|c| {
+        c.query_row(
+            "SELECT generation FROM session_inbox WHERE id=?1",
+            [&message.id],
+            |r| r.get(0),
+        )
+    })??;
+    assert_eq!(generation, None);
+    // A fresh snapshot must reject Git's redirected top level as well.
+    let err = send(&ctx, &sender, &recipient, "new enqueue").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Git worktree identity changed during lookup"),
+        "{err:#}"
+    );
+    assert_eq!(inbox(&ctx, &recipient, false)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_managed_project_subdirectory_is_bound_to_its_saved_checkout_root() -> Result<()> {
+    use crate::worktree::session::{git, prepare};
+    let (temp, ctx, store, sender, recipient) = fixture();
+    let source = temp.path().join("project");
+    git(temp.path(), &["init", "-q"])?;
+    fs::write(source.join("tracked"), "")?;
+    git(temp.path(), &["add", "project/tracked"])?;
+    git(
+        temp.path(),
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    )?;
+    let worktree = prepare(&source, None, true)?;
+    let project = crate::services::session_trust::inspect(&ctx.db, &sender)?;
+    ctx.db.fixture_directory(|c| {
+        worktree.save(c, &sender, &project.id, source.to_str().unwrap())
+    })??;
+    let owner = Consumer::attach(&ctx.paths.data_dir, &recipient)?.unwrap();
+    send(&ctx, &sender, &recipient, "project subdirectory")?;
+    let delivered = drain_pending(&owner.target)?;
+    assert_eq!(delivered.len(), 1);
+    assert!(delivered[0].contains("project subdirectory"));
+
+    // The nested marker resolves to the very same Git and common directories,
+    // but would make the project subdirectory its own checkout root.
+    let marker = worktree.path.join(".git");
+    fs::copy(worktree.path.parent().unwrap().join(".git"), &marker)?;
+    assert_eq!(
+        PathBuf::from(git(&worktree.path, &["rev-parse", "--show-toplevel"])?).canonicalize()?,
+        worktree.path.canonicalize()?
+    );
+    let err = send(&ctx, &sender, &recipient, "nested marker").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Git worktree root does not match the saved session"),
+        "{err:#}"
+    );
+    assert_eq!(inbox(&ctx, &recipient, false)?.len(), 1);
+    assert_eq!(store.history(&recipient)?.len(), 1);
+    Ok(())
+}
+
+fn run_environment_child(command: &mut std::process::Command) -> Result<()> {
+    ensure!(command.status()?.success(), "Git environment child failed");
+    Ok(())
+}
+
 // Only the child receives Git discovery variables. Other libtest threads can
 // create and validate real repositories while these cases run.
-fn check_discovery_environment(redirect: bool) -> Result<()> {
+fn check_discovery_environment(
+    redirect: bool,
+    run: impl FnOnce(&Path, &mut std::process::Command) -> Result<()>,
+) -> Result<()> {
     use std::process::Command;
     if let Some(root) = std::env::var_os("I49_DISCOVERY_TEST_ROOT") {
         let ctx = context(Path::new(&root))?;
@@ -377,42 +519,88 @@ fn check_discovery_environment(redirect: bool) -> Result<()> {
     let (_temp, ctx, store, sender, recipient) = fixture();
     let tree = bind_managed_worktree(&ctx, &store, &sender);
     send(&ctx, &sender, &recipient, "ordinary discovery")?;
-    let run = |key: &str, value: &Path| -> Result<()> {
-        let status = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                std::thread::current().name().unwrap(),
-                "--nocapture",
-            ])
-            .env("I49_DISCOVERY_TEST_ROOT", &ctx.paths.data_dir)
-            .env("I49_DISCOVERY_TEST_RECIPIENT", &recipient)
-            .env(key, value)
-            .status()?;
-        ensure!(status.success(), "discovery child failed for {key}");
-        Ok(())
-    };
-    if redirect {
-        let git_dir = crate::worktree::session::git(&tree, &["rev-parse", "--absolute-git-dir"])?;
-        run("GIT_DIR", Path::new(&git_dir))?;
-        run(
-            "GIT_COMMON_DIR",
-            &crate::worktree::session::common_dir(&tree)?,
-        )?;
-        run("GIT_WORK_TREE", &tree)?;
-    } else {
-        run("GIT_DISCOVERY_ACROSS_FILESYSTEM", Path::new("1"))?;
-    }
-    Ok(())
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "--exact",
+            std::thread::current().name().unwrap(),
+            "--nocapture",
+        ])
+        .env("I49_DISCOVERY_TEST_ROOT", &ctx.paths.data_dir)
+        .env("I49_DISCOVERY_TEST_RECIPIENT", &recipient);
+    run(&tree, &mut command)
 }
 
 #[test]
 fn directory_redirects_block_managed_peers_before_any_claim() -> Result<()> {
-    check_discovery_environment(true)
+    check_discovery_environment(true, |tree, cmd| {
+        let git_dir = crate::worktree::session::git(tree, &["rev-parse", "--absolute-git-dir"])?;
+        let common = crate::worktree::session::common_dir(tree)?;
+        for (key, value) in [
+            ("GIT_DIR", Path::new(&git_dir)),
+            ("GIT_COMMON_DIR", &common),
+            ("GIT_WORK_TREE", tree),
+        ] {
+            run_environment_child(cmd.env(key, value))?;
+            cmd.env_remove(key);
+        }
+        Ok(())
+    })
 }
 
 #[test]
 fn cross_filesystem_discovery_still_delivers_once() -> Result<()> {
-    check_discovery_environment(false)
+    check_discovery_environment(false, |_, cmd| {
+        run_environment_child(cmd.env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1"))
+    })
+}
+
+#[test]
+fn runtime_config_count_blocks_enqueue_and_claim() -> Result<()> {
+    check_discovery_environment(true, |tree, cmd| {
+        run_environment_child(
+            cmd.env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.worktree")
+                .env("GIT_CONFIG_VALUE_0", tree.parent().unwrap()),
+        )
+    })
+}
+
+#[test]
+fn runtime_config_parameters_block_enqueue_and_claim() -> Result<()> {
+    check_discovery_environment(true, |_, cmd| {
+        run_environment_child(cmd.env("GIT_CONFIG_PARAMETERS", "'core.worktree'='..'"))
+    })
+}
+
+#[test]
+fn unlisted_git_variables_block_enqueue_and_claim() -> Result<()> {
+    check_discovery_environment(true, |_, cmd| {
+        for key in [
+            "GIT_NAMESPACE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_INDEX_FILE",
+            "GIT_UNKNOWN_FUTURE_CONTROL",
+        ] {
+            run_environment_child(cmd.env(key, "value"))?;
+            cmd.env_remove(key);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn session_git_trace_allows_delivery_without_tracing_the_identity_child() -> Result<()> {
+    check_discovery_environment(false, |_, cmd| {
+        let dir = tempfile::tempdir()?;
+        let trace = dir.path().join("git-trace");
+        run_environment_child(cmd.env("GIT_TRACE", &trace))?;
+        assert!(!trace.exists());
+        Ok(())
+    })
 }
 
 #[test]
