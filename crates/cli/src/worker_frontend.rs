@@ -762,7 +762,7 @@ async fn observe(
                     remote_request = None;
                 }
                 if let (None, Some(relay), Some(question)) = (&remote_request, &relay, &question) {
-                    if let Some(tool) = question.tool.as_ref().filter(|_| question.kind == "permission" && !answered.contains(&question.request_id)) {
+                    if let Some(tool) = question.tool.as_ref().filter(|tool| question.kind == "permission" && tool["tool_name"] != crate::terminal::tool_view::http_approval::TOOL && !answered.contains(&question.request_id)) {
                         remote_request = Some(relay.request_permission(&question.request_id, tool["tool_name"].as_str().unwrap_or_default(), &tool["input"], tool["tool_use_id"].as_str().unwrap_or_default(), &question.question));
                     }
                 }

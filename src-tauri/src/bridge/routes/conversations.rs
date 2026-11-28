@@ -322,7 +322,9 @@ async fn conversation_permission_handler(
         drop(pool);
         let tool = req.tool_use_id.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
         let behavior = req.behavior.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
-        if !matches!(behavior, "allow" | "deny" | "allow_session") { return Err(StatusCode::BAD_REQUEST); }
+        if !matches!(behavior, "allow" | "deny" | "allow_session" | "http_once" | "http_session" | "http_project" | "http_user") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         return engine.resume_scoped_answer(&id, &req.request_id, tool, behavior.into(), true).await
             .map(Json).map_err(|_| StatusCode::CONFLICT);
     }
@@ -332,7 +334,7 @@ async fn conversation_permission_handler(
         .unwrap_or_default();
 
     let behavior = req.behavior.unwrap_or_else(|| "allow".to_string());
-    if behavior == "allow_session" { return Err(StatusCode::NOT_IMPLEMENTED); }
+    if !matches!(behavior.as_str(), "allow" | "deny") { return Err(StatusCode::NOT_IMPLEMENTED); }
 
     let updated_input = pending.and_then(|p| p.get("input").cloned());
 

@@ -78,6 +78,7 @@ mod shell_discovery;
 pub(crate) mod shell_input;
 mod shell_tool_description;
 mod web;
+pub(crate) use web::{execute_approved_http_fetch_async, validate_plaintext_http_input, HttpFallbackRequired};
 pub use provider_search::search as search_provider;
 
 /// Host entry for the internal managed-PTY roles.
@@ -256,7 +257,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             summary: Some("Read a web page and answer a prompt from it with the session model".into()),
             name: "WebFetch".to_string(),
-            description: "Read a web page and answer prompt from it with the session's model. The result is that answer, not the page markup or the raw response body. http(s) only; public http is upgraded to https. Local and private addresses need the user's approval unless the session is in bypass mode. Public redirects are followed automatically, but a public page is never allowed to redirect to a local or private address. HTML becomes readable text, and text, JSON, XML and JavaScript are read as-is. Cleaned text of 20,000 characters or fewer is returned directly; only longer text is summarized by the model from prompt, and a summary that exceeds its output limit falls back to the first 20,000 characters of the page text. A failed direct fetch or a JavaScript-only shell page falls back to the Jina Reader automatically. Downloads stop at 2 MiB, answers cover up to 50,000 characters from offset, and next_offset continues a truncated page; a successful download is reused for fifteen minutes. When you need the exact response body, such as from a local JSON endpoint, run curl or a similar command through Bash instead.".to_string(),
+            description: "Read a web page and answer prompt from it with the session's model. The result is that answer, not the page markup or the raw response body. http(s) only; public HTTP tries HTTPS first. Plaintext HTTP requires a separate user grant and is labeled unencrypted. A one-request grant cannot follow redirects; an origin grant permits redirects only on that origin. Local and private HTTPS addresses need approval unless the session is in bypass mode. Public redirects are followed automatically, but a public page is never allowed to redirect to a local or private address. HTML becomes readable text, and text, JSON, XML and JavaScript are read as-is. Cleaned text of 20,000 characters or fewer is returned directly; only longer text is summarized by the model from prompt, and a summary that exceeds its output limit falls back to the first 20,000 characters of the page text. Eligible public HTTPS pages can fall back to Jina Reader. HTTP requests are never sent to the reader. Downloads stop at 2 MiB, answers cover up to 50,000 characters from offset, and next_offset continues a truncated page; eligible HTTPS downloads are reused for fifteen minutes. When you need the exact response body, such as from a local JSON endpoint, run curl or a similar command through Bash instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2555,25 +2556,29 @@ pub fn filter_search_domains(result: &mut serde_json::Value, input: &serde_json:
 }
 
 /// The model's WebFetch: the URL policy applies before any request is made.
-fn model_fetch_input(mut input: serde_json::Value) -> Result<serde_json::Value> {
+fn model_fetch_input(mut input: serde_json::Value) -> Result<(serde_json::Value, bool)> {
     let url = input["url"]
         .as_str()
         .ok_or_else(|| anyhow!("url required"))?;
-    input["url"] = serde_json::json!(web::model_url(url, path_scope::approved_local_fetch(url))?);
-    Ok(input)
+    let target = web::model_url(url, path_scope::approved_local_fetch(url))?;
+    let upgraded = reqwest::Url::parse(url)?.scheme() == "http";
+    input["url"] = target.into();
+    Ok((input, upgraded))
 }
 fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> {
-    web::fetch_blocking(model_fetch_input(input)?)
+    let (input, upgraded) = model_fetch_input(input)?;
+    web::fetch_blocking(input, upgraded)
 }
 async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> {
-    web::fetch(model_fetch_input(input)?).await
+    execute_web_fetch_async(input, None).await
 }
 /// WebFetch with the configured transport proxy, after the same URL policy.
 pub(crate) async fn execute_web_fetch_async(
     input: serde_json::Value,
     proxy: Option<&str>,
 ) -> Result<serde_json::Value> {
-    web::fetch_with_proxy(model_fetch_input(input)?, proxy).await
+    let (input, upgraded) = model_fetch_input(input)?;
+    web::fetch_model(input, proxy, upgraded).await
 }
 fn tool_web_search_blocking(_input: serde_json::Value) -> Result<serde_json::Value> {
     Err(anyhow!("WebSearch requires a conversation provider and its search settings. Start search from a conversation."))

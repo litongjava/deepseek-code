@@ -38,6 +38,26 @@ async fn session_bash_answers_validate_owner_and_danger_before_claiming() {
     }
 }
 
+#[tokio::test]
+async fn scoped_http_answer_requires_live_http_owner_and_is_single_use() {
+    let (_temp, engine) = fixture();
+    let id = uuid::Uuid::new_v4().to_string();
+    responses::register_owner(&id, "http-test-child", "fetch", "permission", Value::Null, None, None, None);
+    responses::set_owner_tool(&id, "WebFetch");
+    let reply = responses::register(&engine.permission_mailbox, &id).await;
+    assert!(engine.resume_scoped_answer("http-test-child", &id, "fetch", "http_user".into(), true).await.is_err());
+    responses::set_owner_tool(&id, "WebFetchHttp");
+    let pending = engine.pending_questions("http-test-child").await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["tool_name"], "WebFetchHttp");
+    assert!(engine.resume_scoped_answer("other", &id, "fetch", "http_user".into(), true).await.is_err());
+    engine.resume_scoped_answer("http-test-child", &id, "fetch", "http_once".into(), true).await.unwrap();
+    assert!(matches!(reply.await.unwrap(), responses::PermissionResponse::Text(choice) if choice == "http_once"));
+    assert!(engine.pending_questions("http-test-child").await.is_empty());
+    assert!(engine.resume_scoped_answer("http-test-child", &id, "fetch", "http_user".into(), true).await.is_err());
+    responses::remove_owner(&id);
+}
+
 fn fixture() -> (tempfile::TempDir, QueryEngine) {
     let temp = tempfile::tempdir().unwrap();
     let context = crate::services::session_messages::context(temp.path()).unwrap();

@@ -208,6 +208,12 @@ Desktop 与 CLI 共用 `crates/core` 的监控服务。Bridge 在 `src-tauri/src
 - `crates/core` 的技能发现、模型技能列表和 `Skill` 工具：D4，以及 `cli-regression-tests.md` 的 N 节
 - 其他范围：至少跑 D1
 
+### WebFetch 明文 HTTP 审批
+
+在隔离的 Desktop 数据目录用本地模型 fixture 触发 `WebFetchHttp`。检查弹窗显示准确的 origin（含非默认端口）、请求 URL 和明文风险；`local: true` 时额外提示所选范围也允许访问该 origin 的本地/私有网络目的地，`reason` 非空时按纯文本显示 HTTPS 升级失败原因。对新的待批请求分别选择仅本次、此会话、此项目、此用户；在 `/permission` 请求中核对 `behavior` 分别为 `http_once`、`http_session`、`http_project`、`http_user`，并检查请求和工具 ID。Deny 只拒绝本次调用；Cancel turn 停止回合，不发送授权。以上四档是原生引擎 Bridge 的 `behavior`，不是 SDK 的 `allow` + `httpScope`。旧外部进程后端对四档值应返回 HTTP 501，不得回退为普通 `allow`。
+
+运行 `npm run test:run -- src/components/ToolPermissionPrompt.test.tsx` 检查组件。另用真实 Desktop 和本地服务按不同路径计数：批准前、拒绝或取消后均不应收到目标请求；项目授权在同项目的新会话可复用，换项目应重新询问。组件测试不代替 Bridge、WebView 或授权持久化验收。
+
 ### ToolScript 内层审批来源
 
 复用 `ToolPermissionPrompt` 和已有权限响应路由。模型经 ToolLoad 加载 ToolScript 后，ask 模式中的内层 Write 应展示实际输入以及 ToolScript 父调用 ID，允许/拒绝与普通工具一致；取消或 TaskStop 后提示消失，旧回复不能执行工具。`ToolPermissionPrompt.test.tsx` 覆盖来源文字与既有按钮行为；真实 Desktop/WebView 和私有 worker 的全链路需另行运行，不以 SDK 测试代替。

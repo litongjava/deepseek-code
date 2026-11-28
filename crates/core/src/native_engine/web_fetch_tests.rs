@@ -112,6 +112,7 @@ impl Fixture {
                 input.clone(),
                 &provider,
                 None,
+                Some((input["url"].as_str().unwrap(), true)),
                 crate::native_engine::request_options::RequestOptions::for_session(None),
             ),
         )
@@ -131,7 +132,12 @@ impl Fixture {
             &input,
             ".",
             true,
-            crate::tools::execute_web_fetch_async(input.clone(), None),
+            crate::tools::execute_approved_http_fetch_async(
+                input.clone(),
+                None,
+                input["url"].as_str().unwrap(),
+                true,
+            ),
         )
         .await
         .unwrap()
@@ -156,6 +162,8 @@ async fn direct_fetches_negotiate_markdown() {
     let f = Fixture::start().await;
     let result = f.fetch("short", 0, "read", 128_000, 8_192).await;
     assert_eq!(result["result"], "# 界🙂\n");
+    assert_eq!(result["transport"], "plaintext_http");
+    assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
     let pages = f.page_requests();
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0]["accept"], "text/markdown, text/html, */*");
@@ -193,6 +201,7 @@ async fn an_offset_past_the_end_reports_the_page_length_without_a_model_request(
     ] {
         let result = f.fetch("short", offset, "read", 128_000, 8_192).await;
         assert_eq!(result["result"], expected);
+        assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
         assert_eq!(result["summarized"], false);
     }
     assert!(f.model_requests().is_empty());
@@ -215,6 +224,7 @@ async fn a_roomy_context_keeps_the_configured_summary_budget() {
         .fetch("long", 0, "what is on the page?", 128_000, 8_192)
         .await;
     assert_eq!(result["result"], "model answer");
+    assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
     assert_eq!(result["summarized"], true);
     let requests = f.model_requests();
     assert_eq!(requests.len(), 1);
@@ -229,6 +239,7 @@ async fn a_tight_context_reserves_only_the_output_room_that_fits() {
         .fetch("long", 0, "what is on the page?", 8_192, 8_192)
         .await;
     assert_eq!(result["result"], "model answer");
+    assert_eq!(result["warning"], "Fetched over unencrypted HTTP.");
     assert_eq!(result["summarized"], true);
     let requests = f.model_requests();
     assert_eq!(requests.len(), 1);

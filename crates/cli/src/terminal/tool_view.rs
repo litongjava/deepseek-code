@@ -710,7 +710,11 @@ pub struct Approval {
     pub remember: Option<Remember>,
     /// Whether a "switch to auto mode" choice follows the remember choice.
     pub auto: bool,
+    http: bool,
 }
+
+#[path = "http_approval.rs"]
+pub(crate) mod http_approval;
 
 impl Approval {
     /// The prompt as plain text, for terminals without the live menu,
@@ -723,6 +727,9 @@ impl Approval {
         text.push_str(&self.question);
         for (index, option) in self.options.iter().enumerate() {
             text.push_str(&format!("\n  {}. {option}", index + 1));
+        }
+        if self.http {
+            return text;
         }
         let mut hints = vec!["1/y yes".to_owned()];
         if self.remember.is_some() {
@@ -805,6 +812,9 @@ pub fn approval(
     workspace: Option<&std::path::Path>,
     auto: bool,
 ) -> Approval {
+    if name == http_approval::TOOL {
+        return http_approval::menu(input);
+    }
     let local_fetch = name == "WebFetch"
         && deepseek_code_core::permissions::web_fetch::requires_local_approval(
             input["url"].as_str().unwrap_or_default(),
@@ -988,7 +998,7 @@ pub fn approval(
         options.push("Yes, do not ask again \u{b7} enable and switch to auto mode".into());
     }
     options.push("No".into());
-    Approval { lines, question, options, remember, auto }
+    Approval { lines, question, options, remember, auto, http: false }
 }
 
 #[cfg(test)]

@@ -807,6 +807,15 @@ impl PermissionManager {
             .result
     }
 
+    pub(crate) fn http_fetch_url(context: &PermissionContext) -> Option<reqwest::Url> {
+        if context.tool_name != "WebFetch" {
+            return None;
+        }
+        reqwest::Url::parse(context.tool_input["url"].as_str()?)
+            .ok()
+            .filter(|url| url.scheme() == "http")
+    }
+
     pub fn evaluate_permission(&self, context: &PermissionContext) -> PermissionDecision {
         self.evaluate_permission_inner(context, false, false)
     }
@@ -846,7 +855,13 @@ impl PermissionManager {
     ) -> PermissionDecision {
         let mode = self.get_mode();
         let decision = self
-            .static_decision(context, mode, plan_document, memory_document)
+            .static_decision(
+                context,
+                mode,
+                plan_document,
+                memory_document,
+                super::full_access(),
+            )
             .in_mode(mode);
         self.audit_logger.log(
             AuditEntry::new(
@@ -870,6 +885,7 @@ impl PermissionManager {
         mode: PermissionMode,
         plan_document: bool,
         memory_document: bool,
+        full_access: bool,
     ) -> PermissionDecision {
         use DecisionOrigin::*;
         let decision = PermissionDecision::new;
@@ -877,8 +893,9 @@ impl PermissionManager {
             && super::web_fetch::requires_local_approval(
                 context.tool_input["url"].as_str().unwrap_or_default(),
             );
-        // Full Access grants everything bypass mode would, deny rules included.
-        if mode == PermissionMode::BypassPermissions && super::full_access() {
+        // Plaintext requests still enforce explicit policy before any network I/O.
+        let http_fetch = Self::http_fetch_url(context).is_some();
+        if mode == PermissionMode::BypassPermissions && full_access && !http_fetch {
             return decision(PermissionResult::Granted, Mode);
         }
         let auto = mode == PermissionMode::Auto;
@@ -957,6 +974,14 @@ impl PermissionManager {
                 PermissionResult::Denied("Tool is explicitly disabled".into()),
                 ToolSetting,
             );
+        }
+        if http_fetch {
+            if actions.contains(&PermissionAction::Confirm) {
+                return decision(self.request_confirmation(context), ExplicitRule);
+            }
+            if setting.as_ref().is_some_and(|p| p.requires_confirmation) {
+                return decision(self.request_confirmation(context), ToolSetting);
+            }
         }
         if local_fetch && mode != PermissionMode::BypassPermissions {
             return decision(self.request_confirmation(context), NetworkBoundary);
@@ -1937,6 +1962,60 @@ mod policy_tests {
                 manager.check_permission(&call),
                 PermissionResult::Denied(_)
             ));
+        }
+    }
+
+    #[test]
+    fn http_explicit_ask_is_distinct_from_local_boundary_and_public_default() {
+        let manager = manager(PermissionMode::Auto);
+        for (url, origin) in [
+            ("http://localhost/", DecisionOrigin::NetworkBoundary),
+            ("http://example.org/", DecisionOrigin::DefaultPrompt),
+        ] {
+            let call = PermissionContext {
+                tool_input: serde_json::json!({"url": url}),
+                ..context("WebFetch")
+            };
+            manager.set_session_rules("session", HashMap::new());
+            assert_eq!(manager.evaluate_permission(&call).origin, origin);
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("WebFetch".into(), PermissionAction::Confirm)]),
+            );
+            let decision = manager.evaluate_permission(&call);
+            assert_eq!(decision.origin, DecisionOrigin::ExplicitRule);
+            assert!(!decision.classifier_eligible);
+            assert!(matches!(decision.result, PermissionResult::RequiresConfirmation(_)));
+        }
+    }
+
+    #[test]
+    fn full_access_keeps_http_rules_without_changing_https() {
+        let mode = PermissionMode::BypassPermissions;
+        let manager = manager(mode);
+        for action in [PermissionAction::Confirm, PermissionAction::Deny] {
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("WebFetch".into(), action.clone())]),
+            );
+            for host in ["example.org", "localhost"] {
+                let mut call = context("WebFetch");
+                call.tool_input = serde_json::json!({"url": format!("http://{host}/")});
+                let decision = manager.static_decision(&call, mode, false, false, true);
+                assert_eq!(decision.origin, DecisionOrigin::ExplicitRule);
+                assert!(!decision.classifier_eligible);
+                assert!(match action {
+                    PermissionAction::Confirm => {
+                        matches!(decision.result, PermissionResult::RequiresConfirmation(_))
+                    }
+                    _ => matches!(decision.result, PermissionResult::Denied(_)),
+                });
+                call.tool_input = serde_json::json!({"url": format!("https://{host}/")});
+                assert_eq!(
+                    manager.static_decision(&call, mode, false, false, true).result,
+                    PermissionResult::Granted
+                );
+            }
         }
     }
 

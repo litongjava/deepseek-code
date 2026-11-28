@@ -2415,12 +2415,19 @@ impl QueryEngine {
 
     pub async fn pending_questions(&self, session: &str) -> Vec<Value> {
         let waiters = self.answer_waiters.lock().await;
+        let permissions = self.permission_mailbox.lock().await;
         super::permission_response::pending_owners(session)
             .into_iter()
-            .filter(|(id, _)| waiters.get(id).is_some_and(|sender| !sender.is_closed()))
+            .filter(|(id, owner)| {
+                if owner.tool_name.as_deref() == Some("WebFetchHttp") {
+                    permissions.get(id).is_some_and(|entry| !entry.is_closed())
+                } else {
+                    waiters.get(id).is_some_and(|sender| !sender.is_closed())
+                }
+            })
             .map(|(id, owner)| {
                 serde_json::json!({"request_id":id,"session_id":owner.session_id,
-                "tool_use_id":owner.tool_use_id,"kind":owner.kind,"tool_input":owner.input,
+                "tool_use_id":owner.tool_use_id,"kind":owner.kind,"tool_name":owner.tool_name,"tool_input":owner.input,
                 "planApprovalRequest":owner.plan})
             })
             .collect()
@@ -2446,6 +2453,9 @@ impl QueryEngine {
             (owner.kind == "permission") == permission,
             "Incorrect response endpoint for request"
         );
+        if permission && matches!(answer.as_str(), "http_once" | "http_session" | "http_project" | "http_user") {
+            anyhow::ensure!(owner.tool_name.as_deref() == Some("WebFetchHttp"), "HTTP scope is unavailable for this request");
+        }
         if let Some(request) = &owner.plan {
             let manager = owner
                 .manager
