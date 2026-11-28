@@ -606,35 +606,35 @@ impl QueryEngine {
             None
         };
         let summary = async {
-        if shard
-            .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
-            .is_some_and(|host| host.standalone_frontend)
-        {
-            use crate::db::session_store::settings::{Microcompact, MICROCOMPACT};
-            let boundary = boundary.as_deref().unwrap_or_default();
-            let mut state = shard
-                .repository()
-                .preference(MICROCOMPACT)?
-                .filter(|state| state.boundary == boundary)
-                .unwrap_or_else(|| Microcompact::for_boundary(boundary));
-            crate::services::compaction::microcompact::replay(
-                &mut history,
-                &mut state,
-                provider.model.context_window,
-            )?;
-        }
-        self.generate_replay_summary(
-            shard,
-            provider,
-            model,
-            system,
-            instructions,
-            history,
-            boundary,
-            options,
-        )
-        .await
-        .map(Into::into)
+            if shard
+                .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
+                .is_some_and(|host| host.standalone_frontend)
+            {
+                use crate::db::session_store::settings::{Microcompact, MICROCOMPACT};
+                let boundary = boundary.as_deref().unwrap_or_default();
+                let mut state = shard
+                    .repository()
+                    .preference(MICROCOMPACT)?
+                    .filter(|state| state.boundary == boundary)
+                    .unwrap_or_else(|| Microcompact::for_boundary(boundary));
+                crate::services::compaction::microcompact::replay(
+                    &mut history,
+                    &mut state,
+                    provider.model.context_window,
+                )?;
+            }
+            self.generate_replay_summary(
+                shard,
+                provider,
+                model,
+                system,
+                instructions,
+                history,
+                boundary,
+                options,
+            )
+            .await
+            .map(Into::into)
         };
         match native {
             Some(result) => {

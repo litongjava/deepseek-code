@@ -259,6 +259,64 @@ impl ToolLoopExecutor {
             .transpose()
     }
 
+    fn estimated_input_tokens(&self, estimated_messages: u64) -> u64 {
+        let reported_plus_delta = self
+            .last_reported_input_tokens
+            .map(|reported| {
+                let delta = self
+                    .last_request_message_tokens
+                    .map(|prev| estimated_messages.saturating_sub(prev))
+                    .unwrap_or(0);
+                reported.saturating_add(delta)
+            })
+            .unwrap_or(0);
+        reported_plus_delta
+            .max(estimated_messages.saturating_add(self.last_request_overhead_tokens))
+    }
+
+    async fn handle_compaction_failure<M: serde::Serialize>(
+        &mut self,
+        error: anyhow::Error,
+        window: &[M],
+    ) -> Result<()> {
+        if self.event_tx.is_closed() {
+            return Err(error);
+        }
+        let wire = self.build_mid_turn_summary_wire(window)?;
+        let model = &self.provider.model;
+        let usage = super::super::request_context::ContextUsage::from_body(
+            &wire.api,
+            &wire.body,
+            model.context_window,
+            self.max_tokens,
+        );
+        let rows = window
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let estimated = self
+            .estimated_input_tokens(TokenCounter::estimate(&rows) as u64)
+            .max(usage.text_subtotal());
+        let limit = model
+            .context_window
+            .map(u64::from)
+            .unwrap_or_else(|| TokenCounter::get_model_context_limit(&model.id) as u64);
+        let capacity = limit.saturating_sub(u64::from(self.max_tokens));
+        if estimated > capacity {
+            anyhow::bail!("Automatic compaction failed: {error:#}. The next request needs about {estimated} input tokens and only {capacity} fit. Resume this session and run /compact or select a model with a larger context window.");
+        }
+        if !self.auto_compaction_warned {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::CompactionNotice(format!(
+                    "Automatic compaction failed: {error:#}. Continuing with the existing context."
+                )))
+                .await;
+            self.auto_compaction_warned = true;
+        }
+        Ok(())
+    }
+
     /// Check the session's `/autocompact` threshold between tool iterations.
     /// When crossed, try lightweight `microcompact` first; if context still
     /// meets the threshold, run a real durable compaction (native or LLM) and
@@ -302,19 +360,7 @@ impl ToolLoopExecutor {
                 .collect::<serde_json::Result<Vec<_>>>()
         };
         let rows = values(window)?;
-        let estimated_messages = TokenCounter::estimate(&rows) as u64;
-        let reported_plus_delta = self
-            .last_reported_input_tokens
-            .map(|reported| {
-                let delta = self
-                    .last_request_message_tokens
-                    .map(|prev| estimated_messages.saturating_sub(prev))
-                    .unwrap_or(0);
-                reported.saturating_add(delta)
-            })
-            .unwrap_or(0);
-        let estimated = reported_plus_delta
-            .max(estimated_messages.saturating_add(self.last_request_overhead_tokens));
+        let estimated = self.estimated_input_tokens(TokenCounter::estimate(&rows) as u64);
         if estimated < threshold {
             return Ok(MidTurnCompact::Managed);
         }
@@ -427,22 +473,10 @@ impl ToolLoopExecutor {
         let (generated, mut record) = match result {
             Ok(pair) => pair,
             Err(error) => {
-                tracing::warn!(
-                    module = "HistoryReplay",
-                    "Mid-turn auto-compact failed: {error:#}"
-                );
-                let _ = self
-                    .event_tx
-                    .send(EngineEvent::CompactionNotice(format!(
-                        "Mid-turn auto-compact failed ({error:#}); continuing with existing context."
-                    )))
-                    .await;
-                self.mid_turn_compact_cooldown_until = iteration + 3;
-                return Ok(if microcompact_changed {
-                    MidTurnCompact::Synced
-                } else {
-                    MidTurnCompact::Unmanaged
-                });
+                self.handle_compaction_failure(error, window).await?;
+                // The refreshed window already passed the hard capacity check.
+                // A new tool iteration may trigger another compaction.
+                return Ok(MidTurnCompact::Synced);
             }
         };
 
@@ -596,50 +630,58 @@ impl ToolLoopExecutor {
             "auto",
             &serde_json::to_string(&input)?,
         );
-        let native = if native::supports(&self.provider) {
-            Some(
-                native::generate(
-                    input.clone(),
-                    shard.id(),
-                    &self.provider,
-                    focus,
-                    self.search_config_path
-                        .as_deref()
-                        .and_then(crate::data_layout::data_root_of),
-                    options.clone(),
+        let operation = async {
+            let native = if native::supports(&self.provider) {
+                Some(
+                    native::generate(
+                        input.clone(),
+                        shard.id(),
+                        &self.provider,
+                        focus,
+                        self.search_config_path
+                            .as_deref()
+                            .and_then(crate::data_layout::data_root_of),
+                        options.clone(),
+                    )
+                    .await,
                 )
-                .await,
-            )
-        } else {
-            None
-        };
-        let summary = async {
-            let mut wire = self.build_mid_turn_summary_wire(window)?;
-            wire.allow_text_summary();
-            let opaque = self.opaque_responses_window(&input, PROMPT, shard.id())?;
-            if opaque.is_some() {
-                input.remove(0);
+            } else {
+                None
+            };
+            let summary = async {
+                let mut wire = self.build_mid_turn_summary_wire(window)?;
+                wire.allow_text_summary();
+                let opaque = self.opaque_responses_window(&input, PROMPT, shard.id())?;
+                if opaque.is_some() {
+                    input.remove(0);
+                }
+                let selected = shard.scoped_stores();
+                let mut checkpoint =
+                    Checkpoint::open(&selected, shard.id(), &self.provider, PROMPT)?;
+                checkpoint.options = options;
+                super::super::generation::replay::summarize_replay(
+                    self.provider.clone(),
+                    PROMPT,
+                    input,
+                    focus,
+                    true,
+                    wire,
+                    opaque,
+                    &mut checkpoint,
+                )
+                .await
+                .map(Into::into)
+            };
+            match native {
+                Some(result) => native::with_summary_fallback(result, summary).await,
+                None => summary.await,
             }
-            let selected = shard.scoped_stores();
-            let mut checkpoint = Checkpoint::open(&selected, shard.id(), &self.provider, PROMPT)?;
-            checkpoint.options = options;
-            super::super::generation::replay::summarize_replay(
-                self.provider.clone(),
-                PROMPT,
-                input,
-                focus,
-                true,
-                wire,
-                opaque,
-                &mut checkpoint,
-            )
-            .await
-            .map(Into::into)
         };
-        let generated = match native {
-            Some(result) => native::with_summary_fallback(result, summary).await?,
-            None => summary.await?,
-        };
+        let generated = tokio::select! {
+            biased;
+            _ = self.event_tx.closed() => anyhow::bail!("Interrupted during automatic compaction"),
+            result = operation => result,
+        }?;
         Ok((generated, record))
     }
 
@@ -750,7 +792,17 @@ impl ToolLoopExecutor {
                         MID_TURN_CONTINUATION_FOCUS,
                     )
                     .await;
-                let (mut generated, mut record) = result?;
+                let (mut generated, mut record) = match result {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        self.handle_compaction_failure(error, &provided).await?;
+                        *window = provided
+                            .into_iter()
+                            .map(serde_json::from_value)
+                            .collect::<serde_json::Result<_>>()?;
+                        return Ok(true);
+                    }
+                };
                 if let Some(record) = &mut record {
                     record.finish(&generated, "in-flight-native-window");
                 }
@@ -782,14 +834,21 @@ impl ToolLoopExecutor {
                     anyhow::ensure!(TokenCounter::estimate(&suffix) <= capacity,
                         "Context overflow: the current turn's admitted inputs exceed the model window");
                 }
-                let (generated, mut record) = self
+                let result = self
                     .generate_auto_compaction(
                         &shard,
                         rows,
                         &window[..end],
                         self.system_prompt.as_deref().unwrap_or(""),
                     )
-                    .await?;
+                    .await;
+                let (generated, mut record) = match result {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        self.handle_compaction_failure(error, window).await?;
+                        return Ok(microcompact_changed);
+                    }
+                };
                 let boundary = shard.commit_compaction_window(&cut, &generated)?;
                 generated.log_boundary(&boundary);
                 if let Some(record) = &mut record {

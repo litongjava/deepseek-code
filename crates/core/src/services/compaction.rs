@@ -14,6 +14,12 @@ pub(crate) mod checkpoint;
 pub mod microcompact;
 pub(crate) mod native;
 
+/// Generation stopped before the boundary transaction. Hosts may continue
+/// an automatic turn if the existing request still fits.
+#[derive(Debug, thiserror::Error)]
+#[error("Compaction failed: {0:#}")]
+pub struct GenerationFailure(#[source] anyhow::Error);
+
 pub struct GeneratedSummary {
     pub text: String,
     pub native: Option<Value>,
@@ -796,7 +802,9 @@ where
         trigger,
         &prepared.transcript,
     );
-    let summary = summarize(focus, prepared.before.clone(), options).await?;
+    let summary = summarize(focus, prepared.before.clone(), options)
+        .await
+        .map_err(GenerationFailure)?;
     let (fresh_context, start_warnings) =
         match super::session_hooks::collect(context, workspace, id, "compact", model).await {
             Ok(result) => result,

@@ -792,9 +792,16 @@ pub async fn reactive_compact(
         return Ok(None);
     }
     crate::compaction::notice("Context limit reached; compacting the conversation and retrying…");
+    if let Err(error) =
+        compact_automatic(session, "", CompactionTracker::before_input(&input)).await
+    {
+        if error.is::<deepseek_code_core::services::compaction::GenerationFailure>() {
+            anyhow::bail!("{error}. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window.");
+        }
+        return Err(error);
+    }
     shard.write(|w| w.discard_failed_segments(&turn.record().turn_id))?;
     turn.clear_segment();
-    compact_automatic(session, "", CompactionTracker::before_input(&input)).await?;
     Ok(Some(input))
 }
 
@@ -829,7 +836,23 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease:
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
-    compact_automatic(session, "", CompactionTracker::default()).await?;
+    if let Err(error) = compact_automatic(session, "", CompactionTracker::default()).await {
+        if !error.is::<deepseek_code_core::services::compaction::GenerationFailure>() {
+            return Err(error);
+        }
+        let provider = session.selected_provider().await?;
+        let history = session
+            .store
+            .model_history(&session.id, &provider.provider.api_format)?;
+        let input =
+            deepseek_code_core::native_engine::token_counter::TokenCounter::estimate(&history);
+        // Turn preparation can shrink the output reserve to 4096 tokens.
+        let reserve = provider.model.max_tokens.unwrap_or(8192).min(4096);
+        if input > window.saturating_sub(reserve) as usize {
+            anyhow::bail!("{error}. The history is too large for the next request. Resume and run /compact or select a model with a larger context window.");
+        }
+        crate::compaction::notice(&format!("{error}. Continuing with the existing context."));
+    }
     Ok(())
 }
 
