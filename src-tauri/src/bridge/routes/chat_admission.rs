@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use deepseek_code_core::{
+    db::stored_binding::StoredBinding,
     native_engine::{provider_manager::ApiFormat, NativeEngine},
     services::session_messages::ExecutionLease,
 };
@@ -112,85 +113,103 @@ pub(super) async fn resolve_model(
     id: &str,
     request: ModelRequest<'_>,
 ) -> Result<ChatModel, Response> {
-    let current = state
+    let (stored, pending) = state
         .db_manager
-        .observed_binding(id)
+        .stored_binding(id)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if current.pending.is_some() {
+    if pending {
         return Err(error(
             StatusCode::CONFLICT,
             "Conversation provider switch is pending",
         ));
     }
-    let (stored_provider, stored_model) = split_model_key(&current.model);
-    let pick_model = || {
-        error(
-            StatusCode::CONFLICT,
-            "Pick a model in Desktop before compacting this conversation",
-        )
-    };
-    let (requested, provider) = match request {
-        ModelRequest::Chat { model, provider } => (model, provider),
-        ModelRequest::Compact(_) if stored_model.is_empty() => return Err(pick_model()),
-        ModelRequest::Compact(_) => ("", None),
-    };
-    let (qualified, model) = if requested.is_empty() {
-        (stored_provider, stored_model)
-    } else if provider.is_some() {
-        // The client has already split this key. The model ID itself is opaque.
-        (None, requested)
-    } else {
-        split_model_key(requested)
-    };
-    let model = if model.is_empty() {
-        "claude-sonnet-4-6"
-    } else {
-        model
-    };
-    let same_model = model == stored_model;
-    let provider = match provider {
-        Some(id) => Some(std::borrow::Cow::Borrowed(id)),
-        None => qualified
-            .or(stored_provider.filter(|_| same_model))
-            .map(urlencoding::decode)
-            .transpose()
-            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?
-            .or_else(|| {
-                (same_model && !current.provider.is_empty())
-                    .then_some(std::borrow::Cow::Borrowed(current.provider.as_str()))
-            }),
-    };
-    let explicit_provider = provider.is_some() || matches!(request, ModelRequest::Compact(_));
-    let resolved = match request {
+    let compact = matches!(request, ModelRequest::Compact(_));
+    let (mut selection, recorded) = match request {
         ModelRequest::Compact(session) => {
-            let id = match provider {
-                Some(id) => id,
-                None => session
+            let recorded = if stored.provider.is_none() {
+                session
                     .read(|r| r.last_completed_turn_provider())
                     .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
-                    .ok_or_else(pick_model)?
-                    .into(),
+            } else {
+                None
             };
-            engine.resolved_provider(&id, model).await.map_err(|_| error(
-                StatusCode::CONFLICT,
-                format!("provider {id} is unavailable for model {model}. Pick a model in Desktop before compacting this conversation"),
-            ))?
+            (stored, recorded)
         }
-        ModelRequest::Chat { .. } => match provider.as_deref() {
-            Some(id) => engine.resolved_provider(id, model).await.ok(),
-            None => engine.resolve_provider(model).await,
+        ModelRequest::Chat {
+            model,
+            provider: Some(id),
+        } => (
+            StoredBinding::from_row(
+                Some(id.to_owned()),
+                if model.is_empty() {
+                    stored.model
+                } else {
+                    model.to_owned()
+                },
+            ),
+            None,
+        ),
+        ModelRequest::Chat { model, .. } if !model.is_empty() && model != stored.model => (
+            StoredBinding::desktop_selection(model)
+                .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+            None,
+        ),
+        ModelRequest::Chat { model, .. } => {
+            let recorded = if stored.provider.is_none() && stored.model.contains("::") {
+                state
+                    .db_manager
+                    .open_session(id)
+                    .and_then(|s| s.read(|r| r.last_completed_turn_provider()))
+                    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            } else {
+                None
+            };
+            if recorded.is_none() && stored.provider.is_none() && !model.is_empty() {
+                // The caller explicitly supplied a selector for an unbound chat.
+                (
+                    StoredBinding::desktop_selection(model)
+                        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+                    None,
+                )
+            } else {
+                (stored, recorded)
+            }
         }
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chat model unavailable"))?,
+    };
+    if !compact && selection.model.is_empty() {
+        selection.model = "claude-sonnet-4-6".into();
+    }
+    let pinned = compact || selection.provider.is_some() || recorded.is_some();
+    let (resolved, selector) = if pinned {
+        selection
+            .resolve_pinned(recorded, engine)
+            .await
+            .map_err(|e| {
+                if compact {
+                    error(StatusCode::CONFLICT, e)
+                } else {
+                    error(StatusCode::BAD_REQUEST, "Chat model unavailable")
+                }
+            })?
+    } else {
+        // Automatic routing is a chat-only option for an unqualified model.
+        // A legacy stored prefix alone supplies no provider authority.
+        if selection.model.contains("::") {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Pick a model in Desktop before chatting",
+            ));
+        }
+        let resolved = engine
+            .resolve_provider(&selection.model)
+            .await
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chat model unavailable"))?;
+        (resolved, selection.model)
     };
     Ok(ChatModel {
         provider_id: resolved.provider.id,
         api_format: resolved.provider.api_format,
-        selector: model.to_owned(),
-        explicit_provider,
+        selector,
+        explicit_provider: pinned,
     })
-}
-
-fn split_model_key(key: &str) -> (Option<&str>, &str) {
-    key.split_once("::")
-        .map_or((None, key), |(provider, model)| (Some(provider), model))
 }

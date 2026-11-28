@@ -1,20 +1,37 @@
 use axum::{extract::State, http::HeaderMap, routing::post, Router};
 use deepseek_code_core::db::session_store::CreateOptions;
-use deepseek_desktop_tauri_lib::{bridge::BridgeServer, runtime::RuntimePaths};
+use deepseek_desktop_tauri_lib::{
+    bridge::BridgeServer,
+    runtime::{RuntimePaths, SessionStore},
+};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[derive(Clone, Default)]
+struct Endpoint {
+    kinds: Arc<Mutex<Vec<String>>>,
+    compact_models: Arc<Mutex<Vec<String>>>,
+}
+
 // Record every POST, including requests that do not carry a recognized kind.
 async fn provider(
-    State(kinds): State<Arc<Mutex<Vec<String>>>>,
+    State(endpoint): State<Endpoint>,
     headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
 ) -> ([(&'static str, &'static str); 1], String) {
     let kind = headers
         .get("x-dcl-request-kind")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    kinds.lock().unwrap().push(kind.to_owned());
+    endpoint.kinds.lock().unwrap().push(kind.to_owned());
+    if kind == "compaction" {
+        endpoint
+            .compact_models
+            .lock()
+            .unwrap()
+            .push(body["model"].as_str().unwrap().to_owned());
+    }
     let delta = json!({"choices":[{"index":0,"delta":{"content":"Keep the original decision."},"finish_reason":"stop"}]});
     (
         [("content-type", "text/event-stream")],
@@ -25,12 +42,12 @@ async fn provider(
 #[tokio::test]
 async fn compact_uses_the_created_binding_or_latest_completed_turn() {
     let dir = tempfile::tempdir().unwrap();
-    let first = Arc::new(Mutex::new(Vec::new()));
-    let second = Arc::new(Mutex::new(Vec::new()));
+    let first = Endpoint::default();
+    let second = Endpoint::default();
     let calls = || {
         (
-            first.lock().unwrap().clone(),
-            second.lock().unwrap().clone(),
+            first.kinds.lock().unwrap().clone(),
+            second.kinds.lock().unwrap().clone(),
         )
     };
     let app = Router::new()
@@ -57,9 +74,16 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
             })
         })
         .collect();
-    let mut opaque = providers[1]["models"][0].clone();
-    opaque["id"] = json!("first::shared");
-    providers[1]["models"].as_array_mut().unwrap().push(opaque);
+    for (provider, ids) in providers.iter_mut().zip([
+        &["first::shared", "first-only"][..],
+        &["first::shared", "second::raw-only", "second::shared"][..],
+    ]) {
+        for id in ids {
+            let mut model = provider["models"][0].clone();
+            model["id"] = json!(id);
+            provider["models"].as_array_mut().unwrap().push(model);
+        }
+    }
     deepseek_code_core::data_layout::write_config_file(
         dir.path().join("config/config.json"),
         json!({"providers":providers}).to_string(),
@@ -107,6 +131,14 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
                 .unwrap();
             assert!(events.contains("message_stop"), "{events}");
         }
+    };
+    let chat_with_model = |id: &str, model: &str| {
+        client
+            .post(format!("{base}/api/chat"))
+            .header("x-api-key", &key)
+            .json(&json!({"conversation_id":id, "model":model,
+                "messages":[{"role":"user","content":"Continue."}]}))
+            .send()
     };
     let compact = |id: &str| {
         client
@@ -189,6 +221,176 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
     assert_eq!(calls().0, prior.0);
     assert_eq!(&calls().1[prior.1.len()..], ["compaction"]);
 
+    // A caller may also submit the picker value itself on a first chat.
+    let picked_chat = uuid::Uuid::new_v4().to_string();
+    let events = chat_with_model(&picked_chat, "se%63ond::first::shared")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(events.contains("message_stop"), "{events}");
+    wait_for_title(picked_chat.clone()).await;
+    assert_eq!(
+        binding(&picked_chat),
+        (Some("second".into()), Some("first::shared".into()))
+    );
+
+    let store = SessionStore::new(db.clone());
+    let mut matrix = Vec::new();
+    for model in ["shared", "first::shared"] {
+        let cli = store.create(dir.path(), model, "second").unwrap();
+        let rebound = store.create(dir.path(), "shared", "first").unwrap();
+        let session = db.open_session(&rebound).unwrap();
+        let snapshot = deepseek_code_core::native_engine::session_binding::BindingSnapshot {
+            generation: 0,
+            observation_only: false,
+            provider_id: "second".into(),
+            model: model.to_owned(),
+            environment: Default::default(),
+            providers: providers
+                .iter()
+                .map(|p| {
+                    deepseek_code_core::runtime::provider_from_config(
+                        &serde_json::from_value(p.clone()).unwrap(),
+                    )
+                })
+                .collect(),
+        };
+        session
+            .publish_provider(
+                session.observe_provider().unwrap().generation,
+                &snapshot,
+                None,
+                "cli",
+                None,
+            )
+            .unwrap();
+
+        let picker_key = format!("second::{model}");
+        let desktop: Value = client
+            .post(format!("{base}/api/conversations"))
+            .header("x-api-key", &key)
+            .json(&json!({"model":picker_key}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let picker = desktop["id"].as_str().unwrap().to_owned();
+        let detail: Value = client
+            .get(format!("{base}/api/conversations/{picker}"))
+            .header("x-api-key", &key)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(detail["model"], picker_key);
+
+        let http = if model == "shared" {
+            created.clone()
+        } else {
+            opaque.clone()
+        };
+        for (writer, id) in [
+            ("cli", cli),
+            ("rebind", rebound),
+            ("first chat", http),
+            ("picker", picker),
+        ] {
+            assert_eq!(
+                binding(&id),
+                (Some("second".to_owned()), Some(model.to_owned())),
+                "{writer}"
+            );
+            store.append(&id, "user", "Keep this decision").unwrap();
+            store
+                .append(&id, "assistant", "Use the selected provider.")
+                .unwrap();
+            let prior = calls();
+            let response = compact(&id).await.unwrap();
+            assert!(
+                response.status().is_success(),
+                "{writer}/{model}: {}",
+                response.text().await.unwrap()
+            );
+            assert_eq!(calls().0, prior.0, "{writer}/{model}");
+            assert_eq!(
+                &calls().1[prior.1.len()..],
+                ["compaction"],
+                "{writer}/{model}"
+            );
+            assert_eq!(second.compact_models.lock().unwrap().last().unwrap(), model);
+            matrix.push(id);
+        }
+    }
+
+    for (raw, recorded, expected_model) in [
+        ("se%63ond::shared", Some("second"), Some("shared")),
+        ("first::shared", Some("second"), Some("first::shared")),
+        ("second::raw-only", Some("second"), Some("second::raw-only")),
+        ("second::shared", Some("second"), None),
+        ("first::unknown", Some("second"), None),
+        ("second::shared", None, None),
+    ] {
+        let id = uuid::Uuid::new_v4().to_string();
+        db.create(
+            &id,
+            CreateOptions {
+                title: Some("Legacy".into()),
+                model: Some(raw.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if let Some(provider) = recorded {
+            chat(&id, provider, "shared").await;
+        }
+        assert_eq!(binding(&id), (None, Some(raw.to_owned())));
+        let prior = calls();
+        let response = compact(&id).await.unwrap();
+        if let Some(model) = expected_model {
+            assert!(
+                response.status().is_success(),
+                "{}",
+                response.text().await.unwrap()
+            );
+            assert_eq!(&calls().1[prior.1.len()..], ["compaction"]);
+            assert_eq!(second.compact_models.lock().unwrap().last().unwrap(), model);
+        } else {
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("Pick a model in Desktop"));
+            assert_eq!(calls().1, prior.1);
+        }
+        assert_eq!(calls().0, prior.0);
+    }
+
+    let prior = calls();
+    let events = chat_with_model(&opaque, "first::shared")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(events.contains("message_stop"), "{events}");
+    assert_eq!(calls().0, prior.0);
+    assert_eq!(&calls().1[prior.1.len()..], ["turn"]);
+
     let before = calls();
     client
         .patch(format!("{base}/api/providers/second"))
@@ -199,7 +401,7 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
         .unwrap()
         .error_for_status()
         .unwrap();
-    for id in [&created, &legacy] {
+    for id in matrix.iter().chain([&legacy]) {
         let response = compact(id).await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
         let body: Value = response.json().await.unwrap();
@@ -211,6 +413,10 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
             "{body}"
         );
     }
+
+    let disabled_chat = chat_with_model(&opaque, "first::shared").await.unwrap();
+    assert_eq!(disabled_chat.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(calls(), before);
 
     // Even a single enabled provider with this model cannot establish ownership.
     let empty = uuid::Uuid::new_v4().to_string();
@@ -261,6 +467,18 @@ async fn compact_uses_the_created_binding_or_latest_completed_turn() {
         .unwrap()
         .contains("provider second is unavailable"));
     assert_eq!(calls(), before);
+    // Chat still accepts a different, unqualified model from the caller.
+    let events = chat_with_model(&opaque, "first-only")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(events.contains("message_stop"), "{events}");
+    assert_eq!(&calls().0[before.0.len()..], ["turn"]);
+    assert_eq!(calls().1, before.1);
     server.abort();
     mock.abort();
 }

@@ -490,7 +490,7 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
     );
 
-    // A Desktop picker persists its encoded model key, including the window override.
+    // A picker edit stores the decoded provider and preserves the window override.
     let picker = db.open_session(&seeded).unwrap();
     picker
         .edit_conversation(&json!({"model":"second%2Fprovider::small-window"}))
@@ -504,6 +504,9 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
     picker
         .edit_conversation(&json!({"model":"second%2Fprovider::small-window[1m]"}))
         .unwrap();
+    let selected = db.conversation_metadata(&seeded).unwrap().unwrap();
+    assert_eq!(selected.provider.as_deref(), Some("second/provider"));
+    assert_eq!(selected.model.as_deref(), Some("small-window[1m]"));
     let qualified = compact(seeded.clone(), json!({"instructions":"SAME_WINDOW_TEST"})).await;
     assert!(
         qualified.status().is_success(),
