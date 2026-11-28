@@ -70,8 +70,14 @@ impl AutoCompactionGate {
         state.threshold_retry_at = state.iteration.saturating_add(3);
     }
 
+    pub fn committed(&self) {
+        self.state().failure = None;
+    }
+
     pub(crate) fn committed_mid_turn(&self) {
-        self.state().completed_mid_turn += 1;
+        let mut state = self.state();
+        state.failure = None;
+        state.completed_mid_turn += 1;
     }
 
     pub fn blocking_failure(&self) -> Option<String> {
@@ -90,7 +96,7 @@ impl AutoCompactionGate {
     }
 
     /// A provider rejection is a hard limit. Even after cooldown expires, use the
-    /// last exhausted budget from this turn instead of starting reactive recovery.
+    /// last exhausted budget until a successful compaction ends the failure streak.
     pub fn provider_rejection(&self) -> Option<anyhow::Error> {
         let state = self.state();
         let cause = match &state.failure {
@@ -117,6 +123,22 @@ fn provider_overflow_remembers_the_exhausted_budget_after_cooldown() {
     gate.defer_threshold();
     assert!(!gate.may_start());
     assert!(gate.blocking_failure().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn committing_compaction_ends_the_previous_failure_streak() {
+    let gate = AutoCompactionGate::default();
+    for commit in [
+        AutoCompactionGate::committed,
+        AutoCompactionGate::committed_mid_turn,
+    ] {
+        gate.record_failure("HTTP 429 and HTTP 503".into());
+        assert!(gate.provider_rejection().is_some());
+        commit(&gate);
+        assert!(gate.blocking_failure().is_none());
+        assert!(gate.provider_rejection().is_none());
+    }
 }
 
 pub struct GeneratedSummary {

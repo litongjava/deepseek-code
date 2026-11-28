@@ -18,6 +18,7 @@ enum Entry {
 #[derive(Clone, Copy, Debug)]
 enum Case {
     Snapshot(Entry),
+    RejectedAfterRecovery,
     Overflow { status: StatusCode, cooldown: bool },
 }
 
@@ -58,6 +59,22 @@ async fn respond(
     if kind == "main" {
         state.main += 1;
     }
+    if matches!(state.case, Some(Case::RejectedAfterRecovery)) {
+        if kind == "native" && main_before == 9 {
+            return Json(json!({"object":"response.compaction","output":[{"type":"compaction","id":"cmp-nine","encrypted_content":"recovered-at-nine"}]})).into_response();
+        }
+        if kind == "summary" {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "0")],
+                "busy",
+            )
+                .into_response();
+        }
+        if kind == "main" && main_before == 9 {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "input rejected").into_response();
+        }
+    }
     if kind == "native" {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -89,14 +106,15 @@ async fn respond(
         }
     }
     let tool = kind == "main"
-        && main_before == 0
-        && matches!(
-            state.case,
-            Some(Case::Snapshot(Entry::MidTurn) | Case::Overflow { cooldown: true, .. })
-        );
+        && ((matches!(state.case, Some(Case::RejectedAfterRecovery)) && main_before < 9)
+            || (main_before == 0
+                && matches!(
+                    state.case,
+                    Some(Case::Snapshot(Entry::MidTurn) | Case::Overflow { cooldown: true, .. })
+                )));
     let mut frames = Vec::new();
     let output = if tool {
-        json!([{"type":"function_call","id":"fc-read","call_id":"call-read","name":"Read","arguments":r#"{"file_path":"missing.txt"}"#}])
+        json!([{"type":"function_call","id":format!("fc-{main_before}"),"call_id":format!("read-{main_before}"),"name":"Read","arguments":r#"{"file_path":"missing.txt"}"#}])
     } else {
         frames.push(json!({"type":"response.output_text.delta","delta":"fixture reply"}));
         json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture reply"}]}])
@@ -218,7 +236,7 @@ async fn run_case(case: Case) {
     let boundaries = deepseek_code_core::services::compaction::count(&store.db, &id)
         .unwrap()
         .proven();
-    assert_eq!(native.len(), budget, "{case:?} {order:?} {diagnostic}");
+
     eprintln!(
         "{case:?}: {} native, {} summary, {} main POSTs, {boundaries} boundaries",
         native.len(),
@@ -226,7 +244,43 @@ async fn run_case(case: Case) {
         calls.main
     );
     match case {
+        Case::RejectedAfterRecovery => {
+            let mut expected = vec![];
+            for step in 0..10 {
+                if matches!(step, 1 | 5) {
+                    expected.extend(std::iter::repeat_n("native", budget));
+                    expected.extend(std::iter::repeat_n("summary", budget));
+                } else if step == 9 {
+                    expected.push("native");
+                }
+                expected.push("main");
+            }
+            assert_eq!(order, expected, "{diagnostic}");
+            assert_eq!(boundaries, 1);
+            assert!(calls
+                .posts
+                .last()
+                .unwrap()
+                .1
+                .to_string()
+                .contains("recovered-at-nine"));
+            assert!(!result.status.success());
+            let terminal = diagnostic
+                .rsplit_once("Error: ")
+                .expect("CLI error footer")
+                .1;
+            assert!(terminal.contains("413"), "{terminal}");
+            for stale in [
+                "429",
+                "503",
+                "Automatic compaction failed",
+                "uncompressed request",
+            ] {
+                assert!(!terminal.contains(stale), "{terminal}");
+            }
+        }
         Case::Overflow { cooldown, .. } => {
+            assert_eq!(native.len(), budget, "{case:?} {order:?} {diagnostic}");
             assert!(!result.status.success(), "{diagnostic}");
             assert_eq!(summary.len(), budget, "{case:?} {order:?}");
             assert_eq!(calls.main, 1 + usize::from(cooldown));
@@ -243,6 +297,7 @@ async fn run_case(case: Case) {
             }
         }
         Case::Snapshot(entry) => {
+            assert_eq!(native.len(), budget, "{case:?} {order:?} {diagnostic}");
             assert!(result.status.success(), "{case:?} {diagnostic}");
             assert_eq!(boundaries, 1);
             assert_eq!(
@@ -309,4 +364,9 @@ async fn every_compaction_entry_preserves_structured_bash_in_both_transports() {
     ] {
         run_case(Case::Snapshot(entry)).await;
     }
+}
+
+#[tokio::test]
+async fn provider_rejection_after_a_successful_boundary_starts_a_new_streak() {
+    run_case(Case::RejectedAfterRecovery).await;
 }

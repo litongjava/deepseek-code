@@ -917,6 +917,7 @@ impl ToolLoopExecutor {
                     }
                 };
                 let boundary = shard.commit_compaction_window(&cut, &generated)?;
+                gate.committed();
                 generated.log_boundary(&boundary);
                 if let Some(record) = &mut record {
                     record.finish(&generated, &boundary);
@@ -973,6 +974,7 @@ impl ToolLoopExecutor {
                     prefix.retain(|m| m["origin"] != "memory_change");
                     let text = compressor.window_summary(&prefix, &level).await;
                     shard.commit_compaction_window(&cut, &text.as_str().into())?;
+                    gate.committed();
                     let tail = window.split_off(persisted_len);
                     self.reload_history(&shard)?;
                     *window = render(self, &self.message_additions())?;

@@ -896,6 +896,7 @@ async fn compact_automatic(
             &tracker, "Interrupted: automatic compaction cancelled before it was saved; original transcript retained",
         )?.report, true),
     };
+    gate.committed();
     for warning in &report.warnings {
         crate::compaction::notice(&format!("Hook: {warning}"));
     }
