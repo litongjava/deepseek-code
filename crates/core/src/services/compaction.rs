@@ -18,6 +18,16 @@ pub struct GeneratedSummary {
     pub text: String,
     pub native: Option<Value>,
 }
+impl GeneratedSummary {
+    pub(crate) fn log_boundary(&self, boundary: &str) {
+        let path = if self.native.is_some() {
+            "native"
+        } else {
+            "summary"
+        };
+        tracing::info!(boundary, path, "Committed compaction boundary");
+    }
+}
 impl From<String> for GeneratedSummary {
     fn from(text: String) -> Self {
         Self { text, native: None }
@@ -393,7 +403,11 @@ fn commit_with_context(
         !summary.trim().is_empty() && summary.chars().count() <= 32_000,
         "Empty or oversized compaction summary"
     );
-    db.select_session(&prepared.conversation_id)?.commit_compaction(&prepared, generated, session_context)
+    let result = db
+        .select_session(&prepared.conversation_id)?
+        .commit_compaction(&prepared, generated, session_context)?;
+    generated.log_boundary(&result.message_id);
+    Ok(result)
 }
 
 pub(crate) fn commit_locked(

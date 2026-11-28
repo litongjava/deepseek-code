@@ -582,20 +582,30 @@ impl QueryEngine {
         let (mut history, boundary) =
             shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
-        if crate::services::compaction::native::supports(&provider) {
-            history.retain(|row| row["origin"] != "memory_change");
-            let mut options = options;
-            options.compaction_metrics = Some(super::compaction_metrics::MetricsStore(shard));
-            return crate::services::compaction::native::generate(
-                history,
-                session,
-                &provider,
-                instructions,
-                Some(self.db_manager.data_dir()),
-                options,
+        let native = if crate::services::compaction::native::supports(&provider) {
+            let input = history
+                .iter()
+                .filter(|row| row["origin"] != "memory_change")
+                .cloned()
+                .collect();
+            let mut native_options = options.clone();
+            native_options.compaction_metrics =
+                Some(super::compaction_metrics::MetricsStore(shard.clone()));
+            Some(
+                crate::services::compaction::native::generate(
+                    input,
+                    session,
+                    &provider,
+                    instructions,
+                    Some(self.db_manager.data_dir()),
+                    native_options,
+                )
+                .await,
             )
-            .await;
-        }
+        } else {
+            None
+        };
+        let summary = async {
         if shard
             .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
             .is_some_and(|host| host.standalone_frontend)
@@ -625,6 +635,13 @@ impl QueryEngine {
         )
         .await
         .map(Into::into)
+        };
+        match native {
+            Some(result) => {
+                crate::services::compaction::native::with_summary_fallback(result, summary).await
+            }
+            None => summary.await,
+        }
     }
 
     pub(crate) async fn generate_replay_summary(

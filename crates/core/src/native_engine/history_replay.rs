@@ -404,89 +404,16 @@ impl ToolLoopExecutor {
             .search_config_path
             .as_deref()
             .and_then(crate::data_layout::data_root_of);
-        let native = crate::services::compaction::native::supports(&self.provider);
         let generation = async {
-            if native {
-                use crate::native_engine::request_recording::CompactionRecord;
-                let (mut input, _) =
-                    shard.read(|r| r.model_history(&self.provider.provider.api_format))?;
-                input.retain(|row| row["origin"] != "memory_change");
-                self.remove_compaction_indexes(&mut input);
-                let mut options = self
-                    .openai_client
-                    .request_options
-                    .clone()
-                    .compaction("native");
-                options.compaction_metrics = Some(
-                    super::super::compaction_metrics::MetricsStore(shard.clone()),
-                );
-                let record = CompactionRecord::start(
-                    &mut options,
-                    "auto",
-                    &serde_json::to_string(&input)?,
-                );
-                let generated =
-                    crate::services::compaction::native::generate_messages_with_options(
-                        &self.provider,
-                        options,
-                        input
-                            .into_iter()
-                            .map(serde_json::from_value)
-                            .collect::<serde_json::Result<_>>()?,
-                        &focus,
-                        Some(&conv_id),
-                        data_root,
-                    )
-                    .await?;
-                Ok::<_, anyhow::Error>((generated, record))
+            let input = if crate::services::compaction::native::supports(&self.provider) {
+                shard
+                    .read(|r| r.model_history(&self.provider.provider.api_format))?
+                    .0
             } else {
-                use crate::native_engine::request_recording::CompactionRecord;
-                let mut wire = self.build_mid_turn_summary_wire(window)?;
-                wire.allow_text_summary();
-                let mut durable = self.prepare_main_history()?;
-                durable.retain(|row| row["origin"] != "memory_change");
-                let opaque = self.opaque_responses_window(
-                    &durable,
-                    crate::services::compaction::PROMPT,
-                    &conv_id,
-                )?;
-                if opaque.is_some() {
-                    durable.remove(0);
-                }
-                let mut options = match self.provider.provider.api_format {
-                    ApiFormat::Anthropic => self.anthropic_client.request_options.clone(),
-                    ApiFormat::OpenAI => self.openai_client.request_options.clone(),
-                }
-                .compaction("auto");
-                options.compaction_metrics = Some(
-                    super::super::compaction_metrics::MetricsStore(shard.clone()),
-                );
-                let record = CompactionRecord::start(
-                    &mut options,
-                    "auto",
-                    &serde_json::to_string(&durable)?,
-                );
-                let selected = shard.scoped_stores();
-                let mut checkpoint = crate::services::compaction::checkpoint::Checkpoint::open(
-                    &selected,
-                    &conv_id,
-                    &self.provider,
-                    crate::services::compaction::PROMPT,
-                )?;
-                checkpoint.options = options;
-                let text = super::super::generation::replay::summarize_replay(
-                    self.provider.clone(),
-                    crate::services::compaction::PROMPT,
-                    durable,
-                    &focus,
-                    true,
-                    wire,
-                    opaque,
-                    &mut checkpoint,
-                )
-                .await?;
-                Ok((text.into(), record))
-            }
+                self.prepare_main_history()?
+            };
+            self.generate_auto_compaction(&shard, input, window, &focus)
+                .await
         };
 
         let outcome = tokio::select! {
@@ -548,6 +475,7 @@ impl ToolLoopExecutor {
                 });
             }
         };
+        generated.log_boundary(&boundary_id);
         if let Some(record) = &mut record {
             record.finish(&generated, &boundary_id);
         }
@@ -640,92 +568,79 @@ impl ToolLoopExecutor {
         self.reload_history(&shard)
     }
 
-    async fn compact_native_window(
+    /// Generate against the caller's exact cut. The caller owns cancellation
+    /// and commits only after one of the two transports has finished.
+    async fn generate_auto_compaction<M: serde::Serialize>(
         &self,
         shard: &crate::db::session_store::SessionDb,
-        cut: &crate::db::session_store::CompactionWindow,
         mut input: Vec<Value>,
-    ) -> Result<()> {
-        use crate::native_engine::request_recording::CompactionRecord;
-        let mut options = self
-            .openai_client
-            .request_options
-            .clone()
-            .compaction("native");
+        window: &[M],
+        focus: &str,
+    ) -> Result<(
+        crate::services::compaction::GeneratedSummary,
+        Option<super::super::request_recording::CompactionRecord>,
+    )> {
+        use crate::services::compaction::{checkpoint::Checkpoint, native, PROMPT};
+        input.retain(|row| row["origin"] != "memory_change");
+        self.remove_compaction_indexes(&mut input);
+        let mut options = match self.provider.provider.api_format {
+            ApiFormat::Anthropic => self.anthropic_client.request_options.clone(),
+            ApiFormat::OpenAI => self.openai_client.request_options.clone(),
+        }
+        .compaction("auto");
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
             shard.clone(),
         ));
-        let mut record =
-            CompactionRecord::start(&mut options, "auto", &serde_json::to_string(&input)?);
-        self.remove_compaction_indexes(&mut input);
-        let compacted = crate::services::compaction::native::generate_messages_with_options(
-            &self.provider,
-            options,
-            input
-                .into_iter()
-                .map(serde_json::from_value)
-                .collect::<serde_json::Result<_>>()?,
-            self.system_prompt.as_deref().unwrap_or(""),
-            self.conv_id.as_deref(),
-            self.search_config_path
-                .as_deref()
-                .and_then(crate::data_layout::data_root_of),
-        )
-        .await?;
-        let boundary = shard.commit_compaction_window(cut, &compacted)?;
-        if let Some(record) = &mut record {
-            record.finish(&compacted, &boundary);
-        }
-        Ok(())
-    }
-
-    /// Native compaction for a request window that is not backed by the
-    /// durable shard. It changes only this request.
-    async fn compact_in_flight<M: serde::Serialize + serde::de::DeserializeOwned>(
-        &self,
-        mut input: Vec<Value>,
-    ) -> Result<Vec<M>> {
-        use crate::native_engine::request_recording::CompactionRecord;
-        let mut options = self
-            .openai_client
-            .request_options
-            .clone()
-            .compaction("native");
-        let mut record =
-            CompactionRecord::start(&mut options, "auto", &serde_json::to_string(&input)?);
-        self.remove_compaction_indexes(&mut input);
-        let compacted = crate::services::compaction::native::generate_messages_with_options(
-            &self.provider,
-            options,
-            input
-                .into_iter()
-                .map(serde_json::from_value)
-                .collect::<serde_json::Result<_>>()?,
-            self.system_prompt.as_deref().unwrap_or(""),
-            self.conv_id.as_deref(),
-            self.search_config_path
-                .as_deref()
-                .and_then(crate::data_layout::data_root_of),
-        )
-        .await?;
-        if let Some(record) = &mut record {
-            record.finish(&compacted, "in-flight-native-window");
-        }
-        let mut native = compacted.native;
-        if let Some(window) = native.as_mut() {
-            prepare_native_window(
-                window,
-                self.search_config_path
-                    .as_deref()
-                    .and_then(crate::data_layout::data_root_of),
-                self.conv_id.as_deref().unwrap_or_default(),
-            );
-        }
-        Ok(vec![serde_json::from_value(json!({
-            "role":"user",
-            "content":compacted.text,
-            "provider_content":native,
-        }))?])
+        let record = super::super::request_recording::CompactionRecord::start(
+            &mut options,
+            "auto",
+            &serde_json::to_string(&input)?,
+        );
+        let native = if native::supports(&self.provider) {
+            Some(
+                native::generate(
+                    input.clone(),
+                    shard.id(),
+                    &self.provider,
+                    focus,
+                    self.search_config_path
+                        .as_deref()
+                        .and_then(crate::data_layout::data_root_of),
+                    options.clone(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let summary = async {
+            let mut wire = self.build_mid_turn_summary_wire(window)?;
+            wire.allow_text_summary();
+            let opaque = self.opaque_responses_window(&input, PROMPT, shard.id())?;
+            if opaque.is_some() {
+                input.remove(0);
+            }
+            let selected = shard.scoped_stores();
+            let mut checkpoint = Checkpoint::open(&selected, shard.id(), &self.provider, PROMPT)?;
+            checkpoint.options = options;
+            super::super::generation::replay::summarize_replay(
+                self.provider.clone(),
+                PROMPT,
+                input,
+                focus,
+                true,
+                wire,
+                opaque,
+                &mut checkpoint,
+            )
+            .await
+            .map(Into::into)
+        };
+        let generated = match native {
+            Some(result) => native::with_summary_fallback(result, summary).await?,
+            None => summary.await?,
+        };
+        Ok((generated, record))
     }
 
     // A live window can refresh its durable prefix. A summary already owns
@@ -820,16 +735,39 @@ impl ToolLoopExecutor {
         }
 
         if native {
-            if let Some(provided) = durable_window {
-                *window = self.compact_in_flight(provided).await?;
-                return Ok(false);
-            }
             if durable_len.is_none() {
                 return Ok(false);
             }
             let Some(ExecutorHistory::Session(shard)) = self.executor_history.clone() else {
                 anyhow::bail!("Native Responses compression requires durable session history");
             };
+            if let Some(provided) = durable_window {
+                let result = self
+                    .generate_auto_compaction(
+                        &shard,
+                        provided.clone(),
+                        &provided,
+                        MID_TURN_CONTINUATION_FOCUS,
+                    )
+                    .await;
+                let (mut generated, mut record) = result?;
+                if let Some(record) = &mut record {
+                    record.finish(&generated, "in-flight-native-window");
+                }
+                if let Some(native) = &mut generated.native {
+                    prepare_native_window(
+                        native,
+                        self.search_config_path
+                            .as_deref()
+                            .and_then(crate::data_layout::data_root_of),
+                        shard.id(),
+                    );
+                }
+                *window = vec![serde_json::from_value(json!({
+                    "role":"user", "content":generated.text, "provider_content":generated.native,
+                }))?];
+                return Ok(false);
+            }
             let cut = physical_cut.context("Missing native compaction snapshot")?;
             let mut committed = false;
             if cut.prefix_len > 0 {
@@ -844,7 +782,19 @@ impl ToolLoopExecutor {
                     anyhow::ensure!(TokenCounter::estimate(&suffix) <= capacity,
                         "Context overflow: the current turn's admitted inputs exceed the model window");
                 }
-                self.compact_native_window(&shard, &cut, rows).await?;
+                let (generated, mut record) = self
+                    .generate_auto_compaction(
+                        &shard,
+                        rows,
+                        &window[..end],
+                        self.system_prompt.as_deref().unwrap_or(""),
+                    )
+                    .await?;
+                let boundary = shard.commit_compaction_window(&cut, &generated)?;
+                generated.log_boundary(&boundary);
+                if let Some(record) = &mut record {
+                    record.finish(&generated, &boundary);
+                }
                 let additions = window.split_off(persisted_len);
                 self.reload_history(&shard)?;
                 *window = render(self, &self.message_additions())?;

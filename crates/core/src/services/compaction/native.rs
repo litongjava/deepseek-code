@@ -57,6 +57,33 @@ pub(crate) fn validate_history(messages: &[Value], provider: &ResolvedProvider) 
     Ok(())
 }
 
+/// Only the native endpoint is being replaced. Authentication, billing, local
+/// validation and storage errors must keep their original disposition.
+pub(crate) async fn with_summary_fallback<T>(
+    native: Result<T>,
+    summary: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    use crate::performance::{find_failure, ErrorClass};
+    let error = match native {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+    let eligible = find_failure(&error).is_some_and(|failure| {
+        matches!(
+            failure.class(),
+            ErrorClass::Transient | ErrorClass::RateLimit
+        ) || matches!(failure.status(), Some(400 | 404 | 405 | 413))
+    });
+    if !eligible {
+        return Err(error);
+    }
+    tracing::info!(%error, "Trying summary compaction on the same provider");
+    summary.await.map_err(|summary| {
+        let message = format!("{error}; summary compaction failed: {summary:#}");
+        summary.context(message)
+    })
+}
+
 pub(crate) async fn generate(
     history: Vec<Value>,
     id: &str,
@@ -138,16 +165,25 @@ pub(crate) async fn generate_messages_with_options(
         .headers(identity.headers())
         .json(&body);
     let bytes = crate::performance::retry_with_backoff(|| async {
-        let attempt = request.try_clone().context("Cannot replay native compaction request")?;
+        let attempt = request
+            .try_clone()
+            .context("Cannot replay native compaction request")?;
         let response = crate::native_engine::request_recording::send(
-            attempt, &options, provider, "openai-responses-compact", false,
+            attempt,
+            &options,
+            provider,
+            "openai-responses-compact",
+            false,
         )
         .await?;
         let mut response = crate::performance::checked_response(response).await?;
         const LIMIT: usize = 32 * 1024 * 1024;
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            ensure!(bytes.len() + chunk.len() <= LIMIT, "Native compaction response exceeds 32 MiB");
+            ensure!(
+                bytes.len() + chunk.len() <= LIMIT,
+                "Native compaction response exceeds 32 MiB"
+            );
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
@@ -217,7 +253,15 @@ mod tests {
             };
             assert!(commit_with_context(&store.db, prepared, &summary, None).is_err());
             assert_eq!(store.history(&id).unwrap(), before);
-            let count = store.db.fixture_shard(&id, |conn| conn.query_row("SELECT COUNT(*) FROM native_boundaries", [], |r| r.get::<_, i64>(0))).unwrap().unwrap();
+            let count = store
+                .db
+                .fixture_shard(&id, |conn| {
+                    conn.query_row("SELECT COUNT(*) FROM native_boundaries", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                })
+                .unwrap()
+                .unwrap();
             assert_eq!(count, 0);
         }
     }
