@@ -1,3 +1,4 @@
+use crate::memory::MemoryConfig;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -23,6 +24,12 @@ const CODE_IDENTITY: &str = "You are deepseek-code, an agentic coding tool for D
 
 const BEHAVIOR: &str = include_str!("behavior.md");
 const MEMORY_GUIDANCE: &str = include_str!("memory.md");
+const SCOPE_GUIDANCE: [&str; 4] = [
+    include_str!("global-memory.md"),
+    include_str!("project-memory.md"),
+    include_str!("team-memory.md"),
+    include_str!("session-memory.md"),
+];
 const CODE_BEHAVIOR: &str = include_str!("code.md");
 
 pub mod code;
@@ -52,12 +59,12 @@ pub fn compose_system_prompt(custom_prompt: Option<&str>, profile: PromptProfile
 
 /// The built-in prompt text, which the user can start editing from.
 pub fn default_system_prompt(_profile: PromptProfile) -> String {
-    static_sections(true).join("\n\n")
+    static_sections(&MemoryConfig::default()).join("\n\n")
 }
 
 /// The CLI's constant runtime facts. They describe the frontend, so they travel
 /// in the first user message as their own reminder instead of the system prompt.
-pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal.no Desktop window or Bridge server; use native tools directly. For an interactive command like `gcloud auth login`, tell the user to enter `! <command>` and its output appears here.";
+pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal. No Desktop window or Bridge server.";
 
 pub fn standalone_frontend_reminder() -> String {
     format!("<system-reminder>\n{STANDALONE_FRONTEND}\n</system-reminder>")
@@ -556,24 +563,24 @@ pub struct SessionReminders {
     pub skills: Option<String>,
 }
 
-/// The reminders that open the first user message: the user's own instructions,
-/// the CLI's frontend facts, the project's instructions, the resident memory
-/// indexes, the project experience index, the loadable tools, the skills, the
-/// environment, the date, the Git snapshot, skills recovered after compaction,
+/// The reminders that open the first user message: the CLI's frontend facts (when applicable),
+/// the user's own instructions, the project's instructions, the project experience
+/// index, the loadable tools, the skills, the environment, the resident memory
+/// indexes, the date, the Git snapshot, skills recovered after compaction,
 /// and the static session tips block.
 pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     let mut blocks = Vec::new();
-    blocks.extend(parts.user_instructions);
     if parts.standalone_frontend {
         blocks.push(standalone_frontend_reminder());
     }
+    blocks.extend(parts.user_instructions);
     blocks.extend(parts.project_instructions);
-    blocks.extend(parts.resident_indexes);
     blocks.extend(parts.experience);
     blocks.extend(parts.loadable_tools);
     blocks.extend(parts.available_skills);
     blocks.extend(parts.inline_skills);
     blocks.extend(parts.environment);
+    blocks.extend(parts.resident_indexes);
     blocks.extend(parts.date);
     blocks.extend(parts.git);
     blocks.extend(parts.skills);
@@ -582,8 +589,8 @@ pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
 }
 
 /// Like `compose_system_prompt_in`, with the user's system prompt setting and the
-/// memory switch applied. Memory disabled omits the memory guidance section.
-pub fn compose_customized(custom_prompt: Option<&str>, _profile: PromptProfile, user: &crate::services::customization::SystemPrompt, memory: bool) -> String {
+/// enabled memory scopes applied to the built-in prompt.
+pub fn compose_customized(custom_prompt: Option<&str>, _profile: PromptProfile, user: &crate::services::customization::SystemPrompt, memory: &MemoryConfig) -> String {
     use crate::services::customization::PromptMode;
     let text = user.text.trim();
     let mut sections = match user.mode {
@@ -603,13 +610,11 @@ pub fn compose_customized(custom_prompt: Option<&str>, _profile: PromptProfile, 
 /// cache them; request-specific instructions follow them. Session facts such as
 /// the environment belong in the first user message instead.
 pub fn compose_system_prompt_in(custom_prompt: Option<&str>, profile: PromptProfile) -> String {
-    compose_system_prompt_with_memory(custom_prompt, profile, true)
+    compose_system_prompt_with_memory(custom_prompt, profile, &MemoryConfig::default())
 }
 
-/// Composition with the global memory switch applied: a disabled memory omits
-/// the memory guidance section while identity, coding behavior and general
-/// behavior stay identical for every profile.
-pub fn compose_system_prompt_with_memory(custom_prompt: Option<&str>, _profile: PromptProfile, memory: bool) -> String {
+/// Both profiles use common guidance plus only the enabled scope templates.
+pub fn compose_system_prompt_with_memory(custom_prompt: Option<&str>, _profile: PromptProfile, memory: &MemoryConfig) -> String {
     let mut sections = static_sections(memory);
     if let Some(custom) = custom_prompt.map(str::trim).filter(|s| !s.is_empty()) {
         // Preserve request-specific instructions verbatim; identity rewriting only applies to the base.
@@ -618,16 +623,25 @@ pub fn compose_system_prompt_with_memory(custom_prompt: Option<&str>, _profile: 
     sections.join("\n\n")
 }
 
-fn static_sections(memory: bool) -> Vec<String> {
-    let mut sections = vec![
-        CODE_IDENTITY.to_string(),
-        CODE_BEHAVIOR.trim().to_string(),
-        BEHAVIOR.trim().to_string(),
+fn static_sections(memory: &MemoryConfig) -> Vec<String> {
+    let mut guidance = vec![MEMORY_GUIDANCE.trim()];
+    let enabled = [
+        memory.global_enabled,
+        memory.project_enabled,
+        memory.team_enabled,
+        memory.session_enabled,
     ];
-    if memory {
-        sections.push(MEMORY_GUIDANCE.trim().to_string());
+    for (template, enabled) in SCOPE_GUIDANCE.iter().zip(enabled) {
+        if enabled {
+            guidance.push(template.trim());
+        }
     }
-    sections
+    vec![
+        CODE_IDENTITY.into(),
+        CODE_BEHAVIOR.trim().into(),
+        BEHAVIOR.trim().into(),
+        guidance.join("\n\n"),
+    ]
 }
 
 /// The session's facts as the reference CLI puts them in the first user message.
@@ -957,23 +971,26 @@ fn version_output(mut command: std::process::Command) -> Option<String> {
 /// carries its own cache breakpoint and the per-request tail is left unmarked.
 /// Returns None for prompts this module did not compose.
 pub fn cache_blocks(system: &str) -> Option<Vec<(String, bool)>> {
-    [true, false].into_iter().find_map(|memory| {
-        let sections = static_sections(memory);
-        let mut rest = system;
-        let mut blocks = Vec::new();
-        for (index, section) in sections.iter().enumerate() {
-            rest = rest.strip_prefix(section.as_str())?;
-            if index + 1 < sections.len() {
-                rest = rest.strip_prefix("\n\n")?;
-            }
-            blocks.push((section.clone(), true));
+    let mut rest = system;
+    let mut blocks = Vec::new();
+    for section in [CODE_IDENTITY, CODE_BEHAVIOR.trim(), BEHAVIOR.trim()] {
+        rest = rest.strip_prefix(section)?.strip_prefix("\n\n")?;
+        blocks.push((section.to_owned(), true));
+    }
+    // Common and scoped guidance share a breakpoint regardless of scope count.
+    let guidance = rest;
+    rest = rest.strip_prefix(MEMORY_GUIDANCE.trim())?;
+    for template in SCOPE_GUIDANCE {
+        if let Some(after) = rest.strip_prefix("\n\n").and_then(|s| s.strip_prefix(template.trim())) {
+            rest = after;
         }
-        let rest = rest.trim_start_matches('\n');
-        if !rest.is_empty() {
-            blocks.push((rest.to_string(), false));
-        }
-        Some(blocks)
-    })
+    }
+    blocks.push((guidance[..guidance.len() - rest.len()].to_owned(), true));
+    let tail = rest.trim_start_matches('\n');
+    if !tail.is_empty() {
+        blocks.push((tail.to_owned(), false));
+    }
+    Some(blocks)
 }
 
 /// A composed prompt's static sections, joined as composed, and its
@@ -1448,7 +1465,7 @@ mod tests {
         let other = compose_system_prompt_in(None, PromptProfile::Code);
         {
             use crate::services::customization::{PromptMode, SystemPrompt};
-            let compose = |mode, text: &str| compose_customized(Some("rule"), PromptProfile::Code, &SystemPrompt { mode, text: text.into() }, true);
+            let compose = |mode, text: &str| compose_customized(Some("rule"), PromptProfile::Code, &SystemPrompt { mode, text: text.into() }, &MemoryConfig::default());
             assert_eq!(compose(PromptMode::Default, "ignored"), compose_system_prompt_in(Some("rule"), PromptProfile::Code));
             let appended = compose(PromptMode::Append, "EXTRA_RULE");
             assert!(appended.contains(CODE_IDENTITY) && appended.contains("EXTRA_RULE"));
@@ -1465,28 +1482,31 @@ mod tests {
     }
 
     #[test]
-    fn memory_switch_drops_the_guidance_section_for_both_profiles() {
-        for profile in [PromptProfile::Desktop, PromptProfile::Code] {
-            let prompt = compose_system_prompt_with_memory(None, profile, false);
-            assert!(!prompt.contains("<memory_guidance>"), "{profile:?}");
-            assert!(prompt.starts_with(CODE_IDENTITY));
-            assert!(prompt.contains("<behavior>"));
-            let blocks = cache_blocks(&prompt).unwrap();
-            assert_eq!(blocks.len(), 3);
-            assert!(blocks.iter().all(|(_, cached)| *cached));
-
-            let enabled = compose_system_prompt_with_memory(Some("rule"), profile, true);
-            assert!(enabled.contains("<memory_guidance>"));
-            let blocks = cache_blocks(&enabled).unwrap();
-            assert_eq!(blocks.len(), 5);
-            assert!(blocks[3].0.contains("<memory_guidance>"));
-            assert!(!blocks[4].1, "the request tail stays uncached");
+    fn scoped_memory_guidance_and_cache_match_for_every_combination() {
+        for mask in 0..16 {
+            let memory = MemoryConfig {
+                enabled: false, // The legacy archive does not gate file scopes.
+                global_enabled: mask & 1 != 0,
+                project_enabled: mask & 2 != 0,
+                team_enabled: mask & 4 != 0,
+                session_enabled: mask & 8 != 0,
+                ..MemoryConfig::default()
+            };
+            for profile in [PromptProfile::Desktop, PromptProfile::Code] {
+                let fixed = compose_system_prompt_with_memory(None, profile, &memory);
+                assert!(split_tail(&fixed).is_none());
+                let system = compose_system_prompt_with_memory(Some("rule"), profile, &memory);
+                let blocks = cache_blocks(&system).unwrap();
+                assert_eq!(blocks.len(), 5);
+                assert!(blocks[..4].iter().all(|(_, cached)| *cached));
+                assert!(blocks[3].0.starts_with(MEMORY_GUIDANCE.trim()));
+                for (bit, template) in SCOPE_GUIDANCE.iter().enumerate() {
+                    assert_eq!(blocks[3].0.contains(template.trim()), mask & (1 << bit) != 0);
+                }
+                assert_eq!(blocks[4], ("<additional_instructions>\nrule\n</additional_instructions>".into(), false));
+                assert_eq!(split_tail(&system), Some((fixed, blocks[4].0.clone())));
+            }
         }
-        // Both profiles compose the same sections.
-        assert_eq!(
-            compose_system_prompt(None, PromptProfile::Code),
-            compose_system_prompt(None, PromptProfile::Desktop)
-        );
     }
 
     #[test]
@@ -1515,19 +1535,22 @@ mod tests {
             skills: Some("<system-reminder>\ninvoked skills\n</system-reminder>".into()),
         });
         assert_eq!(blocks.len(), 13);
-        assert!(blocks[0].contains("user rules"));
-        assert_eq!(blocks[1], standalone_frontend_reminder());
-        assert!(blocks[1].contains("! <command>"), "the CLI's command hint travels with its frontend facts");
+        assert_eq!(blocks[0], standalone_frontend_reminder());
+        assert!(blocks[1].contains("user rules"));
+        assert!(!blocks[0].contains("! <command>"));
+        for profile in [PromptProfile::Code, PromptProfile::Desktop] {
+            assert!(compose_system_prompt(None, profile).contains("enter `! <command>` in the chat input"));
+        }
         assert!(blocks[2].contains("project rules"));
-        assert!(blocks[3].contains("MEMORY.md index marker"));
-        assert!(blocks[4].contains("experience marker"));
-        assert!(blocks[5].contains("Tools you can load with ToolLoad"));
-        assert!(blocks[6].contains("Available skills"));
-        assert!(blocks[7].contains("codegraph explore marker"));
-        assert!(blocks[8].starts_with("<system-reminder>\n# Working environment\n"));
-        assert!(blocks[8].contains(" - Project: Demo\n - Primary working directory: "));
-        assert!(blocks[8].contains(" - Platform: "));
-        assert!(!blocks[8].contains("Today's date"));
+        assert!(blocks[3].contains("experience marker"));
+        assert!(blocks[4].contains("Tools you can load with ToolLoad"));
+        assert!(blocks[5].contains("Available skills"));
+        assert!(blocks[6].contains("codegraph explore marker"));
+        assert!(blocks[7].starts_with("<system-reminder>\n# Working environment\n"));
+        assert!(blocks[7].contains(" - Project: Demo\n - Primary working directory: "));
+        assert!(blocks[7].contains(" - Platform: "));
+        assert!(!blocks[7].contains("Today's date"));
+        assert!(blocks[8].contains("MEMORY.md index marker"));
         assert_eq!(blocks[9], date_reminder("2026-11-19"));
         assert_eq!(blocks[10], "<system-reminder>\n# gitStatus\n</system-reminder>");
         assert_eq!(blocks[11], "<system-reminder>\ninvoked skills\n</system-reminder>");
@@ -1542,7 +1565,6 @@ mod tests {
             "MCP tools available on demand",
             "Tools you can load with ToolLoad",
             "Available skills:",
-            "! <command>",
         ] {
             assert!(!system.contains(absent), "{absent} in:\n{system}");
         }

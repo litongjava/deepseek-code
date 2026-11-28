@@ -72,7 +72,12 @@ pub(crate) fn seal(
                 [id, &metadata],
             )?;
             match storage {
-                Storage::Shard(memory) => memory.freeze(tx, Some(id))?,
+                Storage::Shard(memory) => {
+                    memory.freeze(tx, Some(id))?;
+                    if matches!(kind, Kind::Compaction) {
+                        memory.freeze_summary(tx, id)?;
+                    }
+                }
                 Storage::Frozen(index) => index.seal(tx, Some(id))?,
                 Storage::Shared => unreachable!(),
             }

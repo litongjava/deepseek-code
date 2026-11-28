@@ -1038,6 +1038,12 @@ async fn run(cli: &mut Cli) -> Result<()> {
             )?
         };
         let work = async {
+            let saved_mode = deepseek_code_core::services::session_permission_mode::load(&context.db, &id)?;
+            if !matches!(cli.permission_mode, args::PermissionModeArg::Plan)
+                && (cli.permission_mode_explicit || saved_mode != Some(deepseek_code_core::permissions::PermissionMode::PlanMode))
+            {
+                deepseek_code_core::services::memory_files::initialize_startup_indexes(&context, &context.db.open_session(&id)?)?;
+            }
             deepseek_code_core::services::lifecycle_events::check_configuration(
                 &context, &workspace, &id,
             )
@@ -1231,6 +1237,11 @@ async fn run(cli: &mut Cli) -> Result<()> {
         // settings, hooks or workspace options may touch it.
         if !session.is_missing_workspace() {
             startup_options::apply(cli, &mut session).await?;
+            if session.permission_mode() != "plan" && !session.binding_state().observation_only {
+                deepseek_code_core::services::memory_files::initialize_startup_indexes(
+                    &session.hook_service_context(), &session.selected_session()?,
+                )?;
+            }
             if !sdk_stream { session.start_hooks(if resumed.is_some() { "resume" } else { "startup" }).await?; }
             if cli.init || cli.init_only || cli.maintenance {
                 anyhow::ensure!(!sdk_stream, "Setup flags with stream-json input are not supported");

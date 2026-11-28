@@ -10,7 +10,7 @@ disable-model-invocation: false
 
 `dc` 指 DeepSeek Code，包含命令行版本 **CLI（`dcl`）** 与桌面端 **Desktop（`dcd`）**。两者共用同一个 Rust 引擎、数据目录（`DEEPSEEK_CODE_DATA_DIR`）、权限规则、MCP 配置和工具实现。
 
-本 skill 自带资源（路径相对本 skill 目录）：
+本 skill 自带以下资源。Bash 示例中的 `SKILL_DIR` 指本次加载的 `SKILL.md` 所在目录；在同一 shell 先设置它。例如 dcl 默认安装可用 `SKILL_DIR="$HOME/.deepseek-code/skills/bundled/dc-docs"`；在 OpenCode、Antigravity 或源码树中请填实际目录。
 
 - `scripts/inspect_dcl.py`：零外部依赖的审计脚本，支持 `session`（分析 `session.db` 耗时/缓存/工具/Shell 反模式）、`stream`（实时或事后解析 `stream-json` 运行流）与 `requests`（检查 `request-records` 工具列表及相邻请求前缀 diff）。
 - `scripts/probe_mcp.py`：stdio MCP 握手、`tools/list` 与可选 `tools/call` 探针。
@@ -123,10 +123,10 @@ dcl -C /path/to/repo \
 
 ```bash
 # 审计已完成或运行中的会话（耗时拆解、缓存命中、单工具轮次、cd/sleep 反模式、最慢工具）
-python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" session <session_id> --top 10
+python3 "$SKILL_DIR/scripts/inspect_dcl.py" session "$SESSION_ID" --top 10
 
 # 实时或事后解析 --output-format stream-json --verbose 输出的 run.jsonl
-python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" stream run.jsonl --tail 15
+python3 "$SKILL_DIR/scripts/inspect_dcl.py" stream run.jsonl --tail 15
 ```
 
 核心表结构：
@@ -202,7 +202,7 @@ python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" stream 
 
 ```bash
 dcl sessions list           # 获取完整会话 ID
-dcl requests <session_id>   # 列出全部请求序号、purpose、model、HTTP 状态、完成标志及文件路径
+dcl requests "$SESSION_ID"   # 列出全部请求序号、purpose、model、HTTP 状态、完成标志及文件路径
 ```
 
 所有文件位于 `<DATA_DIR>/diagnostics/request-records/<session_id>/`，同一次 HTTP 尝试共用前缀 `NNNN-<request_id>-aK`（`NNNN` 为会话内递增序号，`K` 为尝试次数，重试依次为 `a2`、`a3`）：
@@ -224,18 +224,18 @@ dcl requests <session_id>   # 列出全部请求序号、purpose、model、HTTP 
 
 ```bash
 # 列出该会话所有 HTTP 请求尝试、状态、耗时、字节数与压缩文件
-python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" requests <session_id>
+python3 "$SKILL_DIR/scripts/inspect_dcl.py" requests "$SESSION_ID"
 
-# 检查第 1 次请求实际发给模型的 model / reasoning / system 长度 / 工具名称列表
-python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" requests <session_id> --show-tools 1
+# MAIN_SEQ 填上一步确认的主对话序号；SESSION_ID 为本次运行的实际会话 ID
+python3 "$SKILL_DIR/scripts/inspect_dcl.py" requests "$SESSION_ID" --show-tools "$MAIN_SEQ"
 
 # 对比相邻两次请求的 system / tools / messages 前缀差异，定位 prompt cache 失效点
-python3 "~/.deepseek-code/skills/bundled/dc-docs/scripts/inspect_dcl.py" requests <session_id> --prefix-diff 1 2
+python3 "$SKILL_DIR/scripts/inspect_dcl.py" requests "$SESSION_ID" --prefix-diff "$MAIN_SEQ" "$NEXT_MAIN_SEQ"
 ```
 
-1. **验证 System Prompt、Reminder 与工具 Schema**：用 `--show-tools 1` 或直接检查 `0001-*.request.json` 中的 `system` / `messages[0]` 与 `tools` 数组，确认常驻工具、MCP 工具或 skill reminder 是否按预期注入。
-2. **定位 Prompt Cache 失效**：用 `--prefix-diff A B` 对比相邻两次 `.request.json` 的 `tools`、`system` 与 `messages` 前缀，找出导致前缀变化的字段。
-3. **排查 4xx/5xx、截断与重试**：先跑 `dcl requests <session_id>` 或 `inspect_dcl.py requests <session_id>` 找异常序号，再对照 `.meta.json`（确认 `stream_completed` 与 `recording_error`，HTTP 200 不等于流完整）、`.response.json`/`.sse.txt` 以及 `request-attempts/<session_id>.jsonl`。
+1. **验证 System Prompt、Reminder 与工具 Schema**：先按 session ID 列请求，再结合 `.meta.json` 的 `purpose`、输入中的本轮用户原文和 `tools` 确认主对话；`0001` 可能只是生成会话标题，最后一条也可能是重试或压缩。按协议读 `.request.json`：Responses 看 `instructions` 和 `input`；Chat Completions 按 `messages[].role` 分开读系统与用户消息；Anthropic 看顶层 `system` 和 `messages`，注意内容可能是块数组。定位 reminder 时记录所属角色、消息位置和块的相对顺序，不写死块总数。
+2. **定位 Prompt Cache 失效**：用 `--prefix-diff A B` 对比相邻两次 `.request.json` 的 `tools`、`system` 与 `messages` 前缀，找出导致前缀变化的字段。前缀相同不等于缓存命中；命中量看 provider 返回的 usage。
+3. **排查 4xx/5xx、截断与重试**：先跑 `dcl requests "$SESSION_ID"` 或 `inspect_dcl.py requests "$SESSION_ID"` 找异常序号，再对照 `.meta.json`（确认 `stream_completed` 与 `recording_error`，HTTP 200 不等于流完整）、`.response.json`/`.sse.txt` 以及 `request-attempts/<session_id>.jsonl`。
 4. **排查上下文压缩问题**：打开 `compaction-NNNN.json`，沿 `request_sequences` 核对分段摘要与合并请求。
 
 ---
@@ -251,6 +251,8 @@ cargo build --locked -p deepseek-code-cli --bin dcl
 # Release 构建
 cargo build --release --locked -p deepseek-code-cli --bin dcl
 ```
+
+**验收安装副本**：用安装文件的绝对路径运行 `--version`，并比较它与构建产物的 SHA-256（PowerShell：`Get-FileHash`）。版本号相同不代表文件相同。验证新版首轮提示词时，不带 `--resume` 或 `-c`，记录新 session ID；验证恢复行为则单独恢复旧 ID，两者不要混作一次验收。四个记忆开关的实际请求验收见 `references/pty-harness.md`。
 
 **安装路径约定**：
 
@@ -340,10 +342,10 @@ dcl mcp hosts                  # 查看存活 host 及正在运行的服务器 I
 新开会话后执行 `/mcp` 确认连接状态（如 `aoci  connected · 9 tools`）。需要直接验证 stdio 握手时使用本 skill 的探针脚本（仅依赖 Python 标准库）：
 
 ```bash
-python "~/.deepseek-code/skills/bundled/dc-docs/scripts/probe_mcp.py" \
+python "$SKILL_DIR/scripts/probe_mcp.py" \
   --command D:/bin/aoci.exe --arg mcp
 
-python "~/.deepseek-code/skills/bundled/dc-docs/scripts/probe_mcp.py" \
+python "$SKILL_DIR/scripts/probe_mcp.py" \
   --command D:/bin/aoci.exe --arg mcp --call aoci_header
 ```
 

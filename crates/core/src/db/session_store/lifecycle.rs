@@ -540,8 +540,8 @@ impl Stores {
             self,
             &roots,
             &op.incarnation,
+            id,
             session_dir.clone(),
-            agent.clone(),
         )?
         .staged_session(stage.join("memory"));
         sync_dir(stage.parent().unwrap())?;

@@ -1,0 +1,2 @@
+# Session memory
+Session memory is enabled. Use it for facts, progress, and unresolved work specific to this conversation, not lasting cross-project preferences. Use the directory containing the index identified by the host's session memory location. Before compaction the host supplies the path, not the index contents. When the host supplies the `session` index, use its linked entries to recover context; do not infer that missing entries describe completed work.

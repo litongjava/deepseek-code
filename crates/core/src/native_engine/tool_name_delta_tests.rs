@@ -54,10 +54,13 @@ async fn empty_name_deltas_keep_the_accumulated_tool_name() {
     )
     .with_max_turns(Some(4))
     .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(10), executor.execute_openai_loop())
-        .await
-        .unwrap()
-        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        executor.execute_openai_loop(&Default::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 2);
     assert_eq!(result.0, "done");
 

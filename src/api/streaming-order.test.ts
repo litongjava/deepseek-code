@@ -29,6 +29,16 @@ describe.each([['desktop', sendDesktopMessage], ['modular', sendModularMessage]]
     expect(events).toEqual(['running', 'completed', 'done']);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).messages[0].content).toEqual(content);
   });
+  it('forwards a compaction notice once', async () => {
+    const notice = { type: 'compaction_notice', message: 'Automatic compaction failed. Continuing.' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(notice)}\n\ndata: {"type":"message_stop"}\n\n`)));
+    const system = vi.fn(), error = vi.fn();
+    await sendMessage('test', 'hello', null, vi.fn(), vi.fn(), error, undefined, system);
+    await vi.waitFor(() => expect(system).toHaveBeenCalledWith('compaction_notice', notice.message, notice));
+    expect(system.mock.calls.filter(([type]) => type === 'compaction_notice')).toHaveLength(1);
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it('forwards request-scoped permission completion before stream termination', async () => {
     const permission = { type: 'tool_permission', request_id: 'approval', tool_use_id: 'write', tool_name: 'Write', input: {} };
     const resolved = { type: 'tool_permission_resolved', request_id: 'approval', tool_use_id: 'write', conversation_id: 'test' };
@@ -95,6 +105,16 @@ describe.each([['desktop', sendDesktopMessage], ['modular', sendModularMessage]]
 
 
 describe.each([['desktop', reconnectDesktop], ['modular', reconnectModular]] as const)('%s permission reconnect', (_name, reconnect) => {
+  it('forwards a compaction notice once', async () => {
+    const notice = { type: 'compaction_notice', message: 'Automatic compaction failed. Continuing.' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(notice)}\n\ndata: {"type":"message_stop"}\n\n`)));
+    const system = vi.fn(), error = vi.fn();
+    reconnect('test', vi.fn(), vi.fn(), error, undefined, system);
+    await vi.waitFor(() => expect(system).toHaveBeenCalledWith('compaction_notice', notice.message, notice));
+    expect(system.mock.calls.filter(([type]) => type === 'compaction_notice')).toHaveLength(1);
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it('forwards an already resolved request instead of reopening its approval', async () => {
     const resolved = { type: 'tool_permission_resolved', request_id: 'previous', conversation_id: 'test' };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(resolved)}\n\ndata: {"type":"message_stop"}\n\n`)));

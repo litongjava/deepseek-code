@@ -553,7 +553,20 @@ impl FileMemoryStore {
 
     fn commit_topic(&self, change: Change) -> Result<()> {
         let (entries, _) = Self::scan(&self.directory, Some(&change))?;
-        self.commit(vec![change], Self::catalog(&entries)?)
+        let before = self.directory.read("MEMORY.md", MAX_INDEX_BYTES)?;
+        let previous = std::str::from_utf8(before.as_deref().unwrap_or_default())
+            .map_err(|_| invalid("index is not UTF-8"))?;
+        let entry = entries.iter().find(|entry| entry.filename == change.name);
+        let updated = index::update_row(previous, &change.name, entry);
+        let mut changes = vec![change];
+        if updated != previous {
+            changes.push(Change {
+                name: "MEMORY.md".into(),
+                before,
+                after: Some(updated.into_bytes()),
+            });
+        }
+        self.commit(changes, Self::catalog(&entries)?)
     }
 
     fn catalog(entries: &[Entry]) -> Result<Vec<u8>> {

@@ -24,8 +24,7 @@ non-interactive layer.
 A fresh `--data-dir` first shows the provider onboarding wizard and then the
 folder trust prompt, so automation must pre-seed both:
 
-1. Copy a working `config.json` into the data directory. Use a local or mock
-   provider; never a real key.
+1. Put a mock-only provider config at `<data>/config/config.json`. Point it at a running loopback endpoint and use a dummy key, never a production config.
 2. Write `startup-prompts.json` next to it:
 
 ```json
@@ -84,17 +83,21 @@ for the prompt, runs each step, captures the rendered screen, closes with Esc,
 and exits the REPL.
 
 ```bash
-python scripts/drive_dcl.py \
-  --bin target/debug/dcl.exe \
-  --cwd . \
-  --data-dir %TEMP%\dcl-pty \
-  --config %USERPROFILE%\.deepseek-code\config.json \
-  --outdir %TEMP%\dcl-shots \
-  --steps "/skills" "/plugins" "/tools" "/tools" --keys Right
+python "$SKILL_DIR/scripts/drive_dcl.py" \
+  --bin "$PWD/target/debug/dcl.exe" --cwd . \
+  --data-dir "$TEST_DATA" --config "$MOCK_CONFIG" --outdir "$SHOTS" \
+  --steps '/skills' '@Esc' '/plugins' '@Esc' '/tools' '@Right'
 ```
 
-`--keys` inserts named keys between steps (`Right`, `Left`, `Space`, `Tab`),
-which is how tab switching and toggles are exercised.
+Set `TEST_DATA` and `SHOTS` to disposable directories and `MOCK_CONFIG` to a mock-only JSON file. Use `@Right`, `@Left`, `@Space`, `@Tab`, `@Enter` or `@Esc` as separate steps; there is no `--keys` option.
+
+## 验收 `/config` 四个记忆开关（Windows ConPTY）
+
+1. 在隔离数据目录启动目标 exe，指定 `--record-requests`；仅在明确要求且环境合适时加 `--yolo`。用本机 mock 接收请求；模型能力声明（包括 `supports_web_search`）应与 mock 实现匹配。用户指定默认数据目录时，先记下原开关值，结束后恢复，不要用 mock 配置覆盖个人配置。
+2. 在真实终端或 ConPTY 打开 `/config`，记录 Global、Project、Session、Team 四个值。全新配置的默认值依次是开、开、开、关。每次只切一个，用同一数据目录重新启动**新会话**，重开面板确认该项已保存、另三项未变。
+3. 发送唯一的测试短句，用 session ID 和短句定位主对话请求（见 `SKILL.md` §5）。检查系统提示词：打开的 scope 有对应的启用说明，关闭的没有；共有说明仍在。若要证明请求确实抵达 mock，另存端点收到的 body，与对应 `.request.json` 对比。
+4. 首轮用户提醒只比较实际适用的块：Global → Team（已绑定团队）→ Project → 日期；Session 首轮可告知路径，不应注入索引正文。验证 Session 正文请先写入有辨识度的条目，触发实际压缩，检查压缩后首次重放的摘要或原生压缩项之前是否有该条目。普通新会话不能替代压缩测试。
+5. 分别报告面板值、重启持久化、请求文件名和检查结果。验证跨会话记忆时，在 A 写入无敏感信息的唯一条目，在同项目、同数据目录的新会话 B 检查索引行；让 B 读取链接正文，别把只看见标题当作读到了正文。
 
 ## Traps
 

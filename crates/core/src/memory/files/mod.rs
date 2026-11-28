@@ -96,6 +96,14 @@ pub fn normalized_name(name: &str) -> String {
     format::name_key(name)
 }
 
+pub(crate) fn ensure_empty_index(root: &Path, directory: &Path) -> Result<()> {
+    let dir = scoped_directory(root, directory, false)?;
+    match dir.create("MEMORY.md", b"") {
+        Err(MemoryFileError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
 /// Read only the resident index. A manually maintained scope needs no catalog.
 pub(crate) fn resident_index(root: &Path, directory: &Path) -> Result<Option<(Vec<u8>, String)>> {
     if !directory.join("MEMORY.md").try_exists()? {

@@ -4015,6 +4015,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_switches_in_text_settings_use_the_saved_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let mut session = config_test_session(&paths).await;
+        let mut input = answers(&["memory global off", "memory team on", "done"]);
+        handle("/config", &paths, &mut session, &mut input).await.unwrap();
+        assert!(handle("/config memory team invalid", &paths, &mut session, &mut input).await.is_err());
+        assert_eq!(config::memory_switches(&paths).unwrap(), serde_json::json!({
+            "global_enabled": false, "project_enabled": true, "team_enabled": true, "session_enabled": true,
+        }));
+        assert!(memory_status(&paths, &session.id, None).unwrap().contains("no bound team"));
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn fetch_proxy_quick_and_interactive_forms_save_and_clear() {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
@@ -4086,6 +4101,20 @@ mod tests {
     }
 }
 
+fn memory_status(paths: &RuntimePaths, session: &str, scope: Option<&str>) -> Result<String> {
+    let switches = config::memory_switches(paths)?;
+    let mut status = match scope {
+        Some(scope) => format!("{scope}: {}", switches[format!("{scope}_enabled")]),
+        None => switches.to_string(),
+    };
+    if matches!(scope, None | Some("team")) && switches["team_enabled"] == true
+        && deepseek_code_core::services::teams::team_for_session(&paths.data_dir, session)?.is_none()
+    {
+        status.push_str(" (no bound team)");
+    }
+    Ok(status)
+}
+
 async fn settings_menu(
     argument: &str,
     paths: &RuntimePaths,
@@ -4105,6 +4134,7 @@ async fn settings_menu(
             let display = crate::display_commands::load(session)?;
             let saved = paths.read_config()?;
             command_eprintln!("Settings | {}\nProvider: {} | Model: {}\nSearch: {} | WebFetch proxy: {}\nPermissions: {} | Theme: {} | Color: {} | Focus: {} | Renderer: {}\nprovider | model | permissions | theme | color | focus | output-style | statusline | tui | effort | autocompact | search | fetch-proxy\nChoose a setting, or enter done to return.", paths.data_dir.display(), session.binding_state().provider_id, session.binding_state().model, search_status(&saved.deepseek_search), fetch_proxy_status(&saved.web_fetch), session.permission_mode(), display.theme, display.color, display.focus, display.tui);
+            command_eprintln!("Memory prompt switches: {}\nmemory [global|project|team|session [on|off]]", memory_status(paths, &session.id, None)?);
             ask(input, "Setting").await?
         };
         if matches!(choice.as_str(), "" | "done" | "exit") {
@@ -4127,13 +4157,14 @@ async fn settings_menu(
                 "effort",
                 "autocompact",
                 "search",
-                "fetch-proxy"
+                "fetch-proxy",
+                "memory",
             ]
             .contains(&setting),
             "Unknown setting"
         );
         let value = if value.trim().is_empty()
-            && !matches!(setting, "provider" | "model" | "search" | "fetch-proxy")
+            && !matches!(setting, "provider" | "model" | "search" | "fetch-proxy" | "memory")
         {
             ask(
                 input,
@@ -4151,6 +4182,18 @@ async fn settings_menu(
                 input,
             ))
             .await?;
+        } else if setting == "memory" {
+            let words = value.split_whitespace().collect::<Vec<_>>();
+            match words.as_slice() {
+                [] => command_eprintln!("{}", memory_status(paths, &session.id, None)?),
+                [scope] | [scope, "on" | "off"] if matches!(*scope, "global" | "project" | "team" | "session") => {
+                    if let Some(state) = words.get(1) {
+                        config::set_memory_switch(paths, scope, *state == "on")?;
+                    }
+                    command_eprintln!("{}", memory_status(paths, &session.id, Some(scope))?);
+                }
+                _ => bail!("Usage: /config memory [global|project|team|session [on|off]]"),
+            }
         } else if setting == "search" {
             search_config(&value, paths, input).await?;
         } else if setting == "fetch-proxy" {

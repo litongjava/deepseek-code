@@ -54,12 +54,12 @@ async fn authored_project_index_survives_listing_topic_crud_and_compaction() -> 
         "Write",
         json!({"file_path":topic,"content":"---\nname: Sibling\ndescription: Sibling topic\nmetadata:\n  type: user\n---\nold body\n"}),
     )?;
-    check_disk();
+    assert!(fs::read_to_string(&index)?.contains("sibling.md"));
     tool(
         "Edit",
         json!({"file_path":topic,"old_string":"old body","new_string":"new body"}),
     )?;
-    check_disk();
+    assert!(fs::read_to_string(&index)?.contains("sibling.md"));
     tool(
         "ApplyPatch",
         json!({"patch":format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch", topic.display())}),
@@ -80,6 +80,78 @@ async fn authored_project_index_survives_listing_topic_crud_and_compaction() -> 
     )?;
     shard.admit_prompt("after compact", None, "typed")?;
     check_request(memory_request_bytes(&shard, "openai").await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_session_location_and_legacy_resume() -> Result<()> {
+    use crate::db::session_store::{settings::Setting, Stores};
+    use crate::services::memory_files::{config, save_config};
+    use std::fs;
+
+    let root = tempfile::tempdir()?;
+    let data = root.path().join("data");
+    let ws = root.path().join("project");
+    fs::create_dir(&ws)?;
+    let ctx = crate::services::session_messages::context(&data)?;
+    for project_enabled in [false, true] {
+        for session_enabled in [false, true] {
+            let mut cfg = config(&ctx)?;
+            cfg.project_enabled = project_enabled;
+            cfg.session_enabled = session_enabled;
+            save_config(&ctx, &cfg)?;
+            let shard = ctx.db.create_code_session(
+                &ws,
+                "model",
+                "provider",
+                &uuid::Uuid::new_v4().to_string(),
+            )?;
+            let dir = shard.memory_directory();
+            fs::create_dir_all(&dir)?;
+            let path = dir.join("MEMORY.md");
+            fs::write(&path, "SECRET-SESSION-ROW")?;
+            shard.admit_prompt("first turn", None, "typed")?;
+            let first = memory_request_bytes(&shard, "openai").await;
+            let body: Value = serde_json::from_slice(&first)?;
+            let text = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["role"] == "user")
+                .unwrap()["content"]
+                .as_str()
+                .unwrap();
+            assert_eq!(text.contains("<project_memory>"), project_enabled);
+            assert_eq!(text.contains(path.to_str().unwrap()), session_enabled);
+            assert!(!text.contains("SECRET-SESSION-ROW"));
+            if !session_enabled {
+                continue;
+            }
+
+            // An older host froze the same prefix without the path field.
+            const OLD: Setting<Value> = Setting::new("memory.prompt.index");
+            shard.write(|w| {
+                let mut old = w.setting(OLD)?.unwrap();
+                old.as_object_mut().unwrap().remove("session_index_path");
+                w.set_setting(OLD, &old)
+            })?;
+            let resumed = Stores::open(&data)?.open_session(shard.id())?;
+            resumed.admit_prompt("resumed turn", None, "typed")?;
+            let bytes = memory_request_bytes(&resumed, "openai").await;
+            let body: Value = serde_json::from_slice(&bytes)?;
+            let users: Vec<_> = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .map(|m| m["content"].as_str().unwrap())
+                .collect();
+            assert!(!users[0].contains("<session_memory_location>"));
+            assert!(users.last().unwrap().contains(path.to_str().unwrap()));
+            assert!(!std::str::from_utf8(&bytes)?.contains("SECRET-SESSION-ROW"));
+            assert_eq!(bytes, memory_request_bytes(&resumed, "openai").await);
+        }
+    }
     Ok(())
 }
 
@@ -168,11 +240,13 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             };
             let project = FileMemory::session(&ctx, shard.id())?;
             let agent = project.directory.parent().unwrap().join("agents/reviewer");
-            let team = root.path().join("team");
-            crate::data_layout::write_config_file(
-                crate::data_layout::DataLayout::from_root(&data).config_file("settings.json"),
-                json!({"memory":{"team_dir":team}}).to_string(),
-            )?;
+            let team = data.join("data/memory/teams/fixture");
+            let binding = crate::services::teams::team_path(&data, "fixture");
+            fs::create_dir_all(binding.parent().unwrap())?;
+            fs::write(binding, json!({"name":"fixture","createdAt":1,"leadAgentId":"team-lead@fixture","leadSessionId":shard.id(),"members":[]}).to_string())?;
+            let mut config = crate::services::memory_files::config(&ctx)?;
+            config.team_enabled = true;
+            crate::services::memory_files::save_config(&ctx, &config)?;
             let dirs = [
                 ("global", data.join("data/memory/global")),
                 ("team", team),
@@ -196,7 +270,7 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             }
             let visible = dirs
                 .iter()
-                .filter(|(scope, _)| child || *scope != "subagent")
+                .filter(|(scope, _)| !matches!(*scope, "subagent" | "session"))
                 .collect::<Vec<_>>();
             let protocol = if kind.contains("native") {
                 "responses"
@@ -237,10 +311,12 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             assert!(
                 !wire.contains("HIDDEN-MEMORY-FILE-BODY") && !wire.contains("PARENT-ONLY-INDEX")
             );
+            let prefix_end = "</session_memory_location>\\n</system-reminder>";
+            let cached_prefix = &wire[..wire.find(prefix_end).unwrap() + prefix_end.len()];
             let mut kept = String::new();
             for (scope, dir) in &visible {
                 if kind == "summary" {
-                    let input = json!({"file_path":dir.join("MEMORY.md"), "content":format!("CHANGE-{scope}!")});
+                    let input = json!({"file_path":dir.join("MEMORY.md"), "content":format!("FIRST-{scope}!\nCHANGE-{scope}!")});
                     for tool in ["Read", "Write"] {
                         let filename = project.target(tool, &input, ws.to_str().unwrap())?.unwrap();
                         project.tool(tool, &input, &filename, false)?;
@@ -251,6 +327,10 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
                 kept = shard.admit_prompt("next topic", None, "typed")?;
                 let bytes = memory_request_bytes(&shard, protocol).await;
                 let wire = std::str::from_utf8(&bytes)?;
+                assert!(
+                    wire.starts_with(cached_prefix),
+                    "{kind}: earlier request bytes changed"
+                );
                 assert_eq!(wire.matches("FIRST-").count(), visible.len());
                 let last = wire.rsplit_once("MEMORY.md changed.").unwrap().1;
                 assert!(last.contains(&format!("CHANGE-{scope}!")));
@@ -260,6 +340,15 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             for (scope, dir) in &visible {
                 fs::write(dir.join("MEMORY.md"), format!("BOUNDARY-{scope}!"))?;
             }
+            let empty_native = kind == "queued-native" && child;
+            fs::write(
+                shard.memory_directory().join("MEMORY.md"),
+                if empty_native {
+                    ""
+                } else {
+                    "BOUNDARY-session!"
+                },
+            )?;
             let summary = GeneratedSummary {text:"summary".into(),native:kind.contains("native").then(||json!({"api":"openai-responses","compaction":true,"items":[{"type":"compaction","encrypted_content":"opaque-test"}]}))};
             match kind {
                 "plan" => {
@@ -310,7 +399,7 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             for (scope, _) in &visible {
                 assert_eq!(
                     wire.matches(&format!("BOUNDARY-{scope}!")).count(),
-                    1,
+                    usize::from(!(*scope == "team" && kind.starts_with("partial-"))),
                     "{kind} {scope}"
                 );
             }
@@ -324,10 +413,36 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             let unescaped_wire = wire.replace("\\\\", "\\");
             let memory_dir = shard.memory_directory();
             let memory_dir = memory_dir.to_string_lossy();
-            assert!(
+            assert_eq!(
                 unescaped_wire.contains(memory_dir.as_ref())
-                    || unescaped_wire.contains(&memory_dir.replace('\\', "/"))
+                    || unescaped_wire.contains(&memory_dir.replace('\\', "/")),
+                !empty_native,
+                "{kind}"
             );
+            assert_eq!(
+                wire.contains("<session_memory>"),
+                kind != "plan" && !empty_native,
+                "{kind}"
+            );
+            if empty_native {
+                let body: Value = serde_json::from_slice(&bytes)?;
+                assert_eq!(body["input"][0]["encrypted_content"], "opaque-test");
+            } else if kind != "plan" {
+                let at = wire
+                    .find("BOUNDARY-session!")
+                    .expect("session index at compact");
+                if kind.contains("native") {
+                    assert!(
+                        at < wire.find("opaque-test").unwrap(),
+                        "{kind}: before opaque window"
+                    );
+                } else {
+                    assert!(
+                        at < wire.rfind("summary").unwrap(),
+                        "{kind}: immediately before summary"
+                    );
+                }
+            }
             assert_eq!(bytes, memory_request_bytes(&shard, protocol).await);
             fs::write(root.path().join("expected"), bytes)?;
             let resume = std::process::Command::new(std::env::current_exe()?)
@@ -359,7 +474,7 @@ async fn memory_resident_scopes_across_boundaries_and_resume() -> Result<()> {
             assert_eq!(wire.matches("MEMORY.md changed.").count(), 1, "{kind}");
             let (_, reminder) = wire.split_once("MEMORY.md changed.").unwrap();
             assert_eq!(reminder.matches("AFTER-global!").count(), 1);
-            assert_eq!(reminder.matches("AFTER-session!").count(), 1);
+            assert!(!wire.contains("AFTER-session!"));
             assert!(!reminder.contains("BOUNDARY-"));
         }
     }

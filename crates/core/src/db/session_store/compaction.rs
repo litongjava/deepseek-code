@@ -190,7 +190,14 @@ impl SessionRead<'_> {
              ORDER BY sort_order,rowid LIMIT 1", params![protected_row, segment], |r| r.get(0),
         ).optional()?;
         let (prefix, boundary) = self.model_history_before(format, before.as_deref())?;
-        let prefix_len = if boundary.is_some()
+        // A legacy report and its queued notification can straddle a physical cut.
+        // Do not apply a prefix length from standalone replay to their merged view.
+        let split_notification = before.is_some() && prefix.iter().enumerate().any(|(i, row)| {
+            row["origin"] == "task_notification" && messages.get(i) != Some(row)
+        });
+        let prefix_len = if split_notification {
+            0
+        } else if boundary.is_some()
             && prefix.len() == 1
             && (prefix[0]["provider_content"]["compaction"] == true
                 || prefix[0]["origin"] == "compaction")

@@ -113,16 +113,6 @@ fn process_worker() {
             };
             fs::write(root.join(format!("result-{id}")), status).unwrap();
         }
-        "crash-repair" => {
-            let memory = store(&root);
-            let (_, token) = memory
-                .snapshot()
-                .unwrap()
-                .repair_preview("fixture")
-                .unwrap();
-            memory.confirm_repair("fixture", &token).unwrap();
-            panic!("configured repair crash checkpoint was not reached");
-        }
         "crash" | "crash-delete" => {
             let memory = store(&root);
             let before = memory.read("one.md").unwrap().unwrap();
@@ -395,8 +385,10 @@ fn store_crud_persists_ids_extensions_generation_and_index() {
         .unwrap();
     assert!(first.document.id().is_some());
     let initial = memory.snapshot().unwrap();
-    assert!(initial.index.is_empty());
-    assert!(!memory.index_path().exists());
+    assert_eq!(
+        initial.index,
+        "- [中文标题](one.md) — Relevant when reviewing tests\n"
+    );
     assert_eq!(initial.entries.len(), 1);
     assert!(initial
         .diagnostics
@@ -561,6 +553,65 @@ fn index_repairs_missing_stale_and_deleted_pointers_preserving_valid_order() {
 }
 
 #[test]
+fn topic_updates_only_its_own_row_and_skips_unchanged_index_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let memory = store(root.path());
+    let manual = "# Manual\r\n- [my link](one.md)\r\n- [stale](other.md) — keep\n";
+    fs::write(
+        memory.index_path(),
+        format!("{manual}- [old](one.md) — stale\r\n- [duplicate](one.md) — stale\nend"),
+    )
+    .unwrap();
+    let first = memory
+        .put("one.md", &note("One", "first"), ExpectedVersion::Absent)
+        .unwrap();
+    let expected = format!("{manual}- [One](one.md) — Relevant when reviewing tests\r\nend");
+    assert_eq!(fs::read_to_string(memory.index_path()).unwrap(), expected);
+    let stamp = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(memory.index_path())
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    let next = memory
+        .put(
+            "one.md",
+            &note("One", "second"),
+            ExpectedVersion::Hash(first.hash),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::metadata(memory.index_path())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        stamp
+    );
+    let edited = String::from_utf8(next.bytes)
+        .unwrap()
+        .replace("Relevant when reviewing tests", "New description");
+    let last = memory
+        .put(
+            "one.md",
+            edited.as_bytes(),
+            ExpectedVersion::Hash(next.hash),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(memory.index_path()).unwrap(),
+        expected.replace("Relevant when reviewing tests", "New description")
+    );
+    memory
+        .delete("one.md", ExpectedVersion::Hash(last.hash))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(memory.index_path()).unwrap(),
+        format!("{manual}end")
+    );
+}
+
+#[test]
 fn index_repair_refuses_changed_preimage_or_proposal() {
     let root = tempfile::tempdir().unwrap();
     let memory = store(root.path());
@@ -579,9 +630,7 @@ fn index_repair_refuses_changed_preimage_or_proposal() {
         .unwrap()
         .repair_preview("fixture")
         .unwrap();
-    memory
-        .put("two.md", &note("Two", "fact"), ExpectedVersion::Absent)
-        .unwrap();
+    fs::write(memory.directory().join("two.md"), note("Two", "fact")).unwrap();
     assert!(matches!(
         memory.confirm_repair("fixture", &token),
         Err(MemoryFileError::Conflict(_))
@@ -926,17 +975,10 @@ fn process_crashes_at_each_commit_boundary_recover_consistent_index_and_generati
             .unwrap();
         fs::write(memory.index_path(), "marker unchanged\n").unwrap();
         drop(memory);
-        let mut worker = child(
-            root.path(),
-            if phase == "index" {
-                "crash-repair"
-            } else {
-                "crash"
-            },
-        )
-        .env("DCL_MEMORY_TEST_CRASH", phase)
-        .spawn_owned()
-        .unwrap();
+        let mut worker = child(root.path(), "crash")
+            .env("DCL_MEMORY_TEST_CRASH", phase)
+            .spawn_owned()
+            .unwrap();
         assert_eq!(bounded_wait(&mut worker).code(), Some(87), "{phase}");
         if phase == "journal" {
             let journal = state(root.path()).join("journal.json");
@@ -950,19 +992,21 @@ fn process_crashes_at_each_commit_boundary_recover_consistent_index_and_generati
             );
         }
         let recovered = store(root.path()).snapshot().unwrap();
-        let expected = if matches!(phase, "staged" | "index") {
+        let expected = if phase == "staged" {
             "Original"
         } else {
             "Changed"
         };
         assert_eq!(recovered.entries[0].document.name, expected, "{phase}");
-        if phase == "index" {
-            assert!(recovered
-                .index
-                .starts_with("marker unchanged\n- [Original](one.md)"));
-        } else {
-            assert_eq!(recovered.index, "marker unchanged\n", "{phase}");
-        }
+        assert_eq!(
+            recovered.index,
+            if phase == "staged" {
+                "marker unchanged\n"
+            } else {
+                "marker unchanged\n- [Changed](one.md) — Relevant when reviewing tests\n"
+            },
+            "{phase}"
+        );
         assert_eq!(
             recovered.generation,
             if phase == "staged" { 1 } else { 2 },
@@ -1002,6 +1046,36 @@ fn recovery_preserves_external_conflict_and_journal_instead_of_overwriting() {
     ));
     assert_eq!(fs::read(&path).unwrap(), external);
     assert!(state(root.path()).join("journal.json").exists());
+}
+
+#[test]
+fn unreadable_index_rejects_topic_mutations_before_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let memory = store(root.path());
+    let entry = memory
+        .put("one.md", &note("One", "original"), ExpectedVersion::Absent)
+        .unwrap();
+    fs::write(memory.index_path(), [0xff]).unwrap();
+    assert!(memory
+        .put("two.md", &note("Two", "new"), ExpectedVersion::Absent)
+        .is_err());
+    assert!(memory
+        .put(
+            "one.md",
+            &note("Changed", "edit"),
+            ExpectedVersion::Hash(entry.hash.clone())
+        )
+        .is_err());
+    assert!(memory
+        .delete("one.md", ExpectedVersion::Hash(entry.hash))
+        .is_err());
+    assert!(memory.read("two.md").unwrap().is_none());
+    assert_eq!(memory.read("one.md").unwrap().unwrap().bytes, entry.bytes);
+    assert_eq!(fs::read(memory.index_path()).unwrap(), [0xff]);
+    assert_eq!(
+        fs::read(state(root.path()).join("generation")).unwrap(),
+        b"1"
+    );
 }
 
 #[test]

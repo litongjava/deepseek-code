@@ -296,16 +296,12 @@ impl Stores {
             let owner = saved
                 .filter(|(p, _)| p == &project)
                 .map_or(default_owner, |(_, owner)| owner);
-            let agent = shard
-                .connection_under_lock(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, |c| {
-                    super::super::settings::MEMORY_AGENT.read(c)
-                })?;
             Some(Admission::starting(
                 self,
                 &roots,
                 &owner,
+                shard.id(),
                 shard.memory_directory(),
-                agent,
             )?)
         } else {
             None

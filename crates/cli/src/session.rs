@@ -1605,6 +1605,11 @@ impl Session {
             let state =
                 crate::worker_binding::observe_row(paths, id, shard.observe_provider()?, candidate)
                     .await?;
+            if mode != PermissionMode::PlanMode && !state.observation_only {
+                deepseek_code_core::services::memory_files::initialize_startup_indexes(
+                    &self.hook_service_context(), &shard,
+                )?;
+            }
             let target = self.prepare_resumed_binding(&shard, state)?;
             deepseek_code_core::services::session_permission_mode::set(
                 &shard,
@@ -2550,11 +2555,12 @@ impl Session {
             Some(item) => self.store.db.start_desktop_input(&self.id,turn_lease.clone().context("Missing queue execution lease")?,item)?,
             None=>self.store.db.start_turn_timer(&self.id)?,
         };
+        let compaction_gate = Default::default();
         let mut recovery_requests = Vec::new();
         let mut result = async {
-            let first = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
+            let first = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone(), &compaction_gate).await;
             match first {
-                Err(error) if completion.stdout_failure.is_none() && !matches!(origin, TurnOrigin::HookWake | TurnOrigin::InitialHook) && crate::session_commands::is_context_overflow(&error) => {
+                Err(error) if completion.stdout_failure.is_none() && !matches!(origin, TurnOrigin::HookWake | TurnOrigin::InitialHook) && deepseek_code_core::performance::is_context_overflow(&error) => {
                     recovery_requests.extend(completion.requests.iter().cloned());
                     if let Err(log_error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &json!({
                         "type":"request_turn_attempt_end", "turnId":turn.record().turn_id,
@@ -2564,7 +2570,7 @@ impl Session {
                         crate::compaction::notice(&format!("Could not save request attempt log: {log_error}"));
                     }
                     // Recovery errors must reach the same finalization as requests.
-                    match crate::session_commands::reactive_compact(self, completion.admitted_message.as_deref(), &mut turn).await {
+                    match crate::session_commands::reactive_compact(self, completion.admitted_message.as_deref(), &mut turn, &compaction_gate).await {
                         Ok(None) => {
                             recovery_requests.clear();
                             Err(error)
@@ -2583,7 +2589,7 @@ impl Session {
                             // Retrying after compaction stays inside this turn and
                             // keeps its ownership; a failure here would mean the
                             // lease was lost, so it must not be ignored.
-                            let result = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone()).await;
+                            let result = self.run_timed_turn(cli, prompt, input, origin, publish, &mut turn, completion, turn_lease.clone(), &compaction_gate).await;
                             completion.sdk_result = Some(merge_attempt_results(previous, completion.sdk_result.take()));
                             result
                         }
@@ -2694,6 +2700,7 @@ impl Session {
         execution_lease: Option<
             std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>,
         >,
+        compaction_gate: &deepseek_code_core::services::compaction::AutoCompactionGate,
     ) -> Result<()> {
         let hook_wake = origin == TurnOrigin::HookWake;
         let content = match origin {
@@ -2748,6 +2755,7 @@ impl Session {
                 self,
                 self.context_window().await,
                 execution_lease.clone(),
+                compaction_gate,
             )
             .await?;
         }
@@ -2963,22 +2971,13 @@ impl Session {
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote_interrupts = self.remote_interrupts();
-        let mut request = Box::pin(async {
-            if hook_wake {
-                match execution_lease {
-                    Some(lease) => {
-                        self.engine
-                            .send_hook_wake_with_lease(chat_request, false, lease)
-                            .await
-                    }
-                    None => self.engine.send_hook_wake(chat_request, false).await,
-                }
-            } else {
-                self.engine
-                    .send_with_suggestion_capture(chat_request, execution_lease, suggestion_capture)
-                    .await
-            }
-        });
+        let mut request = Box::pin(self.engine.send_cli_turn(
+            chat_request,
+            hook_wake,
+            execution_lease,
+            if hook_wake { None } else { suggestion_capture },
+            compaction_gate.clone(),
+        ));
         let worker_cancel =
             deepseek_code_core::services::background_sessions::wait_for_cancellation();
         tokio::pin!(worker_cancel);
@@ -6224,6 +6223,8 @@ mod missing_workspace_tests {
             .db
             .resume_code(&fixture.second)
             .is_err());
+        let session_memory = fixture.session.selected_session().unwrap().memory_directory();
+        assert!(!session_memory.exists());
         // Read-only admission never writes the target's permission mode.
         assert_eq!(
             deepseek_code_core::services::session_permission_mode::load(
@@ -6257,6 +6258,7 @@ mod missing_workspace_tests {
             second_path.canonicalize().unwrap()
         );
         assert_ne!(fixture.session.permission_mode(), "read-only");
+        assert_eq!(std::fs::read(session_memory.join("MEMORY.md")).unwrap(), b"");
         assert!(fixture.session.lifecycle_owned);
         assert!(fixture.session.set_permission_mode("ask").await.is_ok());
 

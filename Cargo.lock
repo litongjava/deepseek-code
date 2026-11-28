@@ -1696,6 +1696,7 @@ dependencies = [
  "cron",
  "diffy",
  "dirs 5.0.1",
+ "dunce",
  "enigo",
  "flate2",
  "futures",

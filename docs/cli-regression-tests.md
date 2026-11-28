@@ -340,6 +340,8 @@ cargo test --locked -p deepseek-code-cli --bin dcl resume_tests
 
 ### F. /tasks
 
+后台报告回归：`cargo test --locked -p deepseek-code-core --lib runtime::background_replay::tests:: -- agent_report_is_delivered_once_as_the_notification_result completion_receipt_is_atomic_and_survives_reopen`。检查旧记录只合并到同一任务的生成通知，普通用户输入保持原样；通知缺失时保留一份用户角色报告。新任务在重新打开会话、投递及重复收集后也只保留一份报告。
+
 有两个后台命令时输入 `/tasks`：
 
 1. 显示 `Background`、`2 active shells`，每个任务一行（`● 命令  running`），最新的在前。
@@ -380,9 +382,9 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 2. `/memory` 菜单有 Long-term memories；列表可以搜索，`+ Add a memory` 能添加。
 3. 详情里 `e` 编辑后列表立即更新并保留重要性，`x` 删除，`←` 返回，`Esc` 关闭。
 4. `/memory` 的说明文件选项和 `/memory show` 不受影响。
-5. `dcl config memory` 输出当前开关；`dcl config memory off` 后 `config show` 的 `memory.enabled` 为 `false`，CLI 与 Desktop 新请求的系统提示词不再包含 `<memory_guidance>`，MEMORY.md 索引和记忆目录写入同时停止；`dcl config memory on` 和 `dcl config set memory.enabled true/false` 作用于同一开关。`cargo test --locked -p deepseek-code-cli --test peripheral config_memory_switch` 覆盖这些分支。
+5. 使用隔离 data-dir 检查 `/config`：Global、Project、Session 默认开启，Team 默认关闭；分别修改并重启，确认四个选择独立持久化。关闭只停止对应提示词和索引注入，不删除文件或改变受管文件权限。Global 开启时首次启动创建 `data/memory/global/MEMORY.md`，再次启动不覆盖原文。
 
-提示词分段由 `cargo test --locked -p deepseek-code-core --lib prompt::` 覆盖：Code 与 Desktop 都按“身份行、`code.md`、`behavior.md`、`memory.md`”组装，记忆关闭时省略第四段，`cache_blocks` 同时识别四段和三段布局并在 Anthropic 请求中分别设置缓存断点。
+提示词分段运行 `cargo test --locked -p deepseek-code-core --lib prompt::`：共有 `memory.md` 始终存在；逐项启用 Global、Team、Project、Session 时，只增加对应模板和开启状态说明。检查 Code、Desktop 的共享组装，以及 Anthropic 缓存块拼接后是否保留原文。
 
 #### 文件记忆（独立 core 模块）
 
@@ -399,8 +401,8 @@ cargo test --locked -p deepseek-code-cli --bin dcl -- monitor_events_are_queued_
 
 #### M3 常驻索引（替代逐消息正文召回）
 
-- 用独立临时 data-dir 和本地模型端点；给 global、team、project、subagent、session 的索引和正文各写不同标记。捕获主会话与子代理的实际请求：首条用户消息里先项目指令再按上述顺序放 scope/路径；主会话无 subagent，子代理无父 session，team 未配置或索引空缺时无对应块。搜索所有消息，确认正文标记从未自动出现。
-- 同时改两个索引，下次请求应只有一条新提醒，只含改动的 scope；原首条前缀逐字节不变。再发一轮，不新增提醒。用普通文件工具写索引再重复；用 CRLF、多字节字符、200/201 行和 25 KiB 临界值检查截断和路径提示。
+- 用隔离 data-dir 和本地模型端点，给四类索引及正文写不同标记。首条用户消息在日期前按 global、team、project 放独立索引块，只含开启且已绑定的作用域；空索引仍显示路径。首次请求不含 session 索引或条目正文；启用 session 后，仅在压缩边界的摘要前看到本会话的索引。另测已开启但未绑定团队，不注入其他团队的索引。
+- 用普通文件工具保存条目，核对磁盘索引自动新增链接；下次模型请求在尾部仅提醒新增行，原首条前缀逐字节不变，再发一轮不重复。仅编辑正文时不产生索引提醒。用 CRLF、多字节字符、200/201 行和 25 KiB 临界值检查截断和路径提示。
 - 对 summary/native、自动/手动、partial、plan clear context 和 overflow recovery，各在边界前改索引并发送一次，边界后独立改另一个。比较请求与从会话库恢复的重放：当前索引各一次，不重复边界前提醒；仅边界后的改动有新提醒。退出并用同一 data-dir 恢复，比较相同历史前缀的序列化字节。另核对 fork 复制、删除清理及 home/private 项目隔离。
 - 运行 core 的 `resident_indexes` 单测、`--test compaction_history --test native_compaction` 及 CLI 的 `--test memory_files --test memory_compaction`；分别记录实际覆盖的边界、协议、请求层和进程层。仅重放测试不能替代真实 provider 请求或 Desktop 验收。
 
@@ -636,10 +638,13 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 
 全部使用本地模拟接口和临时数据库，不发真实请求。
 
+- `cargo test --locked -p deepseek-code-core --test mid_turn_auto_compact --test native_compaction`：本地 Responses 网关模拟 429、503、400 和 401，逐次统计原生、文本摘要及主请求。核对 Retry-After 与退避时取消、单次边界提交、仍能装下时仅提示一次。连续 8 个工具迭代只在第 1、5 步用尽两条路径的预算，第 9 步恢复并提交一次。冷却中的每一步仍校验硬上限，超限立即报告状态码、/compact 恢复方法并保留工具结果。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream manual_`：用临时会话实际执行 `/compact`。429 后成功只新增一个边界；两条路径持续 429 时命令返回错误，历史保持原样。12 条 Read 结果跨过微压缩阈值时，逐项对比原生请求与摘要请求追加指令前的全部输入。
+- `cargo test --locked -p deepseek-code-cli --bin dcl attached_worker_shows_compaction_notice_and_keeps_recovery_footer`：附着终端只显示一次软限制提示；最终错误保留原生和摘要的 HTTP 状态码及恢复操作，不输出原始响应正文。
 - `cargo test --locked -p deepseek-code-core --test compaction_cache_prefix`：主回合完成后重开引擎，通过本地 Chat、Anthropic Messages 和非 GPT Responses 接口比较完整请求体。摘要须保留主回合的系统指令、工具定义、首条消息的提醒和后续回答，末尾只追加一条含 keep 的用户指令。即使回复同时含正文与写文件调用，也只能提交正文；历史只增加摘要边界。按请求 ID 核对 SQLite 的输入和缓存读取 token 数，包括截断后的各次恢复请求。
 - `cargo test --locked -p deepseek-code-core --test compaction_history`：检查本地压缩和首轮收件箱投递后的历史完整性、Responses 不透明窗口的分段回退、结构化输出约束、Claude 推理模式下的前缀复用，以及原生网关的路由和鉴权。核对每日缓存分项、跨分支的物理请求数和 Bedrock 缓存读写。
 - `cargo test --locked -p deepseek-code-core --test native_compaction`：同一 GPT Responses 会话的主请求与原生压缩请求使用相同的 `prompt_cache_key`；分支使用自身会话的键。核对压缩请求可用字段和会话请求指标。真实服务端的命中率需用已启用记录的代理另行测量。
-- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream`：通过本地 OpenCode Go Chat 接口续接超阈值会话。角色帧和正文帧被合并为一个流元素时，摘要按 SSE 帧顺序解码，正文中的 JSON 字面文本原样写入边界，续接主请求只发送一次。若单个提供方帧内含两个 JSON 值，首个分段请求失败，保留原历史和解析位置，不重发、不写入边界、不发送主请求。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream`：通过本地 OpenCode Go Chat 接口续接超阈值会话。角色帧和正文帧被合并为一个流元素时，摘要按 SSE 帧顺序解码，正文中的 JSON 字面文本原样写入边界，续接主请求只发送一次。若单个提供方帧内含两个 JSON 值，首个分段请求失败，保留原历史和解析位置，不重发、不写入边界。下一请求仍能装下时带原上下文继续，装不下时不发送主请求。如果本地估算可发送而提供方返回 413，错误中保留压缩失败原因和恢复方法。
 
 1. `cargo test --locked -p deepseek-code-core --test compaction_status_regressions`（3 项）：指令开销的 `unknown_parts` 不为 0 时估算不得标为完整；与压缩边界同一毫秒、但没有记录该边界的旧请求不得成为当前用量；旧分支复制了祖先边界且没有计数键时，次数为“未知（旧历史）”、可证明的自身次数为 0，不显示精确的祖先累计值。
 2. `cargo test --locked -p deepseek-code-core --test compaction_boundary_provenance`（6 项，均覆盖 OpenAI 与 Anthropic）：先按当前历史读取消息与压缩边界，再由另一入口提交新的压缩，随后用旧消息发出真实 HTTP 请求。断言服务端正文是旧上下文、不含新摘要，且每个请求快照记录的 `contextBoundary` 都不是新边界；没有可信来源的主机消息记录为未知边界。把执行器改回“发送时查询数据库最新边界”后这 4 项全部失败，证明它们确实覆盖该缺陷。
@@ -1809,7 +1814,7 @@ cargo test --locked -p deepseek-code-cli --bin dcl shell_configuration_is_shared
 
 - `cargo test --locked -p deepseek-code-core --lib -- experience prompt`：
   - `experience::tests` 验证 frontmatter 解析、64 KiB/8 KiB 上限、根与一级子目录扫描、三级目录不扫描、同名跨根去重、确定性排序、`- 相对路径 | 名称: 描述` 行格式、正文不进入索引、凭据启发式跳过，以及 `experience.enabled` 默认 true 与持久化。
-  - `prompt::tests::first_message_reminders_keep_the_stable_order` 断言首条消息提醒按 `user_instructions → standalone_frontend → project_instructions → resident_indexes → experience → loadable_tools → available_skills → environment → date → git → skills` 顺序输出（Experience 位于 MEMORY 索引之后、loadable_tools 之前；CLI 前端说明位于用户指令之后、项目指令之前；environment 位于 available_skills 之后、date 之前）；`experience_*` 断言首请求冻结、内部草稿工作区与关闭开关都冻结 `None`；`changes_reminder_reports_*` 断言新增/删除各只提醒一次。
+  - `prompt::tests::first_message_reminders_keep_the_stable_order` 断言首条消息提醒按 `standalone_frontend → user_instructions → project_instructions → experience → loadable_tools → available_skills → inline_skills → environment → resident_indexes → date → git → skills → session_tips` 顺序输出（独立 CLI 的前端说明排第一，非 CLI 不注入该说明）；`experience_*` 断言首请求冻结、内部草稿工作区与关闭开关都冻结 `None`；`changes_reminder_reports_*` 断言新增/删除各只提醒一次。
   - `forget_*` 与 `prune_*` 断言 `.experience.json` 和 `<session>.experience.names.json` 纳入会话删除与 30 天清理。
 - `cargo test --locked -p deepseek-code-cli --test experience`：OpenAI 与 Anthropic 各跑一遍。断言首条用户消息只有一个 `# Experience`，根与 `docs/.agents/experience/` 条目在、`docs/sub/.agents/experience/` 不在、行以相对路径开头、正文与无效文件标记不在；恢复后首条消息逐字一致；新增 `gamma` 只出现一次 `New experience:`，删除 `beta` 只出现一次 `Removed experience: beta`；关闭开关的新会话没有块，重新打开恢复。
 - `cargo test --locked -p deepseek-code-cli --test peripheral config_memory_switch`：断言 `config show` 的 `experience.enabled` 默认 true，`config set experience.enabled false|true` 可读回；`/config` 的 Experience 行读取同一设置。

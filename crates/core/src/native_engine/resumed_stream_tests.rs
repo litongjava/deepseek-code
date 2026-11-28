@@ -71,9 +71,9 @@ async fn empty_stream_retry_keeps_completed_tool_results_without_reexecuting_too
             ReasoningMode::Standard,
         );
         let result = if anthropic {
-            engine.execute_anthropic_loop().await
+            engine.execute_anthropic_loop(&Default::default()).await
         } else {
-            engine.execute_openai_loop().await
+            engine.execute_openai_loop(&Default::default()).await
         }
         .unwrap();
         assert_eq!(result.0, "Recovered");
@@ -139,9 +139,9 @@ async fn first_request_after_resume_is_compressed_for_both_protocols() {
             ReasoningMode::Standard,
         );
         let result = if anthropic {
-            engine.execute_anthropic_loop().await
+            engine.execute_anthropic_loop(&Default::default()).await
         } else {
-            engine.execute_openai_loop().await
+            engine.execute_openai_loop(&Default::default()).await
         };
         result.unwrap();
         let body = seen.lock().unwrap().clone();

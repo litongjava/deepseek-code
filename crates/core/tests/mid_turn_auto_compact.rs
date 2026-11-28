@@ -82,10 +82,24 @@ fn responses_sse(output: Value, delta_text: Option<&str>, input_tokens: u64) -> 
     frames
 }
 
-async fn run_mid_turn_scenario(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    None,
+    RetryTwice,
+    Fallback,
+    SoftLimit,
+    HardLimit,
+    HardDuringCooldown,
+    Cancel,
+    BadRequest,
+    Unauthorized,
+}
+
+async fn run_with_failure(
     protocol: Protocol,
     prefs: Preferences,
     standalone_frontend: bool,
+    failure: Failure,
 ) -> (
     tempfile::TempDir,
     SessionStore,
@@ -96,8 +110,8 @@ async fn run_mid_turn_scenario(
     deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let big_file = dir.path().join("evidence.txt");
-    // ~45 KB -> ~15,000 estimated tokens; with ~4-5k tool overhead this crosses the
-    // 50% threshold (16,000) of a 32,000 window while still fitting one whole-request summary.
+    // ~45 KB -> ~15,000 estimated tokens; with the normal tool and instruction overhead this crosses the
+    // 50% threshold (24,000) of a 48,000 window while still fitting one whole-request summary.
     let marker_line = "BULKY_EVIDENCE_MARKER_0123456789 ".repeat(1400);
     std::fs::write(&big_file, &marker_line).unwrap();
 
@@ -128,11 +142,15 @@ async fn run_mid_turn_scenario(
     let main_step_clone = main_step.clone();
     let file_path = big_file.to_string_lossy().into_owned();
 
+    let native_attempts = Arc::new(AtomicUsize::new(0));
+    let last_attempt = Arc::new(Mutex::new(None::<std::time::Instant>));
     let app = Router::new().fallback(post(
         move |uri: axum::http::Uri, headers: HeaderMap, Json(body): Json<Value>| {
             let recorded = recorded_clone.clone();
             let main_step = main_step_clone.clone();
             let file_path = file_path.clone();
+            let native_attempts = native_attempts.clone();
+            let last_attempt = last_attempt.clone();
             async move {
                 let path = uri.path().to_owned();
                 let is_compact = headers
@@ -144,6 +162,28 @@ async fn run_mid_turn_scenario(
                 recorded.lock().unwrap().push((path.clone(), headers, body));
 
                 if path.ends_with("/responses/compact") {
+                    let attempt = native_attempts.fetch_add(1, Ordering::SeqCst);
+                    let now = std::time::Instant::now();
+                    let previous = last_attempt.lock().unwrap().replace(now);
+                    if failure == Failure::RetryTwice && attempt == 1 {
+                        assert!(now.duration_since(previous.unwrap()) >= std::time::Duration::from_secs(1));
+                    }
+                    let status = match failure {
+                        Failure::None => None,
+                        Failure::RetryTwice if attempt >= 2 => None,
+                        Failure::SoftLimit if main_step.load(Ordering::SeqCst) >= 9 => None,
+                        Failure::BadRequest => Some(StatusCode::BAD_REQUEST),
+                        Failure::Unauthorized => Some(StatusCode::UNAUTHORIZED),
+                        _ => Some(StatusCode::TOO_MANY_REQUESTS),
+                    };
+                    if let Some(status) = status {
+                        let wait = match failure {
+                            Failure::RetryTwice if attempt == 0 => "1",
+                            Failure::Cancel => "60",
+                            _ => "0",
+                        };
+                        return (status, [("retry-after", wait)], "fixture failure").into_response();
+                    }
                     return (
                         StatusCode::OK,
                         Json(json!({
@@ -159,6 +199,9 @@ async fn run_mid_turn_scenario(
                 }
 
                 if is_compact {
+                    if matches!(failure, Failure::SoftLimit | Failure::HardLimit | Failure::HardDuringCooldown) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "0")], "unavailable").into_response();
+                    }
                     let summary = "MID_TURN_SUMMARY: Read evidence.txt (found BULKY_EVIDENCE_MARKER); next step is to report final conclusion.";
                     if !is_stream {
                         return match protocol {
@@ -251,17 +294,17 @@ async fn run_mid_turn_scenario(
                         }
                     }
                     Protocol::OpenAIResponses => {
-                        if step == 0 {
+                        if step == 0 || (step < 9 && failure == Failure::SoftLimit) || (step == 1 && failure == Failure::HardDuringCooldown) {
                             let output = json!([{
                                 "type": "function_call",
-                                "id": "fc-read-1",
-                                "call_id": "call-read-1",
+                                "id": format!("fc-read-{step}"),
+                                "call_id": format!("call-read-{step}"),
                                 "name": "Read",
-                                "arguments": read_args.to_string()
+                                "arguments": if step == 0 {read_args.to_string()} else {json!({"file_path":format!("missing-{step}.txt")}).to_string()}
                             }]);
                             (
                                 [("content-type", "text/event-stream")],
-                                responses_sse(output, None, 300),
+                                responses_sse(output, None, if failure == Failure::HardLimit || (step == 1 && failure == Failure::HardDuringCooldown) { 47_000 } else { 300 }),
                             )
                                 .into_response()
                         } else {
@@ -314,7 +357,7 @@ async fn run_mid_turn_scenario(
             "api": model_api,
             "enabled": true,
             "max_tokens": 1000,
-            "context_window": 32000,
+            "context_window": 48000,
             "supports_web_search": false
         }]
     }))
@@ -356,13 +399,59 @@ async fn run_mid_turn_scenario(
     let mut events = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while let Some(event) = rx.recv().await {
-            assert!(!matches!(event, EngineEvent::Error(_)), "unexpected error: {event:?}");
+            if failure == Failure::Cancel && matches!(&event, EngineEvent::RequestAttempt(v) if v["outcome"] == "retry_wait" && v["waitMs"] == 60000) {
+                events.push(event);
+                break;
+            }
+            if !matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
+                assert!(!matches!(event, EngineEvent::Error(_)), "unexpected error: {event:?}");
+            }
             events.push(event);
         }
     })
     .await
     .unwrap();
 
+    drop(rx);
+    assert!(matches!(
+        engine
+            .wait_for_executor(&id, std::time::Duration::from_secs(2))
+            .await,
+        deepseek_code_core::native_engine::engine_core::ExecutorWait::Completed
+    ));
+    if matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
+        let rows = store
+            .db
+            .open_session(&id)
+            .unwrap()
+            .repository()
+            .messages()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].id, assistant_id);
+        assert!(!rows.iter().any(|row| row.is_compact_boundary));
+        let reopened = SessionStore::new(paths.open_database().unwrap());
+        let saved = reopened.model_history(&id, &format).unwrap();
+        assert!(saved
+            .iter()
+            .any(|r| r["role"] == "tool" && r.to_string().contains("BULKY_EVIDENCE_MARKER")));
+        turn.finish(deepseek_code_core::db::turn_repo::TurnStatus::Failed)
+            .unwrap();
+        reopened
+            .append(&id, "user", "Continue from the saved tool result")
+            .unwrap();
+        let request = serde_json::from_value(json!({
+            "conversation_id":id, "messages":reopened.model_history(&id,&format).unwrap(),
+            "model":model_id, "provider_id":"fixture", "workspace_path":dir.path(), "max_tokens":1000
+        })).unwrap();
+        let mut resumed = engine.send_message(request).await.unwrap();
+        let mut completed = false;
+        while let Some(event) = resumed.recv().await {
+            assert!(!matches!(event, EngineEvent::Error(_)), "{event:?}");
+            completed |= matches!(event, EngineEvent::MessageStop { ref full_text, .. } if full_text.contains("FINAL_ANSWER"));
+        }
+        assert!(completed);
+    }
     server.abort();
     let _ = server.await;
     let calls = recorded.lock().unwrap().clone();
@@ -376,7 +465,7 @@ async fn openai_mid_turn_tool_loop_triggers_auto_compact_and_continues() {
         ..Default::default()
     };
     let (dir, store, id, calls, events) =
-        run_mid_turn_scenario(Protocol::OpenAIChat, prefs, true).await;
+        run_with_failure(Protocol::OpenAIChat, prefs, true, Failure::None).await;
 
     // 1) Initial main request -> 2) mid-turn compaction request -> 3) resumed main request.
     assert_eq!(calls.len(), 3, "expected main + compact + main calls");
@@ -450,7 +539,7 @@ async fn anthropic_mid_turn_tool_loop_triggers_auto_compact_and_continues() {
         ..Default::default()
     };
     let (_dir, _store, _id, calls, events) =
-        run_mid_turn_scenario(Protocol::Anthropic, prefs, true).await;
+        run_with_failure(Protocol::Anthropic, prefs, true, Failure::None).await;
 
     assert_eq!(calls.len(), 3, "expected main + compact + main calls");
     assert_eq!(calls[1].1["x-dcl-request-kind"], "compaction");
@@ -483,7 +572,7 @@ async fn native_responses_mid_turn_auto_compact_uses_responses_compact_and_conti
         ..Default::default()
     };
     let (_dir, _store, _id, calls, events) =
-        run_mid_turn_scenario(Protocol::OpenAIResponses, prefs, false).await;
+        run_with_failure(Protocol::OpenAIResponses, prefs, false, Failure::None).await;
 
     assert_eq!(calls.len(), 3, "expected responses + /responses/compact + responses");
     assert!(calls[1].0.ends_with("/responses/compact"));
@@ -505,6 +594,198 @@ async fn native_responses_mid_turn_auto_compact_uses_responses_compact_and_conti
     )));
 }
 
+async fn check_failure(
+    failure: Failure,
+    boundaries: u64,
+    native: usize,
+    summary: usize,
+    main: usize,
+) {
+    let prefs = Preferences {
+        autocompact_percent: Some(50.try_into().unwrap()),
+        ..Default::default()
+    };
+    let (_dir, store, id, calls, events) =
+        run_with_failure(Protocol::OpenAIResponses, prefs, false, failure).await;
+    let native_calls = calls
+        .iter()
+        .filter(|(path, _, _)| path.ends_with("/compact"))
+        .count();
+    let summary_calls = calls
+        .iter()
+        .filter(|(path, h, _)| {
+            !path.ends_with("/compact")
+                && h.get("x-dcl-request-kind")
+                    .is_some_and(|v| v == "compaction")
+        })
+        .count();
+    assert_eq!(
+        (
+            native_calls,
+            summary_calls,
+            calls.len() - native_calls - summary_calls
+        ),
+        (native, summary, main),
+        "{failure:?}"
+    );
+    assert_eq!(
+        deepseek_code_core::services::compaction::count(&store.db, &id)
+            .unwrap()
+            .proven(),
+        boundaries
+    );
+    let warnings = events.iter().filter(|e| matches!(e, EngineEvent::CompactionNotice(s) if s.contains("Automatic compaction failed"))).count();
+    assert_eq!(
+        warnings,
+        usize::from(matches!(
+            failure,
+            Failure::SoftLimit | Failure::HardDuringCooldown | Failure::Unauthorized
+        ))
+    );
+    if matches!(failure, Failure::RetryTwice | Failure::Cancel) {
+        let waits: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::RequestAttempt(v) if v["outcome"] == "retry_wait" => {
+                    assert_eq!(v["retryAfter"], true);
+                    Some(v["waitMs"].as_u64().unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            waits,
+            if failure == Failure::Cancel {
+                vec![60_000]
+            } else {
+                vec![1000, 0]
+            }
+        );
+    }
+    if failure == Failure::Fallback {
+        let native = calls
+            .iter()
+            .find(|(path, _, _)| path.ends_with("/compact"))
+            .unwrap();
+        let summary = calls
+            .iter()
+            .find(|(path, h, _)| {
+                !path.ends_with("/compact")
+                    && h.get("x-dcl-request-kind")
+                        .is_some_and(|v| v == "compaction")
+            })
+            .unwrap();
+        let (_, prefix) = summary.2["input"].as_array().unwrap().split_last().unwrap();
+        assert_eq!(native.2["input"].as_array().unwrap().as_slice(), prefix);
+        assert!(native.2["input"]
+            .to_string()
+            .contains("BULKY_EVIDENCE_MARKER"));
+    }
+    if failure == Failure::SoftLimit {
+        let main_indexes: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, h, _))| {
+                (h.get("x-dcl-request-kind")
+                    .is_none_or(|v| v != "compaction"))
+                .then_some(i)
+            })
+            .collect();
+        assert!(calls[main_indexes[3]].2["input"]
+            .to_string()
+            .contains("BULKY_EVIDENCE_MARKER"));
+        let budget = 2 * attempts();
+        assert_eq!(
+            main_indexes,
+            [
+                0,
+                budget + 1,
+                budget + 2,
+                budget + 3,
+                budget + 4,
+                2 * budget + 5,
+                2 * budget + 6,
+                2 * budget + 7,
+                2 * budget + 8,
+                2 * budget + 10
+            ]
+        );
+    }
+    if matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
+        let message = events
+            .iter()
+            .find_map(|e| match e {
+                EngineEvent::Error(s) => Some(s),
+                _ => None,
+            })
+            .expect("hard limit error");
+        assert!(
+            message.contains("429") && message.contains("503") && message.contains("/compact"),
+            "{message}"
+        );
+        assert!(calls.last().unwrap().2["input"]
+            .to_string()
+            .contains("BULKY_EVIDENCE_MARKER"));
+    } else if failure != Failure::Cancel {
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::MessageStop { full_text, .. } if full_text.contains("FINAL_ANSWER"))));
+        let final_body = calls.last().unwrap().2.to_string();
+        let expected = match failure {
+            Failure::RetryTwice | Failure::SoftLimit => "opaque-mid-turn-summary",
+            Failure::Fallback | Failure::BadRequest => "MID_TURN_SUMMARY",
+            _ => "BULKY_EVIDENCE_MARKER",
+        };
+        assert!(final_body.contains(expected));
+    }
+}
+
+fn attempts() -> usize {
+    deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
+    deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1
+}
+
+#[tokio::test]
+async fn native_429_twice_honors_retry_after_and_commits_once() {
+    check_failure(Failure::RetryTwice, 1, 3, 0, 2).await;
+}
+
+#[tokio::test]
+async fn exhausted_native_budget_uses_one_summary() {
+    check_failure(Failure::Fallback, 1, attempts(), 1, 2).await;
+}
+
+#[tokio::test]
+async fn soft_limit_skips_three_steps_then_recovers_after_eight_tool_steps() {
+    check_failure(
+        Failure::SoftLimit,
+        1,
+        2 * attempts() + 1,
+        2 * attempts(),
+        10,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hard_limit_reports_both_failures_and_resumes_from_saved_tool_results() {
+    check_failure(Failure::HardLimit, 0, attempts(), attempts(), 2).await;
+}
+
+#[tokio::test]
+async fn hard_capacity_stops_during_cooldown_without_another_attempt() {
+    check_failure(Failure::HardDuringCooldown, 0, attempts(), attempts(), 3).await;
+}
+
+#[tokio::test]
+async fn closing_turn_during_native_backoff_releases_executor() {
+    check_failure(Failure::Cancel, 0, 1, 0, 1).await;
+}
+
+#[tokio::test]
+async fn native_bad_request_falls_back_without_retry_and_auth_failure_skips_fallback() {
+    check_failure(Failure::BadRequest, 1, 1, 1, 2).await;
+    check_failure(Failure::Unauthorized, 0, 1, 0, 2).await;
+}
+
 #[tokio::test]
 async fn autocompact_off_disables_mid_turn_auto_compact() {
     let prefs = Preferences {
@@ -512,7 +793,7 @@ async fn autocompact_off_disables_mid_turn_auto_compact() {
         ..Default::default()
     };
     let (_dir, store, id, calls, events) =
-        run_mid_turn_scenario(Protocol::OpenAIChat, prefs, true).await;
+        run_with_failure(Protocol::OpenAIChat, prefs, true, Failure::None).await;
 
     // Only the two main requests should run — no compaction request, no ContextReset.
     assert_eq!(calls.len(), 2, "expected only 2 main calls when autocompact is off");
@@ -539,16 +820,16 @@ async fn anthropic_mid_turn_microcompact_clears_old_tool_results_before_llm_comp
     let dir = tempfile::tempdir().unwrap();
     let big_file = dir.path().join("big.txt");
     let small_file = dir.path().join("small.txt");
-    // ~45 KB (~15,000 tokens) read in slot 0, followed by 10 tiny reads so microcompact
-    // clears slot 0 while keeping the last 10 tool_result blocks, dropping well below 16,000.
-    std::fs::write(&big_file, "OLD_LARGE_RESULT_TOKEN ".repeat(2000)).unwrap();
+    // ~100 KB (>24,000 estimated history tokens) read in slot 0, followed by 10 tiny reads so microcompact
+    // clears slot 0 while keeping the last 10 tool_result blocks, dropping well below 24,000.
+    std::fs::write(&big_file, "OLD_LARGE_RESULT_TOKEN ".repeat(4400)).unwrap();
     std::fs::write(&small_file, "tiny").unwrap();
 
     let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let id = store.create(dir.path(), "fixture-model", "fixture").unwrap();
-    // 50% of 32,000 = 16,000 tokens threshold. After 11 reads, slot 0 is older than KEEP_RECENT (10),
-    // so microcompact clears slot 0 and drops total well below 16,000 — avoiding an LLM compaction!
+    // 50% of 48,000 = 24,000 tokens threshold. After 11 reads, slot 0 is older than KEEP_RECENT (10),
+    // so microcompact clears slot 0 and drops total well below 24,000 — avoiding an LLM compaction!
     store
         .db
         .open_session(&id)
@@ -624,7 +905,7 @@ async fn anthropic_mid_turn_microcompact_clears_old_tool_results_before_llm_comp
             "name": "fixture-model",
             "enabled": true,
             "max_tokens": 1000,
-            "context_window": 32000,
+            "context_window": 48000,
             "supports_web_search": false
         }]
     }))

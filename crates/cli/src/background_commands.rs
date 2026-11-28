@@ -1255,40 +1255,6 @@ pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut
     Ok(true)
 }
 
-/// A finished background agent's report becomes, as in the reference CLI,
-/// "● Agent "…" completed" and a task notification that wakes this
-/// session; the full report stays in its history.
-fn agent_notice(session: &Session, report: String) -> Result<String> {
-    let Some(id) = report.lines().find_map(|line| line.strip_prefix("Task: ")) else {
-        return Ok(report);
-    };
-    let context = crate::services::context(&session.paths)?;
-    let Some(record) = context.db.background_agent(id)? else {
-        return Ok(report);
-    };
-    let status = report.lines().find_map(|line| line.strip_prefix("Status: ")).unwrap_or("completed");
-    let description = record["description"].as_str().unwrap_or("background agent");
-    let mut summary = match status {
-        "completed" => format!("Agent \"{description}\" completed"),
-        "cancelled" => format!("Agent \"{description}\" was stopped"),
-        other => format!("Agent \"{description}\" {other}"),
-    };
-    if status == "failed" {
-        if let Some(reason) = report
-            .split_once("\n\n")
-            .map(|(_, body)| body)
-            .and_then(|body| body.lines().find(|line| !line.trim().is_empty()))
-        {
-            summary.push_str(": ");
-            summary.push_str(&safe_output(reason).chars().take(400).collect::<String>());
-        }
-    }
-    session.selected_session()?.enqueue_cli_input(deepseek_code_core::services::input_queue::QueueOrigin::TaskNotification,
-        &format!("{}\n<task-id>{id}</task-id>\n<status>{status}</status>\n<summary>{summary}</summary>\n<result>See the background task report for this task above.</result>\n</task-notification>", deepseek_code_core::tools::background_shell::NOTIFICATION_START),
-    )?;
-    Ok(format!("\u{25cf} {summary}"))
-}
-
 pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WORKER_WARNING: AtomicBool = AtomicBool::new(false);
@@ -1298,7 +1264,7 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     let mut notices = Vec::new();
     for (source, warning, result) in [
         ("messages", &MESSAGE_WARNING, deepseek_code_core::services::session_messages::notices(&deepseek_code_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(deepseek_code_core::services::EnvironmentCredentials) },&session.id)),
-        ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).and_then(|reports| reports.into_iter().map(|report| agent_notice(session, report)).collect())),
+        ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).map(|notices| notices.into_iter().map(|text| safe_output(&text)).collect())),
         ("shells", &SHELL_WARNING, shell_notifications(session)),
         ("monitors", &MONITOR_WARNING, monitor_notifications(session)),
     ] {

@@ -10,6 +10,7 @@ use crate::permissions::{
     PermissionContext, PermissionManager, PermissionResult,
 };
 use crate::prefetch::PrefetchEngine;
+use crate::services::compaction::AutoCompactionGate;
 use crate::skills::SkillsManager;
 use anyhow::Context;
 use anyhow::{anyhow, Result};
@@ -582,20 +583,6 @@ impl QueryEngine {
         let (mut history, boundary) =
             shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
-        if crate::services::compaction::native::supports(&provider) {
-            history.retain(|row| row["origin"] != "memory_change");
-            let mut options = options;
-            options.compaction_metrics = Some(super::compaction_metrics::MetricsStore(shard));
-            return crate::services::compaction::native::generate(
-                history,
-                session,
-                &provider,
-                instructions,
-                Some(self.db_manager.data_dir()),
-                options,
-            )
-            .await;
-        }
         if shard
             .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
             .is_some_and(|host| host.standalone_frontend)
@@ -613,7 +600,8 @@ impl QueryEngine {
                 provider.model.context_window,
             )?;
         }
-        self.generate_replay_summary(
+        let native = crate::services::compaction::native::supports(&provider);
+        self.generate_replay_compaction(
             shard,
             provider,
             model,
@@ -622,12 +610,12 @@ impl QueryEngine {
             history,
             boundary,
             options,
+            native,
         )
         .await
-        .map(Into::into)
     }
 
-    pub(crate) async fn generate_replay_summary(
+    pub(crate) async fn generate_replay_compaction(
         &self,
         shard: crate::db::session_store::SessionDb,
         provider: super::provider_manager::ResolvedProvider,
@@ -636,48 +624,10 @@ impl QueryEngine {
         instructions: &str,
         history: Vec<Value>,
         boundary: Option<String>,
-        mut options: super::request_options::RequestOptions,
-    ) -> Result<String> {
+        options: super::request_options::RequestOptions,
+        native: bool,
+    ) -> Result<crate::services::compaction::GeneratedSummary> {
         let session = shard.id();
-        let selected = shard.scoped_stores();
-        let mut checkpoint = crate::services::compaction::checkpoint::Checkpoint::open(
-            &selected, session, &provider, system,
-        )?;
-        options.compaction_metrics = Some(super::compaction_metrics::MetricsStore(shard.clone()));
-        checkpoint.options = options;
-        let window = history
-            .first()
-            .filter(|m| m["provider_content"]["compaction"] == true)
-            .map(|boundary| -> Result<_> {
-                let mut body = super::provider_runtime::messages::request(
-                    "openai-responses",
-                    &provider,
-                    &serde_json::Value::Null,
-                    vec![serde_json::from_value(boundary.clone())?],
-                    Some(system),
-                    vec![],
-                    0,
-                )?;
-                anyhow::ensure!(
-                    body["input"] == boundary["provider_content"]["items"]
-                        && body["input"]
-                            .as_array()
-                            .is_some_and(|items| items.iter().any(|i| i["type"] == "compaction"
-                                && i["encrypted_content"]
-                                    .as_str()
-                                    .is_some_and(|v| !v.is_empty()))),
-                    "Cannot replay the saved opaque Responses window; original history retained"
-                );
-                if let Some(key) = super::request_identity::prompt_cache_key(Some(session)) {
-                    body["prompt_cache_key"] = key.into();
-                }
-                Ok(super::followup::WireRequest {
-                    api: "openai-responses".into(),
-                    body,
-                    builtin_vision: Some(false),
-                })
-            })
-            .transpose()?;
         let saved_options =
             shard.read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?;
         let has_main_turn = saved_options.is_some();
@@ -704,31 +654,34 @@ impl QueryEngine {
             top_p: None,
         };
         let std::ops::ControlFlow::Continue(mut turn) = self
-            .prepare_turn(shard.clone(), request, TurnPurpose::Summary)
+            .prepare_turn(
+                shard.clone(),
+                request,
+                TurnPurpose::Summary,
+                Default::default(),
+            )
             .await?
         else {
             anyhow::bail!("Cannot prepare a summary request");
         };
         turn.executor.restore_request_context().await?;
-        let mut durable = turn.executor.prepare_main_history()?;
-        durable.retain(|row| row["origin"] != "memory_change");
-        // The saved Responses prefix is already carried in the typed window.
-        if window.is_some() {
-            durable.remove(0);
-        }
-        let mut wire = turn.executor.replay_request().await?;
-        wire.allow_text_summary();
-        super::generation::replay::summarize_replay(
-            provider,
-            system,
-            durable,
-            instructions,
-            has_main_turn,
-            wire,
-            window,
-            &mut checkpoint,
-        )
-        .await
+        let durable = turn.executor.compaction_history(..);
+        let summary_only_wire = if native {
+            None
+        } else {
+            Some(turn.executor.replay_request().await?)
+        };
+        turn.executor
+            .generate_compaction_snapshot(
+                &shard,
+                durable,
+                summary_only_wire,
+                system,
+                instructions,
+                has_main_turn,
+                options,
+            )
+            .await
     }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
@@ -960,8 +913,15 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, None, None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            false,
+            None,
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// Internal hook feedback: no user prompt hooks, skill invocation or authority.
@@ -970,7 +930,7 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, None, None)
+        self.send_with_origin(request, save_response, true, None, None, Default::default())
             .await
     }
 
@@ -983,8 +943,15 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, Some(lease), None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            false,
+            Some(lease),
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// Hook wakes share ownership the same way.
@@ -994,8 +961,15 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, Some(lease), None)
-            .await
+        self.send_with_origin(
+            request,
+            save_response,
+            true,
+            Some(lease),
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// A CLI turn can retain its final provider request for a single follow-up.
@@ -1005,7 +979,21 @@ impl QueryEngine {
         lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
         capture: Option<super::suggestion::SuggestionCapture>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, false, false, lease, capture)
+        self.send_cli_turn(request, false, lease, capture, Default::default())
+            .await
+    }
+
+    /// The CLI can reach its compaction threshold before assembling the turn.
+    /// Carry that outcome into the first request's actual context check.
+    pub async fn send_cli_turn(
+        &self,
+        request: ChatRequest,
+        hook_wake: bool,
+        lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
+        capture: Option<super::suggestion::SuggestionCapture>,
+        compaction_gate: AutoCompactionGate,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        self.send_with_origin(request, false, hook_wake, lease, capture, compaction_gate)
             .await
     }
 
@@ -1014,6 +1002,7 @@ impl QueryEngine {
         selected: crate::db::session_store::SessionDb,
         mut request: ChatRequest,
         purpose: TurnPurpose,
+        compaction_gate: AutoCompactionGate,
     ) -> Result<std::ops::ControlFlow<mpsc::Receiver<EngineEvent>, PreparedTurn>> {
         let replay = matches!(purpose, TurnPurpose::Summary);
         let hook_wake = matches!(purpose, TurnPurpose::HookWake);
@@ -1111,11 +1100,11 @@ impl QueryEngine {
             .await?;
         }
         let customization = crate::services::customization::load(&plugin_context.paths.data_dir)?;
-        let memory_enabled = match crate::services::memory_files::config(&plugin_context) {
-            Ok(config) => config.enabled,
+        let memory = match crate::services::memory_files::config(&plugin_context) {
+            Ok(config) => config,
             Err(error) => {
-                tracing::warn!(module = "Prompt", error = %error, "Memory setting unavailable; keeping memory guidance");
-                true
+                tracing::warn!(module = "Prompt", error = %error, "Memory settings unavailable; using default prompt scopes");
+                Default::default()
             }
         };
         let standalone_frontend = request.standalone_frontend;
@@ -1123,7 +1112,7 @@ impl QueryEngine {
             request.system_prompt.as_deref(),
             prompt_profile,
             &customization.system_prompt,
-            memory_enabled,
+            &memory,
         ));
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
@@ -1570,11 +1559,11 @@ impl QueryEngine {
         let memory_session = selected.clone();
         let memory_context = plugin_context.clone();
         let (file_memory, resident_indexes, turn_context) = {
-            use crate::services::memory_files::{self, FileMemory};
-            let memory = memory_files::config(&memory_context)?
-                .enabled
-                .then(|| FileMemory::session(&memory_context, memory_session.id()))
-                .transpose()?;
+            use crate::services::memory_files::FileMemory;
+            let memory = Some(FileMemory::session(&memory_context, memory_session.id())?);
+            if applied_compaction.is_none() {
+                crate::services::memory_files::prompt::Admission::ensure_first_prefix(&memory_session)?;
+            }
             let (index, turns) = crate::services::turn_context::replay(
                 &memory_session,
                 applied_compaction.as_deref(),
@@ -1755,6 +1744,9 @@ impl QueryEngine {
                 // fail when too little is left for a useful answer.
                 let remaining = (context as u64).saturating_sub(estimated);
                 if remaining < 4096 && !replay {
+                    if let Some(error) = compaction_gate.blocking_failure() {
+                        anyhow::bail!("Automatic compaction failed. The next request cannot fit. Resume and run /compact or select a model with a larger context window. Cause: {error}");
+                    }
                     anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens");
                 }
                 if remaining >= 4096 {
@@ -1874,6 +1866,7 @@ impl QueryEngine {
         } else {
             self.resource_monitor.clone()
         });
+        executor.compaction_gate = compaction_gate;
 
         if let Some(memory) = file_memory {
             executor = executor.with_file_memory(memory);
@@ -1904,6 +1897,7 @@ impl QueryEngine {
         hook_wake: bool,
         execution_lease: Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
         suggestion: Option<super::suggestion::SuggestionCapture>,
+        compaction_gate: AutoCompactionGate,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         // Every submission owns the session for its whole attempt. A host that
         // already acquired (CLI, SDK, Desktop SSE) shares that same `Arc`; an
@@ -1950,6 +1944,7 @@ impl QueryEngine {
                 } else {
                     TurnPurpose::Submit
                 },
+                compaction_gate,
             )
             .await?
         {
@@ -2869,7 +2864,7 @@ mod resource_monitor_tests {
 
         let selected = store.db.open_session(&id).unwrap();
         let flow = engine
-            .prepare_turn(selected, request, TurnPurpose::Submit)
+            .prepare_turn(selected, request, TurnPurpose::Submit, Default::default())
             .await
             .unwrap();
         assert!(matches!(flow, std::ops::ControlFlow::Continue(_)));

@@ -59,8 +59,8 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let provider = json!([{"id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"model","name":"Model","enabled":true,"context_window":window,"max_tokens":1024,"supports_web_search":false,"supports_vision":false}]}]);
-        fs::write(
-            self.root.path().join("data/providers.json"),
+        deepseek_code_core::data_layout::write_config_file(
+            self.context.paths.data_dir.join("config/providers.json"),
             provider.to_string(),
         )
         .unwrap();
@@ -228,8 +228,11 @@ async fn compressed_chat(large: bool, edited: bool) {
     fs::write(&index, if edited { "INDEX_OLD_37" } else { &current }).unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let capture = requests.clone();
+    // Leave enough room for the complete resident index and protected prompt.
+    // Older replies still put this replay above the compression threshold.
+    let window = if large && !edited { 14_000 } else { 12_800 };
     let server = fixture
-        .serve(12_800, move |body, _| {
+        .serve(window, move |body, _| {
             assert_eq!(body["stream"], true);
             capture.lock().unwrap().push(body["messages"].to_string());
             if large {
@@ -315,13 +318,30 @@ async fn post_boundary_changes_leave_the_frozen_index_intact() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    let session = fixture
+        .context
+        .db
+        .open_session(&fixture.id)
+        .unwrap()
+        .memory_directory();
+    fs::create_dir_all(&session).unwrap();
+    fs::write(session.join("MEMORY.md"), "SESSION_BOUNDARY_ROW").unwrap();
+    let before = fixture.turn(false, "before compact").await;
+    assert!(
+        before.status.success(),
+        "{}",
+        String::from_utf8_lossy(&before.stderr)
+    );
     let prefix = compaction::prepare(&fixture.context.db, &fixture.id).unwrap();
     compaction::commit(&fixture.context.db, prefix, "hello and its answer").unwrap();
     for (marker, question) in [
         ("INDEX_CHANGE_D", "first saffron question"),
         ("INDEX_CHANGE_E", "second saffron question"),
     ] {
-        fs::write(&index, marker).unwrap();
+        let mut previous = fs::read_to_string(&index).unwrap();
+        previous.push('\n');
+        previous.push_str(marker);
+        fs::write(&index, previous).unwrap();
         let output = fixture.turn(false, question).await;
         assert!(
             output.status.success(),
@@ -332,13 +352,21 @@ async fn post_boundary_changes_leave_the_frozen_index_intact() {
     server.abort();
     let _ = server.await;
     let calls = requests.lock().unwrap();
-    assert_eq!(calls.len(), 3);
-    let last = calls[2].to_string();
-    assert!(last.contains("FROZEN_INDEX_C") && last.contains("INDEX_CHANGE_D"));
+    assert_eq!(calls.len(), 4);
+    assert!(!calls[1].to_string().contains("SESSION_BOUNDARY_ROW"));
+    let last = calls[3].to_string();
+    assert_eq!(last.matches("SESSION_BOUNDARY_ROW").count(), 1);
+    assert!(
+        last.find("SESSION_BOUNDARY_ROW").unwrap() < last.find("hello and its answer").unwrap()
+    );
+    assert_eq!(last.matches("FROZEN_INDEX_C").count(), 1);
+    assert_eq!(last.matches("INDEX_CHANGE_D").count(), 1);
     assert_eq!(last.matches("INDEX_CHANGE_E").count(), 1);
     assert_eq!(last.matches(ORIGINAL).count(), 0);
-    let latest = calls[2].as_array().unwrap().last().unwrap()["content"]
+    let latest = calls[3].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
     assert!(latest.contains("second saffron question") && latest.contains("INDEX_CHANGE_E"));
+    assert!(!latest.contains("INDEX_CHANGE_D") && !latest.contains("FROZEN_INDEX_C"));
+    assert!(!latest.contains("SESSION_BOUNDARY_ROW"));
 }

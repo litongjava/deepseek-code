@@ -127,9 +127,8 @@ fn render(request: Option<deepseek_code_core::services::context_usage::LastReque
 fn estimate(session: &Session, window: Option<u64>) -> Result<deepseek_code_core::services::context_usage::LastRequest> {
     let memory = crate::services::context(&session.paths)
         .and_then(|context| deepseek_code_core::services::memory_files::config(&context))
-        .map(|config| config.enabled)
-        .unwrap_or(true);
-    let system = deepseek_code_core::prompt::compose_system_prompt_with_memory(None, deepseek_code_core::prompt::PromptProfile::Code, memory);
+        .unwrap_or_default();
+    let system = deepseek_code_core::prompt::compose_system_prompt_with_memory(None, deepseek_code_core::prompt::PromptProfile::Code, &memory);
     let mut history = session.store.model_history(&session.id, &deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
     // The engine puts instructions at the start of the first user message.
     let reminders = deepseek_code_core::project_instructions::load_all(

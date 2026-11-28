@@ -39,17 +39,25 @@ async fn run(path: &Path, args: &[&str]) -> Value {
 }
 
 #[tokio::test]
-async fn config_memory_switch_is_global_and_shared() {
+async fn config_memory_switches_persist_independently() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], true);
-    assert_eq!(run(dir.path(), &["config", "memory", "off"]).await["enabled"], false);
-    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], false);
-    assert_eq!(run(dir.path(), &["config", "show"]).await["memory"]["enabled"], false);
-    assert!(!output(dir.path(), &["config", "memory", "sideways"]).await.status.success());
-    assert_eq!(run(dir.path(), &["config", "memory", "on"]).await["enabled"], true);
-    // The generic setting reaches the same switch.
-    assert!(output(dir.path(), &["config", "set", "memory.enabled", "false"]).await.status.success());
-    assert_eq!(run(dir.path(), &["config", "memory"]).await["enabled"], false);
+    let mut expected = json!({"global_enabled":true,"project_enabled":true,"team_enabled":false,"session_enabled":true});
+    assert_eq!(run(dir.path(), &["config", "memory"]).await, expected);
+    for scope in ["global", "project", "team", "session"] {
+        let key = format!("{scope}_enabled");
+        let enabled = scope == "team";
+        let state = if enabled { "on" } else { "off" };
+        assert_eq!(run(dir.path(), &["config", "memory", scope, state]).await[&key], enabled);
+        expected[&key] = json!(enabled);
+        assert_eq!(run(dir.path(), &["config", "show"]).await["memory"], expected);
+        assert!(output(dir.path(), &["config", "set", &format!("memory.{key}"), &(!enabled).to_string()]).await.status.success());
+        expected[&key] = json!(!enabled);
+        assert_eq!(run(dir.path(), &["config", "memory", scope]).await[&key], !enabled);
+    }
+    for args in [vec!["config", "memory", "off"], vec!["config", "memory", "team", "bad"], vec!["config", "set", "memory.enabled", "false"]] {
+        assert!(!output(dir.path(), &args).await.status.success());
+    }
+    assert_eq!(run(dir.path(), &["config", "memory"]).await, expected);
     // Experience defaults on and uses the same generic setting path.
     assert_eq!(run(dir.path(), &["config", "show"]).await["experience"]["enabled"], true);
     assert!(output(dir.path(), &["config", "set", "experience.enabled", "false"]).await.status.success());

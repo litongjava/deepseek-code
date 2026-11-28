@@ -14,9 +14,146 @@ pub(crate) mod checkpoint;
 pub mod microcompact;
 pub(crate) mod native;
 
+/// Generation stopped before the boundary transaction. Hosts may continue
+/// an automatic turn if the existing request still fits.
+#[derive(Debug, thiserror::Error)]
+#[error("Compaction failed: {0:#}")]
+pub struct GenerationFailure(#[source] anyhow::Error);
+
+/// Per-turn failure cooldown shared by CLI admission and both provider loops.
+#[derive(Clone, Default)]
+pub struct AutoCompactionGate(std::sync::Arc<std::sync::Mutex<GateState>>);
+
+#[derive(Default)]
+struct GateState {
+    iteration: usize,
+    threshold_retry_at: usize,
+    completed_mid_turn: usize,
+    failure: Option<FailedGeneration>,
+}
+
+struct FailedGeneration {
+    cause: String,
+    retry_at: usize,
+}
+
+impl GateState {
+    fn blocking_failure(&self) -> Option<&FailedGeneration> {
+        self.failure
+            .as_ref()
+            .filter(|failure| self.iteration < failure.retry_at)
+    }
+
+    fn may_start(&self) -> bool {
+        const MAX_MID_TURN_COMPACTIONS: usize = 6;
+        self.iteration >= self.threshold_retry_at
+            && self.completed_mid_turn < MAX_MID_TURN_COMPACTIONS
+            && self.blocking_failure().is_none()
+    }
+}
+
+impl AutoCompactionGate {
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.0.lock().expect("compaction gate poisoned")
+    }
+
+    pub(crate) fn begin_iteration(&self, iteration: usize) {
+        self.state().iteration = iteration;
+    }
+
+    pub fn may_start(&self) -> bool {
+        self.state().may_start()
+    }
+
+    pub(crate) fn defer_threshold(&self) {
+        let mut state = self.state();
+        state.threshold_retry_at = state.iteration.saturating_add(3);
+    }
+
+    pub fn committed(&self) {
+        self.state().failure = None;
+    }
+
+    pub(crate) fn committed_mid_turn(&self) {
+        let mut state = self.state();
+        state.failure = None;
+        state.completed_mid_turn += 1;
+    }
+
+    pub fn blocking_failure(&self) -> Option<String> {
+        self.state()
+            .blocking_failure()
+            .map(|failure| failure.cause.clone())
+    }
+
+    pub fn record_failure(&self, cause: String) {
+        const SKIPPED_ITERATIONS: usize = 3;
+        let mut state = self.state();
+        state.failure = Some(FailedGeneration {
+            cause,
+            retry_at: state.iteration.saturating_add(SKIPPED_ITERATIONS + 1),
+        });
+    }
+
+    /// A provider rejection is a hard limit. Even after cooldown expires, use the
+    /// last exhausted budget until a successful compaction ends the failure streak.
+    pub fn provider_rejection(&self) -> Option<anyhow::Error> {
+        let state = self.state();
+        let cause = match &state.failure {
+            Some(failure) => &failure.cause,
+            None if !state.may_start() => "Further automatic compaction is deferred for this turn",
+            None => return None,
+        };
+        Some(anyhow::anyhow!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {cause}"))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_overflow_remembers_the_exhausted_budget_after_cooldown() {
+    let gate = AutoCompactionGate::default();
+    gate.record_failure("HTTP 429".into());
+    gate.begin_iteration(4);
+    assert!(gate.may_start());
+    assert!(gate
+        .provider_rejection()
+        .unwrap()
+        .to_string()
+        .contains("HTTP 429"));
+    gate.defer_threshold();
+    assert!(!gate.may_start());
+    assert!(gate.blocking_failure().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn committing_compaction_ends_the_previous_failure_streak() {
+    let gate = AutoCompactionGate::default();
+    for commit in [
+        AutoCompactionGate::committed,
+        AutoCompactionGate::committed_mid_turn,
+    ] {
+        gate.record_failure("HTTP 429 and HTTP 503".into());
+        assert!(gate.provider_rejection().is_some());
+        commit(&gate);
+        assert!(gate.blocking_failure().is_none());
+        assert!(gate.provider_rejection().is_none());
+    }
+}
+
 pub struct GeneratedSummary {
     pub text: String,
     pub native: Option<Value>,
+}
+impl GeneratedSummary {
+    pub(crate) fn log_boundary(&self, boundary: &str) {
+        let path = if self.native.is_some() {
+            "native"
+        } else {
+            "summary"
+        };
+        tracing::info!(boundary, path, "Committed compaction boundary");
+    }
 }
 impl From<String> for GeneratedSummary {
     fn from(text: String) -> Self {
@@ -393,7 +530,11 @@ fn commit_with_context(
         !summary.trim().is_empty() && summary.chars().count() <= 32_000,
         "Empty or oversized compaction summary"
     );
-    db.select_session(&prepared.conversation_id)?.commit_compaction(&prepared, generated, session_context)
+    let result = db
+        .select_session(&prepared.conversation_id)?
+        .commit_compaction(&prepared, generated, session_context)?;
+    generated.log_boundary(&result.message_id);
+    Ok(result)
 }
 
 pub(crate) fn commit_locked(
@@ -625,7 +766,7 @@ pub async fn summarize_part(
         &prepared.transcript,
     );
     let summary = engine
-        .generate_replay_summary(
+        .generate_replay_compaction(
             db.open_session(id)?,
             provider,
             model,
@@ -634,8 +775,10 @@ pub async fn summarize_part(
             prepared.messages.clone(),
             prepared.boundary.clone(),
             options,
+            false,
         )
-        .await?;
+        .await?
+        .text;
     let result = commit_part(db, id, message_id, part, prepared, &summary)?;
     if let Some(record) = &mut record {
         record.finish_partial(
@@ -782,7 +925,9 @@ where
         trigger,
         &prepared.transcript,
     );
-    let summary = summarize(focus, prepared.before.clone(), options).await?;
+    let summary = summarize(focus, prepared.before.clone(), options)
+        .await
+        .map_err(GenerationFailure)?;
     let (fresh_context, start_warnings) =
         match super::session_hooks::collect(context, workspace, id, "compact", model).await {
             Ok(result) => result,
