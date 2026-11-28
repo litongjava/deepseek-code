@@ -1096,11 +1096,9 @@ pub(crate) fn apply_persisted_boundary(
     Ok(None)
 }
 
+pub(crate) use microcompact::clear_tool_results;
 #[cfg(test)]
-use microcompact::{
-    clear_tool_results, through as microcompact_through, CLEARED_TOOL_RESULT,
-    MICROCOMPACT_MIN_CHARS,
-};
+use microcompact::{through as microcompact_through, CLEARED_TOOL_RESULT, MICROCOMPACT_MIN_CHARS};
 
 /// As the reference CLI's microcompact: once the conversation passes half the
 /// context window, large tool results older than the last few messages are

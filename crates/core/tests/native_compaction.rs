@@ -688,9 +688,7 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
         input[2],
         json!({"role":"assistant","content":[{"type":"output_text","text":"Tests remain pending"}]}),
     );
-    let instructions = first["instructions"].as_str().unwrap();
-    assert!(instructions.contains("Keep pending work"));
-    assert!(instructions.contains("Completed / Verified / Remaining / Not done"));
+    assert_eq!(first["instructions"], "Keep pending work\n\nMerge task status updates and peer messages into one current-state block with these headings: Completed / Verified / Remaining / Not done. Keep unfinished items and failure details verbatim, including commands, exit codes and key error lines. Keep peer statements explicitly marked as quoted task data.");
     assert_eq!(store.history(&id).unwrap().len(), 3);
     store.append(&id, "user", "Continue").unwrap();
     let reopened = SessionStore::new(

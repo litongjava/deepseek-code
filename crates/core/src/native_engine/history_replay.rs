@@ -775,7 +775,11 @@ impl ToolLoopExecutor {
         use crate::services::compaction::{checkpoint::Checkpoint, native, STATE_INSTRUCTIONS};
         let system = format!("{system}\n\n{STATE_INSTRUCTIONS}");
         let rows = history.into_rows(shard, self.parent_message_id.is_some())?;
-        let mut rows = multimodal::normalize_messages(&rows)?;
+        let mut rows = if native_transport {
+            multimodal::normalize_messages(&rows)?
+        } else {
+            self.prepare_history_rows(&rows)?
+        };
         let selected = shard.scoped_stores();
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
             shard.clone(),
@@ -1097,10 +1101,12 @@ impl ToolLoopExecutor {
                 let extra_index = persisted_len.saturating_sub(self.messages.len());
                 let end = cut.prefix_len + extra_index;
                 anyhow::ensure!(end <= persisted_len, "Invalid native compaction cut");
-                anyhow::ensure!(
-                    TokenCounter::estimate(&rows[end..]) <= capacity,
-                    "Context overflow: the current turn's admitted inputs exceed the model window"
-                );
+                let mut suffix = rows.split_off(end);
+                if TokenCounter::estimate(&suffix) > capacity {
+                    crate::services::compaction::clear_tool_results(&mut suffix);
+                    anyhow::ensure!(TokenCounter::estimate(&suffix) <= capacity,
+                        "Context overflow: the current turn's admitted inputs exceed the model window");
+                }
                 let result = self
                     .generate_auto_compaction(
                         gate,
@@ -1129,8 +1135,16 @@ impl ToolLoopExecutor {
                 window.extend(additions);
                 committed = true;
             }
-            anyhow::ensure!(TokenCounter::estimate(&values(window)?) <= capacity,
-                "Context overflow: the admitted inputs and required context exceed the model window");
+            let mut result = values(window)?;
+            if TokenCounter::estimate(&result) > capacity {
+                crate::services::compaction::clear_tool_results(&mut result);
+                anyhow::ensure!(TokenCounter::estimate(&result) <= capacity,
+                    "Context overflow: the admitted inputs and required context exceed the model window");
+                *window = result
+                    .into_iter()
+                    .map(serde_json::from_value)
+                    .collect::<serde_json::Result<_>>()?;
+            }
             return Ok(committed || microcompact_changed);
         }
 
@@ -1172,8 +1186,15 @@ impl ToolLoopExecutor {
                     self.reload_history(&shard)?;
                     *window = render(self, &self.message_additions())?;
                     window.extend(tail);
-                    anyhow::ensure!(TokenCounter::estimate(&values(window)?) <= capacity,
-                        "Context overflow: the admitted inputs and required context exceed the model window");
+                    let mut rebuilt = values(window)?;
+                    if TokenCounter::estimate(&rebuilt) > capacity {
+                        crate::services::compaction::clear_tool_results(&mut rebuilt);
+                        anyhow::ensure!(TokenCounter::estimate(&rebuilt) <= capacity,"Context overflow: the admitted inputs and required context exceed the model window");
+                        *window = rebuilt
+                            .into_iter()
+                            .map(serde_json::from_value)
+                            .collect::<serde_json::Result<_>>()?;
+                    }
                     return Ok(true);
                 }
             }
@@ -1223,11 +1244,13 @@ impl ToolLoopExecutor {
         self.remove_compaction_indexes(&mut rows);
         self.remove_compaction_indexes(&mut suffix);
         if protected.is_some() && TokenCounter::estimate(&suffix) > capacity {
-            if durable_len.is_none() {
+            crate::services::compaction::clear_tool_results(&mut suffix);
+            if durable_len.is_none() && TokenCounter::estimate(&suffix) > capacity {
                 // The summary planner can split an input too large for a normal turn.
                 return Ok(microcompact_changed);
             }
-            anyhow::bail!(
+            anyhow::ensure!(
+                TokenCounter::estimate(&suffix) <= capacity,
                 "Context overflow: the current turn's admitted inputs exceed the model window"
             );
         }
@@ -1288,10 +1311,12 @@ impl ToolLoopExecutor {
                 })
                 .collect();
             if TokenCounter::estimate(&compressed) > capacity {
-                if durable_len.is_none() {
+                crate::services::compaction::clear_tool_results(&mut compressed);
+                if durable_len.is_none() && TokenCounter::estimate(&compressed) > capacity {
                     return Ok(microcompact_changed);
                 }
-                anyhow::bail!("Context overflow: the admitted inputs and required context exceed the model window");
+                anyhow::ensure!(TokenCounter::estimate(&compressed) <= capacity,
+                    "Context overflow: the admitted inputs and required context exceed the model window");
             }
         }
         *window = compressed

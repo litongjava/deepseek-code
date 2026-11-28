@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 #[path = "../src/native_engine/provider_runtime/bedrock.rs"]
 mod bedrock;
 
+#[path = "compaction_history/notices.rs"]
+mod notices;
+
 struct Fixture {
     root: tempfile::TempDir,
     paths: RuntimePaths,

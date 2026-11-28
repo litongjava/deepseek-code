@@ -7950,8 +7950,8 @@ impl ToolLoopExecutor {
         Ok((full_text, stop_reason))
     }
 
-    pub(super) fn prepare_main_history(&self) -> Result<Vec<Value>> {
-        let mut messages = multimodal::normalize_messages(&self.messages)?;
+    fn prepare_history_rows(&self, rows: &[Value]) -> Result<Vec<Value>> {
+        let mut messages = multimodal::normalize_messages(rows)?;
         self.render_history(&mut messages)?;
         Ok(messages)
     }
@@ -7972,7 +7972,7 @@ impl ToolLoopExecutor {
         &self,
         additions: &[(Vec<String>, Vec<String>)],
     ) -> Result<Vec<AnthropicMessage>> {
-        self.render_anthropic_rows(&self.prepare_main_history()?, additions)
+        self.render_anthropic_rows(&self.prepare_history_rows(&self.messages)?, additions)
     }
 
     fn render_anthropic_rows(
@@ -8093,7 +8093,7 @@ impl ToolLoopExecutor {
         &self,
         additions: &[(Vec<String>, Vec<String>)],
     ) -> Result<Vec<OpenAIMessage>> {
-        self.render_openai_rows(&self.prepare_main_history()?, additions)
+        self.render_openai_rows(&self.prepare_history_rows(&self.messages)?, additions)
     }
 
     fn render_openai_rows(
