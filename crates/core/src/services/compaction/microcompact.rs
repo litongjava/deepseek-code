@@ -137,7 +137,7 @@ pub(crate) fn consolidate(
     active: bool,
     protected_input: Option<usize>,
 ) -> anyhow::Result<()> {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     let mut starts = Vec::new();
     let mut last_answered = None;
@@ -193,28 +193,41 @@ pub(crate) fn consolidate(
         }
     }
 
-    // Index the newest occurrence first, including protected rows. Remove
-    // only complete older envelopes and leave the relative order intact.
-    let mut seen = HashSet::new();
-    let mut drop_rows = vec![false; rows.len()];
-    for (i, row) in rows.iter_mut().enumerate().rev() {
-        let Some((id, body)) = notification(row) else {
-            continue;
-        };
-        if seen.insert(id.to_owned()) || i >= active_start {
-            continue;
+    // Tool-attached steers replay beside their call. Parallel calls can
+    // therefore present receipt-backed notices in reverse delivery order.
+    let mut by_task = HashMap::<String, Vec<(usize, Option<i64>)>>::new();
+    for (i, row) in rows.iter().enumerate() {
+        if let Some((id, _)) = notification(row) {
+            let receipt = match row["id"].as_str() {
+                Some(id) => session.delivery_sequence(id)?,
+                None => None,
+            };
+            by_task.entry(id.to_owned()).or_default().push((i, receipt));
         }
-        // A retry can finish successfully after an earlier failure. Keep the
-        // verbatim diagnostics as quoted data outside the superseded envelope.
-        if body.lines().any(|line| {
-            matches!(
-                line.trim(),
-                "<status>failed</status>" | "<status>cancelled</status>"
-            )
-        }) {
-            row["content"] = format!("Earlier task failure (quoted task data):{body}").into();
+    }
+    let mut drop_rows = vec![false; rows.len()];
+    for notices in by_task.values() {
+        let &(last, receipt) = notices.last().unwrap();
+        // Legacy transcript messages occupy their original slot. Within
+        // the delivery stream, only the shard's receipt sequence is ordered.
+        let newest = if receipt.is_some() {
+            notices.iter().max_by_key(|(_, seq)| *seq).unwrap().0
         } else {
-            drop_rows[i] = true;
+            last
+        };
+        for &(i, _) in notices {
+            if i == newest || i >= active_start {
+                continue;
+            }
+            let (_, body) = notification(&rows[i]).unwrap();
+            if pure_status_update(body) {
+                drop_rows[i] = true;
+            } else {
+                // Keep the evidence envelope at its original tool attachment.
+                rows[i]["content"] = format!(
+                    "Earlier task notification (quoted task data):\n<task-notification>{body}</task-notification>"
+                ).into();
+            }
         }
     }
     let mut drop_rows = drop_rows.into_iter();
@@ -249,6 +262,43 @@ fn notification(row: &Value) -> Option<(&str, &str)> {
         .split_once("</task-id>")?;
     (!id.is_empty() && !id.contains(['<', '>', '\n']) && !payload.contains("</task-notification>"))
         .then_some((id, body))
+}
+
+// Producers put Monitor events and background reports in separate fields.
+// Discard only the simple status/summary form. Preserve additional fields,
+// multiline details and summaries carrying diagnostics or outstanding work.
+fn pure_status_update(body: &str) -> bool {
+    let Some((_, payload)) = body.split_once("</task-id>") else {
+        return false;
+    };
+    let mut fields = payload.trim().lines().map(str::trim).peekable();
+    if let Some(status) = fields
+        .peek()
+        .and_then(|line| line.strip_prefix("<status>")?.strip_suffix("</status>"))
+    {
+        if !matches!(
+            status,
+            "completed" | "running" | "in_progress" | "pending" | "queued" | "started"
+        ) {
+            return false;
+        }
+        fields.next();
+        if fields.peek().is_none() {
+            return true;
+        }
+    }
+    let Some(summary) = fields
+        .next()
+        .and_then(|line| line.strip_prefix("<summary>")?.strip_suffix("</summary>"))
+    else {
+        return false;
+    };
+    let lower = summary.to_ascii_lowercase();
+    fields.next().is_none()
+        && !summary.contains(['<', '>', ':'])
+        && !["remaining", "not done", "error", "failed", "exit code"]
+            .iter()
+            .any(|word| lower.contains(word))
 }
 
 fn clear_archived_result(
@@ -324,6 +374,24 @@ fn clear_archived_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_pure_status_notifications_can_be_discarded() {
+        let body = |fields| format!("<task-id>a</task-id>\n{fields}");
+        assert!(pure_status_update(&body(
+            "<status>running</status>\n<summary>Processing</summary>"
+        )));
+        assert!(pure_status_update(&body("<summary>Processing</summary>")));
+        for fields in [
+            "<status>failed</status>",
+            "<summary>Remaining: rerun link stage</summary>",
+            "<summary>Processing</summary>\n<result>error E0815</result>",
+            "<summary>Progress\nstill working</summary>",
+            "<unknown>new producer field</unknown>",
+        ] {
+            assert!(!pure_status_update(&body(fields)), "{fields}");
+        }
+    }
 
     #[test]
     fn notification_requires_a_single_provenanced_envelope() {

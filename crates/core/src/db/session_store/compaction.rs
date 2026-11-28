@@ -47,6 +47,14 @@ impl SessionRead<'_> {
             .exists([])?)
     }
 
+    pub(crate) fn delivery_sequence(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .0
+            .prepare_cached("SELECT rowid FROM delivery_receipts WHERE delivery_id=?1")?
+            .query_row([id], |row| row.get(0))
+            .optional()?)
+    }
+
     pub(crate) fn compaction_turn_start(&self, id: &str, origin: Option<&str>) -> Result<bool> {
         // A next-turn delivery starts its own exchange even for a notification.
         if self

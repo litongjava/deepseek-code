@@ -106,3 +106,81 @@ async fn peer_before_dispatch_recovers_the_live_window() -> anyhow::Result<()> {
     f.finish().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn monitor_output_and_exit_both_reach_compaction() -> anyhow::Result<()> {
+    use deepseek_code_core::tools::monitor::Event;
+    let f = Fixture::new(128_000).await;
+    f.append("user", "Watch build");
+    let output = "error E0815: missing crate\nRemaining: rerun link stage";
+    let exit = "Monitor exited with code 7 after 0m 1s (1 events)";
+    for (kind, text) in [("output", output), ("exited", exit)] {
+        let event = Event {
+            task_id: "build".into(),
+            description: "build --release".into(),
+            kind: kind.into(),
+            text: text.into(),
+        };
+        f.store
+            .append_prompt(&f.id, &event.notification(), "task_notification")?;
+    }
+    f.append("assistant", "Received.");
+    f.append("user", "Next topic");
+    f.append("assistant", "Acknowledged.");
+    f.compact().await?;
+    {
+        let requests = f.requests.lock().unwrap();
+        let messages = requests[0]["messages"].as_array().unwrap();
+        assert!(messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .any(|s| s.contains("quoted task data") && s.contains(output)));
+        assert!(messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .any(|s| s.contains(exit)));
+    }
+    f.finish().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn parallel_tool_receipts_choose_the_latest_delivery() -> anyhow::Result<()> {
+    use deepseek_code_core::services::input_queue::{QueueMode, QueueOrigin};
+    let f = Fixture::new(128_000).await;
+    f.append("user", "Run parallel reads");
+    let message = f.store.append(&f.id, "assistant", "")?;
+    for (i, id) in ["read-a", "read-b"].into_iter().enumerate() {
+        store_result(
+            &f,
+            &message,
+            id,
+            "Read",
+            json!({"file_path":"log"}),
+            "valid",
+            i as i64,
+        )?;
+    }
+    let shard = f.store.db.open_session(&f.id)?;
+    for state in ["OBSOLETE_STATE", "LATEST_STATE"] {
+        shard.enqueue_cli_input(QueueOrigin::TaskNotification, &format!(
+            "<task-notification>\n<task-id>one</task-id>\n<summary>{state}</summary>\n</task-notification>"
+        ))?;
+    }
+    {
+        let mut owner = shard.delivery_owner()?;
+        for target in ["read-b", "read-a"] {
+            assert!(owner.next_queue(QueueMode::Steer, Some(target))?.is_some());
+        }
+    }
+    f.append("user", "Continue");
+    f.append("assistant", "Reviewed.");
+    let history = serde_json::to_string(&f.store.model_history(&f.id, &f.provider.api_format)?)?;
+    assert!(history.find("LATEST_STATE").unwrap() < history.find("OBSOLETE_STATE").unwrap());
+    f.compact().await?;
+    let wire = f.requests.lock().unwrap()[0]["messages"].to_string();
+    assert_eq!(wire.matches("LATEST_STATE").count(), 1);
+    assert!(!wire.contains("OBSOLETE_STATE"));
+    f.finish().await;
+    Ok(())
+}
