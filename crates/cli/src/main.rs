@@ -42,6 +42,7 @@ mod env_init;
 mod extended_commands;
 mod feedback_commands;
 mod help;
+mod headless_commands;
 mod hook_progress;
 mod hooks_menu;
 mod ide_commands;
@@ -1322,19 +1323,10 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 )?;
                 }
             }
-            // As in the reference CLI, /compact also works without a terminal.
-            let compact = prompt.trim().strip_prefix("/compact").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
-            match compact {
-                Some(instructions) if single => {
-                    let compacted = repl::compact(&paths, &mut session, instructions, None).await?;
-                    let message = crate::compaction::completion_report(&compacted.report);
-                    if cli.output_format == OutputFormat::Text {
-                        println!("{message}");
-                    } else {
-                        session::emit_json(&serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session.id,"result":message,"num_turns":0,"permission_denials":[],"uuid":uuid::Uuid::new_v4().to_string()}))?;
-                    }
-                }
-                _ => prompt_turn(cli, &mut session, &prompt, &mut input, TurnOrigin::command_line(cli, &prompt)).await?,
+            if let Some(command) = headless_commands::parse(&prompt).filter(|_| single) {
+                headless_commands::run(cli, &mut session, command).await?;
+            } else {
+                prompt_turn(cli, &mut session, &prompt, &mut input, TurnOrigin::command_line(cli, &prompt)).await?;
             }
         }
         if sdk_stream {

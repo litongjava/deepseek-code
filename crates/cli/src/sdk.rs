@@ -736,6 +736,7 @@ async fn run_inner(
                 &mut queue,
                 &mut eof,
                 requires_host,
+                None,
             )
             .await?;
             if let Some(text) = session.initial_hook_message.take() {
@@ -776,6 +777,43 @@ async fn run_inner(
                 envelope["session_id"] = json!(session.id);
                 envelope["uuid"] = json!(message_uuid);
                 crate::session::emit_json(&envelope)?;
+            }
+            if let Some(command) = crate::headless_commands::parse(&message.text)
+                .filter(|_| message.source != UserSource::SessionStartHook)
+            {
+                let requires_host = session.sdk_hooks.as_ref().is_some_and(|hooks| hooks.has_callbacks())
+                    || !session.sdk_mcp.names().is_empty();
+                let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+                session.sdk_interrupt = Some(cancelled.clone());
+                let run = async {
+                    let compact = command.is_compaction();
+                    let result = Box::pin(crate::headless_commands::run(cli, session, command));
+                    // Compaction handles cancellation itself, including the interval
+                    // between saving the boundary and finishing post-compact hooks.
+                    let result = if compact {
+                        result.await
+                    } else {
+                        tokio::select! {
+                            result = result => result,
+                            _ = cancelled.wait_for(|value| *value) => Err(anyhow::anyhow!("SDK command interrupted")),
+                        }
+                    };
+                    if let Err(error) = result {
+                        failed = true;
+                        crate::session::emit_json(&crate::sdk_messages::error_result(
+                            &session.id, &format!("{error:#}"),
+                        ))?;
+                    }
+                    Ok(())
+                };
+                let (result, observed) = crate::signals::capture_turn_interrupt(pump_lifecycle(
+                    Box::pin(run), &callbacks, &mcp, &permissions, &mut frames, &mut queue,
+                    &mut eof, requires_host, Some(&cancel),
+                )).await;
+                session.sdk_interrupt = None;
+                signal_scope.rearm_to(observed);
+                result?;
+                continue;
             }
             if message.source != UserSource::SessionStartHook
                 && session.sdk_overrides.prompt_suggestions
@@ -1009,8 +1047,8 @@ async fn route_response(
     }
 }
 
-// SessionStart may invoke the SDK host. Keep processing control replies while
-// its future borrows the session, and queue user turns until startup is complete.
+// SessionStart and local slash commands can invoke SDK callbacks. Keep reading
+// replies and queue later user frames while the operation borrows the session.
 async fn pump_lifecycle(
     future: impl std::future::Future<Output = Result<()>>,
     callbacks: &crate::sdk_hooks::Broker,
@@ -1020,6 +1058,7 @@ async fn pump_lifecycle(
     queue: &mut VecDeque<UserMessage>,
     eof: &mut bool,
     requires_host: bool,
+    command_cancel: Option<&tokio::sync::watch::Sender<bool>>,
 ) -> Result<()> {
     tokio::pin!(future);
     // One scope for the whole pump: control replies are handled between waits,
@@ -1028,13 +1067,22 @@ async fn pump_lifecycle(
     loop {
         tokio::select! {
             result = &mut future => return result,
-            _ = interrupt.interrupted() => bail!("SDK startup interrupted"),
+            _ = interrupt.interrupted(), if !command_cancel.is_some_and(|tx| *tx.borrow()) => {
+                let Some(cancel) = command_cancel else { bail!("SDK startup interrupted") };
+                cancel.send_replace(true);
+            },
             frame = frames.recv(), if !*eof => match frame {
                 None => {
                     *eof = true;
-                    let interrupted = requires_host && !queue.is_empty();
+                    let host_disconnected = callbacks.has_pending() || mcp.has_pending();
                     callbacks.close();mcp.close();permissions.closed.store(true,Ordering::SeqCst);permissions.cancel().await;
-                    ensure!(!interrupted,"SDK input closed during startup hook callback");
+                    if let Some(cancel) = command_cancel {
+                        if host_disconnected {
+                            cancel.send_replace(true);
+                        }
+                    } else {
+                        ensure!(!requires_host || queue.is_empty(), "SDK input closed during startup hook callback");
+                    }
                 },
                 Some(Err(error)) => return Err(error),
                 Some(Ok(Frame::Response(value))) => route_response(permissions,callbacks,mcp,&value).await?,
@@ -1044,7 +1092,9 @@ async fn pump_lifecycle(
                         callbacks.cancel_all();
                         mcp.cancel_all();
                         response(&value["request_id"],Ok(json!({})))?;
-                        bail!("SDK startup interrupted");
+                        let Some(cancel) = command_cancel else { bail!("SDK startup interrupted") };
+                        cancel.send_replace(true);
+                        continue;
                     }
                     // Startup only begins after initialization (or the first user
                     // turn), so a repeated initialize gets the same answer as mid-turn.
@@ -1052,7 +1102,11 @@ async fn pump_lifecycle(
                         response(&value["request_id"],Err(anyhow::anyhow!("Already initialized")))?;
                         continue;
                     }
-                    response(&value["request_id"],Err(anyhow::anyhow!("Control changes require completed session startup")))?;
+                    let reason = match command_cancel {
+                        None => "Control changes require completed session startup",
+                        Some(_) => "Control changes require an idle session",
+                    };
+                    response(&value["request_id"], Err(anyhow::anyhow!(reason)))?;
                 }
             }
         }

@@ -811,7 +811,7 @@ pub struct Compacted {
 /// result with its duration and summary file. Shared by the REPL and print mode.
 pub async fn compact(
     paths: &RuntimePaths,
-    session: &mut Session,
+    session: &Session,
     instructions: &str,
     mut cancel: Option<crate::terminal::input::CancelWatch>,
 ) -> Result<Compacted> {
@@ -822,7 +822,7 @@ pub async fn compact(
     let compacted = {
         let future = crate::hook_progress::during(
             &session.id,
-            true,
+            session.sdk_permissions.is_none(),
             deepseek_code_core::services::compaction::compact_with_hooks_tracked(
                 &session.engine,
                 &context,
@@ -838,6 +838,10 @@ pub async fn compact(
         tokio::pin!(future);
         loop {
             tokio::select! {
+                biased;
+                // Cancelling also releases pending SDK callbacks. Check the recorded
+                // boundary before those callbacks can resume the provider operation.
+                _ = session.sdk_cancelled() => break committed_after_cancel(&tracker, "Compaction interrupted before it was saved; original transcript retained")?,
                 report = &mut future => break Compacted { report: report?, cancelled_after_commit: false },
                 // The input owner forwards Esc/Ctrl+C here while the prompt loop
                 // is paused. The branch re-checks the recorded outcome instead

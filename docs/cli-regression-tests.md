@@ -639,6 +639,7 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 全部使用本地模拟接口和临时数据库，不发真实请求。
 
 - `cargo test --locked -p deepseek-code-core --test mid_turn_auto_compact --test native_compaction`：本地 Responses 网关模拟 429、503、400 和 401，逐次统计原生、文本摘要及主请求。核对 Retry-After 与退避时取消、单次边界提交、仍能装下时仅提示一次。连续 8 个工具迭代只在第 1、5 步用尽两条路径的预算，第 9 步恢复并提交一次。冷却中的每一步仍校验硬上限，超限立即报告状态码、/compact 恢复方法并保留工具结果。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream sdk_manual_compact`：续接已有会话，检查 stream-json 的 /compact focus 只发送压缩请求。直接成功、429 后成功和回退成功都只产生一个边界，持续失败保留全部历史。核对通知、边界 ID 和唯一终态。用 `cargo test --locked -p deepseek-code-cli --test sdk steering::` 验证未知命令仍进入模型，以及提交前后中断后的结果。
 - `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream manual_`：用临时会话实际执行 `/compact`。429 后成功只新增一个边界；两条路径持续 429 时命令返回错误，历史保持原样。12 条 Read 结果跨过微压缩阈值时，逐项对比原生请求与摘要请求追加指令前的全部输入。
 - `cargo test --locked -p deepseek-code-cli --bin dcl attached_worker_shows_compaction_notice_and_keeps_recovery_footer`：附着终端只显示一次软限制提示；最终错误保留原生和摘要的 HTTP 状态码及恢复操作，不输出原始响应正文。
 - `cargo test --locked -p deepseek-code-core --test compaction_cache_prefix`：主回合完成后重开引擎，通过本地 Chat、Anthropic Messages 和非 GPT Responses 接口比较完整请求体。摘要须保留主回合的系统指令、工具定义、首条消息的提醒和后续回答，末尾只追加一条含 keep 的用户指令。即使回复同时含正文与写文件调用，也只能提交正文；历史只增加摘要边界。按请求 ID 核对 SQLite 的输入和缓存读取 token 数，包括截断后的各次恢复请求。

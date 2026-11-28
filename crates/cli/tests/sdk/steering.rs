@@ -375,6 +375,24 @@ async fn slash_commands_keep_their_next_turn_behavior() {
 }
 
 #[tokio::test]
+async fn unknown_slash_text_reaches_the_model_and_known_commands_stay_local() {
+    let server = Server::start(false, Mode::Text).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = Client::start(root.path(), &server, &[]);
+    client.send(user("/help")).await;
+    let help = client.result().await;
+    assert_eq!(help["is_error"], false);
+    assert!(help["result"].as_str().unwrap().contains("/compact"));
+    assert!(streamed_requests(&server).is_empty());
+    client.send(user("/foo")).await;
+    assert_eq!(client.result().await["is_error"], false);
+    let requests = streamed_requests(&server);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(message_count(&requests[0], "/foo"), 1);
+    assert!(client.finish().await.0.success());
+}
+
+#[tokio::test]
 async fn interrupt_keeps_the_steered_frame_for_the_next_turn() {
     for anthropic in [false, true] {
         let server = Server::start(anthropic, Mode::SlowTool).await;
@@ -497,5 +515,53 @@ async fn replay_user_messages_emits_the_steered_envelope_on_delivery() {
             1,
             "a delivered steering frame appears once in the rebuilt history: {transcript}"
         );
+    }
+}
+
+#[tokio::test]
+async fn interrupt_manual_compact_reports_whether_the_boundary_was_saved() {
+    for (hook, committed) in [("PreCompact", false), ("PostCompact", true)] {
+        let root = tempfile::tempdir().unwrap();
+        let server = Server::start(false, Mode::Text).await;
+        let mut client = Client::start(root.path(), &server, &[]);
+        client
+            .send(initialize_request(
+                "init",
+                json!({
+                    "hooks": {hook: [{"hookCallbackIds": ["pause"]}]}
+                }),
+            ))
+            .await;
+        assert_eq!(
+            client.frame("control_response").await["response"]["subtype"],
+            "success"
+        );
+        client.send(user("Seed the transcript")).await;
+        let seed = client.result().await;
+        let id = seed["session_id"].as_str().unwrap();
+        let store = session_store(root.path());
+        let before = store.history(id).unwrap();
+        let requests = streamed_requests(&server).len();
+        client.send(user("/compact retain seed")).await;
+        let pending = client.frame("control_request").await;
+        assert_eq!(pending["request"]["callback_id"], "pause");
+        client.send(json!({"type":"control_request","request_id":"stop","request":{"subtype":"interrupt"}})).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], !committed, "{hook}: {result}");
+        assert_eq!(result["num_turns"], 0);
+        let count = deepseek_code_core::services::compaction::count(&store.db, id)
+            .unwrap()
+            .proven();
+        assert_eq!(count, u64::from(committed));
+        if !committed {
+            assert_eq!(store.history(id).unwrap(), before);
+        }
+        assert_eq!(
+            streamed_requests(&server).len(),
+            requests + usize::from(committed)
+        );
+        client.send(user("/help")).await;
+        assert_eq!(client.result().await["is_error"], false);
+        assert!(client.finish().await.1.is_empty());
     }
 }

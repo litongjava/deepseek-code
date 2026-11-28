@@ -347,39 +347,121 @@ async fn resumed_query(
     .unwrap()
 }
 
+fn sdk_process(
+    paths: &RuntimePaths,
+    workspace: &std::path::Path,
+    id: &str,
+) -> tokio::process::Child {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dcl"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("DEEPSEEK_CODE") {
+            cli.env_remove(key);
+        }
+    }
+    cli.env("DEEPSEEK_CODE_DATA_DIR", &paths.data_dir)
+        .arg("--path")
+        .arg(workspace)
+        .args([
+            "--resume",
+            id,
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+}
+
+async fn sdk_compact(
+    paths: &RuntimePaths,
+    workspace: &std::path::Path,
+    id: &str,
+) -> std::process::Output {
+    use tokio::io::AsyncWriteExt;
+    let mut child = sdk_process(paths, workspace, id);
+    let frame =
+        json!({"type":"user","message":{"role":"user","content":"/compact Keep the fixture"}});
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{frame}\n").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ProviderOutcome {
+    Success,
+    Retry,
+    Fallback,
+    Exhausted,
+}
+
 /// Drive the same slash command a user runs in a resumed CLI session.
-async fn manual_native_compaction(persistent: bool) {
+async fn manual_native_compaction(sdk: bool, outcome: ProviderOutcome) {
     use axum::{http::StatusCode, response::IntoResponse};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    let persistent = outcome == ProviderOutcome::Exhausted;
+    let retry = outcome == ProviderOutcome::Retry;
     let native = Arc::new(AtomicUsize::new(0));
     let summary = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let capture = received.clone();
     let requests = native.clone();
     let fallbacks = summary.clone();
-    let app = Router::new().fallback(post(move |uri: axum::http::Uri| {
-        let attempt = if uri.path().ends_with("/responses/compact") {
-            requests.fetch_add(1, Ordering::SeqCst)
-        } else {
-            assert!(uri.path().ends_with("/responses"));
-            fallbacks.fetch_add(1, Ordering::SeqCst);
-            0
-        };
-        async move {
-            if persistent || attempt == 0 {
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    [("retry-after", "0")],
-                    "busy",
-                )
-                    .into_response();
+    let app = Router::new().fallback(post(
+        move |uri: axum::http::Uri, headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+            let kind = headers
+                .get("x-dcl-request-kind")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or_default();
+            capture.lock().unwrap().push((
+                kind.to_owned(),
+                body.to_string().contains("Keep the fixture"),
+            ));
+            let is_native = uri.path().ends_with("/responses/compact");
+            let attempt = if is_native {
+                requests.fetch_add(1, Ordering::SeqCst)
+            } else {
+                assert!(uri.path().ends_with("/responses"));
+                fallbacks.fetch_add(1, Ordering::SeqCst);
+                0
+            };
+            async move {
+                if outcome == ProviderOutcome::Fallback {
+                    if is_native {
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                    return summary_response();
+                }
+                if persistent || (retry && attempt == 0) {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "0")],
+                        "busy",
+                    )
+                        .into_response();
+                }
+                Json(json!({"object":"response.compaction","output":[
+                    {"type":"compaction","id":"compact-test","encrypted_content":"fixture-context"}
+                ]}))
+                .into_response()
             }
-            Json(json!({"object":"response.compaction","output":[
-                {"type":"compaction","id":"compact-test","encrypted_content":"fixture-context"}
-            ]}))
-            .into_response()
-        }
-    }));
+        },
+    ));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
@@ -391,7 +473,11 @@ async fn manual_native_compaction(persistent: bool) {
         .unwrap();
     let before = store.history(&id).unwrap();
     write_responses_fixture(&paths, &base);
-    let output = resumed_query(&paths, temp.path(), &id, "/compact Keep the fixture").await;
+    let output = if sdk {
+        sdk_compact(&paths, temp.path(), &id).await
+    } else {
+        resumed_query(&paths, temp.path(), &id, "/compact Keep the fixture").await
+    };
     let diagnostic = format!(
         "{} {}",
         String::from_utf8_lossy(&output.stdout),
@@ -399,6 +485,48 @@ async fn manual_native_compaction(persistent: bool) {
     );
     let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
     assert_eq!(output.status.success(), !persistent, "{diagnostic}");
+    let observed = received.lock().unwrap();
+    assert!(!observed.is_empty(), "{diagnostic}");
+    assert_eq!(
+        observed.iter().filter(|(kind, _)| kind == "turn").count(),
+        0,
+        "{observed:?}"
+    );
+    assert!(
+        observed
+            .iter()
+            .all(|(kind, focus)| kind == "compaction" && *focus),
+        "{observed:?}"
+    );
+    if sdk {
+        let frames: Vec<Value> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let result = frames.last().unwrap();
+        assert_eq!(result["type"], "result", "{diagnostic}");
+        assert_eq!(result["is_error"], persistent, "{diagnostic}");
+        assert_eq!(result["num_turns"], 0);
+        assert_eq!(frames.iter().filter(|f| f["type"] == "result").count(), 1);
+        assert!(frames.iter().any(|f| f["type"] == "compaction_notice"));
+        let boundaries: Vec<_> = frames
+            .iter()
+            .filter(|f| f["type"] == "context_reset")
+            .collect();
+        if persistent {
+            assert!(boundaries.is_empty());
+            assert!(result["error"].as_str().unwrap().contains("429"));
+        } else {
+            let saved =
+                deepseek_code_core::services::context_usage::latest_boundary(&store.db, &id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(boundaries.len(), 1);
+            assert_eq!(boundaries[0]["boundary_id"], saved.id);
+            assert!(result["result"].as_str().unwrap().contains("Compacted in"));
+        }
+    }
     if persistent {
         assert!(
             diagnostic.contains("429") && diagnostic.contains("summary compaction failed"),
@@ -408,8 +536,15 @@ async fn manual_native_compaction(persistent: bool) {
         assert_eq!(summary.load(Ordering::SeqCst), attempts);
         assert_eq!(store.history(&id).unwrap(), before);
     } else {
-        assert_eq!(native.load(Ordering::SeqCst), 2, "{diagnostic}");
-        assert_eq!(summary.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            native.load(Ordering::SeqCst),
+            1 + usize::from(retry),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            summary.load(Ordering::SeqCst),
+            usize::from(outcome == ProviderOutcome::Fallback)
+        );
         assert_eq!(store.history(&id).unwrap().len(), before.len() + 1);
     }
     assert_eq!(
@@ -423,12 +558,41 @@ async fn manual_native_compaction(persistent: bool) {
 
 #[tokio::test]
 async fn manual_compact_retries_429_and_commits_once() {
-    manual_native_compaction(false).await;
+    manual_native_compaction(false, ProviderOutcome::Retry).await;
 }
 
 #[tokio::test]
 async fn manual_compact_persistent_429_reports_failure_and_preserves_history() {
-    manual_native_compaction(true).await;
+    manual_native_compaction(false, ProviderOutcome::Exhausted).await;
+}
+
+#[tokio::test]
+async fn sdk_manual_compact_commits_once_without_a_turn() {
+    manual_native_compaction(true, ProviderOutcome::Success).await;
+}
+
+#[tokio::test]
+async fn sdk_manual_compact_retries_429_without_a_turn() {
+    manual_native_compaction(true, ProviderOutcome::Retry).await;
+}
+
+#[tokio::test]
+async fn sdk_manual_compact_exhausts_both_paths_and_preserves_history() {
+    manual_native_compaction(true, ProviderOutcome::Exhausted).await;
+}
+
+#[tokio::test]
+async fn sdk_manual_compact_uses_one_summary_fallback() {
+    manual_native_compaction(true, ProviderOutcome::Fallback).await;
+}
+
+fn summary_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let event = json!({"type":"response.completed","response":{"id":"local-response","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture summary"}]}],
+                "usage":{"input_tokens":100,"output_tokens":5}}});
+    let delta = json!({"type":"response.output_text.delta","delta":"fixture summary"});
+    ([("content-type","text/event-stream")],format!("event: response.output_text.delta\ndata: {delta}\n\nevent: response.completed\ndata: {event}\n\n")).into_response()
 }
 
 #[tokio::test]
@@ -445,11 +609,7 @@ async fn manual_fallback_replays_the_same_twelve_read_results_as_native() {
             if native {
                 return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], "busy").into_response();
             }
-            let event = json!({"type":"response.completed","response":{"id":"local-response","status":"completed",
-                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture summary"}]}],
-                "usage":{"input_tokens":100,"output_tokens":5}}});
-            let delta = json!({"type":"response.output_text.delta","delta":"fixture summary"});
-            ([("content-type","text/event-stream")],format!("event: response.output_text.delta\ndata: {delta}\n\nevent: response.completed\ndata: {event}\n\n")).into_response()
+            summary_response()
         }
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
