@@ -88,17 +88,42 @@ impl SessionRead<'_> {
         &self,
         id: &str,
     ) -> Result<Option<(String, Option<String>, String)>> {
-        Ok(self
-            .0
-            .prepare_cached(
-                "SELECT t.name,t.input,t.output FROM tool_calls t
-            JOIN context_search_sources s ON s.kind='tool' AND s.id=t.id
-            WHERE t.id=?1 AND t.is_error=0 AND typeof(t.output)='text' AND s.size>=0
-            AND t.name!='ContextSearch' AND t.model_recovery IS NULL
-            AND NOT EXISTS (SELECT 1 FROM tool_call_origins WHERE tool_call_id=t.id)",
-            )?
-            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .optional()?)
+        let mut query = self.0.prepare_cached(
+            "SELECT t.name,t.input,t.output,s.materialized FROM tool_calls t
+             JOIN context_search_sources s ON s.kind='tool' AND s.id=t.id
+             WHERE t.id=?1 AND t.is_error=0 AND typeof(t.output)='text' AND s.size>=0
+             AND t.name!='ContextSearch' AND t.model_recovery IS NULL AND s.materialized!=1
+             AND NOT EXISTS (SELECT 1 FROM tool_call_origins WHERE tool_call_id=t.id)",
+        )?;
+        let Some((name, input, output, materialized)) = query
+            .query_row([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if crate::tools::tasks::is_task(crate::permissions::patterns::canonical_tool_name(&name)) {
+            return Ok(None);
+        }
+        // Unclassified older sessions can have a recovery projection computed
+        // by ContextSearch on read. Keep its references in the snapshot.
+        if materialized == 0 && crate::native_engine::tool_loop::eligible(&name) {
+            let session: String = self
+                .0
+                .query_row("SELECT id FROM manifest", [], |row| row.get(0))?;
+            if crate::db::model_results::legacy_search(self.0, &session, &name, id, false)?
+                .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some((name, input, output)))
     }
 
     pub fn queued_turn_input(&self) -> Result<Option<String>> {

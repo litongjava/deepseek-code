@@ -330,7 +330,7 @@ fn clear_archived_result(
         return Ok(());
     };
     let retrievable = match &result["content"] {
-        Value::String(text) => text == &output || searchable.contains(text),
+        Value::String(text) => searchable.contains(text),
         Value::Array(parts) => parts.iter().all(|part| {
             part["type"] == "text"
                 && part["text"]

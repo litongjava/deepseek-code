@@ -184,3 +184,66 @@ async fn parallel_tool_receipts_choose_the_latest_delivery() -> anyhow::Result<(
     f.finish().await;
     Ok(())
 }
+
+fn later_turns(f: &Fixture) {
+    for i in 0..10 {
+        f.append("user", &format!("Continue {i}"));
+        f.append("assistant", "Reviewed.");
+    }
+}
+
+#[tokio::test]
+async fn an_old_todo_read_keeps_the_full_in_progress_item() -> anyhow::Result<()> {
+    let f = Fixture::new(128_000).await;
+    f.append("user", "Review existing tasks");
+    let message = f.store.append(&f.id, "assistant", "")?;
+    let content = format!("Reconcile open invoices {}", " detail".repeat(160));
+    let todos = json!({"todos":[{"content":content, "status":"in_progress"}]}).to_string();
+    assert_eq!(todos.len(), 1193);
+    store_result(&f, &message, "todos", "TodoRead", json!({}), &todos, 0)?;
+    later_turns(&f);
+    f.compact().await?;
+    assert_eq!(tool_output(&f.requests.lock().unwrap()[0]), todos);
+    f.finish().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unsearchable_write_diff_keeps_the_normal_write_result() -> anyhow::Result<()> {
+    let f = Fixture::new(128_000).await;
+    f.append("user", "Write replacement");
+    let message = f.store.append(&f.id, "assistant", "")?;
+    let raw = json!({"result":"written","file_change":{"verified":true,"rows":[
+        {"kind":"delete","text":format!("ORIGINAL_REMOVED_LINE {}", "before ".repeat(180))}
+    ]}})
+    .to_string();
+    store_result(
+        &f,
+        &message,
+        "old-write",
+        "Write",
+        json!({"file_path":"config.txt","content":"replacement"}),
+        &raw,
+        0,
+    )?;
+    later_turns(&f);
+    let boundary = f.compact().await?;
+    assert_eq!(
+        tool_output(&f.requests.lock().unwrap()[0]),
+        r#"{"result":"written"}"#
+    );
+    let found: Value = serde_json::from_str(&f.store.db.open_session(&f.id)?.context_search(json!({
+        "query":"ORIGINAL_REMOVED_LINE","role":"tool","range":"before","boundary_id":boundary.message_id
+    }))?)?;
+    assert_eq!(found["matches"], json!([]));
+    let original: String = f.store.db.shard_sql(&f.id, |c| {
+        c.query_row(
+            "SELECT output FROM tool_calls WHERE id='old-write'",
+            [],
+            |row| row.get(0),
+        )
+    })??;
+    assert_eq!(original, raw);
+    f.finish().await;
+    Ok(())
+}
