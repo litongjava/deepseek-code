@@ -9,6 +9,7 @@ import { getErrorMessage } from './utils/errorHelpers';
 import { getSecure, setSecure, removeSecure } from './services/secureStorage';
 import {
   getLocalConversations,
+  localConversationModelKey,
   createLocalConversation,
   getLocalConversation,
   updateLocalConversation,
@@ -655,7 +656,7 @@ export async function getConversations() {
       return localConvs.map(c => ({
         id: c.id,
         title: c.title,
-        model: c.model,
+        model: localConversationModelKey(c),
         provider: c.provider,
         workspace_path: c.workspace_path,
         project_id: c.project_id,
@@ -675,7 +676,7 @@ export async function getConversations() {
   return localConvs.map(c => ({
     id: c.id,
     title: c.title,
-    model: c.model,
+    model: localConversationModelKey(c),
     provider: c.provider,
     workspace_path: c.workspace_path,
     project_id: c.project_id,
@@ -739,7 +740,7 @@ export async function createConversation(title?: string, model?: string, extras?
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('conversationCreated', { detail: { id: conv.id } }));
     }
-    return conv;
+    return { ...conv, model: localConversationModelKey(conv) };
   }
 
   const fallbackId = 'local-' + crypto.randomUUID();
@@ -806,7 +807,7 @@ async function fetchConversation(id: string) {
   return {
     id: conv.id,
     title: conv.title,
-    model: conv.model,
+    model: localConversationModelKey(conv),
     provider: conv.provider,
     workspace_path: conv.workspace_path,
     project_id: conv.project_id,

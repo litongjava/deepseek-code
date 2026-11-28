@@ -253,8 +253,7 @@ pub async fn handle(
         // /cost is the reference CLI's name for the same session cost view.
         "/usage" | "/cost" => {
             ensure!(matches!(argument,""|"local"|"refresh"), "Usage: /usage [local|refresh]");
-            let mut value=usage(session)?;
-            value["billing"]=deepseek_code_core::services::usage::session_cost(&session.store.db,&session.id,&paths.read_config()?)?;
+            let mut value = local_cost(session)?;
             if argument!="local" {
                 match deepseek_code_core::services::usage::plan(&paths.data_dir).await {
                     Ok(Some(plan))=>value["account_plan"]=serde_json::to_value(plan)?,
@@ -367,6 +366,16 @@ pub async fn handle(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+pub(crate) fn local_cost(session: &Session) -> Result<Value> {
+    let mut value = usage(session)?;
+    value["billing"] = deepseek_code_core::services::usage::session_cost(
+        &session.store.db,
+        &session.id,
+        &session.paths.read_config()?,
+    )?;
+    Ok(value)
 }
 
 pub fn usage(session: &Session) -> Result<Value> {

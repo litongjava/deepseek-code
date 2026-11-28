@@ -1,3 +1,4 @@
+import { modelKey, splitModelKey } from '../utils/modelConfig';
 import type { Provider, ProviderModel } from '../api/providers';
 import { conversationWorkspaceMode, type WorkspaceMode } from '../stores/useWorkspaceModeStore';
 
@@ -124,20 +125,28 @@ export function getLocalConversation(id: string): LocalConversation | undefined 
   return getLocalConversations().find(c => c.id === id);
 }
 
+export function localConversationModelKey({ provider, model }: LocalConversation) {
+  return provider && model != null ? modelKey(provider, model) : model;
+}
+
 export function createLocalConversation(
   title?: string | null,
   model?: string | null,
-  extras?: { research_mode?: boolean; workspace_mode?: WorkspaceMode }
+  extras?: Pick<LocalConversation, 'research_mode' | 'workspace_mode' | 'provider' | 'workspace_path' | 'project_id'>
 ): LocalConversation {
   const convs = getLocalConversations();
   const now = new Date().toISOString();
+  // Branches copy a stored column pair, including an explicitly unbound row.
+  const selection = extras?.provider !== undefined
+    ? { providerId: extras.provider, modelId: model }
+    : model ? splitModelKey(model) : undefined;
   const newConv: LocalConversation = {
     id: crypto.randomUUID(),
     title: title || null,
-    model: model || null,
-    provider: null,
-    workspace_path: null,
-    project_id: null,
+    model: selection?.modelId ?? null,
+    provider: selection?.providerId ?? null,
+    workspace_path: extras?.workspace_path ?? null,
+    project_id: extras?.project_id ?? null,
     research_mode: extras?.research_mode || false,
     workspace_mode: extras?.workspace_mode || 'chat',
     pinned: false,
@@ -155,6 +164,10 @@ export function updateLocalConversation(id: string, updates: Partial<LocalConver
   const convs = getLocalConversations();
   const idx = convs.findIndex(c => c.id === id);
   if (idx === -1) return null;
+  if (typeof updates.model === 'string' && updates.provider === undefined) {
+    const { providerId, modelId } = splitModelKey(updates.model);
+    updates = { ...updates, model: modelId, provider: providerId ?? convs[idx].provider };
+  }
   convs[idx] = { ...convs[idx], ...updates, updated_at: new Date().toISOString() };
   saveLocalConversations(convs);
   return convs[idx];

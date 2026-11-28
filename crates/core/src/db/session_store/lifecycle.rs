@@ -370,15 +370,15 @@ impl Stores {
         else {
             bail!("Project has no folder");
         };
+        let binding = CreateOptions::from_desktop_model(model)?;
         let prepared = crate::worktree::session::prepare(Path::new(source), branch, use_worktree)?;
         let result = self.create_locked(
             &id,
             CreateOptions {
                 title: title.map(str::to_owned),
-                model: model.map(str::to_owned),
                 workspace_mode: Some(mode.as_str().into()),
                 project: Some(selection),
-                ..Default::default()
+                ..binding
             },
             Seed::Project(&plan, &prepared),
             None,

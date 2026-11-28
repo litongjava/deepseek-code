@@ -1,3 +1,4 @@
+mod compact;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -27,7 +28,9 @@ async fn conversations_list(State(state): State<AppState>) -> Json<serde_json::V
         db.conversations()
     }).await;
     match result {
-        Ok(Ok(convs)) => Json(serde_json::json!({ "conversations": convs })),
+        Ok(Ok(convs)) => Json(
+            serde_json::json!({ "conversations": convs.into_iter().map(|row| row.with_desktop_model_key()).collect::<Vec<_>>() }),
+        ),
         _ => Json(serde_json::json!({ "conversations": [] })),
     }
 }
@@ -101,7 +104,7 @@ async fn conversation_get(Path(id): Path<String>, Query(query): Query<Conversati
     let result = tokio::task::spawn_blocking(move || db.conversation_detail(&id_clone)).await;
     let result = result.map(|r| r.map(|(conv,mut messages)| {
         let parts=share_parts.then(||share_snapshot_parts(&mut messages));
-        (conv,messages,parts)
+        (conv.map(|row| row.with_desktop_model_key()),messages,parts)
     }));
     let with_parts = |mut value: serde_json::Value, parts: Option<serde_json::Map<String, serde_json::Value>>| {
         if let Some(parts) = parts {
@@ -434,6 +437,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/conversations/{id}/permission", post(conversation_permission_handler))
         .route("/api/conversations/{id}/bash-session", get(conversation_bash_session).delete(conversation_bash_session_revoke))
         .route("/api/conversations/{id}/warm", post(conversation_warm_handler))
+        .route("/api/conversations/{id}/compact", post(compact::handler))
         .route("/api/conversations/{id}/context-size", get(conversation_context_size))
         .route("/api/conversations/{id}/generation-status", get(conversation_generation_status))
         .route("/api/conversations/{id}/stream-status", get(conversation_stream_status))

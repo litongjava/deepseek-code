@@ -7,6 +7,7 @@ import { useWorkspaceModeStore, conversationWorkspaceMode } from '../stores/useW
 import { request, API_BASE, getToken, waitForApiReady, isTauriApp, getUserModeForConversation, resolveEnvCreds } from './client';
 import {
   getLocalConversations,
+  localConversationModelKey,
   createLocalConversation,
   getLocalConversation,
   updateLocalConversation,
@@ -40,7 +41,7 @@ export async function getConversations() {
         if (localConvs.length > 0) {
           console.log('[API] getConversations fallback to localStorage:', localConvs.length, 'conversations');
           return localConvs.map(c => ({
-            id: c.id, title: c.title, model: c.model, provider: c.provider,
+            id: c.id, title: c.title, model: localConversationModelKey(c), provider: c.provider,
             workspace_path: c.workspace_path, project_id: c.project_id,
             workspace_mode: conversationWorkspaceMode(c), research_mode: c.research_mode, pinned: c.pinned, archived: c.archived,
             created_at: c.created_at, updated_at: c.updated_at,
@@ -68,7 +69,7 @@ export async function getConversations() {
     if (localConvs.length > 0) {
       console.log('[API] getConversations fallback to localStorage:', localConvs.length, 'conversations');
       return localConvs.map(c => ({
-        id: c.id, title: c.title, model: c.model, provider: c.provider,
+        id: c.id, title: c.title, model: localConversationModelKey(c), provider: c.provider,
         workspace_path: c.workspace_path, project_id: c.project_id,
         workspace_mode: conversationWorkspaceMode(c), research_mode: c.research_mode, pinned: c.pinned, archived: c.archived,
         created_at: c.created_at, updated_at: c.updated_at,
@@ -81,7 +82,7 @@ export async function getConversations() {
   const localConvs = getLocalConversations();
   console.log('[API] getConversations from localStorage:', localConvs.length, 'conversations');
   return localConvs.map(c => ({
-    id: c.id, title: c.title, model: c.model, provider: c.provider,
+    id: c.id, title: c.title, model: localConversationModelKey(c), provider: c.provider,
     workspace_path: c.workspace_path, project_id: c.project_id,
     workspace_mode: conversationWorkspaceMode(c), research_mode: c.research_mode, pinned: c.pinned, archived: c.archived,
     created_at: c.created_at, updated_at: c.updated_at,
@@ -131,7 +132,7 @@ export async function createConversation(title?: string, model?: string, extras?
   const conv = createLocalConversation(title || undefined, modelName, { research_mode: researchMode, workspace_mode: workspaceMode });
   console.log('[API] createConversation via localStorage:', conv.id);
   dispatchEvent('conversationCreated', { id: conv.id });
-  return conv;
+  return { ...conv, model: localConversationModelKey(conv) };
 }
 
 // ============ getConversation ============
@@ -155,7 +156,7 @@ async function fetchConversation(id: string) {
         if (localConv) {
           const localMessages = getLocalMessages(id);
           return {
-            id: localConv.id, title: localConv.title, model: localConv.model,
+            id: localConv.id, title: localConv.title, model: localConversationModelKey(localConv),
             workspace_mode: conversationWorkspaceMode(localConv), project_id: localConv.project_id,
             workspace_path: localConv.workspace_path, created_at: localConv.created_at,
             updated_at: localConv.updated_at, message_count: localConv.message_count,
@@ -205,7 +206,7 @@ async function fetchConversation(id: string) {
         const localMessages = getLocalMessages(id);
         console.log('[API] getConversation fallback to localStorage, messages:', localMessages.length);
         return {
-          id: localConv.id, title: localConv.title, model: localConv.model,
+          id: localConv.id, title: localConv.title, model: localConversationModelKey(localConv),
           workspace_mode: conversationWorkspaceMode(localConv), project_id: localConv.project_id,
           workspace_path: localConv.workspace_path, created_at: localConv.created_at,
           updated_at: localConv.updated_at, message_count: localConv.message_count,
@@ -227,7 +228,7 @@ async function fetchConversation(id: string) {
   const messages = getLocalMessages(id);
   console.log('[API] getConversation from localStorage, messages:', messages.length);
   return {
-    id: conv.id, title: conv.title, model: conv.model,
+    id: conv.id, title: conv.title, model: localConversationModelKey(conv),
     workspace_mode: conversationWorkspaceMode(conv), project_id: conv.project_id,
     workspace_path: conv.workspace_path, created_at: conv.created_at,
     updated_at: conv.updated_at, message_count: conv.message_count,
@@ -440,10 +441,8 @@ export async function branchConversation(
     if (fromMessageId && index === undefined) throw new Error('Branch message not found');
     const branchMessages = index === undefined ? messages : messages.slice(0, index + 1);
     const branch = createLocalConversation(`${source.title || 'Conversation'} (branch)`, source.model, {
+      provider: source.provider ?? null, workspace_path: source.workspace_path, project_id: source.project_id,
       research_mode: source.research_mode, workspace_mode: source.workspace_mode,
-    });
-    updateLocalConversation(branch.id, {
-      provider: source.provider, workspace_path: source.workspace_path, project_id: source.project_id,
     });
     const turnIds = new Map<string, string>();
     saveLocalMessages(branch.id, branchMessages.map(message => {

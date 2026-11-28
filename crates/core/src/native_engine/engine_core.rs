@@ -307,7 +307,7 @@ pub(crate) struct PersistenceGate {
 #[derive(Debug, Clone)]
 pub struct ConversationState {
     pub conversation_id: String,
-    pub model: String,
+    pub binding: crate::db::stored_binding::StoredBinding,
     pub messages: Vec<Value>,
     pub system_prompt: Option<String>,
     pub last_activity: String,
@@ -465,6 +465,16 @@ impl QueryEngine {
             super::request_options::RequestOptions::from_db(&self.db_manager, session, purpose),
         )
         .await
+    }
+
+    /// Disabled providers still own their Desktop picker prefix.
+    pub async fn has_configured_provider(&self, id: &str) -> bool {
+        self.provider_manager
+            .lock()
+            .await
+            .list_providers()
+            .iter()
+            .any(|provider| provider.id == id)
     }
 
     /// The resolved provider/model pair this session would use, for hosts that
@@ -870,11 +880,11 @@ impl QueryEngine {
         let db = self.db_manager.clone();
         let id = conv_id.to_owned();
         let saved = tokio::task::spawn_blocking(move || db.engine_history(&id)).await??;
-        let result = saved.map(|(model, messages)| {
+        let result = saved.map(|(binding, messages)| {
             let start = messages.iter().rposition(|msg| msg.is_compact_boundary).unwrap_or(0);
             ConversationState {
                 conversation_id: conv_id.to_owned(),
-                model: model.unwrap_or_default(),
+                binding,
                 messages: messages.into_iter().skip(start).map(|msg| {
                     serde_json::json!({"role": msg.role, "content": msg.content})
                 }).collect(),
@@ -897,7 +907,7 @@ impl QueryEngine {
         if let Some(state) = state {
             let db = self.db_manager.clone();
             tokio::task::spawn_blocking(move || db.save_engine_state(
-                &state.conversation_id, &state.model, &state.last_activity, state.turn_count as i64,
+                &state.conversation_id, &state.binding, &state.last_activity, state.turn_count as i64,
             )).await??;
         }
         Ok(())
@@ -1705,11 +1715,9 @@ impl QueryEngine {
         if !replay {
             let state = ConversationState {
                 conversation_id: conv_id.clone(),
-                model: request
-                    .provider_id
-                    .as_ref()
-                    .map(|id| format!("{}::{}", id, model))
-                    .unwrap_or_else(|| model.clone()),
+                binding: crate::db::stored_binding::StoredBinding::from_row(
+                    request.provider_id.clone(), model.clone(),
+                ),
                 messages: request.messages.clone(),
                 system_prompt: request.system_prompt.clone(),
                 last_activity: Utc::now().to_rfc3339(),
@@ -2155,7 +2163,7 @@ impl QueryEngine {
 
                 if successful_turn && current_turn_count == 0 {
                     let title_conv_id = conv_id_clone.clone();
-                    let title_model = state.model.clone();
+                    let title_binding = state.binding.clone();
                     let pm = provider_manager_title.clone();
                     let title_identity = super::request_identity::TurnIdentity::new(
                         Some(title_conv_id.clone()),
@@ -2169,7 +2177,9 @@ impl QueryEngine {
                         if let Ok(Ok(Some((user_msg, assistant_msg)))) = seed {
                             let resolved = {
                                 let pm_guard = pm.lock().await;
-                                match pm_guard.binding.resolve(None) { Some(active) => Some(active), None => pm_guard.resolve_provider(&title_model).await }
+                                if let Some(active) = pm_guard.binding.resolve(None) { Some(active) }
+                                else if let Some(id) = &title_binding.provider { pm_guard.resolve_selected(id, &title_binding.model) }
+                                else { pm_guard.resolve_provider(&title_binding.model).await }
                             };
 
                             if let Some(resolved) = resolved {

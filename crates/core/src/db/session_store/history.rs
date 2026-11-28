@@ -283,6 +283,34 @@ impl SessionRead<'_> {
         let rows = query.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+    /// Prefer the parent request in the saved trajectory. Older snapshots can
+    /// omit the source. A metrics-only segment identifies main requests by
+    /// their positive number (web search uses zero, compaction has no number).
+    /// Select the turn before its requests so an empty turn cannot inherit an
+    /// older turn's provider.
+    pub fn last_completed_turn_provider(&self) -> Result<Option<String>> {
+        let provider: Option<String> = self.0.query_row(
+            "WITH segments AS (
+                SELECT m.id,m.sort_order FROM message_turns mt JOIN messages m ON m.id=mt.message_id
+                WHERE mt.turn_id=(SELECT id FROM execution_turns WHERE status='completed'
+                                  ORDER BY julianday(ended_at) DESC,rowid DESC LIMIT 1)
+             ), parent_requests AS (
+                SELECT m.sort_order,s.key AS seq,s.value->>'$.providerId' AS provider
+                FROM segments m JOIN message_trajectory t ON t.message_id=m.id, json_each(t.requests_json) s
+                WHERE coalesce(s.value->>'$.source','native_engine')='native_engine'
+                UNION ALL
+                SELECT m.sort_order,r.request_number,r.provider_id FROM segments m
+                JOIN model_requests r ON r.message_id=m.id
+                WHERE r.request_number>0 AND NOT EXISTS
+                    (SELECT 1 FROM message_trajectory t WHERE t.message_id=m.id)
+             )
+             SELECT provider FROM parent_requests ORDER BY sort_order DESC,seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ).optional()?.flatten();
+        Ok(provider.filter(|id| !id.is_empty()))
+    }
+
     pub fn segments(&self, id: &str) -> Result<Vec<String>> {
         Ok(turn_repo::turn_messages(self.0, id)?)
     }

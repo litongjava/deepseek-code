@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./client', () => ({ isTauriApp: true, API_BASE: '/api', getToken: () => '', waitForApiReady: async () => {}, request: vi.fn(), getUserModeForConversation: vi.fn(), resolveEnvCreds: vi.fn() }));
-import { getConversation } from './conversations';
+vi.mock('../services/bridgeConnection', async importOriginal => ({
+  ...await importOriginal<typeof import('../services/bridgeConnection')>(),
+  waitForApiReady: async () => {},
+  bridgeOrigin: () => 'http://bridge.test',
+}));
+import { createConversation, getConversation } from './conversations';
+import { getLocalConversations } from '../services/localStorageService';
+import { pushToCloud } from '../services/syncService';
+import { modelKey } from '../utils/modelConfig';
 
 beforeEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 describe('SQLite message mapping', () => {
@@ -12,4 +20,24 @@ describe('SQLite message mapping', () => {
     expect(result.messages[0].content).toEqual(content);
     expect(result.messages[1].turn).toEqual(turn);
   });
+});
+
+it('pushes the decoded binding from the local mirror after a Bridge picker creation', async () => {
+  const provider = 'team/a::b%';
+  const model = 'first::shared[1m]';
+  const send = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(Response.json({ id: 'bridge-chat' }))
+    .mockResolvedValueOnce(Response.json({ serverTimestamp: '2026-11-28T00:00:00Z' }));
+  try {
+    await createConversation('Mirror', modelKey(provider, model));
+    expect(getLocalConversations()).toMatchObject([{ provider, model }]);
+
+    localStorage.setItem('auth_token', 'fixture');
+    await pushToCloud();
+    const [url, request] = send.mock.calls[1];
+    expect(String(url)).toMatch(/\/data\/sync\/push$/);
+    expect(JSON.parse(String(request?.body)).conversations).toMatchObject([{ provider, model }]);
+  } finally {
+    send.mockRestore();
+  }
 });

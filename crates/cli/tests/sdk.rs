@@ -1141,7 +1141,7 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
         )
         .unwrap();
         let mut client = Client::start(root.path(), &server, &[]);
-        client.send(json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"Before image"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG}},{"type":"text","text":"After image"}]}})).await;
+        client.send(json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"/compact Before image"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG}},{"type":"text","text":"After image"}]}})).await;
         let result = client.result().await;
         assert_eq!(result["is_error"], false, "{result}");
         client.send(user("Remember that image")).await;
@@ -1161,7 +1161,7 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
                     let blocks = m["content"].as_array().unwrap();
                     blocks
                         .iter()
-                        .position(|b| b["text"] == "Before image")
+                        .position(|b| b["text"] == "/compact Before image")
                         .map(|i| (blocks, i))
                 })
                 .unwrap();
