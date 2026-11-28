@@ -764,6 +764,12 @@ pub async fn context_status(session: &Session) -> Option<String> {
 /// context window, as reported by the engine or the provider.
 pub fn is_context_overflow(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
+    // An exhausted compaction has already tried to recover this request.
+    if error.is::<deepseek_code_core::services::compaction::GenerationFailure>()
+        || text.contains("automatic compaction failed.")
+    {
+        return false;
+    }
     ["exceeds the configured context window", "prompt is too long", "context_length_exceeded", "maximum context length", "input is too long"]
         .iter()
         .any(|needle| text.contains(needle))
@@ -796,7 +802,7 @@ pub async fn reactive_compact(
         compact_automatic(session, "", CompactionTracker::before_input(&input)).await
     {
         if error.is::<deepseek_code_core::services::compaction::GenerationFailure>() {
-            anyhow::bail!("{error}. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window.");
+            anyhow::bail!("Automatic compaction failed. The provider rejected the uncompressed request as too large. Resume and run /compact or select a model with a larger context window. Cause: {error}");
         }
         return Err(error);
     }
@@ -849,7 +855,7 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease:
         // Turn preparation can shrink the output reserve to 4096 tokens.
         let reserve = provider.model.max_tokens.unwrap_or(8192).min(4096);
         if input > window.saturating_sub(reserve) as usize {
-            anyhow::bail!("{error}. The history is too large for the next request. Resume and run /compact or select a model with a larger context window.");
+            anyhow::bail!("Automatic compaction failed. The history is too large for the next request. Resume and run /compact or select a model with a larger context window. Cause: {error}");
         }
         crate::compaction::notice(&format!("{error}. Continuing with the existing context."));
     }
@@ -960,6 +966,9 @@ mod tests {
         }
         assert!(!is_context_overflow(&anyhow::anyhow!(
             "Model API error 429: rate limited"
+        )));
+        assert!(!is_context_overflow(&anyhow::anyhow!(
+            "Engine execution failed: Automatic compaction failed. Resume and run /compact. Cause: context_length_exceeded"
         )));
         assert_eq!(
             context_note(5, false).as_deref(),

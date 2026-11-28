@@ -303,7 +303,7 @@ impl ToolLoopExecutor {
             .unwrap_or_else(|| TokenCounter::get_model_context_limit(&model.id) as u64);
         let capacity = limit.saturating_sub(u64::from(self.max_tokens));
         if estimated > capacity {
-            anyhow::bail!("Automatic compaction failed: {error:#}. The next request needs about {estimated} input tokens and only {capacity} fit. Resume this session and run /compact or select a model with a larger context window.");
+            anyhow::bail!("Automatic compaction failed. The next request needs about {estimated} input tokens and only {capacity} fit. Resume and run /compact or select a model with a larger context window. Cause: {error:#}");
         }
         if !self.auto_compaction_warned {
             let _ = self
@@ -634,7 +634,7 @@ impl ToolLoopExecutor {
             let native = if native::supports(&self.provider) {
                 Some(
                     native::generate(
-                        input.clone(),
+                        &input,
                         shard.id(),
                         &self.provider,
                         focus,

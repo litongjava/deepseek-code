@@ -79,22 +79,32 @@ pub(crate) async fn with_summary_fallback<T>(
     }
     tracing::info!(%error, "Trying summary compaction on the same provider");
     summary.await.map_err(|summary| {
-        let message = format!("{error}; summary compaction failed: {summary:#}");
+        let reason = |error: &anyhow::Error| match find_failure(error).and_then(|f| f.status()) {
+            Some(status) => format!("HTTP {status}"),
+            None => format!("{error:#}"),
+        };
+        let message = format!(
+            "Native compaction failed ({}); summary compaction failed ({})",
+            reason(&error),
+            reason(&summary)
+        );
         summary.context(message)
     })
 }
 
 pub(crate) async fn generate(
-    history: Vec<Value>,
+    history: &[Value],
     id: &str,
     provider: &ResolvedProvider,
     instructions: &str,
     root: Option<&std::path::Path>,
     options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<GeneratedSummary> {
+    use serde::Deserialize;
     let messages = history
-        .into_iter()
-        .map(serde_json::from_value::<OpenAIMessage>)
+        .iter()
+        .filter(|row| row["origin"] != "memory_change")
+        .map(OpenAIMessage::deserialize)
         .collect::<serde_json::Result<Vec<_>>>()?;
     generate_messages_with_options(
         provider,
@@ -189,10 +199,7 @@ pub(crate) async fn generate_messages_with_options(
         Ok(bytes)
     })
     .await
-    .map_err(|error| {
-        let message = format!("Native compaction gateway request failed: {error}");
-        error.context(message)
-    })?;
+    .context("Native compaction gateway request failed")?;
     let result: Value = serde_json::from_slice(&bytes).context("Invalid native compaction JSON")?;
     if let Some(metrics) = &mut metrics {
         metrics.observe_usage(&result["usage"]);

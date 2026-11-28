@@ -583,17 +583,12 @@ impl QueryEngine {
             shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
         let native = if crate::services::compaction::native::supports(&provider) {
-            let input = history
-                .iter()
-                .filter(|row| row["origin"] != "memory_change")
-                .cloned()
-                .collect();
             let mut native_options = options.clone();
             native_options.compaction_metrics =
                 Some(super::compaction_metrics::MetricsStore(shard.clone()));
             Some(
                 crate::services::compaction::native::generate(
-                    input,
+                    &history,
                     session,
                     &provider,
                     instructions,
