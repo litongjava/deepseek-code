@@ -1863,6 +1863,48 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_rebound_during_validation_cannot_be_claimed() {
+        let (_temp, context, store, sender, recipient) = fixture();
+        bind_managed_worktree(&context, &store, &sender);
+        let message = send(&context, &sender, &recipient, "stale binding").unwrap();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let db = context.db.clone();
+        let resolver = identity::Resolver::new(move |cwd| {
+            let common = crate::worktree::session::common_dir(cwd)?;
+            // Another host commits a new mapping after this lookup has started.
+            let db = db.clone();
+            let session = sender.clone();
+            std::thread::spawn(move || {
+                db.fixture_directory(|conn| {
+                    conn.execute(
+                        "UPDATE conversation_worktrees SET repo_path=path WHERE conversation_id=?1",
+                        [session],
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            })
+            .join()
+            .unwrap();
+            Ok(common)
+        });
+        owner
+            .delivery
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .set_peer_resolver(resolver);
+        assert!(owner.target.drain(8).unwrap().is_empty());
+        let blocked = inbox(&context, &recipient, false).unwrap();
+        assert_eq!(blocked[0].id, message.id);
+        assert_eq!(blocked[0].state, "blocked");
+        assert!(store.history(&recipient).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_busy_shard_preserves_the_claim_generation_until_delivery() {
         use std::{sync::mpsc, time::Duration};
         let (_temp, context, store, sender, recipient) = fixture();
@@ -1884,7 +1926,9 @@ mod tests {
             .unwrap();
         });
         ready.recv_timeout(Duration::from_secs(10)).unwrap();
-        for _ in 0..3 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut confirmed_claims = 0;
+        while confirmed_claims < 3 {
             assert!(owner.target.drain(8).unwrap().is_empty());
             let claim = context
                 .db
@@ -1892,12 +1936,19 @@ mod tests {
                     conn.query_row(
                         "SELECT state,generation FROM session_inbox WHERE id=?1",
                         [&message.id],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
                     )
                 })
                 .unwrap()
                 .unwrap();
-            assert_eq!(claim, ("claimed".into(), 1));
+            if claim.0 == "queued" {
+                assert_eq!(confirmed_claims, 0, "claim returned to the queue");
+                assert_eq!(claim.1, None);
+                assert!(std::time::Instant::now() < deadline, "directory claim was never made");
+                continue;
+            }
+            assert_eq!(claim, ("claimed".into(), Some(1)));
+            confirmed_claims += 1;
         }
         release.send(()).unwrap();
         holder.join().unwrap();

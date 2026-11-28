@@ -75,28 +75,16 @@ impl GitKey {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct GitPath {
+struct ProjectBinding {
+    id: String,
     path: PathBuf,
-    key: Option<GitKey>,
+    folders: Vec<project_repo::ProjectFolder>,
+    worktree: Option<session::SavedWorktree>,
 }
 
-impl GitPath {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.into(),
-            key: GitKey::read(path),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PeerProject {
-    pub(super) source: String,
-    project_id: String,
-    git: Option<(GitPath, GitPath)>,
-}
-
-impl PeerProject {
+impl ProjectBinding {
+    // Only directory records are read here, including when the writer compares
+    // them to the snapshot whose filesystem and Git identities were validated.
     fn read(conn: &Connection, id: &str) -> Result<Self> {
         super::valid_id(id)?;
         let row = conversation_repo::conversation_metadata(conn, id)?
@@ -110,39 +98,40 @@ impl PeerProject {
             .project_id
             .context("Message session has no source project")?;
         workspace::private_workspace_owner(conn, id)?;
-        let project = project_repo::require_trusted(conn, &project_id)?;
+        let project =
+            project_repo::get_project(conn, &project_id)?.context("Message project not found")?;
         ensure!(!project.is_archived, "Message project is archived");
-        let path = Path::new(
-            project
-                .workspace_path
-                .as_deref()
-                .context("Message project has no source directory")?,
-        );
-        ensure!(
-            path.is_absolute() && path.is_dir(),
-            "Project folder is unavailable"
-        );
-        let mut git = None;
-        session::resolve_with(conn, id, &project_id, path, |worktree, repo| {
-            git = Some((GitPath::new(worktree), GitPath::new(repo)));
-            Ok(())
-        })?;
-        let source = path.canonicalize()?.to_string_lossy().into_owned();
         Ok(Self {
-            source: if cfg!(windows) {
-                source.to_lowercase()
-            } else {
-                source
-            },
-            project_id,
-            git,
+            path: project
+                .workspace_path
+                .context("Message project has no source directory")?
+                .into(),
+            folders: project.folders,
+            worktree: session::SavedWorktree::read(conn, id, &project_id)?,
+            id: project_id,
         })
     }
+}
 
+pub(crate) struct PeerProject {
+    pub(super) source: String,
+    binding: ProjectBinding,
+    // Linkage checked by Git during preparation. A retarget while waiting for
+    // the writer invalidates the evidence without launching another process.
+    git_keys: Vec<(PathBuf, Option<GitKey>)>,
+}
+
+impl PeerProject {
     pub(crate) fn confirm(&self, conn: &Connection, id: &str) -> Result<&str> {
         ensure!(
-            *self == Self::read(conn, id)?,
+            self.binding == ProjectBinding::read(conn, id)?,
             "Message project changed during authorization"
+        );
+        ensure!(
+            self.git_keys
+                .iter()
+                .all(|(path, key)| GitKey::read(path) == *key),
+            "Git worktree identity changed during authorization"
         );
         Ok(&self.source)
     }
@@ -167,31 +156,52 @@ impl Resolver {
         }
     }
 
-    fn common_dir(&mut self, path: &GitPath) -> Result<PathBuf> {
-        if let Some(key) = &path.key {
-            if self.verified.get(&path.path) == Some(key) {
+    fn common_dir(&mut self, path: &Path, key: Option<&GitKey>) -> Result<PathBuf> {
+        if let Some(key) = key {
+            if self.verified.get(path) == Some(key) {
                 return Ok(key.common.clone());
             }
         }
-        self.verified.remove(&path.path);
-        let actual = (self.lookup)(&path.path)?;
-        if let Some(key) = &path.key {
-            if key.common == actual && GitKey::read(&path.path).as_ref() == Some(key) {
-                self.verified.insert(path.path.clone(), key.clone());
+        self.verified.remove(path);
+        let actual = (self.lookup)(path)?;
+        if let Some(key) = key {
+            ensure!(
+                GitKey::read(path).as_ref() == Some(key),
+                "Git worktree identity changed during lookup"
+            );
+            if key.common == actual {
+                self.verified.insert(path.into(), key.clone());
             }
         }
         Ok(actual)
     }
 
     pub(crate) fn project(&mut self, conn: &Connection, id: &str) -> Result<PeerProject> {
-        let project = PeerProject::read(conn, id)?;
-        if let Some((worktree, repo)) = &project.git {
-            ensure!(
-                self.common_dir(worktree)? == self.common_dir(repo)?,
-                "Conversation worktree no longer belongs to this repository"
-            );
+        let binding = ProjectBinding::read(conn, id)?;
+        project_repo::validate_trusted_folders(&binding.folders)?;
+        ensure!(
+            binding.path.is_absolute() && binding.path.is_dir(),
+            "Project folder is unavailable"
+        );
+        let mut git_keys = Vec::new();
+        if let Some(worktree) = &binding.worktree {
+            worktree.validate(&binding.path, |cwd| {
+                let key = GitKey::read(cwd);
+                let common = self.common_dir(cwd, key.as_ref())?;
+                git_keys.push((cwd.to_owned(), key));
+                Ok(common)
+            })?;
         }
-        Ok(project)
+        let source = binding.path.canonicalize()?.to_string_lossy().into_owned();
+        Ok(PeerProject {
+            source: if cfg!(windows) {
+                source.to_lowercase()
+            } else {
+                source
+            },
+            binding,
+            git_keys,
+        })
     }
 
     pub(crate) fn pair(
