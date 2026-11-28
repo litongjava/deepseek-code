@@ -482,7 +482,7 @@ async fn failure_and_cancellation_never_commit_opaque_state() {
         .expect("the mock 502 response should arrive within the watchdog")
         .expect_err("a gateway 502 must fail the compaction");
         let message = error.to_string();
-        assert!(message.contains("502"), "unexpected error: {message}");
+        assert!(message.contains("HTTP 502"), "unexpected error: {message}");
         assert!(!message.contains("Elapsed"), "unexpected timeout: {message}");
         assert_eq!(store.history(&id).unwrap(), before);
         assert_eq!(
@@ -563,7 +563,7 @@ async fn an_error_response_slower_than_200ms_would_misjudge_the_old_window() {
         .await
         .expect("the released 502 response should arrive")
         .expect_err("a gateway 502 must fail the compaction");
-    assert!(error.to_string().contains("502"), "{error}");
+    assert!(error.to_string().contains("HTTP 502"), "{error}");
     assert_eq!(store.history(&id).unwrap(), before);
     assert_eq!(
         seen.lock().unwrap().len(),
