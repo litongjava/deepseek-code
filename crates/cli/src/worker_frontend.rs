@@ -1238,12 +1238,22 @@ fn resource_alert_renders_a_system_resource_warning_notice() {
 #[test]
 fn attached_worker_shows_compaction_notice_and_keeps_recovery_footer() {
     let temp = tempfile::tempdir().unwrap();
-    let mut display = TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
+    let mut display =
+        TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
     let cause = "Native compaction failed (HTTP 429); summary compaction failed (HTTP 503): private response body https://secret@example.test";
-    let warning = format!("Automatic compaction failed: {cause}. Continuing with the existing context.");
-    render(&mut display, &serde_json::json!({"type":"compaction_notice","message":warning})).unwrap();
+    let warning =
+        format!("Automatic compaction failed: {cause}. Continuing with the existing context.");
+    render(
+        &mut display,
+        &serde_json::json!({"type":"compaction_notice","message":warning}),
+    )
+    .unwrap();
     let hard_stop = format!("Engine execution failed: Automatic compaction failed. The next request cannot fit. Resume and run /compact. Cause: {cause}");
-    render(&mut display, &serde_json::json!({"type":"error","message":hard_stop})).unwrap();
+    render(
+        &mut display,
+        &serde_json::json!({"type":"error","message":hard_stop}),
+    )
+    .unwrap();
     assert_eq!(display.take_notices(), ["Automatic compaction failed: native compaction (HTTP 429) and summary compaction (HTTP 503). Continuing with the existing context."]);
     assert_eq!(failure_message("job", "failed", &hard_stop), "Automatic compaction failed: native compaction (HTTP 429) and summary compaction (HTTP 503). Resume and run /compact or select a model with a larger context window.");
 }
@@ -1269,7 +1279,10 @@ fn render(display: &mut TurnDisplay, event: &Value) -> Result<()> {
         "compaction_notice" => {
             let message = text("message");
             if message.starts_with("Automatic compaction failed:") {
-                display.notice(&format!("{}. Continuing with the existing context.", compaction_failure_reason(message)));
+                display.notice(&format!(
+                    "{}. Continuing with the existing context.",
+                    compaction_failure_reason(message)
+                ));
             } else {
                 display.notice(message);
             }
@@ -1332,14 +1345,24 @@ fn compaction_failure_reason(diagnostic: &str) -> String {
         Some(status) => format!("{label} (HTTP {status})"),
         None => label.to_owned(),
     };
-    if let Some((native, summary)) = lower.split_once("; summary compaction failed") {
-        return format!("Automatic compaction failed: {} and {}",
-            describe("native compaction", native), describe("summary compaction", summary));
+    let native = lower
+        .split_once("native compaction failed")
+        .map(|(_, cause)| cause);
+    if let Some((native, summary)) =
+        native.and_then(|cause| cause.split_once("; summary compaction failed"))
+    {
+        return format!(
+            "Automatic compaction failed: {} and {}",
+            describe("native compaction", native),
+            describe("summary compaction", summary)
+        );
     }
     let label = if lower.contains("native compaction") {
         "Automatic native compaction failed"
-    } else {
+    } else if lower.contains("summary") {
         "Automatic summary compaction failed"
+    } else {
+        "Automatic compaction failed"
     };
     describe(label, &lower)
 }
@@ -1350,7 +1373,10 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
     }
     let lower = diagnostic.to_ascii_lowercase();
     if lower.contains("automatic compaction failed.") {
-        return format!("{}. Resume and run /compact or select a model with a larger context window.", compaction_failure_reason(diagnostic));
+        return format!(
+            "{}. Resume and run /compact or select a model with a larger context window.",
+            compaction_failure_reason(diagnostic)
+        );
     }
     if lower.contains("max tool iterations") {
         return format!(
