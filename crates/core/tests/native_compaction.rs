@@ -1127,30 +1127,50 @@ async fn base64_model_boundary_native_compaction_projects_stored_protocol_result
 mod model_output;
 
 #[tokio::test]
-async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_original() -> anyhow::Result<()> {
+async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_original(
+) -> anyhow::Result<()> {
     use deepseek_code_core::db::message_repo::{insert_tool_call, UNFINISHED_TOOL_RESULT};
     let f = fixture(8).await;
     let store = &f.store;
     let id = &f.id;
-    let notice = |task: &str, text: &str| format!(
+    let notice = |task: &str, text: &str| {
+        format!(
         "<task-notification>\n<task-id>{task}</task-id>\n<summary>{text}</summary>\n</task-notification>"
-    );
+    )
+    };
     for (task, text, origin) in [
-        ("a","earliest notice","task_notification"),
-        ("b","other task","task_notification"),
-        ("a","middle notice","task_notification"),
-        ("a","typed quotation","typed"),
-        ("a","latest notice","task_notification"),
+        ("a", "earliest notice", "task_notification"),
+        ("b", "other task", "task_notification"),
+        ("a", "middle notice", "task_notification"),
+        ("a", "typed quotation", "typed"),
+        ("a", "latest notice", "task_notification"),
     ] {
         let msg = notice(task, text);
         store.append_user_content(id, &msg, &json!([{"type":"text","text":msg}]), origin)?;
     }
+    let diagnostic = "build --release\nexit code 9\nerror: missing target";
+    let failed_notice = format!("<task-notification>\n<task-id>retry</task-id>\n<status>failed</status>\n<result>{diagnostic}</result>\n</task-notification>");
+    store.append_prompt(id, &failed_notice, "task_notification")?;
+    store.append_prompt(id, &notice("retry", "retry complete"), "task_notification")?;
     let old = format!("ARCHIVED_NEEDLE\n{}\nfin🙂", "word ".repeat(260));
-    let failed = format!("compile --strict\nexit code 17\nerror: expected module\n{}", "trace ".repeat(220));
+    let failed = format!(
+        "compile --strict\nexit code 17\nerror: expected module\n{}",
+        "trace ".repeat(220)
+    );
     let recent = format!("recent read\n{}", "data ".repeat(220));
     let tool = |message: &str, call: &str, text: Option<&str>, error: bool, order: i64| {
-        store.db.shard_sql(id, |db| insert_tool_call(db, call, message, "Read",
-            Some(r#"{"file_path":"src/main.rs"}"#), text, error, order))?
+        store.db.shard_sql(id, |db| {
+            insert_tool_call(
+                db,
+                call,
+                message,
+                "Read",
+                Some(r#"{"file_path":"src/main.rs"}"#),
+                text,
+                error,
+                order,
+            )
+        })?
     };
     let first = store.append(id, "assistant", "Remaining: verify the fixture.")?;
     tool(&first, "old", Some(&old), false, 0)?;
@@ -1171,11 +1191,23 @@ async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_orig
         store.append_prompt(id, &notice("live", text), "task_notification")?;
     }
     let before = || -> anyhow::Result<_> {
-        Ok(serde_json::to_vec(&store.model_history(id, &ApiFormat::OpenAI)?)?)
+        Ok(serde_json::to_vec(
+            &store.model_history(id, &ApiFormat::OpenAI)?,
+        )?)
     };
     let normal = before()?;
     let prepared = compaction::prepare(&store.db, id)?;
-    let generated = f.engine.generate_compaction(id, "gateway", "gpt-6-astra", "Summarize", "", "retain evidence").await?;
+    let generated = f
+        .engine
+        .generate_compaction(
+            id,
+            "gateway",
+            "gpt-6-astra",
+            "Summarize",
+            "",
+            "retain evidence",
+        )
+        .await?;
     assert_eq!(before()?, normal);
     {
         let requests = f.seen.lock().unwrap();
@@ -1192,19 +1224,54 @@ async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_orig
         for text in ["earliest notice", "middle notice"] {
             assert!(!rendered.contains(text), "{text}");
         }
-        for text in ["other task", "typed quotation", "latest notice", "active first", "active latest",
-                     "Remaining: verify the fixture.", "Continue the unfinished work."] {
+        for text in [
+            "other task",
+            "typed quotation",
+            "latest notice",
+            "active first",
+            "active latest",
+            "Remaining: verify the fixture.",
+            "Continue the unfinished work.",
+        ] {
             assert!(rendered.contains(text), "{text}");
         }
+        let texts: Vec<_> = rows
+            .iter()
+            .filter(|row| row["role"] == "user")
+            .flat_map(|row| row["content"].as_array().unwrap())
+            .filter_map(|part| part["text"].as_str())
+            .collect();
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.starts_with("<task-notification>")
+                    && text.contains("<task-id>retry</task-id>"))
+                .count(),
+            1
+        );
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("quoted task data") && text.contains(diagnostic)));
         let output = |call| {
-            let at = rows.iter().position(|row| row["type"] == "function_call" && row["call_id"] == call).unwrap();
-            let matching: Vec<_> = rows[at + 1..].iter().filter(|row| row["type"] == "function_call_output" && row["call_id"] == call).collect();
+            let at = rows
+                .iter()
+                .position(|row| row["type"] == "function_call" && row["call_id"] == call)
+                .unwrap();
+            let matching: Vec<_> = rows[at + 1..]
+                .iter()
+                .filter(|row| row["type"] == "function_call_output" && row["call_id"] == call)
+                .collect();
             assert_eq!(matching.len(), 1);
             matching[0]["output"].as_str().unwrap()
         };
         let placeholder = output("old");
         assert_eq!(placeholder.lines().count(), 1);
-        for part in ["Read", "src/main.rs", &format!("3 lines, {} bytes", old.len()), "use ContextSearch to retrieve if needed"] {
+        for part in [
+            "Read",
+            "src/main.rs",
+            &format!("3 lines, {} bytes", old.len()),
+            "use ContextSearch to retrieve if needed",
+        ] {
             assert!(placeholder.contains(part), "{placeholder}");
         }
         assert_eq!(output("failed"), failed);
@@ -1216,9 +1283,12 @@ async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_orig
     let found: Value = serde_json::from_str(&store.db.open_session(id)?.context_search(json!({
         "query":"ARCHIVED_NEEDLE", "role":"tool", "range":"before", "boundary_id":boundary.message_id
     }))?)?;
-    assert!(found["matches"].as_array().unwrap().iter().any(|hit|
-        hit["tool_call_id"] == "old" && hit["excerpt"].as_str().unwrap().contains("ARCHIVED_NEEDLE")
-    ));
+    assert!(found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["tool_call_id"] == "old"
+            && hit["excerpt"].as_str().unwrap().contains("ARCHIVED_NEEDLE")));
     f.server.abort();
     Ok(())
 }

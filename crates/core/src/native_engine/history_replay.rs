@@ -6,7 +6,30 @@ const MID_TURN_CONTINUATION_FOCUS: &str = "This automatic compaction runs mid-tu
 const NATIVE_MID_TURN_CONTINUATION_PROMPT: &str = "Context was automatically compacted mid-turn. Continue executing the current task immediately from where you left off without waiting for a new user prompt.";
 
 /// A selection from the executor's canonical model history, before wire rendering.
-pub(in crate::native_engine) struct CompactionHistory(Vec<Value>);
+#[derive(Default)]
+pub(in crate::native_engine) struct CompactionHistory {
+    rows: Vec<Value>,
+    protected_input: Option<usize>,
+}
+
+impl CompactionHistory {
+    fn into_rows(
+        mut self,
+        shard: &crate::db::session_store::SessionDb,
+        active: bool,
+    ) -> Result<Vec<Value>> {
+        shard.read(|session| {
+            crate::services::compaction::microcompact::consolidate(
+                &mut self.rows,
+                session,
+                active,
+                self.protected_input,
+            )
+        })?;
+        self.rows.retain(|row| row["origin"] != "memory_change");
+        Ok(self.rows)
+    }
+}
 
 // Host-provided history can be absent from the shard. Keep any later live
 // messages outside that snapshot and reattach them after in-flight compaction.
@@ -185,7 +208,7 @@ impl ToolLoopExecutor {
         &mut self,
         shard: &crate::db::session_store::SessionDb,
         capture_cut: bool,
-        snapshot: Option<&mut Vec<Value>>,
+        snapshot: Option<&mut CompactionHistory>,
     ) -> Result<(
         Option<crate::db::session_store::CompactionWindow>,
         bool,
@@ -249,19 +272,19 @@ impl ToolLoopExecutor {
         // window. Its durable message/result cursors can split a single turn.
         if let Some(snapshot) = snapshot {
             let end = cut.as_ref().map_or(messages.len(), |cut| cut.prefix_len);
-            snapshot.extend_from_slice(&messages[..end]);
+            snapshot.rows.extend_from_slice(&messages[..end]);
+            snapshot.protected_input = protected.map(|index| index.min(end));
         }
-        let microcompact_changed =
-            if self.standalone_frontend && self.in_flight_window.is_none() {
-                crate::services::compaction::microcompact(
-                    shard,
-                    boundary.as_deref(),
-                    &mut messages,
-                    self.provider.model.context_window,
-                )?
-            } else {
-                false
-            };
+        let microcompact_changed = if self.standalone_frontend && self.in_flight_window.is_none() {
+            crate::services::compaction::microcompact(
+                shard,
+                boundary.as_deref(),
+                &mut messages,
+                self.provider.model.context_window,
+            )?
+        } else {
+            false
+        };
         self.protected_input = protected;
         self.pending_inputs = pending;
         if boundary.is_some() {
@@ -275,7 +298,10 @@ impl ToolLoopExecutor {
         self.turn_context = entries;
         let previous = std::mem::replace(&mut self.messages, messages);
         let explicit = explicit_len.map(|rendered_len| ExplicitHistory {
-            source: CompactionHistory(previous),
+            source: CompactionHistory {
+                rows: previous,
+                protected_input: None,
+            },
             rendered_len,
         });
         self.applied_compaction = boundary.is_some();
@@ -500,8 +526,9 @@ impl ToolLoopExecutor {
         // both microcompact and full summarization see the latest progress.
         self.flush_replay_segment(&shard, Some(current_text))?;
         let additions = window.split_off(durable_len.min(window.len()));
-        let mut snapshot = Vec::new();
-        let (_, microcompact_changed, _) = self.reload_with_cut(&shard, false, Some(&mut snapshot))?;
+        let mut snapshot = CompactionHistory::default();
+        let (_, microcompact_changed, _) =
+            self.reload_with_cut(&shard, false, Some(&mut snapshot))?;
         *window = render(self, &self.message_additions())?;
         window.extend(additions.clone());
 
@@ -580,8 +607,7 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(crate::data_layout::data_root_of);
         let generation = async {
-            let input = CompactionHistory(snapshot);
-            self.generate_auto_compaction(gate, &shard, input, &focus)
+            self.generate_auto_compaction(gate, &shard, snapshot, &focus)
                 .await
         };
 
@@ -728,7 +754,10 @@ impl ToolLoopExecutor {
         &self,
         cut: impl std::slice::SliceIndex<[Value], Output = [Value]>,
     ) -> CompactionHistory {
-        CompactionHistory(self.messages[cut].to_vec())
+        CompactionHistory {
+            rows: self.messages[cut].to_vec(),
+            protected_input: None,
+        }
     }
 
     /// The native endpoint and its fallback serialize the same frozen rows.
@@ -745,49 +774,47 @@ impl ToolLoopExecutor {
     ) -> Result<crate::services::compaction::GeneratedSummary> {
         use crate::services::compaction::{checkpoint::Checkpoint, native, STATE_INSTRUCTIONS};
         let system = format!("{system}\n\n{STATE_INSTRUCTIONS}");
-        let mut rows = multimodal::normalize_messages(&history.0)?;
-        rows.retain(|row| row["origin"] != "memory_change");
-        shard.read(|r| crate::services::compaction::microcompact::consolidate(
-            &mut rows, r, self.parent_message_id.is_some(),
-        ))?;
+        let rows = history.into_rows(shard, self.parent_message_id.is_some())?;
+        let mut rows = multimodal::normalize_messages(&rows)?;
         let selected = shard.scoped_stores();
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
             shard.clone(),
         ));
         let (mut wire, native_result) = if !native_transport {
-                let additions = self.message_additions_for(&rows);
-                let wire = match self.provider.provider.api_format {
-                    ApiFormat::Anthropic => self.build_mid_turn_summary_wire(&self.render_anthropic_rows(&rows, &additions)?)?,
-                    ApiFormat::OpenAI => self.build_mid_turn_summary_wire(&self.render_openai_rows(&rows, &additions)?)?,
-                };
-                (wire, None)
-            } else {
-                // Durable rows lack the user-role host prefix used on main requests.
-                // In-flight rows are already rendered, including this prefix.
-                if self.in_flight_window.is_none() {
-                    if let Some(first) = rows.iter().position(|row| row["role"] == "user") {
-                        if let Some((offset, reminders)) =
-                            project_memory_context::boundary_reminders(
-                                &self.context_reminders,
-                                &rows[first]["provider_content"],
-                            )
-                        {
-                            rows.insert(first + offset, serde_json::to_value(reminders)?);
-                        }
+            let additions = self.message_additions_for(&rows);
+            let wire = match self.provider.provider.api_format {
+                ApiFormat::Anthropic => self
+                    .build_mid_turn_summary_wire(&self.render_anthropic_rows(&rows, &additions)?)?,
+                ApiFormat::OpenAI => {
+                    self.build_mid_turn_summary_wire(&self.render_openai_rows(&rows, &additions)?)?
+                }
+            };
+            (wire, None)
+        } else {
+            // Durable rows lack the user-role host prefix used on main requests.
+            // In-flight rows are already rendered, including this prefix.
+            if self.in_flight_window.is_none() {
+                if let Some(first) = rows.iter().position(|row| row["role"] == "user") {
+                    if let Some((offset, reminders)) = project_memory_context::boundary_reminders(
+                        &self.context_reminders,
+                        &rows[first]["provider_content"],
+                    ) {
+                        rows.insert(first + offset, serde_json::to_value(reminders)?);
                     }
                 }
-                self.remove_compaction_indexes(&mut rows);
-                let wire = self.build_mid_turn_summary_wire(&rows)?;
-                let result = native::generate(
-                    &rows,
-                    shard.id(),
-                    &self.provider,
-                    &format!("{focus}\n\n{STATE_INSTRUCTIONS}"),
-                    Some(selected.data_dir()),
-                    options.clone(),
-                )
-                .await;
-                (wire, Some(result))
+            }
+            self.remove_compaction_indexes(&mut rows);
+            let wire = self.build_mid_turn_summary_wire(&rows)?;
+            let result = native::generate(
+                &rows,
+                shard.id(),
+                &self.provider,
+                &format!("{focus}\n\n{STATE_INSTRUCTIONS}"),
+                Some(selected.data_dir()),
+                options.clone(),
+            )
+            .await;
+            (wire, Some(result))
         };
         let summary = async {
             wire.allow_text_summary();
@@ -836,7 +863,7 @@ impl ToolLoopExecutor {
             let record = super::super::request_recording::CompactionRecord::start(
                 &mut options,
                 "auto",
-                &serde_json::to_string(&input.0)?,
+                &serde_json::to_string(&input.rows)?,
             );
             let generated = self
                 .generate_compaction_snapshot(
@@ -931,7 +958,7 @@ impl ToolLoopExecutor {
         {
             return Ok(false);
         }
-        let mut snapshot = Vec::new();
+        let mut snapshot = CompactionHistory::default();
         let mut physical_cut = None;
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
@@ -945,7 +972,8 @@ impl ToolLoopExecutor {
             (durable_len, self.executor_history.clone())
         {
             let additions = window.split_off(durable_len);
-            let (cut, changed, explicit) = self.reload_with_cut(&shard, true, Some(&mut snapshot))?;
+            let (cut, changed, explicit) =
+                self.reload_with_cut(&shard, true, Some(&mut snapshot))?;
             physical_cut = cut;
             microcompact_changed = changed;
             *window = render(self, &self.message_additions())?;
@@ -1069,17 +1097,15 @@ impl ToolLoopExecutor {
                 let extra_index = persisted_len.saturating_sub(self.messages.len());
                 let end = cut.prefix_len + extra_index;
                 anyhow::ensure!(end <= persisted_len, "Invalid native compaction cut");
-                let mut suffix = rows.split_off(end);
-                if TokenCounter::estimate(&suffix) > capacity {
-                    crate::services::compaction::clear_tool_results(&mut suffix);
-                    anyhow::ensure!(TokenCounter::estimate(&suffix) <= capacity,
-                        "Context overflow: the current turn's admitted inputs exceed the model window");
-                }
+                anyhow::ensure!(
+                    TokenCounter::estimate(&rows[end..]) <= capacity,
+                    "Context overflow: the current turn's admitted inputs exceed the model window"
+                );
                 let result = self
                     .generate_auto_compaction(
                         gate,
                         &shard,
-                        CompactionHistory(snapshot),
+                        snapshot,
                         self.system_prompt.as_deref().unwrap_or(""),
                     )
                     .await;
@@ -1103,16 +1129,8 @@ impl ToolLoopExecutor {
                 window.extend(additions);
                 committed = true;
             }
-            let mut result = values(window)?;
-            if TokenCounter::estimate(&result) > capacity {
-                crate::services::compaction::clear_tool_results(&mut result);
-                anyhow::ensure!(TokenCounter::estimate(&result) <= capacity,
-                    "Context overflow: the admitted inputs and required context exceed the model window");
-                *window = result
-                    .into_iter()
-                    .map(serde_json::from_value)
-                    .collect::<serde_json::Result<_>>()?;
-            }
+            anyhow::ensure!(TokenCounter::estimate(&values(window)?) <= capacity,
+                "Context overflow: the admitted inputs and required context exceed the model window");
             return Ok(committed || microcompact_changed);
         }
 
@@ -1145,8 +1163,8 @@ impl ToolLoopExecutor {
                     "Session changed during compaction"
                 );
                 if cut.prefix_len > 0 {
-                    let mut prefix = self.messages[..cut.prefix_len].to_vec();
-                    prefix.retain(|m| m["origin"] != "memory_change");
+                    snapshot.rows.truncate(cut.prefix_len);
+                    let prefix = snapshot.into_rows(&shard, self.parent_message_id.is_some())?;
                     let text = compressor.window_summary(&prefix, &level).await;
                     shard.commit_compaction_window(&cut, &text.as_str().into())?;
                     gate.committed();
@@ -1154,15 +1172,8 @@ impl ToolLoopExecutor {
                     self.reload_history(&shard)?;
                     *window = render(self, &self.message_additions())?;
                     window.extend(tail);
-                    let mut rebuilt = values(window)?;
-                    if TokenCounter::estimate(&rebuilt) > capacity {
-                        crate::services::compaction::clear_tool_results(&mut rebuilt);
-                        anyhow::ensure!(TokenCounter::estimate(&rebuilt) <= capacity,"Context overflow: the admitted inputs and required context exceed the model window");
-                        *window = rebuilt
-                            .into_iter()
-                            .map(serde_json::from_value)
-                            .collect::<serde_json::Result<_>>()?;
-                    }
+                    anyhow::ensure!(TokenCounter::estimate(&values(window)?) <= capacity,
+                        "Context overflow: the admitted inputs and required context exceed the model window");
                     return Ok(true);
                 }
             }
@@ -1212,13 +1223,11 @@ impl ToolLoopExecutor {
         self.remove_compaction_indexes(&mut rows);
         self.remove_compaction_indexes(&mut suffix);
         if protected.is_some() && TokenCounter::estimate(&suffix) > capacity {
-            crate::services::compaction::clear_tool_results(&mut suffix);
-            if durable_len.is_none() && TokenCounter::estimate(&suffix) > capacity {
+            if durable_len.is_none() {
                 // The summary planner can split an input too large for a normal turn.
                 return Ok(microcompact_changed);
             }
-            anyhow::ensure!(
-                TokenCounter::estimate(&suffix) <= capacity,
+            anyhow::bail!(
                 "Context overflow: the current turn's admitted inputs exceed the model window"
             );
         }
@@ -1279,12 +1288,10 @@ impl ToolLoopExecutor {
                 })
                 .collect();
             if TokenCounter::estimate(&compressed) > capacity {
-                crate::services::compaction::clear_tool_results(&mut compressed);
-                if durable_len.is_none() && TokenCounter::estimate(&compressed) > capacity {
+                if durable_len.is_none() {
                     return Ok(microcompact_changed);
                 }
-                anyhow::ensure!(TokenCounter::estimate(&compressed) <= capacity,
-                    "Context overflow: the admitted inputs and required context exceed the model window");
+                anyhow::bail!("Context overflow: the admitted inputs and required context exceed the model window");
             }
         }
         *window = compressed

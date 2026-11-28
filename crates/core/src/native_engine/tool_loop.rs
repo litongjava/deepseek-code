@@ -7980,7 +7980,6 @@ impl ToolLoopExecutor {
         messages: &[Value],
         additions: &[(Vec<String>, Vec<String>)],
     ) -> Result<Vec<AnthropicMessage>> {
-
         Ok(messages
             .iter()
             .enumerate()

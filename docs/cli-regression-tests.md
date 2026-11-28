@@ -1774,6 +1774,12 @@ For a rejected launch selector, verify the launch prompt reaches neither topic n
 
 For unstamped worker submissions, run `unstamped_worker_adopts_the_authoritative_revision_without_publishing`, `session_worker::added_directory_survives_worker_resume_without_granting_other_sessions`, and `registry_worker_survives_frontend_exit` and `registry_real_frontend_and_worker_share_group` in `local_coordination_registry`. Exercise retained-child routing with `session_messages::resident_owner_resumes_same_child_with_original_provider_after_switch`. Verify the original child’s endpoint and key across the switch and the new child’s endpoint and key after it.
 
+### I38 压缩时合并任务通知与同伴消息
+
+- `cargo test --locked -p deepseek-code-core --test native_compaction compaction_consolidates_only_archived_rows`。用临时会话和本地 Responses 服务逐项比较原生请求与文本回退。核对旧通知、独立任务、用户引用、未完成回合、失败命令与原始行数/字节数；提交边界后用 ContextSearch 搜索原工具结果。
+- `cargo test --locked -p deepseek-code-core --test compaction_history -- first_iteration_peer_delivery anthropic_compaction_clears`。对照普通请求与压缩输入中通知的数量，核对 peer 引文标记、Anthropic 调用与结果配对、多行命令的单行占位，以及阈值边界。
+- 模拟提供商可验证两条路径收到的指令。验证模型实际生成的摘要时，使用包含失败后重试、尚未验证的修复和同伴报告的会话执行 `/compact`，检查 Completed / Verified / Remaining / Not done 四栏、未完成项与逐字诊断、同伴报告的来源。
+
 ### I39 提示建议与主会话缓存
 
 - `cargo test --locked -p deepseek-code-core --lib suggestion::` 验证五分钟时限、缓存未命中、各协议追加消息的格式，以及独立文件的替换、接受、历史校验和删除。`prompt::tests::prune_removes_old_files_and_keeps_recent_ones` 同时检查 30 天清理。
