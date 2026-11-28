@@ -970,7 +970,7 @@ fn a_skill_enabled_mid_session_produces_one_change_reminder_on_the_latest_messag
     )
     .with_context_reminders(vec![first_list.clone()])
     .with_turn_context(vec![entry]);
-    let additions = executor.message_additions();
+    let additions = executor.message_additions(&executor.messages);
     assert_eq!(additions[0].0, vec![first_list]);
     assert!(additions[0].1.is_empty());
     assert!(additions[1].0.is_empty() && additions[1].1.is_empty());

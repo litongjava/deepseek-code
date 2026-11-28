@@ -308,6 +308,14 @@ struct InFlightWindow {
     boundary_len: usize,
 }
 
+type MessageAdditions = (Vec<String>, Vec<String>);
+type WireRowEncoder<M> = fn(&ToolLoopExecutor, &[Value], &[MessageAdditions]) -> Result<Vec<M>>;
+
+struct RenderedHistory<M> {
+    normalized: Vec<Value>,
+    wire_rows: Vec<M>,
+}
+
 pub struct ToolLoopExecutor {
     /// Selected model including a virtual context suffix omitted from the wire ID.
     pub(super) model_selector: String,
@@ -3814,11 +3822,7 @@ impl ToolLoopExecutor {
     /// Text blocks to place before and after each message's own content: the
     /// context reminders open the first user message, and recorded turn
     /// context follows the message it was recorded for.
-    fn message_additions(&self) -> Vec<(Vec<String>, Vec<String>)> {
-        self.message_additions_for(&self.messages)
-    }
-
-    fn message_additions_for(&self, messages: &[Value]) -> Vec<(Vec<String>, Vec<String>)> {
+    fn message_additions(&self, messages: &[Value]) -> Vec<MessageAdditions> {
         let target = (!self.context_reminders.is_empty())
             .then(|| {
                 messages
@@ -6179,7 +6183,7 @@ impl ToolLoopExecutor {
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
-                    Self::render_anthropic_messages,
+                    Self::render_anthropic_rows,
                 ))
                 .await?
                 {
@@ -6208,7 +6212,7 @@ impl ToolLoopExecutor {
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,
-                Self::render_anthropic_messages,
+                Self::render_anthropic_rows,
             ))
             .await?
             {
@@ -7055,7 +7059,7 @@ impl ToolLoopExecutor {
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
-                    Self::render_openai_messages,
+                    Self::render_openai_rows,
                 ))
                 .await?
                 {
@@ -7084,7 +7088,7 @@ impl ToolLoopExecutor {
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,
-                Self::render_openai_messages,
+                Self::render_openai_rows,
             ))
             .await?
             {
@@ -7950,10 +7954,20 @@ impl ToolLoopExecutor {
         Ok((full_text, stop_reason))
     }
 
-    fn prepare_history_rows(&self, rows: &[Value]) -> Result<Vec<Value>> {
-        let mut messages = multimodal::normalize_messages(rows)?;
-        self.render_history(&mut messages)?;
-        Ok(messages)
+    fn render_canonical_history<M>(
+        &self,
+        canonical: &[Value],
+        encode: WireRowEncoder<M>,
+    ) -> Result<RenderedHistory<M>> {
+        // Saved turn context is keyed by the original content and its occurrence.
+        let additions = self.message_additions(canonical);
+        let mut normalized = multimodal::normalize_messages(canonical)?;
+        self.render_history(&mut normalized)?;
+        let wire_rows = encode(self, &normalized, &additions)?;
+        Ok(RenderedHistory {
+            normalized,
+            wire_rows,
+        })
     }
 
     fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
@@ -7965,20 +7979,15 @@ impl ToolLoopExecutor {
                 .map(serde_json::from_value)
                 .collect::<serde_json::Result<_>>()?);
         }
-        self.render_anthropic_messages(&self.message_additions())
-    }
-
-    fn render_anthropic_messages(
-        &self,
-        additions: &[(Vec<String>, Vec<String>)],
-    ) -> Result<Vec<AnthropicMessage>> {
-        self.render_anthropic_rows(&self.prepare_history_rows(&self.messages)?, additions)
+        Ok(self
+            .render_canonical_history(&self.messages, Self::render_anthropic_rows)?
+            .wire_rows)
     }
 
     fn render_anthropic_rows(
         &self,
         messages: &[Value],
-        additions: &[(Vec<String>, Vec<String>)],
+        additions: &[MessageAdditions],
     ) -> Result<Vec<AnthropicMessage>> {
         Ok(messages
             .iter()
@@ -8086,20 +8095,15 @@ impl ToolLoopExecutor {
                 .map(serde_json::from_value)
                 .collect::<serde_json::Result<_>>()?);
         }
-        self.render_openai_messages(&self.message_additions())
-    }
-
-    fn render_openai_messages(
-        &self,
-        additions: &[(Vec<String>, Vec<String>)],
-    ) -> Result<Vec<OpenAIMessage>> {
-        self.render_openai_rows(&self.prepare_history_rows(&self.messages)?, additions)
+        Ok(self
+            .render_canonical_history(&self.messages, Self::render_openai_rows)?
+            .wire_rows)
     }
 
     fn render_openai_rows(
         &self,
         messages: &[Value],
-        additions: &[(Vec<String>, Vec<String>)],
+        additions: &[MessageAdditions],
     ) -> Result<Vec<OpenAIMessage>> {
         // Responses accepts content arrays for user messages, so the stable
         // instruction blocks stay separate for caching. Chat Completions keeps

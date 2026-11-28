@@ -477,7 +477,7 @@ impl ToolLoopExecutor {
         current_text: &str,
         window: &mut Vec<M>,
         durable_len: usize,
-        render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
+        encode: WireRowEncoder<M>,
     ) -> Result<MidTurnCompact> {
         // Pressure on a host window is handled by replay_window, which can
         // compact in memory without committing a boundary over unrelated rows.
@@ -529,7 +529,9 @@ impl ToolLoopExecutor {
         let mut snapshot = CompactionHistory::default();
         let (_, microcompact_changed, _) =
             self.reload_with_cut(&shard, false, Some(&mut snapshot))?;
-        *window = render(self, &self.message_additions())?;
+        *window = self
+            .render_canonical_history(&self.messages, encode)?
+            .wire_rows;
         window.extend(additions.clone());
 
         if microcompact_changed {
@@ -719,7 +721,9 @@ impl ToolLoopExecutor {
 
         self.reload_history(&shard)?;
         self.mid_turn_continuation_cue = true;
-        *window = render(self, &self.message_additions())?;
+        *window = self
+            .render_canonical_history(&self.messages, encode)?
+            .wire_rows;
         self.mid_turn_continuation_cue = false;
         let is_native_boundary = self
             .messages
@@ -760,6 +764,16 @@ impl ToolLoopExecutor {
         }
     }
 
+    fn text_summary_input<M: serde::Serialize>(
+        &self,
+        canonical: &[Value],
+        encode: WireRowEncoder<M>,
+    ) -> Result<(Vec<Value>, super::super::followup::WireRequest)> {
+        let rendered = self.render_canonical_history(canonical, encode)?;
+        let wire = self.build_mid_turn_summary_wire(&rendered.wire_rows)?;
+        Ok((rendered.normalized, wire))
+    }
+
     /// The native endpoint and its fallback serialize the same frozen rows.
     /// Text-only providers retain their normal turn wire for cache-prefix replay.
     pub(in crate::native_engine) async fn generate_compaction_snapshot(
@@ -774,27 +788,23 @@ impl ToolLoopExecutor {
     ) -> Result<crate::services::compaction::GeneratedSummary> {
         use crate::services::compaction::{checkpoint::Checkpoint, native, STATE_INSTRUCTIONS};
         let system = format!("{system}\n\n{STATE_INSTRUCTIONS}");
-        let rows = history.into_rows(shard, self.parent_message_id.is_some())?;
-        let mut rows = if native_transport {
-            multimodal::normalize_messages(&rows)?
-        } else {
-            self.prepare_history_rows(&rows)?
-        };
+        let canonical = history.into_rows(shard, self.parent_message_id.is_some())?;
         let selected = shard.scoped_stores();
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
             shard.clone(),
         ));
-        let (mut wire, native_result) = if !native_transport {
-            let additions = self.message_additions_for(&rows);
-            let wire = match self.provider.provider.api_format {
-                ApiFormat::Anthropic => self
-                    .build_mid_turn_summary_wire(&self.render_anthropic_rows(&rows, &additions)?)?,
+        let (mut rows, mut wire, native_result) = if !native_transport {
+            let (rows, wire) = match self.provider.provider.api_format {
+                ApiFormat::Anthropic => {
+                    self.text_summary_input(&canonical, Self::render_anthropic_rows)?
+                }
                 ApiFormat::OpenAI => {
-                    self.build_mid_turn_summary_wire(&self.render_openai_rows(&rows, &additions)?)?
+                    self.text_summary_input(&canonical, Self::render_openai_rows)?
                 }
             };
-            (wire, None)
+            (rows, wire, None)
         } else {
+            let mut rows = multimodal::normalize_messages(&canonical)?;
             // Durable rows lack the user-role host prefix used on main requests.
             // In-flight rows are already rendered, including this prefix.
             if self.in_flight_window.is_none() {
@@ -818,7 +828,7 @@ impl ToolLoopExecutor {
                 options.clone(),
             )
             .await;
-            (wire, Some(result))
+            (rows, wire, Some(result))
         };
         let summary = async {
             wire.allow_text_summary();
@@ -898,7 +908,7 @@ impl ToolLoopExecutor {
         window: &mut Vec<M>,
         durable_len: Option<usize>,
         mid_turn_managed: bool,
-        render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
+        encode: WireRowEncoder<M>,
     ) -> Result<bool> {
         if let Some(cause) = gate.blocking_failure() {
             self.check_uncompressed_request(&cause, window).await?;
@@ -980,7 +990,9 @@ impl ToolLoopExecutor {
                 self.reload_with_cut(&shard, true, Some(&mut snapshot))?;
             physical_cut = cut;
             microcompact_changed = changed;
-            *window = render(self, &self.message_additions())?;
+            *window = self
+                .render_canonical_history(&self.messages, encode)?
+                .wire_rows;
             persisted_len = window.len();
             // An explicit request can carry a window that the durable shard does
             // not contain (for example a replayed conversation). Compact that
@@ -1131,7 +1143,9 @@ impl ToolLoopExecutor {
                 }
                 let additions = window.split_off(persisted_len);
                 self.reload_history(&shard)?;
-                *window = render(self, &self.message_additions())?;
+                *window = self
+                    .render_canonical_history(&self.messages, encode)?
+                    .wire_rows;
                 window.extend(additions);
                 committed = true;
             }
@@ -1184,7 +1198,9 @@ impl ToolLoopExecutor {
                     gate.committed();
                     let tail = window.split_off(persisted_len);
                     self.reload_history(&shard)?;
-                    *window = render(self, &self.message_additions())?;
+                    *window = self
+                        .render_canonical_history(&self.messages, encode)?
+                        .wire_rows;
                     window.extend(tail);
                     let mut rebuilt = values(window)?;
                     if TokenCounter::estimate(&rebuilt) > capacity {

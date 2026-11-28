@@ -18,6 +18,9 @@ mod bedrock;
 #[path = "compaction_history/notices.rs"]
 mod notices;
 
+#[path = "compaction_history/rendering.rs"]
+mod rendering;
+
 struct Fixture {
     root: tempfile::TempDir,
     paths: RuntimePaths,
