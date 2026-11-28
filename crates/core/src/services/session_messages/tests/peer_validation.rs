@@ -11,7 +11,7 @@ use std::{
 
 fn install_lookup(
     owner: &Consumer,
-    lookup: impl Fn(&Path) -> Result<GitDirs> + Send + Sync + 'static,
+    lookup: impl Fn(&Path, Instant) -> Result<GitDirs> + Send + Sync + 'static,
 ) {
     owner
         .delivery
@@ -59,8 +59,8 @@ fn trusted_folder_retargeted_during_preparation_blocks_the_claim() {
         .unwrap()
         .unwrap();
     let changed = AtomicBool::new(false);
-    install_lookup(&owner, move |cwd| {
-        let dirs = GitDirs::lookup(cwd)?;
+    install_lookup(&owner, move |cwd, deadline| {
+        let dirs = GitDirs::lookup(cwd, deadline)?;
         // Both endpoints passed folder canonicalization before the sender lookup.
         if !changed.swap(true, Ordering::SeqCst) {
             fs::rename(&folder, &moved)?;
@@ -98,8 +98,8 @@ fn hook_directory_recreated_after_recipient_preparation_blocks_the_claim() {
         .unwrap()
         .unwrap();
     let changed = AtomicBool::new(false);
-    install_lookup(&owner, move |cwd| {
-        let dirs = GitDirs::lookup(cwd)?;
+    install_lookup(&owner, move |cwd, deadline| {
+        let dirs = GitDirs::lookup(cwd, deadline)?;
         if !changed.swap(true, Ordering::SeqCst) {
             fs::rename(&hook, hook.with_extension("old"))?;
             fs::create_dir(&hook)?;
@@ -117,31 +117,42 @@ fn hook_directory_recreated_after_recipient_preparation_blocks_the_claim() {
     assert_blocked(&context, &store, &recipient, &message);
 }
 
+fn queue_nine_managed_senders(
+    ctx: &ServiceContext,
+    store: &SessionStore,
+    first: &str,
+    recipient: &str,
+) -> Vec<(Message, PathBuf)> {
+    (0..9)
+        .map(|i| {
+            let sender = if i == 0 {
+                first.to_owned()
+            } else {
+                store.fork(recipient).unwrap()
+            };
+            let path = bind_managed_worktree(ctx, store, &sender);
+            let message = send(ctx, &sender, recipient, &format!("sender {i}")).unwrap();
+            (message, path)
+        })
+        .collect()
+}
+
 #[test]
 fn a_cold_one_message_drain_resolves_only_the_first_of_nine_senders() {
     let (_temp, context, store, first, recipient) = fixture();
     let source = store
         .workspace(&recipient, &context.paths.data_dir.join("data/workspaces"))
         .unwrap();
-    let mut paths = Vec::new();
-    for index in 0..9 {
-        let sender = if index == 0 {
-            first.clone()
-        } else {
-            store.fork(&recipient).unwrap()
-        };
-        paths.push(bind_managed_worktree(&context, &store, &sender));
-        send(&context, &sender, &recipient, &format!("sender {index}")).unwrap();
-    }
+    let messages = queue_nine_managed_senders(&context, &store, &first, &recipient);
     let owner = Consumer::attach(&context.paths.data_dir, &recipient)
         .unwrap()
         .unwrap();
     let lookups = Arc::new(Mutex::new(Vec::new()));
     let calls = lookups.clone();
-    install_lookup(&owner, move |cwd| {
+    install_lookup(&owner, move |cwd, deadline| {
         calls.lock().unwrap().push(cwd.to_path_buf());
         std::thread::sleep(Duration::from_millis(300));
-        GitDirs::lookup(cwd)
+        GitDirs::lookup(cwd, deadline)
     });
     let started = Instant::now();
     let inputs = owner.target.drain(1).unwrap();
@@ -153,7 +164,7 @@ fn a_cold_one_message_drain_resolves_only_the_first_of_nine_senders() {
     );
     assert_eq!(inputs.len(), 1);
     assert!(inputs[0].contains("sender 0"));
-    assert_eq!(calls.as_slice(), &[paths[0].clone(), source]);
+    assert_eq!(calls.as_slice(), &[messages[0].1.clone(), source]);
     let rows = inbox(&context, &recipient, false).unwrap();
     assert_eq!(rows.iter().filter(|m| m.state == "queued").count(), 8);
     assert_eq!(store.history(&recipient).unwrap().len(), 1);
@@ -172,9 +183,9 @@ fn the_remaining_byte_budget_skips_the_next_sender_lookup() {
         .unwrap();
     let lookups = Arc::new(Mutex::new(Vec::new()));
     let calls = lookups.clone();
-    install_lookup(&owner, move |cwd| {
+    install_lookup(&owner, move |cwd, deadline| {
         calls.lock().unwrap().push(cwd.to_path_buf());
-        GitDirs::lookup(cwd)
+        GitDirs::lookup(cwd, deadline)
     });
     assert_eq!(owner.target.drain(8).unwrap().len(), 1);
     assert!(lookups.lock().unwrap().is_empty());
@@ -192,11 +203,11 @@ fn a_lookup_timeout_defers_without_blocking_or_claiming_the_message() {
         .unwrap()
         .unwrap();
     let first = AtomicBool::new(true);
-    install_lookup(&owner, move |cwd| {
+    install_lookup(&owner, move |cwd, deadline| {
         if first.swap(false, Ordering::SeqCst) {
             return Err(GitLookupTimeout.into());
         }
-        GitDirs::lookup(cwd)
+        GitDirs::lookup(cwd, deadline)
     });
     assert!(owner.target.drain(1).unwrap().is_empty());
     let row = context
@@ -259,7 +270,9 @@ fn a_cold_receipt_only_recovery_acks_without_resolving_either_endpoint() {
         .unwrap()
         .unwrap();
     let recovered = attach();
-    install_lookup(&recovered, |_| panic!("receipt-only recovery started Git"));
+    install_lookup(&recovered, |_, _| {
+        panic!("receipt-only recovery started Git")
+    });
     assert!(recovered.target.drain(1).unwrap().is_empty());
     assert_eq!(
         inbox(&context, &recipient, false).unwrap()[0].state,
@@ -305,8 +318,8 @@ fn retargeting_the_recipient_gitfile_within_one_repository_blocks_the_claim() {
     let owner = Consumer::attach(&context.paths.data_dir, &recipient)
         .unwrap()
         .unwrap();
-    install_lookup(&owner, move |cwd| {
-        let dirs = GitDirs::lookup(cwd)?;
+    install_lookup(&owner, move |cwd, deadline| {
+        let dirs = GitDirs::lookup(cwd, deadline)?;
         if cwd == from {
             fs::copy(from.join(".git"), to.join(".git"))?;
         }
@@ -334,9 +347,14 @@ fn check_discovery_environment(redirect: bool) -> Result<()> {
                 Some("Git directory override in effect: peer identity cannot be verified")
             );
             assert!(store.history(&recipient)?.is_empty());
-            let (generation, consumers): (Option<i64>,i64) = ctx.db.fixture_directory(|c| c.query_row(
-                "SELECT generation,(SELECT count(*) FROM session_inbox_consumers WHERE session_id=?1) FROM session_inbox WHERE recipient=?1",
-                [&recipient],|r| Ok((r.get(0)?,r.get(1)?))))??;
+            let (generation, consumers): (Option<i64>, i64) = ctx.db.fixture_directory(|c| {
+                c.query_row(
+                    "SELECT generation, (SELECT count(*) FROM session_inbox_consumers WHERE session_id=?1)
+                     FROM session_inbox WHERE recipient=?1",
+                    [&recipient],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })??;
             assert_eq!((generation, consumers), (None, 0));
             let sender = &row.sender;
             let err = send(&ctx, sender, &recipient, "another message").unwrap_err();
@@ -395,4 +413,91 @@ fn directory_redirects_block_managed_peers_before_any_claim() -> Result<()> {
 #[test]
 fn cross_filesystem_discovery_still_delivers_once() -> Result<()> {
     check_discovery_environment(false)
+}
+
+#[test]
+fn one_preparation_budget_bounds_eight_candidates_and_retries_the_rest_once() -> Result<()> {
+    use std::collections::HashSet;
+    let (_temp, ctx, store, first, recipient) = fixture();
+    let messages = queue_nine_managed_senders(&ctx, &store, &first, &recipient);
+    let owner = Consumer::attach(&ctx.paths.data_dir, &recipient)?.unwrap();
+    let clipped = Arc::new(AtomicBool::new(false));
+    let saw_short_deadline = clipped.clone();
+    install_lookup(&owner, move |cwd, end| {
+        let delay = Duration::from_millis(700);
+        let remaining = end.saturating_duration_since(Instant::now());
+        if remaining < delay {
+            saw_short_deadline.store(true, Ordering::Relaxed);
+        }
+        std::thread::sleep(delay.min(remaining));
+        // Use the production runner with the original deadline, including the
+        // part already spent waiting on simulated Git latency.
+        GitDirs::lookup(cwd, end)
+    });
+
+    let mut delivered = HashSet::new();
+    for poll in 1..=10 {
+        let start = Instant::now();
+        let inputs = owner
+            .delivery
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .poll_turn(true, 8)?;
+        let wall = start.elapsed();
+        eprintln!(
+            "engine poll {poll}: elapsed={wall:?} delivered={}",
+            inputs.len()
+        );
+        if poll == 1 {
+            assert!(wall < Duration::from_millis(3500), "{wall:?}");
+            assert!((1..8).contains(&inputs.len()));
+            assert!(
+                clipped.load(Ordering::Relaxed),
+                "no lookup received the partial remaining budget"
+            );
+        }
+        for input in inputs {
+            assert!(
+                delivered.insert(input.message_id.unwrap()),
+                "duplicate peer delivery"
+            );
+        }
+        let (rows, owner_generation) = ctx.db.fixture_directory(|c| -> rusqlite::Result<_> {
+            let mut query = c.prepare(
+                "SELECT id,state,generation,blocked_reason FROM session_inbox WHERE recipient=?1 ORDER BY rowid",
+            )?;
+            let rows = query.query_map([&recipient], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?, r.get::<_, Option<String>>(3)?))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let generation: i64 = c.query_row(
+                "SELECT generation FROM session_inbox_consumers WHERE session_id=?1",
+                [&recipient], |r| r.get(0),
+            )?;
+            Ok((rows, generation))
+        })??;
+        assert_eq!(rows.len(), messages.len());
+        assert_eq!(owner_generation as usize, delivered.len());
+        for (i, (id, state, generation, reason)) in rows.into_iter().enumerate() {
+            assert_eq!(id, messages[i].0.id);
+            assert!(reason.is_none());
+            if delivered.contains(&id) {
+                assert_eq!(state, "context_committed");
+                assert_eq!(generation, Some(i as i64 + 1));
+            } else {
+                assert_eq!(state, "queued");
+                assert_eq!(generation, None);
+            }
+        }
+        assert_eq!(store.history(&recipient)?.len(), delivered.len());
+        if delivered.len() == messages.len() {
+            break;
+        }
+    }
+    assert_eq!(delivered.len(), 9);
+    assert!(owner.target.drain(8)?.is_empty());
+    assert_eq!(store.history(&recipient)?.len(), 9);
+    Ok(())
 }

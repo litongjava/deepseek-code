@@ -12,7 +12,12 @@ use session_messages::identity::{
     GitDirectoryOverride, GitLookupTimeout, PeerProject, Resolver, GIT_OVERRIDE_REASON,
 };
 use sha2::{Digest, Sha256};
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -749,6 +754,34 @@ struct Claim {
 }
 pub(crate) const TURN_POLL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Identity preparation pauses the discovery clock. Every preflight in this
+/// poll draws from one allowance, including work on a candidate that defers.
+struct PeerPollBudget {
+    discovery_until: Instant,
+    preparation_left: Duration,
+}
+
+impl PeerPollBudget {
+    fn new(discovery_wait: Duration) -> Self {
+        Self {
+            discovery_until: Instant::now() + discovery_wait,
+            preparation_left: Duration::from_millis(2500),
+        }
+    }
+
+    fn prepare<T>(&mut self, lookup: impl FnOnce(Instant) -> Result<T>) -> Result<T> {
+        if self.preparation_left.is_zero() {
+            return Err(GitLookupTimeout.into());
+        }
+        let start = Instant::now();
+        let result = lookup(start + self.preparation_left);
+        let spent = start.elapsed();
+        self.preparation_left = self.preparation_left.saturating_sub(spent);
+        self.discovery_until += spent;
+        result
+    }
+}
+
 /// Bound each writer acquisition for live delivery. Resolving memory,
 /// hashing files and flushing a committed WAL can each outlast a poll interval.
 fn write_wait(until: std::time::Instant, live: bool) -> std::time::Duration {
@@ -931,8 +964,8 @@ impl DeliveryOwner {
     }
     pub fn next_peer(&mut self) -> Result<Option<Handoff>> {
         let mut batch = self.peer_candidates(1)?;
-        let mut until = std::time::Instant::now() + super::WRITE_DEADLINE;
-        self.peer_before(&mut batch, usize::MAX, &mut until, false, false)
+        let mut budget = PeerPollBudget::new(super::WRITE_DEADLINE);
+        self.peer_before(&mut batch, usize::MAX, &mut budget, false, false)
     }
 
     fn peer_candidates(&self, limit: usize) -> Result<std::vec::IntoIter<PeerCandidate>> {
@@ -971,7 +1004,7 @@ impl DeliveryOwner {
         &mut self,
         batch: &mut std::vec::IntoIter<PeerCandidate>,
         max_bytes: usize,
-        until: &mut std::time::Instant,
+        budget: &mut PeerPollBudget,
         live: bool,
         validate_recipient: bool,
     ) -> Result<Option<Handoff>> {
@@ -983,7 +1016,7 @@ impl DeliveryOwner {
             blocked,
         } in batch.by_ref()
         {
-            if std::time::Instant::now() >= *until {
+            if std::time::Instant::now() >= budget.discovery_until {
                 return Ok(None);
             }
             if size > max_bytes {
@@ -994,16 +1027,16 @@ impl DeliveryOwner {
                 // previously committed body to this public consumer still needs
                 // the same recipient authorization as a fresh public delivery.
                 if validate_recipient && self.live_handoffs.contains_key(&claim.id) {
-                    let budget = until.saturating_duration_since(std::time::Instant::now());
-                    match s.validate_peer_endpoint(&mut self.peer_resolver) {
+                    match budget
+                        .prepare(|end| s.validate_peer_endpoint(&mut self.peer_resolver, Some(end)))
+                    {
                         Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
                         result => result?,
                     }
-                    *until = std::time::Instant::now() + budget;
                 }
                 // The authorized generation already committed its local effect.
                 // Its frozen claim is sufficient for the acknowledgement CAS.
-                return self.complete(claim, *until, live).map(Some);
+                return self.complete(claim, budget.discovery_until, live).map(Some);
             }
             if blocked {
                 // Rotate bounded rechecks so an unchanged blocked row cannot
@@ -1011,28 +1044,27 @@ impl DeliveryOwner {
                 self.blocked_cursor = rowid;
             }
             let sender_id = claim.sender.as_deref().expect("peer claim has a sender");
-            // Start this candidate's writer deadline after its potentially slow
-            // identity lookup, carrying only the unused part of the batch budget.
-            let budget = until.saturating_duration_since(std::time::Instant::now());
-            let prepare = |c: &Connection| {
-                let recipient = self.peer_resolver.project(c, &s.id);
-                let recipient = if validate_recipient {
-                    Some(recipient?)
+            let projects = budget.prepare(|end| {
+                let prepare = |c: &Connection| {
+                    let recipient = self.peer_resolver.project(c, &s.id, Some(end));
+                    let recipient = if validate_recipient {
+                        Some(recipient?)
+                    } else {
+                        authorized_project(recipient)?
+                    };
+                    let Some(recipient) = recipient else {
+                        return Ok(None);
+                    };
+                    let sender =
+                        authorized_project(self.peer_resolver.project(c, sender_id, Some(end)))?;
+                    Ok(sender.map(|sender| (recipient, sender)))
+                };
+                if validate_recipient {
+                    s.read_peer_endpoint(prepare)
                 } else {
-                    authorized_project(recipient)?
-                };
-                let Some(recipient) = recipient else {
-                    return Ok(None);
-                };
-                let sender = authorized_project(self.peer_resolver.project(c, sender_id))?;
-                Ok(sender.map(|sender| (recipient, sender)))
-            };
-            let projects = if validate_recipient {
-                s.read_peer_endpoint(prepare)
-            } else {
-                s.stores.global().read(prepare)
-            };
-            *until = std::time::Instant::now() + budget;
+                    s.stores.global().read(prepare)
+                }
+            });
             const TRUST_CHANGED: &str = "Sender or recipient project/trust changed";
             let (projects, preflight_reason) = match projects {
                 Ok(value) => (value, TRUST_CHANGED),
@@ -1040,7 +1072,7 @@ impl DeliveryOwner {
                 Err(e) if e.is::<GitDirectoryOverride>() => (None, GIT_OVERRIDE_REASON),
                 Err(e) => return Err(e),
             };
-            let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
+            let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, budget.discovery_until.saturating_duration_since(std::time::Instant::now()), |c| {
                 let sender_live: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM session_inbox i JOIN conversations c ON c.id=i.sender AND c.incarnation=i.sender_incarnation WHERE i.id=?1)", [&claim.id], |r| r.get(0))?;
                 if !sender_live {
                     c.execute("UPDATE session_inbox SET state='undeliverable',blocked_reason='Sender retired before local delivery' WHERE id=?1", [&claim.id])?;
@@ -1079,7 +1111,7 @@ impl DeliveryOwner {
                 continue;
             };
             claim.revision = generation;
-            return self.complete(claim, *until, live).map(Some);
+            return self.complete(claim, budget.discovery_until, live).map(Some);
         }
         Ok(None)
     }
@@ -1113,23 +1145,26 @@ impl DeliveryOwner {
         } else {
             None
         };
+        let mut budget = PeerPollBudget::new(TURN_POLL_WAIT);
         if validate_recipient && peer_batch.as_ref().is_some_and(|batch| batch.len() == 0) {
-            match self.session.validate_peer_endpoint(&mut self.peer_resolver) {
+            match budget.prepare(|end| {
+                self.session
+                    .validate_peer_endpoint(&mut self.peer_resolver, Some(end))
+            }) {
                 Err(e) if e.is::<GitLookupTimeout>() => return Ok(Vec::new()),
                 result => result?,
             }
         }
-        let mut until = std::time::Instant::now() + TURN_POLL_WAIT;
         let mut remaining = 128 * 1024;
         let mut inputs = Vec::new();
         for _ in 0..limit.min(8) {
-            if peers && std::time::Instant::now() >= until {
+            if peers && Instant::now() >= budget.discovery_until {
                 break;
             }
             let next = if let Some(batch) = &mut peer_batch {
-                self.peer_before(batch, remaining, &mut until, true, validate_recipient)
+                self.peer_before(batch, remaining, &mut budget, true, validate_recipient)
             } else {
-                self.queue_before(QueueMode::Steer, None, until, true, None)
+                self.queue_before(QueueMode::Steer, None, budget.discovery_until, true, None)
             };
             let handoff = match next {
                 Ok(Some(value)) => value,

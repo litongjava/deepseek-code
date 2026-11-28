@@ -48,7 +48,9 @@ fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 pub(crate) fn project(conn: &Connection, id: &str) -> Result<String> {
-    Ok(identity::Resolver::default().project(conn, id)?.source)
+    Ok(identity::Resolver::default()
+        .project(conn, id, None)?
+        .source)
 }
 pub(crate) fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -647,7 +649,7 @@ impl Consumer {
         let Some(row)=ctx.db.conversation_metadata(id)? else {return Ok(None);};
         if row.workspace_mode!="code" || row.project_id.is_none(){return Ok(None);}
         let session=ctx.db.open_session(id)?;
-        session.validate_peer_endpoint(&mut identity::Resolver::default())?;
+        session.validate_peer_endpoint(&mut identity::Resolver::default(), None)?;
         let delivery=std::sync::Arc::new(std::sync::Mutex::new(Some(session.delivery_owner()?)));
         Ok(Some(Self{owner:std::process::id(), target:Target{generation:std::process::id(),live:std::sync::Arc::downgrade(&delivery)},delivery}))
     }
@@ -1799,14 +1801,14 @@ mod tests {
         let lookups = Arc::new(AtomicUsize::new(0));
         let calls = lookups.clone();
         let probe = context.clone();
-        let resolver = identity::Resolver::new(move |cwd| {
+        let resolver = identity::Resolver::new(move |cwd, deadline| {
             // The caller must allow another connection to take the directory writer.
             let (release, holder) = hold_writer(&probe);
             std::thread::sleep(std::time::Duration::from_millis(300));
             release.send(()).unwrap();
             holder.join().unwrap();
             calls.fetch_add(1, Ordering::Relaxed);
-            identity::GitDirs::lookup(cwd)
+            identity::GitDirs::lookup(cwd, deadline)
         });
         owner
             .delivery
@@ -1873,8 +1875,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let db = context.db.clone();
-        let resolver = identity::Resolver::new(move |cwd| {
-            let common = identity::GitDirs::lookup(cwd)?;
+        let resolver = identity::Resolver::new(move |cwd, deadline| {
+            let common = identity::GitDirs::lookup(cwd, deadline)?;
             // Another host commits a new mapping after this lookup has started.
             let db = db.clone();
             let session = sender.clone();

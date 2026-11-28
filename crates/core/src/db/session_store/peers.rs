@@ -67,8 +67,9 @@ impl super::SessionDb {
     pub(crate) fn validate_peer_endpoint(
         &self,
         resolver: &mut session_messages::identity::Resolver,
+        prepare_until: Option<std::time::Instant>,
     ) -> Result<()> {
-        self.read_peer_endpoint(|c| resolver.project(c, self.id()).map(drop))
+        self.read_peer_endpoint(|c| resolver.project(c, self.id(), prepare_until).map(drop))
     }
 
     pub(super) fn read_peer_endpoint<T>(

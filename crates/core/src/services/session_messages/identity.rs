@@ -17,6 +17,7 @@ use std::{
 };
 
 const CACHE_CAPACITY: usize = 64;
+const GIT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const REDIRECTS: [&str; 3] = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"];
 
 pub(crate) const GIT_OVERRIDE_REASON: &str =
@@ -44,7 +45,7 @@ pub(crate) struct GitDirs {
 }
 
 impl GitDirs {
-    pub(crate) fn lookup(cwd: &Path) -> Result<Self> {
+    pub(crate) fn lookup(cwd: &Path, deadline: Instant) -> Result<Self> {
         let mut command = session::git_command(
             cwd,
             &[
@@ -58,7 +59,7 @@ impl GitDirs {
         for key in REDIRECTS {
             command.env_remove(key);
         }
-        let output = git_output(&mut command, Duration::from_secs(2))?;
+        let output = git_output(&mut command, deadline)?;
         let mut lines = std::str::from_utf8(&output)?.lines();
         let common = Path::new(lines.next().context("Git returned no common directory")?);
         let git = Path::new(lines.next().context("Git returned no Git directory")?);
@@ -73,11 +74,13 @@ impl GitDirs {
     }
 }
 
-fn git_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>> {
+fn git_output(command: &mut Command, until: Instant) -> Result<Vec<u8>> {
     // A regular output file lets us wait on just the owned process. A wrapper
     // that leaves a descendant holding stdout cannot stall a pipe reader.
     let mut output = tempfile::tempfile()?;
-    let until = Instant::now() + timeout;
+    if Instant::now() >= until {
+        return Err(GitLookupTimeout.into());
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -92,7 +95,11 @@ fn git_output(command: &mut Command, timeout: Duration) -> Result<Vec<u8>> {
                 );
                 break;
             }
-            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) if Instant::now() < until => std::thread::sleep(
+                until
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(5)),
+            ),
             result => {
                 let _ = child.kill();
                 child.wait()?;
@@ -274,7 +281,7 @@ impl PeerProject {
 }
 
 pub(crate) struct Resolver {
-    lookup: Box<dyn Fn(&Path) -> Result<GitDirs> + Send + Sync>,
+    lookup: Box<dyn Fn(&Path, Instant) -> Result<GitDirs> + Send + Sync>,
     verified: VecDeque<(PathBuf, GitKey)>,
 }
 
@@ -285,14 +292,16 @@ impl Default for Resolver {
 }
 
 impl Resolver {
-    pub(crate) fn new(lookup: impl Fn(&Path) -> Result<GitDirs> + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(
+        lookup: impl Fn(&Path, Instant) -> Result<GitDirs> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             lookup: Box::new(lookup),
             verified: VecDeque::new(),
         }
     }
 
-    fn resolve_git(&mut self, path: &Path) -> Result<GitKey> {
+    fn resolve_git(&mut self, path: &Path, prepare_until: Option<Instant>) -> Result<GitKey> {
         let before = GitKey::read(path);
         if let Some(index) = self.verified.iter().position(|(cwd, _)| cwd == path) {
             let (cwd, cached) = self.verified.remove(index).expect("existing cache entry");
@@ -307,7 +316,13 @@ impl Resolver {
         {
             return before;
         }
-        let actual = (self.lookup)(path)?;
+        let now = Instant::now();
+        let call_deadline = now + GIT_LOOKUP_TIMEOUT;
+        let deadline = prepare_until.map_or(call_deadline, |end| end.min(call_deadline));
+        if now >= deadline {
+            return Err(GitLookupTimeout.into());
+        }
+        let actual = (self.lookup)(path, deadline)?;
         let key = GitKey::read(path)?;
         ensure!(
             before? == key && actual == key.dirs,
@@ -322,11 +337,16 @@ impl Resolver {
         Ok(key)
     }
 
-    pub(crate) fn project(&mut self, conn: &Connection, id: &str) -> Result<PeerProject> {
+    pub(crate) fn project(
+        &mut self,
+        conn: &Connection,
+        id: &str,
+        prepare_until: Option<Instant>,
+    ) -> Result<PeerProject> {
         let binding = ProjectBinding::read(conn, id)?;
         let mut git_keys = Vec::new();
         let source = binding.validate_source(|cwd| {
-            let key = self.resolve_git(cwd)?;
+            let key = self.resolve_git(cwd, prepare_until)?;
             let common = key.dirs.common.clone();
             git_keys.push((cwd.to_owned(), key));
             Ok(common)
@@ -344,7 +364,10 @@ impl Resolver {
         from: &str,
         to: &str,
     ) -> Result<(PeerProject, PeerProject)> {
-        Ok((self.project(conn, from)?, self.project(conn, to)?))
+        Ok((
+            self.project(conn, from, None)?,
+            self.project(conn, to, None)?,
+        ))
     }
 }
 
@@ -362,7 +385,7 @@ mod tests {
             .arg(path)
             .status()?
             .success());
-        GitDirs::lookup(path)
+        GitDirs::lookup(path, Instant::now() + GIT_LOOKUP_TIMEOUT)
     }
 
     #[test]
@@ -375,12 +398,12 @@ mod tests {
         repo(&other)?;
         let calls = Arc::new(AtomicUsize::new(0));
         let lookups = calls.clone();
-        let mut resolver = Resolver::new(move |_| {
+        let mut resolver = Resolver::new(move |_, _| {
             lookups.fetch_add(1, Ordering::Relaxed);
             Ok(actual.clone())
         });
-        assert!(resolver.resolve_git(&no_marker).is_err());
-        assert!(resolver.resolve_git(&other).is_err());
+        assert!(resolver.resolve_git(&no_marker, None).is_err());
+        assert!(resolver.resolve_git(&other, None).is_err());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert!(resolver.verified.is_empty());
         Ok(())
@@ -396,17 +419,17 @@ mod tests {
         fs::write(tree.join(".git"), &link)?;
         let lookups = Arc::new(AtomicUsize::new(0));
         let calls = lookups.clone();
-        let mut resolver = Resolver::new(move |cwd| {
+        let mut resolver = Resolver::new(move |cwd, deadline| {
             calls.fetch_add(1, Ordering::Relaxed);
-            GitDirs::lookup(cwd)
+            GitDirs::lookup(cwd, deadline)
         });
-        let before = resolver.resolve_git(&tree)?;
-        assert_eq!(before, resolver.resolve_git(&tree)?);
+        let before = resolver.resolve_git(&tree, None)?;
+        assert_eq!(before, resolver.resolve_git(&tree, None)?);
         fs::remove_file(tree.join(".git"))?;
         fs::remove_dir(&tree)?;
         fs::create_dir(&tree)?;
         fs::write(tree.join(".git"), &link)?;
-        let after = resolver.resolve_git(&tree)?;
+        let after = resolver.resolve_git(&tree, None)?;
         assert_eq!(before.dirs, after.dirs);
         assert_ne!(before.root_id, after.root_id);
         assert_eq!(lookups.load(Ordering::Relaxed), 2);
@@ -425,18 +448,18 @@ mod tests {
         }
         let lookups = Arc::new(AtomicUsize::new(0));
         let calls = lookups.clone();
-        let mut resolver = Resolver::new(move |_| {
+        let mut resolver = Resolver::new(move |_, _| {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(dirs.clone())
         });
         for path in &paths[..CACHE_CAPACITY] {
-            resolver.resolve_git(path)?;
+            resolver.resolve_git(path, None)?;
         }
-        resolver.resolve_git(&paths[0])?;
-        resolver.resolve_git(&paths[CACHE_CAPACITY])?;
-        resolver.resolve_git(&paths[0])?;
+        resolver.resolve_git(&paths[0], None)?;
+        resolver.resolve_git(&paths[CACHE_CAPACITY], None)?;
+        resolver.resolve_git(&paths[0], None)?;
         assert_eq!(lookups.load(Ordering::Relaxed), CACHE_CAPACITY + 1);
-        resolver.resolve_git(&paths[1])?;
+        resolver.resolve_git(&paths[1], None)?;
         assert_eq!(lookups.load(Ordering::Relaxed), CACHE_CAPACITY + 2);
         assert_eq!(resolver.verified.len(), CACHE_CAPACITY);
         Ok(())
@@ -448,7 +471,7 @@ mod tests {
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
         let started = Instant::now();
-        let err = git_output(&mut cmd, Duration::from_millis(75)).unwrap_err();
+        let err = git_output(&mut cmd, started + Duration::from_millis(75)).unwrap_err();
         assert!(err.is::<GitLookupTimeout>(), "{err:#}");
         assert!(started.elapsed() < Duration::from_secs(2));
     }
