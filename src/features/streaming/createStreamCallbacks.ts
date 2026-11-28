@@ -144,6 +144,64 @@ function pendingUserIndex(messages: any[]): number {
   return -1;
 }
 
+export function handleCompactionNotice(event: string, message: string, setStatus: StreamContext['setCompactStatus']) {
+  if (event !== 'compaction_notice') return false;
+  if (message.trim()) setStatus({ state: 'notice', message });
+  return true;
+}
+
+type ReconnectContext = Pick<StreamContext,
+  'setCompactStatus' | 'setMessagesFor' | 'setPlanMode' | 'setAskUserDialog' |
+  'setToolPermissionDialog' | 'setPermissionApproval' | 'setTokenUsage' | 'setActiveTasks'
+> & { convId: string; showResourceAlert: (alert: { summary: string }) => void };
+
+export function createReconnectSystemCallback({
+  convId, setCompactStatus, showResourceAlert, setMessagesFor, setPlanMode,
+  setAskUserDialog, setToolPermissionDialog, setPermissionApproval, setTokenUsage, setActiveTasks,
+}: ReconnectContext) {
+  return (event: string, message: string, data: any) => {
+    if (handleCompactionNotice(event, message, setCompactStatus)) return;
+    if (event === 'resource_alert') {
+      showResourceAlert({ summary: data?.summary || message });
+    }
+    if (event === 'context_reset' && data?.boundary_id) {
+      setMessagesFor(convId, prev => prev.some(item => item.id === data.boundary_id) ? prev : [...prev, { id: data.boundary_id, role: 'user', content: data.content, is_compact_boundary: true }, { id: data.assistant_id, role: 'assistant', content: '' }]);
+      setPlanMode(false);
+    }
+    if (event === 'ask_user' && data) {
+      setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, questions: data.questions || [], answers: {} });
+    }
+    if (event === 'tool_permission_resolved' && typeof data?.request_id === 'string' && (!data.conversation_id || data.conversation_id === convId)) {
+      setToolPermissionDialog((current: any) => current?.request_id === data.request_id ? null : current);
+      setPermissionApproval((current: any) => current?.id === data.request_id ? null : current);
+    }
+    if (event === 'tool_permission' && data) {
+      setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || convId, allow_session: data.allow_session, toolscript: data.toolscript });
+    }
+    if (event === 'message_start' && data?.usage) {
+      setTokenUsage((prev: any) => {
+        const u = data.usage;
+        return { input_tokens: (prev?.input_tokens || 0) + (u.input_tokens || 0), output_tokens: (prev?.output_tokens || 0) + (u.output_tokens || 0) };
+      });
+    }
+    if (event === 'message_delta' && data?.usage) {
+      setTokenUsage((prev: any) => {
+        const u = data.usage;
+        return { input_tokens: prev?.input_tokens || 0, output_tokens: (prev?.output_tokens || 0) + (u.output_tokens || 0) };
+      });
+    }
+    if (event === 'task_event' && data) {
+      setActiveTasks(prev => {
+        const next = new Map(prev);
+        if (data.subtype === 'task_started') next.set(data.task_id, { description: data.description || 'Running task...' });
+        else if (data.subtype === 'task_progress') { const e = next.get(data.task_id); if (e) next.set(data.task_id, { ...e, last_tool_name: data.last_tool_name }); }
+        else if (data.subtype === 'task_notification') next.delete(data.task_id);
+        return next;
+      });
+    }
+  };
+}
+
 export function createStreamCallbacks(ctx: StreamContext) {
   const {
     conversationId, streamRequestId, isStreamSessionActive,
@@ -312,6 +370,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
 
   const onSystemEvents = (event: string, message: string, data: any) => {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (handleCompactionNotice(event, message, setCompactStatus)) return;
     if (event === 'resource_alert') { reportResourceAlert(message, data); return; }
     if (event === 'queued_input' && data?.queueItem) {
       useBusySendStore.getState().accept(conversationId, data.queueItem);
@@ -617,6 +676,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
   const onSystemEventsLight = (event: string, message: string, data: any) => {
     if (event === 'context_reset') { onSystemEvents(event, message, data); return; }
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (handleCompactionNotice(event, message, setCompactStatus)) return;
     if (event === 'resource_alert') { reportResourceAlert(message, data); return; }
     if (event === 'queued_input' && data?.queueItem) {
       useBusySendStore.getState().accept(conversationId, data.queueItem);

@@ -29,7 +29,7 @@ interface CrossModeWarning {
 }
 
 export interface CompactStatus {
-  state: 'idle' | 'compacting' | 'done' | 'error';
+  state: 'idle' | 'compacting' | 'done' | 'error' | 'notice';
   message?: string;
 }
 

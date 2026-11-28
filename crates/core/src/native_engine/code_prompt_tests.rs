@@ -1156,6 +1156,17 @@ async fn memory_live_replay_bytes_after_clear_compression_and_steering() -> Resu
     let shard = context
         .db
         .create_code_session(&project, "code-test", "code-test", ID)?;
+    // Exercise local replay compression without starting a provider summary.
+    use crate::db::session_store::settings::{Preferences, PREFERENCES};
+    shard.write(|w| {
+        w.set_setting(
+            PREFERENCES,
+            &Preferences {
+                autocompact_off: true,
+                ..Default::default()
+            },
+        )
+    })?;
     std::fs::write(&index, "OLD_RECEIPT_B")?;
     shard.admit_prompt("before clear", None, "typed")?;
     let history = shard.read(|r| r.model_history(&ApiFormat::OpenAI))?.0;

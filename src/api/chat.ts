@@ -416,6 +416,8 @@ export async function sendMessageNative(
             } else if (event.type === 'tool_use_done') {
               onToolUse?.({ type: 'done', tool_use_id: event.tool_use_id || '', tool_name: event.tool_name || 'unknown', tool_input: event.tool_input || {}, content: event.output || event.content || '', is_error: event.is_error === true });
             } else if (event.type === 'tool_arg_delta') {
+            } else if (event.type === 'compaction_notice') {
+              onSystem?.('compaction_notice', event.message || '', event);
             } else if (event.type === 'resource_alert') {
               onSystem?.('resource_alert', event.summary || '', event);
             } else if (event.type === 'message_start') {
@@ -947,7 +949,9 @@ export async function sendMessage(
               continue;
             }
 
-            if (parsed.type === 'resource_alert') {
+            if (parsed.type === 'compaction_notice') {
+              onSystem?.('compaction_notice', parsed.message || '', parsed);
+            } else if (parsed.type === 'resource_alert') {
               onSystem?.('resource_alert', parsed.summary || '', parsed);
               continue;
             }

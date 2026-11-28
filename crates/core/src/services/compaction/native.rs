@@ -57,17 +57,54 @@ pub(crate) fn validate_history(messages: &[Value], provider: &ResolvedProvider) 
     Ok(())
 }
 
+/// Only the native endpoint is being replaced. Authentication, billing, local
+/// validation and storage errors must keep their original disposition.
+pub(crate) async fn with_summary_fallback<T>(
+    native: Result<T>,
+    summary: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    use crate::performance::{find_failure, ErrorClass};
+    let error = match native {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+    let eligible = find_failure(&error).is_some_and(|failure| {
+        matches!(
+            failure.class(),
+            ErrorClass::Transient | ErrorClass::RateLimit
+        ) || matches!(failure.status(), Some(400 | 404 | 405 | 413))
+    });
+    if !eligible {
+        return Err(error);
+    }
+    tracing::info!(%error, "Trying summary compaction on the same provider");
+    summary.await.map_err(|summary| {
+        let reason = |error: &anyhow::Error| match find_failure(error).and_then(|f| f.status()) {
+            Some(status) => format!("HTTP {status}"),
+            None => format!("{error:#}"),
+        };
+        let message = format!(
+            "Native compaction failed ({}); summary compaction failed ({})",
+            reason(&error),
+            reason(&summary)
+        );
+        summary.context(message)
+    })
+}
+
 pub(crate) async fn generate(
-    history: Vec<Value>,
+    history: &[Value],
     id: &str,
     provider: &ResolvedProvider,
     instructions: &str,
     root: Option<&std::path::Path>,
     options: crate::native_engine::request_options::RequestOptions,
 ) -> Result<GeneratedSummary> {
+    use serde::Deserialize;
     let messages = history
-        .into_iter()
-        .map(serde_json::from_value::<OpenAIMessage>)
+        .iter()
+        .filter(|row| row["origin"] != "memory_change")
+        .map(OpenAIMessage::deserialize)
         .collect::<serde_json::Result<Vec<_>>>()?;
     generate_messages_with_options(
         provider,
@@ -137,25 +174,32 @@ pub(crate) async fn generate_messages_with_options(
         .headers(options.headers(provider)?)
         .headers(identity.headers())
         .json(&body);
-    let mut response = crate::native_engine::request_recording::send(
-        request,
-        &options,
-        provider,
-        "openai-responses-compact",
-        false,
-    )
+    let bytes = crate::performance::retry_with_backoff(|| async {
+        let attempt = request
+            .try_clone()
+            .context("Cannot replay native compaction request")?;
+        let response = crate::native_engine::request_recording::send(
+            attempt,
+            &options,
+            provider,
+            "openai-responses-compact",
+            false,
+        )
+        .await?;
+        let mut response = crate::performance::checked_response(response).await?;
+        const LIMIT: usize = 32 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len() + chunk.len() <= LIMIT,
+                "Native compaction response exceeds 32 MiB"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    })
     .await
     .context("Native compaction gateway request failed")?;
-    ensure!(response.status().is_success(), "Native compaction gateway returned HTTP {}; verify /responses/compact support and input context size", response.status().as_u16());
-    const LIMIT: usize = 32 * 1024 * 1024;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            bytes.len() + chunk.len() <= LIMIT,
-            "Native compaction response exceeds 32 MiB"
-        );
-        bytes.extend_from_slice(&chunk);
-    }
     let result: Value = serde_json::from_slice(&bytes).context("Invalid native compaction JSON")?;
     if let Some(metrics) = &mut metrics {
         metrics.observe_usage(&result["usage"]);
@@ -216,7 +260,15 @@ mod tests {
             };
             assert!(commit_with_context(&store.db, prepared, &summary, None).is_err());
             assert_eq!(store.history(&id).unwrap(), before);
-            let count = store.db.fixture_shard(&id, |conn| conn.query_row("SELECT COUNT(*) FROM native_boundaries", [], |r| r.get::<_, i64>(0))).unwrap().unwrap();
+            let count = store
+                .db
+                .fixture_shard(&id, |conn| {
+                    conn.query_row("SELECT COUNT(*) FROM native_boundaries", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                })
+                .unwrap()
+                .unwrap();
             assert_eq!(count, 0);
         }
     }

@@ -49,6 +49,7 @@ use crate::native_engine::token_counter::TokenCounter;
 use crate::permissions::{PermissionManager, PermissionResult};
 use crate::prefetch::PrefetchEngine;
 use crate::prompt::{code::adapt_tools, PromptProfile};
+use crate::services::compaction::AutoCompactionGate;
 use crate::streaming::sse_parser::{
     consume_sse_payloads, merge_tool_args, recover_malformed_tool_input,
 };
@@ -385,6 +386,8 @@ pub struct ToolLoopExecutor {
     /// in every request; never saved to the transcript.
     context_reminders: Vec<String>,
     session_reminders: crate::prompt::SessionReminders,
+    /// Shard inputs already seen when reloading a compacted host-supplied conversation.
+    in_flight_shard_users: Option<std::collections::HashSet<String>>,
     /// The first typed input in the active turn, including later steers.
     protected_input: Option<usize>,
     pending_inputs: Vec<String>,
@@ -459,10 +462,9 @@ pub struct ToolLoopExecutor {
     last_request_message_tokens: Option<u64>,
     /// Non-history request overhead (system prompt + tools + schema) observed in the previous request.
     last_request_overhead_tokens: u64,
-    /// Number of durable mid-turn auto-compactions committed during this turn.
-    mid_turn_compactions: usize,
-    /// Iteration index before which mid-turn auto-compaction is paused (failure or low-reduction cooldown).
-    mid_turn_compact_cooldown_until: usize,
+    /// Emit a single failure warning while this turn continues uncompressed.
+    auto_compaction_warned: bool,
+    pub(super) compaction_gate: AutoCompactionGate,
     /// Transient cue appended once when rendering a freshly compacted mid-turn boundary.
     mid_turn_continuation_cue: bool,
 }
@@ -1997,6 +1999,7 @@ impl ToolLoopExecutor {
             prompt_profile: PromptProfile::Desktop,
             context_reminders: Vec::new(),
             session_reminders: Default::default(),
+            in_flight_shard_users: None,
             protected_input,
             pending_inputs: Vec::new(),
             replay_tools: Vec::new(),
@@ -2046,8 +2049,8 @@ impl ToolLoopExecutor {
             last_reported_input_tokens: None,
             last_request_message_tokens: None,
             last_request_overhead_tokens: 0,
-            mid_turn_compactions: 0,
-            mid_turn_compact_cooldown_until: 0,
+            auto_compaction_warned: false,
+            compaction_gate: Default::default(),
             mid_turn_continuation_cue: false,
         }
     }
@@ -4894,7 +4897,13 @@ impl ToolLoopExecutor {
                 let mut messages = self.build_anthropic_messages()?;
                 self.apply_reasoning_prompt();
                 let _ = self
-                    .replay_window(&mut messages, None, false, Self::render_anthropic_messages)
+                    .replay_window(
+                        &self.compaction_gate.clone(),
+                        &mut messages,
+                        None,
+                        false,
+                        Self::render_anthropic_messages,
+                    )
                     .await?;
                 let prepared = self.prepare_request()?;
                 let body = self.anthropic_client.request_body(
@@ -4915,7 +4924,13 @@ impl ToolLoopExecutor {
                 let mut messages = self.build_openai_messages()?;
                 self.apply_reasoning_prompt();
                 let _ = self
-                    .replay_window(&mut messages, None, false, Self::render_openai_messages)
+                    .replay_window(
+                        &self.compaction_gate.clone(),
+                        &mut messages,
+                        None,
+                        false,
+                        Self::render_openai_messages,
+                    )
                     .await?;
                 let prepared = self.prepare_request()?;
                 self.openai_client.request_body(
@@ -5001,20 +5016,29 @@ impl ToolLoopExecutor {
                 })
                 .await;
         }
+        let gate = self.compaction_gate.clone();
         let loop_result = match user_skill {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
             Ok(None) => match self.provider.provider.api_format {
                 ApiFormat::Anthropic => {
                     tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
-                    self.execute_anthropic_loop().await
+                    self.execute_anthropic_loop(&gate).await
                 }
                 ApiFormat::OpenAI => {
                     tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
-                    self.execute_openai_loop().await
+                    self.execute_openai_loop(&gate).await
                 }
             },
-        };
+        }
+        .map_err(|error| {
+            if crate::performance::is_context_overflow(&error) {
+                if let Some(stop) = gate.provider_rejection() {
+                    return stop;
+                }
+            }
+            error
+        });
 
         if api_request {
             let failure = match &loop_result {
@@ -6058,19 +6082,26 @@ impl ToolLoopExecutor {
         }
     }
 
-    async fn execute_anthropic_loop(&mut self) -> Result<(String, Option<String>)> {
+    async fn execute_anthropic_loop(
+        &mut self,
+        gate: &AutoCompactionGate,
+    ) -> Result<(String, Option<String>)> {
         let messages = self.build_anthropic_messages()?;
-        self.continue_anthropic(Continuation {
-            messages,
-            iteration: 0,
-            text: String::new(),
-            after_tools: false,
-        })
+        self.continue_anthropic(
+            gate,
+            Continuation {
+                messages,
+                iteration: 0,
+                text: String::new(),
+                after_tools: false,
+            },
+        )
         .await
     }
 
     async fn continue_anthropic(
         &mut self,
+        gate: &AutoCompactionGate,
         cursor: Continuation<AnthropicMessage>,
     ) -> Result<(String, Option<String>)> {
         let mut conversation_messages = cursor.messages;
@@ -6086,15 +6117,25 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
+            gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
-                return Box::pin(self.continue_openai(Continuation {
-                    messages,
-                    iteration,
-                    text: full_text,
-                    after_tools: after_tool_results,
-                }))
+                if self.in_flight_shard_users.is_some() {
+                    self.messages = messages
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<_>>()?;
+                }
+                return Box::pin(self.continue_openai(
+                    gate,
+                    Continuation {
+                        messages,
+                        iteration,
+                        text: full_text,
+                        after_tools: after_tool_results,
+                    },
+                ))
                 .await;
             }
             let base_url = self.provider.provider.base_url.clone();
@@ -6102,6 +6143,7 @@ impl ToolLoopExecutor {
             let api_key_len = self.provider.provider.api_key.len();
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
+            self.retain_in_flight_additions(&conversation_messages)?;
             let queued = self
                 .deliver_queued_inputs(std::mem::take(&mut after_tool_results))
                 .await?;
@@ -6166,7 +6208,7 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
-                    iteration,
+                    gate,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
@@ -6195,6 +6237,7 @@ impl ToolLoopExecutor {
                 }
             }
             if Box::pin(self.replay_window(
+                gate,
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,
@@ -6821,6 +6864,9 @@ impl ToolLoopExecutor {
                     content: AnthropicContent::Blocks(tool_results),
                 });
                 after_tool_results = true;
+                if self.pending_plan_reset.is_some() {
+                    self.retain_in_flight_additions(&conversation_messages)?;
+                }
                 if let Some(boundary_id) = self.restore_plan_boundary()? {
                     after_tool_results = false;
                     conversation_messages = self.build_anthropic_messages()?;
@@ -6884,19 +6930,26 @@ impl ToolLoopExecutor {
         Ok((full_text, stop_reason))
     }
 
-    async fn execute_openai_loop(&mut self) -> Result<(String, Option<String>)> {
+    async fn execute_openai_loop(
+        &mut self,
+        gate: &AutoCompactionGate,
+    ) -> Result<(String, Option<String>)> {
         let messages = self.build_openai_messages()?;
-        self.continue_openai(Continuation {
-            messages,
-            iteration: 0,
-            text: String::new(),
-            after_tools: false,
-        })
+        self.continue_openai(
+            gate,
+            Continuation {
+                messages,
+                iteration: 0,
+                text: String::new(),
+                after_tools: false,
+            },
+        )
         .await
     }
 
     async fn continue_openai(
         &mut self,
+        gate: &AutoCompactionGate,
         cursor: Continuation<OpenAIMessage>,
     ) -> Result<(String, Option<String>)> {
         let mut conversation_messages = cursor.messages;
@@ -6927,15 +6980,25 @@ impl ToolLoopExecutor {
 
         let mut after_tool_results = cursor.after_tools;
         for iteration in cursor.iteration.. {
+            gate.begin_iteration(iteration);
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;
-                return Box::pin(self.continue_anthropic(Continuation {
-                    messages,
-                    iteration,
-                    text: full_text,
-                    after_tools: after_tool_results,
-                }))
+                if self.in_flight_shard_users.is_some() {
+                    self.messages = messages
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<_>>()?;
+                }
+                return Box::pin(self.continue_anthropic(
+                    gate,
+                    Continuation {
+                        messages,
+                        iteration,
+                        text: full_text,
+                        after_tools: after_tool_results,
+                    },
+                ))
                 .await;
             }
             let base_url = self.provider.provider.base_url.clone();
@@ -6943,6 +7006,7 @@ impl ToolLoopExecutor {
             let api_key_len = self.provider.provider.api_key.len();
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
+            self.retain_in_flight_additions(&conversation_messages)?;
             let queued = self
                 .deliver_queued_inputs(std::mem::take(&mut after_tool_results))
                 .await?;
@@ -7019,7 +7083,7 @@ impl ToolLoopExecutor {
             let mut mid_turn_managed = false;
             if iteration > 0 {
                 match Box::pin(self.maybe_mid_turn_auto_compact(
-                    iteration,
+                    gate,
                     &full_text,
                     &mut request_messages,
                     active_durable_len,
@@ -7048,6 +7112,7 @@ impl ToolLoopExecutor {
                 }
             }
             if Box::pin(self.replay_window(
+                gate,
                 &mut request_messages,
                 Some(active_durable_len),
                 mid_turn_managed,
@@ -7841,6 +7906,9 @@ impl ToolLoopExecutor {
                     });
                 }
                 after_tool_results = true;
+                if self.pending_plan_reset.is_some() {
+                    self.retain_in_flight_additions(&conversation_messages)?;
+                }
                 if let Some(boundary_id) = self.restore_plan_boundary()? {
                     after_tool_results = false;
                     conversation_messages = self.build_openai_messages()?;
@@ -7919,6 +7987,14 @@ impl ToolLoopExecutor {
     }
 
     fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
+        if self.in_flight_shard_users.is_some() {
+            return Ok(self
+                .messages
+                .iter()
+                .cloned()
+                .map(serde_json::from_value)
+                .collect::<serde_json::Result<_>>()?);
+        }
         self.render_anthropic_messages(&self.message_additions())
     }
 
@@ -8025,6 +8101,14 @@ impl ToolLoopExecutor {
     }
 
     fn build_openai_messages(&self) -> Result<Vec<OpenAIMessage>> {
+        if self.in_flight_shard_users.is_some() {
+            return Ok(self
+                .messages
+                .iter()
+                .cloned()
+                .map(serde_json::from_value)
+                .collect::<serde_json::Result<_>>()?);
+        }
         self.render_openai_messages(&self.message_additions())
     }
 

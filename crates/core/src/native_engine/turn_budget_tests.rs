@@ -49,9 +49,9 @@ async fn check_budget(format: ApiFormat, budget: u32) {
     .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         if anthropic {
-            executor.execute_anthropic_loop().await
+            executor.execute_anthropic_loop(&Default::default()).await
         } else {
-            executor.execute_openai_loop().await
+            executor.execute_openai_loop(&Default::default()).await
         }
     })
     .await
@@ -249,9 +249,9 @@ async fn check_output_limit_recovery(anthropic: bool) {
     .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         if anthropic {
-            executor.execute_anthropic_loop().await
+            executor.execute_anthropic_loop(&Default::default()).await
         } else {
-            executor.execute_openai_loop().await
+            executor.execute_openai_loop(&Default::default()).await
         }
     })
     .await

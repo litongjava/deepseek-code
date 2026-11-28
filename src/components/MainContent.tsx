@@ -45,7 +45,7 @@ import { useLastCodeProject } from '../features/project/useLastCodeProject';
 import MessageList, { draftsStore } from '../features/message-list/MessageList';
 import { handleSlashCommand, SLASH_COMMANDS } from '../features/slash-commands/registry';
 import SlashCommandSuggestions from '../features/slash-commands/SlashCommandSuggestions';
-import { createStreamCallbacks } from '../features/streaming/createStreamCallbacks';
+import { createReconnectSystemCallback, createStreamCallbacks } from '../features/streaming/createStreamCallbacks';
 import { nextResourceAlertToast, type ResourceAlertToast } from '../features/streaming/resourceAlert';
 import { useStreamSession } from '../features/streaming/useStreamSession';
 import PanelsRenderer from '../features/panels/PanelsRenderer';
@@ -452,6 +452,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const [projectToTrust, setProjectToTrust] = useState<Project | null>(null);
   const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
   const [resourceAlertToast, setResourceAlertToast] = useState<ResourceAlertToast | null>(null);
+  useEffect(() => {
+    if (compactStatus.state !== 'notice') return;
+    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), 8000);
+    return () => clearTimeout(timer);
+  }, [compactStatus, setCompactStatus]);
   const showResourceAlert = useCallback((alert: { summary?: string }) => {
     setResourceAlertToast(current => nextResourceAlertToast(current, alert?.summary));
   }, []);
@@ -760,46 +765,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   return newMsgs;
                 });
               },
-              (event, message, data) => {
-                if (event === 'resource_alert') {
-                  showResourceAlert({ summary: data?.summary || message });
-                }
-                if (event === 'context_reset' && data?.boundary_id) {
-                  setMessagesFor(convId, prev => prev.some(item => item.id === data.boundary_id) ? prev : [...prev, { id: data.boundary_id, role: 'user', content: data.content, is_compact_boundary: true }, { id: data.assistant_id, role: 'assistant', content: '' }]);
-                  setPlanMode(false);
-                }
-                if (event === 'ask_user' && data) {
-                  setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, questions: data.questions || [], answers: {} });
-                }
-                if (event === 'tool_permission_resolved' && typeof data?.request_id === 'string' && (!data.conversation_id || data.conversation_id === convId)) {
-                  setToolPermissionDialog(current => current?.request_id === data.request_id ? null : current);
-                  setPermissionApproval(current => current?.id === data.request_id ? null : current);
-                }
-                if (event === 'tool_permission' && data) {
-                  setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || convId, allow_session: data.allow_session, toolscript: data.toolscript });
-                }
-                if (event === 'message_start' && data?.usage) {
-                  setTokenUsage((prev: any) => {
-                    const u = data.usage;
-                    return { input_tokens: (prev?.input_tokens || 0) + (u.input_tokens || 0), output_tokens: (prev?.output_tokens || 0) + (u.output_tokens || 0) };
-                  });
-                }
-                if (event === 'message_delta' && data?.usage) {
-                  setTokenUsage((prev: any) => {
-                    const u = data.usage;
-                    return { input_tokens: prev?.input_tokens || 0, output_tokens: (prev?.output_tokens || 0) + (u.output_tokens || 0) };
-                  });
-                }
-                if (event === 'task_event' && data) {
-                  setActiveTasks(prev => {
-                    const next = new Map(prev);
-                    if (data.subtype === 'task_started') next.set(data.task_id, { description: data.description || 'Running task...' });
-                    else if (data.subtype === 'task_progress') { const e = next.get(data.task_id); if (e) next.set(data.task_id, { ...e, last_tool_name: data.last_tool_name }); }
-                    else if (data.subtype === 'task_notification') next.delete(data.task_id);
-                    return next;
-                  });
-                }
-              },
+              createReconnectSystemCallback({
+                convId, setCompactStatus, showResourceAlert, setMessagesFor, setPlanMode,
+                setAskUserDialog, setToolPermissionDialog, setPermissionApproval, setTokenUsage, setActiveTasks,
+              }),
               (toolEvent) => {
                 const planMode = planModeFromTool(toolEvent);
                 if (planMode !== null) setPlanMode(planMode);
@@ -1911,8 +1880,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
         )
       )}
-      {(webSearchToast || resourceAlertToast) && (
+      {(webSearchToast || resourceAlertToast || compactStatus.state === 'notice') && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col items-center gap-2 max-w-[92vw]">
+          {compactStatus.state === 'notice' && (
+            <div role="status" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
+              {compactStatus.message}
+            </div>
+          )}
           {resourceAlertToast && (
             <div role="alert" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
               <AlertTriangle size={14} className="shrink-0 text-amber-500" />
