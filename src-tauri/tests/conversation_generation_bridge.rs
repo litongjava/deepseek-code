@@ -5,26 +5,62 @@ use deepseek_desktop_tauri_lib::{
 use serde_json::{json, Value};
 use std::time::Duration;
 
+async fn fixture_response(
+    axum::extract::State(captured): axum::extract::State<
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    >,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if headers["x-dcl-request-kind"] == "compaction" {
+        captured.lock().unwrap().push(body.clone());
+        if body.to_string().contains("FAIL_FOCUS") {
+            return (axum::http::StatusCode::UNAUTHORIZED, "fixture denied").into_response();
+        }
+        let stream = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{"content":"Retain the fixture decision."},"finish_reason":"stop"}]})
+        );
+        return ([("content-type", "text/event-stream")], stream).into_response();
+    }
+    let messages = body["messages"].as_array().unwrap();
+    let (delta, finish) = if messages.iter().any(|m| m["role"] == "tool") {
+        (json!({"content":"turn finished"}), "stop")
+    } else {
+        let (shell, command) = if cfg!(windows) {
+            ("powershell", "Set-Content started.txt ready; Start-Sleep -Milliseconds 3000; Set-Content late.txt unexpected")
+        } else {
+            (
+                "sh",
+                "echo ready > started.txt; sleep 3; echo unexpected > late.txt",
+            )
+        };
+        (
+            json!({"content":"partial generation evidence", "tool_calls":[{"index":0,"id":"slow-call","type":"function","function":{"name":"Bash","arguments":json!({"shell":shell,"command":command,"timeout":10000}).to_string()}}]}),
+            "tool_calls",
+        )
+    };
+    let stream = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}]})
+    );
+    ([("content-type", "text/event-stream")], stream).into_response()
+}
+
 #[tokio::test]
 async fn conversation_status_context_size_and_stop_generation_routes() {
     deepseek_desktop_tauri_lib::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     // A local fixture model: the first request starts a slow tool, later ones finish.
-    let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
-        let messages = body["messages"].as_array().unwrap();
-        let (delta, finish) = if messages.iter().any(|m| m["role"] == "tool") {
-            (json!({"content":"turn finished"}), "stop")
-        } else {
-            let (shell, command) = if cfg!(windows) {
-                ("powershell", "Set-Content started.txt ready; Start-Sleep -Milliseconds 3000; Set-Content late.txt unexpected")
-            } else {
-                ("sh", "echo ready > started.txt; sleep 3; echo unexpected > late.txt")
-            };
-            (json!({"content":"partial generation evidence", "tool_calls":[{"index":0,"id":"slow-call","type":"function","function":{"name":"Bash","arguments":json!({"shell":shell,"command":command,"timeout":10000}).to_string()}}]}), "tool_calls")
-        };
-        let stream = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}), json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}]}));
-        ([("content-type", "text/event-stream")], stream)
-    }));
+    let compactions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(fixture_response),
+        )
+        .with_state(compactions.clone());
     let model_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let model_addr = model_listener.local_addr().unwrap();
     let model = tokio::spawn(async move {
@@ -125,6 +161,54 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         "Conversation not found"
     );
 
+    let compact = |id: String, body: Value| {
+        let req = client
+            .post(format!("{base}/{id}/compact"))
+            .header("x-api-key", &key)
+            .json(&body);
+        async move { req.send().await.unwrap() }
+    };
+    // Run the success and failure cases on a separate seeded conversation so
+    // the active-turn checks below retain their original context-size baseline.
+    let seeded = sessions
+        .create(dir.path(), "fixture-model", "fixture")
+        .unwrap();
+    sessions
+        .append(&seeded, "user", &"Some durable decision. ".repeat(256))
+        .unwrap();
+    sessions
+        .append(&seeded, "assistant", "Keep the fixture decision.")
+        .unwrap();
+    let history = sessions.history(&seeded).unwrap();
+    let failure = compact(seeded.clone(), json!({"focus":"FAIL_FOCUS"})).await;
+    assert_eq!(failure.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert!(failure.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("401"));
+    assert_eq!(sessions.history(&seeded).unwrap(), history);
+
+    let success = compact(seeded.clone(), json!({"instruction":"KEEP_FOCUS"})).await;
+    let status = success.status();
+    let result: Value = success.json().await.unwrap();
+    assert!(status.is_success(), "{result}");
+    assert_eq!(result["messagesCompacted"], 2);
+    assert!(result["summary"]
+        .as_str()
+        .unwrap()
+        .contains("Retain the fixture decision."));
+    assert!(result["tokensSaved"].as_u64().unwrap() > 0);
+    assert_eq!(
+        deepseek_code_core::services::compaction::count(&db, &seeded)
+            .unwrap()
+            .proven(),
+        1
+    );
+    assert_eq!(compactions.lock().unwrap().len(), 2);
+    assert!(compactions.lock().unwrap()[1]
+        .to_string()
+        .contains("KEEP_FOCUS"));
+
     let idle: Value = get(format!("{conversation}/generation-status"))
         .await
         .json()
@@ -210,6 +294,9 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
     );
     assert_eq!(running["text"], "partial generation evidence");
     assert!(running["eventCount"].as_u64().unwrap() > 0);
+    let busy = compact(conversation.clone(), json!({"instructions":"BUSY_FOCUS"})).await;
+    assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(compactions.lock().unwrap().len(), 2);
     let running_stream: Value = get(format!("{conversation}/stream-status"))
         .await
         .json()
@@ -274,7 +361,11 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
         !dir.path().join("late.txt").exists(),
         "stop-generation left the tool running"
     );
-    let rows = db.open_session(&conversation).unwrap().read(|r|r.messages()).unwrap();
+    let rows = db
+        .open_session(&conversation)
+        .unwrap()
+        .read(|r| r.messages())
+        .unwrap();
     assert!(
         rows.iter()
             .any(|row| row.role == "assistant"
