@@ -219,6 +219,208 @@ fn responses_replays_only_self_contained_native_reasoning_verbatim() {
 }
 
 #[test]
+fn responses_replays_same_issuer_plaintext_summary_and_content_reasoning_verbatim() {
+    let p = provider("openai", "openai-responses", "http://localhost/v1");
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses","provider":"test","model":"fixture-model",
+        "items":[
+            {"type":"reasoning","id":"rs_empty","summary":[]},
+            {"type":"reasoning","id":"rs_blank","summary":[{"type":"summary_text","text":"   "}]},
+            {"type":"reasoning","id":"rs_summary","summary":[{"type":"summary_text","text":"step plan"}]},
+            {"type":"reasoning","id":"rs_content","content":[{"type":"reasoning_text","text":"raw trace"}]},
+            {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        body["input"],
+        json!([
+            {"type":"reasoning","id":"rs_summary","summary":[{"type":"summary_text","text":"step plan"}]},
+            {"type":"reasoning","id":"rs_content","content":[{"type":"reasoning_text","text":"raw trace"}]},
+            {"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}
+        ])
+    );
+}
+
+#[test]
+fn responses_drops_foreign_plaintext_summary_reasoning_on_model_switch() {
+    let mut p = provider("openai", "openai-responses", "http://localhost/v1");
+    p.model.id = "gpt-6.2-astra".into();
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(json!({
+        "api":"openai-responses","provider":"test","model":"deepseek-v4.1-flash",
+        "items":[
+            {"type":"reasoning","id":"rs_ds","summary":[{"type":"summary_text","text":"prior deepseek plan"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+        ]
+    }));
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        body["input"],
+        json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}])
+    );
+}
+
+#[test]
+fn responses_stream_summary_only_reasoning_round_trips_to_next_request() {
+    let mut p = provider("openai", "openai-responses", "http://localhost/v1");
+    p.model.id = "deepseek-v4.1-flash".into();
+    let mut s = events::State::default();
+    let reasoning = json!({"id":"rs_ds","type":"reasoning","summary":[{"type":"summary_text","text":"check db"}]});
+    let call = json!({"id":"fc_1","type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"});
+    let chunks = s
+        .convert(
+            "openai-responses",
+            json!({
+                "type":"response.completed",
+                "response":{
+                    "id":"resp_1",
+                    "model":"deepseek-v4.1-flash",
+                    "status":"completed",
+                    "output":[reasoning.clone(), call.clone()],
+                    "usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}
+                }
+            }),
+        )
+        .unwrap();
+    let mut native = chunks.last().unwrap()["provider_content"].clone();
+    native["provider"] = json!(p.provider.id);
+    native["model"] = json!(p.model.id);
+
+    let mut assistant = user();
+    assistant.role = "assistant".into();
+    assistant.provider_content = Some(native);
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        vec![user(), assistant],
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        body["input"],
+        json!([
+            {"role":"user","content":[{"type":"input_text","text":"hello"}]},
+            reasoning,
+            call
+        ])
+    );
+}
+
+#[test]
+fn responses_replays_persisted_reasoning_only_before_assistant_and_tool_calls() {
+    let mut p = provider("openai", "openai-responses", "http://localhost/v1");
+    p.model.id = "gpt-6.2-astra".into();
+
+    let mut step_with_call = user();
+    step_with_call.role = "assistant".into();
+    step_with_call.content = OpenAIContent::Text(String::new());
+    step_with_call.tool_calls = Some(
+        serde_json::from_value(json!([
+            {"id":"msg1:call_1","type":"function","function":{"name":"Read","arguments":"{\"path\":\"a.rs\"}"}}
+        ]))
+        .unwrap(),
+    );
+    step_with_call.provider_content = Some(json!({
+        "api": "openai-responses",
+        "provider": "test",
+        "model": "gpt-6.2-astra",
+        "reasoning_only": true,
+        "items": [
+            {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"enc-step-1"}
+        ]
+    }));
+
+    let mut tool_out = user();
+    tool_out.role = "tool".into();
+    tool_out.tool_call_id = Some("msg1:call_1".into());
+    tool_out.content = OpenAIContent::Text("file body".into());
+
+    let mut final_step = user();
+    final_step.role = "assistant".into();
+    final_step.content = OpenAIContent::Text("turn 1 answer".into());
+    final_step.provider_content = Some(json!({
+        "api": "openai-responses",
+        "provider": "test",
+        "model": "gpt-6.2-astra",
+        "reasoning_only": true,
+        "items": [
+            {"type":"reasoning","id":"rs_2","summary":[],"encrypted_content":"enc-step-2"}
+        ]
+    }));
+
+    let history = vec![user(), step_with_call, tool_out, final_step];
+    let body = messages::request(
+        "openai-responses",
+        &p,
+        &Value::Null,
+        history.clone(),
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        body["input"],
+        json!([
+            {"role":"user","content":[{"type":"input_text","text":"hello"}]},
+            {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"enc-step-1"},
+            {"type":"function_call","call_id":"msg1:call_1","name":"Read","arguments":"{\"path\":\"a.rs\"}"},
+            {"type":"function_call_output","call_id":"msg1:call_1","output":"file body"},
+            {"type":"reasoning","id":"rs_2","summary":[],"encrypted_content":"enc-step-2"},
+            {"role":"assistant","content":[{"type":"output_text","text":"turn 1 answer"}]}
+        ])
+    );
+
+    // Switching to another model drops the encrypted reasoning while preserving tool calls and text.
+    let mut other_model = p.clone();
+    other_model.model.id = "deepseek-v4.1-flash".into();
+    let switched = messages::request(
+        "openai-responses",
+        &other_model,
+        &Value::Null,
+        history,
+        None,
+        vec![],
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        switched["input"],
+        json!([
+            {"role":"user","content":[{"type":"input_text","text":"hello"}]},
+            {"type":"function_call","call_id":"msg1:call_1","name":"Read","arguments":"{\"path\":\"a.rs\"}"},
+            {"type":"function_call_output","call_id":"msg1:call_1","output":"file body"},
+            {"role":"assistant","content":[{"type":"output_text","text":"turn 1 answer"}]}
+        ])
+    );
+}
+
+#[test]
 fn responses_and_compact_preserve_mixed_history_without_synthesizing_reasoning() {
     let p = provider("openai", "openai-responses", "http://localhost/v1");
     let mut assistant = user();

@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -42,7 +43,9 @@ fn resolve(explicit: Option<std::ffi::OsString>, home: Option<PathBuf>) -> Resul
     if let Some(path) = explicit.filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    Ok(home.context("Cannot locate the home directory; use --data-dir")?.join(DATA_DIR_NAME))
+    Ok(home
+        .context("Cannot locate the home directory; use --data-dir")?
+        .join(DATA_DIR_NAME))
 }
 
 #[derive(Clone, Debug)]
@@ -167,10 +170,7 @@ pub fn create_engine(
     let _ = std::thread::Builder::new()
         .name("session-file-prune".to_owned())
         .spawn(move || {
-            crate::prompt::prune_session_files(
-                &prune_root,
-                crate::prompt::SESSION_FILE_MAX_AGE,
-            )
+            crate::prompt::prune_session_files(&prune_root, crate::prompt::SESSION_FILE_MAX_AGE)
         });
     engine
 }
@@ -207,12 +207,24 @@ mod identity_tests {
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
         let store = SessionStore::new(paths.open_database().unwrap());
         let id = uuid::Uuid::new_v4().to_string();
-        assert_eq!(store.create_with_id(root.path(),"model","provider",&id).unwrap(),id);
-        store.append(&id,"user","Keep this conversation").unwrap();
-        assert!(store.create_with_id(root.path(),"other","provider",&id).is_err());
-        assert!(store.create_with_id(root.path(),"model","provider","invalid").is_err());
-        assert_eq!(store.resume(&id).unwrap().model.as_deref(),Some("model"));
-        assert_eq!(store.history(&id).unwrap()[0]["content"],"Keep this conversation");
+        assert_eq!(
+            store
+                .create_with_id(root.path(), "model", "provider", &id)
+                .unwrap(),
+            id
+        );
+        store.append(&id, "user", "Keep this conversation").unwrap();
+        assert!(store
+            .create_with_id(root.path(), "other", "provider", &id)
+            .is_err());
+        assert!(store
+            .create_with_id(root.path(), "model", "provider", "invalid")
+            .is_err());
+        assert_eq!(store.resume(&id).unwrap().model.as_deref(), Some("model"));
+        assert_eq!(
+            store.history(&id).unwrap()[0]["content"],
+            "Keep this conversation"
+        );
     }
 }
 
@@ -257,6 +269,71 @@ struct ModelRequestStep {
     thinking: Option<String>,
     text: String,
     calls: Vec<(String, Option<String>)>,
+    provider_reasoning: Option<Value>,
+}
+
+pub(crate) fn valid_trajectory_provider_reasoning(value: &Value) -> Option<Value> {
+    if value["api"] != "openai-responses" || value["reasoning_only"] != true {
+        return None;
+    }
+    value["provider"].as_str().filter(|s| !s.is_empty())?;
+    value["model"].as_str().filter(|s| !s.is_empty())?;
+    let items = value["items"]
+        .as_array()
+        .filter(|items| !items.is_empty())?;
+    if !items.iter().all(|item| {
+        item["type"] == "reasoning"
+            && item["encrypted_content"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+    }) {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn load_trajectory_provider_reasoning(
+    conn: &rusqlite::Connection,
+    message_id: &str,
+) -> Result<(HashMap<String, Value>, HashMap<i64, Value>)> {
+    use rusqlite::OptionalExtension;
+    let raw: Option<String> = match conn
+        .query_row(
+            "SELECT requests_json FROM message_trajectory WHERE message_id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(raw) => raw,
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut by_id = HashMap::new();
+    let mut by_number = HashMap::new();
+    let Some(raw) = raw else {
+        return Ok((by_id, by_number));
+    };
+    let Ok(Value::Array(snapshots)) = serde_json::from_str::<Value>(&raw) else {
+        return Ok((by_id, by_number));
+    };
+    for snapshot in snapshots {
+        let Some(reasoning) = snapshot
+            .get("providerReasoning")
+            .and_then(valid_trajectory_provider_reasoning)
+        else {
+            continue;
+        };
+        if let Some(id) = snapshot["id"].as_str().filter(|id| !id.is_empty()) {
+            by_id.insert(id.to_owned(), reasoning.clone());
+        }
+        if let Some(number) = snapshot["number"].as_i64() {
+            by_number.insert(number, reasoning);
+        }
+    }
+    Ok((by_id, by_number))
 }
 
 fn load_model_request_steps(
@@ -264,7 +341,7 @@ fn load_model_request_steps(
     message_id: &str,
 ) -> Result<Vec<ModelRequestStep>> {
     let mut stmt = match conn.prepare(
-        "SELECT id, response_blocks_json FROM model_requests \
+        "SELECT id, request_number, response_blocks_json FROM model_requests \
          WHERE message_id = ?1 \
          ORDER BY request_number ASC, started_at_ms ASC, rowid ASC",
     ) {
@@ -276,15 +353,17 @@ fn load_model_request_steps(
         }
         Err(err) => return Err(err.into()),
     };
+    let (by_id, by_number) = load_trajectory_provider_reasoning(conn, message_id)?;
     let rows = stmt.query_map([message_id], |row| {
         Ok((
             row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, String>(2)?,
         ))
     })?;
     let mut steps = Vec::new();
     for entry in rows {
-        let (request_id, raw) = entry?;
+        let (request_id, request_number, raw) = entry?;
         let Ok(blocks) = serde_json::from_str::<Vec<Value>>(&raw) else {
             continue;
         };
@@ -330,11 +409,16 @@ fn load_model_request_steps(
                 _ => {}
             }
         }
+        let provider_reasoning = (!request_id.is_empty())
+            .then(|| by_id.get(&request_id).cloned())
+            .flatten()
+            .or_else(|| request_number.and_then(|n| by_number.get(&n).cloned()));
         steps.push(ModelRequestStep {
             request_id,
             thinking: (!thinking_parts.is_empty()).then(|| thinking_parts.join("\n\n")),
             text: text_parts.concat(),
             calls,
+            provider_reasoning,
         });
     }
     Ok(steps)
@@ -347,6 +431,7 @@ fn emit_tool_step(
     step_calls: &[crate::db::model_results::ModelCall],
     step_thinking: Option<&str>,
     step_text: &str,
+    step_provider_reasoning: Option<&Value>,
     history: &mut Vec<Value>,
 ) -> Result<bool> {
     let mut thinking_replayed = false;
@@ -374,6 +459,9 @@ fn emit_tool_step(
                 assistant["reasoning_content"] = json!(thinking);
                 thinking_replayed = true;
             }
+            if let Some(pr) = step_provider_reasoning {
+                assistant["provider_content"] = pr.clone();
+            }
             history.push(assistant);
             for tool in step_calls {
                 history.push(json!({
@@ -384,9 +472,8 @@ fn emit_tool_step(
             }
             for tool in step_calls {
                 if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? {
-                    history.push(
-                        json!({"role": "user", "content": note, "origin": "approval_note"}),
-                    );
+                    history
+                        .push(json!({"role": "user", "content": note, "origin": "approval_note"}));
                 }
             }
         }
@@ -468,7 +555,11 @@ pub(crate) fn replay_rows(
             background_replay::native_fallbacks(&mut native);
             let mut row =
                 json!({"role":message.role,"content":message.content,"provider_content":native});
-            if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+            if let Some(thinking) = message
+                .thinking
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
                 row["reasoning_content"] = json!(thinking);
             }
             if include_provenance {
@@ -498,113 +589,131 @@ pub(crate) fn replay_rows(
         // the provider never emitted their ids, so replaying them would
         // fabricate an assistant tool_use with no matching requested
         // call. Their rows stay visible to transcript/display readers.
-        let nested =
-            crate::services::tool_history::nested_ids_for_message(conn, &message.id)?;
+        let nested = crate::services::tool_history::nested_ids_for_message(conn, &message.id)?;
         calls.retain(|tool| !nested.contains(&tool.id));
         let mut thinking_replayed = false;
         let mut any_step_matched = false;
         let mut final_step_thinking: Option<String> = None;
-        if message.role == "assistant" && !calls.is_empty() {
+        let mut final_step_provider_reasoning: Option<Value> = None;
+        if message.role == "assistant" {
             let steps = load_model_request_steps(conn, &message.id)?;
-            let mut remaining = calls;
-            for step in steps {
-                let mut step_calls = Vec::new();
-                // Priority 1: exact `request_id` link from `tool_calls.request_id`.
-                // Preserve `step.calls` (`provider_call_id` / `id`) order first, then
-                // any remaining linked calls in their `sort_order`.
-                if !step.request_id.is_empty()
-                    && remaining
-                        .iter()
-                        .any(|c| c.request_id.as_deref() == Some(step.request_id.as_str()))
-                {
-                    for (call_id, _) in &step.calls {
-                        if !call_id.is_empty() {
-                            if let Some(pos) = remaining.iter().position(|c| {
-                                c.request_id.as_deref() == Some(step.request_id.as_str())
-                                    && (c.provider_call_id.as_deref() == Some(call_id.as_str())
-                                        || c.id == *call_id)
-                            }) {
+            if !calls.is_empty() {
+                let mut remaining = calls;
+                for step in steps {
+                    let mut step_calls = Vec::new();
+                    // Priority 1: exact `request_id` link from `tool_calls.request_id`.
+                    // Preserve `step.calls` (`provider_call_id` / `id`) order first, then
+                    // any remaining linked calls in their `sort_order`.
+                    if !step.request_id.is_empty()
+                        && remaining
+                            .iter()
+                            .any(|c| c.request_id.as_deref() == Some(step.request_id.as_str()))
+                    {
+                        for (call_id, _) in &step.calls {
+                            if !call_id.is_empty() {
+                                if let Some(pos) = remaining.iter().position(|c| {
+                                    c.request_id.as_deref() == Some(step.request_id.as_str())
+                                        && (c.provider_call_id.as_deref() == Some(call_id.as_str())
+                                            || c.id == *call_id)
+                                }) {
+                                    step_calls.push(remaining.remove(pos));
+                                }
+                            }
+                        }
+                        let mut idx = 0;
+                        while idx < remaining.len() {
+                            if remaining[idx].request_id.as_deref()
+                                == Some(step.request_id.as_str())
+                            {
+                                step_calls.push(remaining.remove(idx));
+                            } else {
+                                idx += 1;
+                            }
+                        }
+                    } else {
+                        // Priority 2 (legacy fallback, only when `c.request_id` is None):
+                        // exact `c.id == call_id` or `c.provider_call_id == Some(call_id)`,
+                        // then earliest remaining `c.name == name`.
+                        for (call_id, call_name) in &step.calls {
+                            let pos = (!call_id.is_empty())
+                                .then(|| {
+                                    remaining.iter().position(|c| {
+                                        c.request_id.is_none()
+                                            && (c.id == *call_id
+                                                || c.provider_call_id.as_deref()
+                                                    == Some(call_id.as_str()))
+                                    })
+                                })
+                                .flatten()
+                                .or_else(|| {
+                                    call_name.as_deref().and_then(|name| {
+                                        remaining
+                                            .iter()
+                                            .position(|c| c.request_id.is_none() && c.name == name)
+                                    })
+                                });
+                            if let Some(pos) = pos {
                                 step_calls.push(remaining.remove(pos));
                             }
                         }
                     }
-                    let mut idx = 0;
-                    while idx < remaining.len() {
-                        if remaining[idx].request_id.as_deref() == Some(step.request_id.as_str()) {
-                            step_calls.push(remaining.remove(idx));
-                        } else {
-                            idx += 1;
+                    if !step_calls.is_empty() {
+                        any_step_matched = true;
+                        final_step_thinking = None;
+                        final_step_provider_reasoning = None;
+                        if emit_tool_step(
+                            conn,
+                            id,
+                            format,
+                            &step_calls,
+                            step.thinking.as_deref(),
+                            &step.text,
+                            step.provider_reasoning.as_ref(),
+                            &mut history,
+                        )? {
+                            thinking_replayed = true;
                         }
-                    }
-                } else {
-                    // Priority 2 (legacy fallback, only when `c.request_id` is None):
-                    // exact `c.id == call_id` or `c.provider_call_id == Some(call_id)`,
-                    // then earliest remaining `c.name == name`.
-                    for (call_id, call_name) in &step.calls {
-                        let pos = (!call_id.is_empty())
-                            .then(|| {
-                                remaining.iter().position(|c| {
-                                    c.request_id.is_none()
-                                        && (c.id == *call_id
-                                            || c.provider_call_id.as_deref()
-                                                == Some(call_id.as_str()))
-                                })
-                            })
-                            .flatten()
-                            .or_else(|| {
-                                call_name.as_deref().and_then(|name| {
-                                    remaining
-                                        .iter()
-                                        .position(|c| c.request_id.is_none() && c.name == name)
-                                })
-                            });
-                        if let Some(pos) = pos {
-                            step_calls.push(remaining.remove(pos));
-                        }
+                    } else {
+                        final_step_thinking = step.thinking;
+                        final_step_provider_reasoning = step.provider_reasoning;
                     }
                 }
-                if !step_calls.is_empty() {
-                    any_step_matched = true;
-                    final_step_thinking = None;
+                if !remaining.is_empty() {
+                    let fallback_thinking = if !any_step_matched {
+                        final_step_thinking = None;
+                        final_step_provider_reasoning = None;
+                        message.thinking.as_deref()
+                    } else if !thinking_replayed && final_step_thinking.is_none() {
+                        message.thinking.as_deref()
+                    } else {
+                        None
+                    };
                     if emit_tool_step(
                         conn,
                         id,
                         format,
-                        &step_calls,
-                        step.thinking.as_deref(),
-                        &step.text,
+                        &remaining,
+                        fallback_thinking,
+                        "",
+                        None,
                         &mut history,
                     )? {
                         thinking_replayed = true;
                     }
-                } else {
-                    final_step_thinking = step.thinking;
                 }
-            }
-            if !remaining.is_empty() {
-                let fallback_thinking = if !any_step_matched {
-                    final_step_thinking = None;
-                    message.thinking.as_deref()
-                } else if !thinking_replayed && final_step_thinking.is_none() {
-                    message.thinking.as_deref()
-                } else {
-                    None
-                };
-                if emit_tool_step(
-                    conn,
-                    id,
-                    format,
-                    &remaining,
-                    fallback_thinking,
-                    "",
-                    &mut history,
-                )? {
-                    thinking_replayed = true;
-                }
+            } else {
+                final_step_provider_reasoning =
+                    steps.into_iter().rev().find_map(|s| s.provider_reasoning);
             }
         }
         use rusqlite::OptionalExtension;
-        let structured: Option<String> = conn.query_row("SELECT content_json FROM message_user_content WHERE message_id=?1", [&message.id], |r|r.get(0)).optional()?;
+        let structured: Option<String> = conn
+            .query_row(
+                "SELECT content_json FROM message_user_content WHERE message_id=?1",
+                [&message.id],
+                |r| r.get(0),
+            )
+            .optional()?;
         let mut collapsed = *collapsed;
         let content = if let Some(json) = structured {
             let mut content: Value = serde_json::from_str(&json)?;
@@ -640,6 +749,11 @@ pub(crate) fn replay_rows(
             if let Some(thinking) = final_thinking {
                 item["reasoning_content"] = json!(thinking);
             }
+            if matches!(format, ApiFormat::OpenAI) {
+                if let Some(pr) = final_step_provider_reasoning {
+                    item["provider_content"] = pr;
+                }
+            }
         }
         if collapsed {
             item["_collapsed_monitor"] = Value::Bool(true);
@@ -664,14 +778,26 @@ pub(crate) fn replay_rows(
 }
 
 impl SessionStore<DbManager> {
-
     pub fn create(&self, workspace: &Path, model: &str, provider: &str) -> Result<String> {
-        self.create_with_id(workspace, model, provider, &uuid::Uuid::new_v4().to_string())
+        self.create_with_id(
+            workspace,
+            model,
+            provider,
+            &uuid::Uuid::new_v4().to_string(),
+        )
     }
 
     /// Create a fresh conversation; existing IDs remain untouched.
-    pub fn create_with_id(&self, workspace: &Path, model: &str, provider: &str, id: &str) -> Result<String> {
-        let id = uuid::Uuid::parse_str(id).context("Session ID must be a UUID")?.to_string();
+    pub fn create_with_id(
+        &self,
+        workspace: &Path,
+        model: &str,
+        provider: &str,
+        id: &str,
+    ) -> Result<String> {
+        let id = uuid::Uuid::parse_str(id)
+            .context("Session ID must be a UUID")?
+            .to_string();
         let workspace =
             std::fs::canonicalize(workspace).context("Project directory is unavailable")?;
         ensure!(workspace.is_dir(), "Project path must be a directory");
@@ -784,7 +910,10 @@ impl SessionStore<DbManager> {
             });
             for session in sessions {
                 // Empty sessions are not conversations to continue, as in the /resume list.
-                if session.archived || session.workspace_mode != "code" || session.message_count == 0 {
+                if session.archived
+                    || session.workspace_mode != "code"
+                    || session.message_count == 0
+                {
                     continue;
                 }
                 // Resolve the same project/worktree as the engine, rather than a
@@ -820,17 +949,37 @@ impl SessionStore<DbManager> {
     }
 
     /// Derive a child without converting Desktop modes/private folders into Code projects.
-    pub fn derive_owned_child(&self, id: &str, workspaces_root: &Path, expected_cwd: &Path) -> Result<String> {
-        self.derive_empty(id, Some((workspaces_root, expected_cwd)), uuid::Uuid::new_v4().to_string(), |_, _| Ok(()))
+    pub fn derive_owned_child(
+        &self,
+        id: &str,
+        workspaces_root: &Path,
+        expected_cwd: &Path,
+    ) -> Result<String> {
+        self.derive_empty(
+            id,
+            Some((workspaces_root, expected_cwd)),
+            uuid::Uuid::new_v4().to_string(),
+            |_, _| Ok(()),
+        )
     }
 
-    pub fn clear_with(&self, id: &str, new_id: String, initialize: impl FnOnce(&rusqlite::Connection, &str) -> Result<()>) -> Result<String> {
+    pub fn clear_with(
+        &self,
+        id: &str,
+        new_id: String,
+        initialize: impl FnOnce(&rusqlite::Connection, &str) -> Result<()>,
+    ) -> Result<String> {
         self.resume(id)?;
         self.derive_empty(id, None, new_id, initialize)
     }
 
-    fn derive_empty(&self, id: &str, owned: Option<(&Path, &Path)>, new_id: String,
-        initialize: impl FnOnce(&rusqlite::Connection, &str) -> Result<()>) -> Result<String> {
+    fn derive_empty(
+        &self,
+        id: &str,
+        owned: Option<(&Path, &Path)>,
+        new_id: String,
+        initialize: impl FnOnce(&rusqlite::Connection, &str) -> Result<()>,
+    ) -> Result<String> {
         self.db.with_conn(|conn| -> Result<String> {
             let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
             let source = conversation_repo::get_conversation(&tx, id)?.context("Session not found")?;
@@ -988,9 +1137,18 @@ mod data_dir_tests {
     #[test]
     fn explicit_directory_wins_over_the_home_default() {
         let home = PathBuf::from("/home/user");
-        assert_eq!(resolve(None, Some(home.clone())).unwrap(), home.join(DATA_DIR_NAME));
-        assert_eq!(resolve(Some("".into()), Some(home.clone())).unwrap(), home.join(DATA_DIR_NAME));
-        assert_eq!(resolve(Some("/data/dcl".into()), Some(home)).unwrap(), PathBuf::from("/data/dcl"));
+        assert_eq!(
+            resolve(None, Some(home.clone())).unwrap(),
+            home.join(DATA_DIR_NAME)
+        );
+        assert_eq!(
+            resolve(Some("".into()), Some(home.clone())).unwrap(),
+            home.join(DATA_DIR_NAME)
+        );
+        assert_eq!(
+            resolve(Some("/data/dcl".into()), Some(home)).unwrap(),
+            PathBuf::from("/data/dcl")
+        );
         assert!(resolve(None, None).is_err());
     }
 }
@@ -1029,7 +1187,7 @@ mod database_cache_tests {
         let data_a = root.path().join("a");
         std::fs::create_dir_all(&data_a).unwrap();
         // Hold the write lock so opening directory A stays busy for a while.
-        let blocker=std::fs::File::create(data_a.join(".session-bootstrap")).unwrap();
+        let blocker = std::fs::File::create(data_a.join(".session-bootstrap")).unwrap();
         blocker.lock().unwrap();
         let began = Instant::now();
         let slow = {
@@ -1172,7 +1330,11 @@ mod model_history_step_replay_tests {
         drop(conn);
 
         let history = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
-        assert_eq!(history.len(), 6, "user + 3 assistant steps + 2 tool results");
+        assert_eq!(
+            history.len(),
+            6,
+            "user + 3 assistant steps + 2 tool results"
+        );
 
         assert_eq!(history[0]["role"], "user");
         assert_eq!(history[0]["content"], "Inspect the repo");
@@ -1241,7 +1403,11 @@ mod model_history_step_replay_tests {
         drop(conn);
 
         let history = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
-        assert_eq!(history.len(), 5, "user + merged assistant + 2 tools + final assistant");
+        assert_eq!(
+            history.len(),
+            5,
+            "user + merged assistant + 2 tools + final assistant"
+        );
 
         assert_eq!(history[1]["role"], "assistant");
         assert_eq!(history[1]["reasoning_content"], "merged legacy thinking");
@@ -1277,9 +1443,39 @@ mod model_history_step_replay_tests {
         let inv1 = format!("{assistant_id}:inv-aaaa-1");
         let inv2 = format!("{assistant_id}:inv-aaaa-2");
         let inv3 = format!("{assistant_id}:inv-aaaa-3");
-        message_repo::insert_tool_call(&conn, &inv1, &assistant_id, "Bash", Some("{}"), Some("out1"), false, 0).unwrap();
-        message_repo::insert_tool_call(&conn, &inv2, &assistant_id, "Grep", Some("{}"), Some("out2"), false, 1).unwrap();
-        message_repo::insert_tool_call(&conn, &inv3, &assistant_id, "Read", Some("{}"), Some("out3"), false, 2).unwrap();
+        message_repo::insert_tool_call(
+            &conn,
+            &inv1,
+            &assistant_id,
+            "Bash",
+            Some("{}"),
+            Some("out1"),
+            false,
+            0,
+        )
+        .unwrap();
+        message_repo::insert_tool_call(
+            &conn,
+            &inv2,
+            &assistant_id,
+            "Grep",
+            Some("{}"),
+            Some("out2"),
+            false,
+            1,
+        )
+        .unwrap();
+        message_repo::insert_tool_call(
+            &conn,
+            &inv3,
+            &assistant_id,
+            "Read",
+            Some("{}"),
+            Some("out3"),
+            false,
+            2,
+        )
+        .unwrap();
 
         // Production model_requests shape: thinking uses `"text"` and tool_call uses provider `"call_..."` id.
         let req1 = json!([
@@ -1309,7 +1505,11 @@ mod model_history_step_replay_tests {
         drop(conn);
 
         let history = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
-        assert_eq!(history.len(), 7, "user + step1(asst+2tools) + step2(asst+1tool) + step3(asst)");
+        assert_eq!(
+            history.len(),
+            7,
+            "user + step1(asst+2tools) + step2(asst+1tool) + step3(asst)"
+        );
         assert_eq!(history[1]["reasoning_content"], "Step 1 explore");
         assert_eq!(history[1]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(history[1]["tool_calls"][0]["id"], inv1);
@@ -1418,5 +1618,176 @@ mod model_history_step_replay_tests {
         assert_eq!(history[4]["role"], "assistant");
         assert_eq!(history[4]["reasoning_content"], "Step 3 summary");
         assert_eq!(history[4]["content"], "All done");
+    }
+
+    #[test]
+    fn openai_replays_persisted_encrypted_reasoning_across_turns_and_fork() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store
+            .create(root.path(), "gpt-6.2-astra", "java-llm-proxy")
+            .unwrap();
+
+        store.append(&id, "user", "Turn 1: check config").unwrap();
+        let turn1_asst = store.append(&id, "assistant", "Turn 1 answer").unwrap();
+        let conn = open_session_db(&store, &id);
+        let inv1 = format!("{turn1_asst}:inv-turn1-1");
+        message_repo::insert_tool_call(
+            &conn,
+            &inv1,
+            &turn1_asst,
+            "Read",
+            Some(r#"{"file_path":"a.rs"}"#),
+            Some("a-body"),
+            false,
+            0,
+        )
+        .unwrap();
+        let turn1_snapshots = json!([
+            {
+                "id": "req-t1-1",
+                "number": 1,
+                "startedAt": 1000,
+                "responseBlocks": [
+                    {"type": "tool_call", "id": "call_t1_1", "name": "Read", "arguments": "{\"file_path\":\"a.rs\"}"}
+                ],
+                "providerReasoning": {
+                    "api": "openai-responses",
+                    "provider": "java-llm-proxy",
+                    "model": "gpt-6.2-astra",
+                    "reasoning_only": true,
+                    "items": [
+                        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc-t1-1"}
+                    ]
+                }
+            },
+            {
+                "id": "req-t1-2",
+                "number": 2,
+                "startedAt": 2000,
+                "responseBlocks": [
+                    {"type": "text", "text": "Turn 1 answer"}
+                ],
+                "providerReasoning": {
+                    "api": "openai-responses",
+                    "provider": "java-llm-proxy",
+                    "model": "gpt-6.2-astra",
+                    "reasoning_only": true,
+                    "items": [
+                        {"type": "reasoning", "id": "rs_2", "summary": [], "encrypted_content": "enc-t1-2"}
+                    ]
+                }
+            }
+        ]);
+        message_repo::save_request_snapshots(&conn, &turn1_asst, &turn1_snapshots).unwrap();
+        message_repo::set_tool_call_request_link(&conn, &inv1, Some("req-t1-1"), Some("call_t1_1"))
+            .unwrap();
+
+        // Turn 2: 0-tool-call assistant turn with persisted encrypted reasoning.
+        store.append(&id, "user", "Turn 2: follow up").unwrap();
+        let turn2_asst = store.append(&id, "assistant", "Turn 2 answer").unwrap();
+        let turn2_snapshots = json!([
+            {
+                "id": "req-t2-1",
+                "number": 3,
+                "startedAt": 3000,
+                "responseBlocks": [
+                    {"type": "text", "text": "Turn 2 answer"}
+                ],
+                "providerReasoning": {
+                    "api": "openai-responses",
+                    "provider": "java-llm-proxy",
+                    "model": "gpt-6.2-astra",
+                    "reasoning_only": true,
+                    "items": [
+                        {"type": "reasoning", "id": "rs_3", "summary": [], "encrypted_content": "enc-t2-1"}
+                    ]
+                }
+            }
+        ]);
+        message_repo::save_request_snapshots(&conn, &turn2_asst, &turn2_snapshots).unwrap();
+        drop(conn);
+
+        let same_provider: crate::native_engine::provider_manager::ResolvedProvider = {
+            let p: Provider = serde_json::from_value(json!({
+                "id": "java-llm-proxy",
+                "name": "java-llm-proxy",
+                "base_url": "http://127.0.0.1:8318/tools/codex/v1",
+                "api_key": "fixture",
+                "api_format": "openai",
+                "enabled": true,
+                "models": [
+                    {"id": "gpt-6.2-astra", "name": "gpt-6.2-astra", "api": "openai-responses", "enabled": true, "supports_vision": false, "supports_web_search": false},
+                    {"id": "deepseek-v4.1-flash", "name": "deepseek-v4.1-flash", "api": "openai-responses", "enabled": true, "supports_vision": false, "supports_web_search": false}
+                ]
+            }))
+            .unwrap();
+            crate::native_engine::provider_manager::ResolvedProvider {
+                model: p.models[0].clone(),
+                provider: p,
+            }
+        };
+
+        let verify_wire = |session_id: &str| {
+            let history = store.model_history(session_id, &ApiFormat::OpenAI).unwrap();
+            let msgs: Vec<_> = history
+                .iter()
+                .map(|m| serde_json::from_value(m.clone()).unwrap())
+                .collect();
+            let wire = crate::native_engine::provider_runtime::compaction_request(
+                &same_provider,
+                msgs,
+                "sys",
+                None,
+            )
+            .unwrap();
+            let input = wire["input"].as_array().unwrap();
+            let encrypted: Vec<&str> = input
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .filter_map(|item| item["encrypted_content"].as_str())
+                .collect();
+            assert_eq!(encrypted, vec!["enc-t1-1", "enc-t1-2", "enc-t2-1"]);
+            assert!(input
+                .iter()
+                .all(
+                    |item| item.get("role").and_then(Value::as_str) != Some("assistant")
+                        || item["content"] != json!([{"type": "output_text", "text": ""}])
+                ));
+            let fc = input
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .unwrap();
+            let fco = input
+                .iter()
+                .find(|item| item["type"] == "function_call_output")
+                .unwrap();
+            assert_eq!(fc["call_id"], fco["call_id"]);
+        };
+
+        verify_wire(&id);
+
+        // Model switch drops all encrypted reasoning while preserving history.
+        let mut switched = same_provider.clone();
+        switched.model = switched.provider.models[1].clone();
+        let history = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
+        let msgs: Vec<_> = history
+            .iter()
+            .map(|m| serde_json::from_value(m.clone()).unwrap())
+            .collect();
+        let switched_wire = crate::native_engine::provider_runtime::compaction_request(
+            &switched, msgs, "sys", None,
+        )
+        .unwrap();
+        assert!(!switched_wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "reasoning"));
+
+        // Forked session retains all three encrypted reasoning items and valid tool call pairing.
+        let forked = store.fork(&id).unwrap();
+        verify_wire(&forked);
     }
 }

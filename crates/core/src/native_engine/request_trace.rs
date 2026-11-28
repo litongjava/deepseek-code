@@ -23,12 +23,14 @@ pub struct RequestTrace {
     openai_provider_error: bool,
     /// Recovery-only: content on a choice the first-choice assembly may skip.
     openai_recovery_content: bool,
+    /// Cross-turn opaque Responses reasoning items with `encrypted_content`.
+    provider_reasoning: Option<Value>,
 }
 
 pub(super) fn cache_write_tokens(usage: &Value) -> Option<u64> {
     usage["cache_creation_input_tokens"]
-            .as_u64()
-            .or_else(|| usage["prompt_tokens_details"]["cache_write_tokens"].as_u64())
+        .as_u64()
+        .or_else(|| usage["prompt_tokens_details"]["cache_write_tokens"].as_u64())
 }
 
 impl RequestTrace {
@@ -53,11 +55,53 @@ impl RequestTrace {
             remote_failure: None,
             openai_provider_error: false,
             openai_recovery_content: false,
+            provider_reasoning: None,
         }
     }
 
-    pub fn capture_context(&mut self, sender: tokio::sync::mpsc::Sender<super::tool_loop::EngineEvent>) -> super::request_context::ContextCapture {
-        let capture = super::request_context::ContextCapture { event: Some((sender, self.started())), ..Default::default() };
+    pub fn set_provider_reasoning(&mut self, native: &Value) {
+        let Some(provider) = native["provider"].as_str().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let Some(model) = native["model"].as_str().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if native["api"] != "openai-responses" {
+            return;
+        }
+        let Some(items) = native["items"].as_array() else {
+            return;
+        };
+        let encrypted: Vec<Value> = items
+            .iter()
+            .filter(|item| {
+                item["type"] == "reasoning"
+                    && item["encrypted_content"]
+                        .as_str()
+                        .is_some_and(|s| !s.trim().is_empty())
+            })
+            .cloned()
+            .collect();
+        if encrypted.is_empty() {
+            return;
+        }
+        self.provider_reasoning = Some(json!({
+            "api": "openai-responses",
+            "provider": provider,
+            "model": model,
+            "reasoning_only": true,
+            "items": encrypted,
+        }));
+    }
+
+    pub fn capture_context(
+        &mut self,
+        sender: tokio::sync::mpsc::Sender<super::tool_loop::EngineEvent>,
+    ) -> super::request_context::ContextCapture {
+        let capture = super::request_context::ContextCapture {
+            event: Some((sender, self.started())),
+            ..Default::default()
+        };
         self.context_capture = Some(capture.clone());
         capture
     }
@@ -339,7 +383,10 @@ impl RequestTrace {
                     );
                     self.blocks[position]["text"] = json!(combined);
                 }
-                if let Some(args) = delta["partial_json"].as_str().filter(|args| !args.is_empty()) {
+                if let Some(args) = delta["partial_json"]
+                    .as_str()
+                    .filter(|args| !args.is_empty())
+                {
                     self.arguments.entry(position).or_default().push_str(args);
                 }
                 if let Some(signature) = delta["signature"].as_str() {
@@ -388,7 +435,9 @@ impl RequestTrace {
             .or_else(|| failure.as_ref().map(|failure| failure.diagnostic()));
         let status = if error.is_some() {
             "error"
-        } else if status == "completed" && matches!(self.finish_reason.as_deref(),Some("max_tokens"|"length")) {
+        } else if status == "completed"
+            && matches!(self.finish_reason.as_deref(), Some("max_tokens" | "length"))
+        {
             error=Some(format!("Incomplete response: provider stopped at the output token limit ({}). Partial output was retained; send a follow-up to continue.",self.finish_reason.as_deref().unwrap()));
             "incomplete"
         } else if status == "completed" && !self.response_finished && self.finish_reason.is_none() {
@@ -461,6 +510,11 @@ impl RequestTrace {
             .as_object_mut()
             .unwrap()
             .extend(fields.as_object().unwrap().clone());
+        if status == "completed" && error.is_none() {
+            if let Some(reasoning) = self.provider_reasoning.take() {
+                self.snapshot["providerReasoning"] = reasoning;
+            }
+        }
         self.started()
     }
 }
@@ -475,11 +529,14 @@ mod tests {
             "prompt_tokens_details":{"cached_tokens":4}}}));
         trace.observe_openai(&json!({"usage":{"prompt_tokens":null,"completion_tokens":2,
             "prompt_tokens_details":{"cached_tokens":null,"cache_write_tokens":3}}}));
-        let result = trace.finish("interrupted",None);
-        assert_eq!(result["usage"],json!({"prompt_tokens":11,"completion_tokens":2,
-            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":3}}));
-        assert_eq!(result["inputTokens"],11);
-        assert_eq!(result["outputTokens"],2);
+        let result = trace.finish("interrupted", None);
+        assert_eq!(
+            result["usage"],
+            json!({"prompt_tokens":11,"completion_tokens":2,
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":3}})
+        );
+        assert_eq!(result["inputTokens"], 11);
+        assert_eq!(result["outputTokens"], 2);
     }
 
     #[test]
@@ -512,7 +569,10 @@ mod tests {
         trace.observe_openai(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"","arguments":"\"pwd\"}"}}]}, "finish_reason":"tool_calls"}]}));
         let result = trace.finish("completed", None);
         assert_eq!(result["responseBlocks"][0]["name"], "Bash");
-        assert_eq!(result["responseBlocks"][0]["input"], json!({"command":"pwd"}));
+        assert_eq!(
+            result["responseBlocks"][0]["input"],
+            json!({"command":"pwd"})
+        );
     }
 
     #[test]
@@ -666,5 +726,68 @@ mod tests {
         );
         assert_eq!(result["responseBlocks"][1]["input"], json!({"path":"file"}));
         assert_eq!(result["responseBlocks"][2]["text"], "Comment");
+    }
+
+    #[test]
+    fn openai_responses_encrypted_reasoning_is_saved_on_completed_snapshot_only() {
+        let mut trace = RequestTrace::new(json!({"id": "req-1", "startedAt": 1000}));
+        trace.mark_completed();
+        trace.set_provider_reasoning(&json!({
+            "api": "openai-responses",
+            "provider": "java-llm-proxy",
+            "model": "gpt-6.2-astra",
+            "items": [
+                {"type": "reasoning", "id": "rs_sum", "summary": [{"type": "summary_text", "text": "plain"}]},
+                {"type": "reasoning", "id": "rs_blank", "encrypted_content": "   "},
+                {"type": "reasoning", "id": "rs_enc", "summary": [], "encrypted_content": "opaque-enc"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+            ]
+        }));
+        let completed = trace.finish("completed", None);
+        assert_eq!(
+            completed["providerReasoning"],
+            json!({
+                "api": "openai-responses",
+                "provider": "java-llm-proxy",
+                "model": "gpt-6.2-astra",
+                "reasoning_only": true,
+                "items": [
+                    {"type": "reasoning", "id": "rs_enc", "summary": [], "encrypted_content": "opaque-enc"}
+                ]
+            })
+        );
+
+        let mut errored = RequestTrace::new(json!({"id": "req-2", "startedAt": 1000}));
+        errored.mark_completed();
+        errored.set_provider_reasoning(&json!({
+            "api": "openai-responses",
+            "provider": "java-llm-proxy",
+            "model": "gpt-6.2-astra",
+            "items": [{"type": "reasoning", "id": "rs_enc", "encrypted_content": "opaque-enc"}]
+        }));
+        let failed = errored.finish("completed", Some("upstream failed"));
+        assert!(failed.get("providerReasoning").is_none());
+
+        let mut summary_only = RequestTrace::new(json!({"id": "req-3", "startedAt": 1000}));
+        summary_only.mark_completed();
+        summary_only.set_provider_reasoning(&json!({
+            "api": "openai-responses",
+            "provider": "java-llm-proxy",
+            "model": "deepseek-v4.1-flash",
+            "items": [{"type": "reasoning", "id": "rs_ds", "summary": [{"type": "summary_text", "text": "only summary"}]}]
+        }));
+        let summary_done = summary_only.finish("completed", None);
+        assert!(summary_done.get("providerReasoning").is_none());
+
+        let mut other_api = RequestTrace::new(json!({"id": "req-4", "startedAt": 1000}));
+        other_api.mark_completed();
+        other_api.set_provider_reasoning(&json!({
+            "api": "anthropic-messages",
+            "provider": "claude",
+            "model": "claude-opus",
+            "items": [{"type": "thinking", "thinking": "t", "signature": "sig"}]
+        }));
+        let other_done = other_api.finish("completed", None);
+        assert!(other_done.get("providerReasoning").is_none());
     }
 }

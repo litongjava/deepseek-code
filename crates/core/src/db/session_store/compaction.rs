@@ -192,14 +192,17 @@ impl SessionRead<'_> {
         let (prefix, boundary) = self.model_history_before(format, before.as_deref())?;
         // A legacy report and its queued notification can straddle a physical cut.
         // Do not apply a prefix length from standalone replay to their merged view.
-        let split_notification = before.is_some() && prefix.iter().enumerate().any(|(i, row)| {
-            row["origin"] == "task_notification" && messages.get(i) != Some(row)
-        });
+        let split_notification = before.is_some()
+            && prefix.iter().enumerate().any(|(i, row)| {
+                row["origin"] == "task_notification" && messages.get(i) != Some(row)
+            });
         let prefix_len = if split_notification {
             0
         } else if boundary.is_some()
             && !prefix.is_empty()
-            && prefix[1..].iter().all(|row| row["origin"] == "compaction_git")
+            && prefix[1..]
+                .iter()
+                .all(|row| row["origin"] == "compaction_git")
             && (prefix[0]["provider_content"]["compaction"] == true
                 || prefix[0]["origin"] == "compaction")
         {
@@ -240,7 +243,10 @@ impl SessionRead<'_> {
 
 impl SessionDb {
     fn compaction_git(&self) -> Option<String> {
-        self.workspace().ok().as_deref().and_then(crate::services::git_snapshot::capture_boundary)
+        self.workspace()
+            .ok()
+            .as_deref()
+            .and_then(crate::services::git_snapshot::capture_boundary)
     }
 
     pub(crate) fn commit_compaction_window(
@@ -276,7 +282,8 @@ impl SessionDb {
         let memory = crate::services::memory_files::prompt::Admission::session(self)?;
         self.require_active_compaction()?;
         self.write_locked("commit mid-turn compaction", |w| {
-            let (current_last, current_boundary, _) = SessionRead(w.0).mid_turn_compaction_fence()?;
+            let (current_last, current_boundary, _) =
+                SessionRead(w.0).mid_turn_compaction_fence()?;
             ensure!(
                 current_last.as_deref() == expected_last_message
                     && current_boundary.as_deref() == expected_boundary,
@@ -388,12 +395,14 @@ impl DeliveryOwner {
 }
 
 impl SessionRepository<'_> {
-    pub(crate) fn request_compaction(&self, keep:&str, used:u64, window:u64) -> Result<()> {
+    pub(crate) fn request_compaction(&self, keep: &str, used: u64, window: u64) -> Result<()> {
         match &self.0 {
-            owned::Backend::Admitted(s) => s.write_named("queue compaction", |w| w.request_compaction(keep, used, window)),
-            owned::Backend::Shared(_,_) => self.write("queue compaction",|c,id|{
-                compaction_requests::validate(c,id,keep,used,window)?;
-                compaction_requests::save(c,id,keep)
+            owned::Backend::Admitted(s) => s.write_named("queue compaction", |w| {
+                w.request_compaction(keep, used, window)
+            }),
+            owned::Backend::Shared(_, _) => self.write("queue compaction", |c, id| {
+                compaction_requests::validate(c, id, keep, used, window)?;
+                compaction_requests::save(c, id, keep)
             }),
         }
     }
@@ -440,8 +449,15 @@ impl SessionRepository<'_> {
                 "Not enough messages to compact"
             );
             let pending_request = if incarnation.is_some() {
-                c.query_row("SELECT id FROM compaction_request WHERE singleton=1",[],|r|r.get(0)).optional()?
-            } else {None};
+                c.query_row(
+                    "SELECT id FROM compaction_request WHERE singleton=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
             Ok(compaction::PreparedCompaction {
                 pending_request,
                 conversation_id: id.into(),
@@ -469,7 +485,9 @@ impl SessionRepository<'_> {
             owned::Backend::Shared(db, id) => {
                 ensure!(prepared.incarnation.is_none(), "Compaction store changed");
                 let root = crate::data_layout::DataLayout::new(db.data_dir()).workspaces();
-                let git = db.engine_workspace(&root, id, None).ok()
+                let git = db
+                    .engine_workspace(&root, id, None)
+                    .ok()
                     .and_then(|(cwd, _, _)| crate::services::git_snapshot::capture_boundary(&cwd));
                 self.write("commit compaction", |c, _| {
                     compaction::commit_locked(c, prepared, generated, context, git.as_deref())
@@ -489,11 +507,19 @@ impl SessionRepository<'_> {
                         compaction::fingerprint(w.0, w.1)?.0 == prepared.fingerprint,
                         "Session changed during compaction; retry after the active turn finishes"
                     );
-                    if let Some(request)=&prepared.pending_request {
-                        ensure!(w.0.execute("DELETE FROM compaction_request WHERE id=?1",[request])?==1,"Compaction request changed");
+                    if let Some(request) = &prepared.pending_request {
+                        ensure!(
+                            w.0.execute("DELETE FROM compaction_request WHERE id=?1", [request])?
+                                == 1,
+                            "Compaction request changed"
+                        );
                     }
-                    let message_id =
-                        w.commit_summary(generated, &memory, git.as_deref(), prepared.before.as_deref())?;
+                    let message_id = w.commit_summary(
+                        generated,
+                        &memory,
+                        git.as_deref(),
+                        prepared.before.as_deref(),
+                    )?;
                     if let Some(context) = context {
                         state::set_local(
                             w.0,
@@ -630,6 +656,44 @@ impl SessionRepository<'_> {
                 let git = crate::services::git_snapshot::read_boundary(c, &message_id)?;
                 Ok((message_id, text, native.map(|s|serde_json::from_str(&s)).transpose()?, git))
             }).transpose()
+        })
+    }
+
+    /// Reads all valid persisted `providerReasoning` envelopes from `message_trajectory`
+    /// for this conversation so boundary sanitization can keep DB-backed reasoning
+    /// while stripping host-forged `provider_content`.
+    pub(crate) fn persisted_provider_reasonings(&self) -> Result<Vec<Value>> {
+        self.read(|c, id| {
+            let mut stmt = match c.prepare(
+                "SELECT t.requests_json FROM message_trajectory t
+                 JOIN messages m ON m.id = t.message_id
+                 WHERE m.conversation_id = ?1",
+            ) {
+                Ok(stmt) => stmt,
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+                    if msg.contains("no such table") =>
+                {
+                    return Ok(Vec::new());
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+            let mut reasonings = Vec::new();
+            for raw in rows {
+                let raw = raw?;
+                let Ok(Value::Array(snapshots)) = serde_json::from_str::<Value>(&raw) else {
+                    continue;
+                };
+                for snapshot in snapshots {
+                    if let Some(reasoning) = snapshot
+                        .get("providerReasoning")
+                        .and_then(crate::runtime::valid_trajectory_provider_reasoning)
+                    {
+                        reasonings.push(reasoning);
+                    }
+                }
+            }
+            Ok(reasonings)
         })
     }
 }
