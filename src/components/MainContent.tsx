@@ -452,6 +452,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const [projectToTrust, setProjectToTrust] = useState<Project | null>(null);
   const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
   const [resourceAlertToast, setResourceAlertToast] = useState<ResourceAlertToast | null>(null);
+  useEffect(() => {
+    if (compactStatus.state !== 'notice') return;
+    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), 8000);
+    return () => clearTimeout(timer);
+  }, [compactStatus, setCompactStatus]);
   const showResourceAlert = useCallback((alert: { summary?: string }) => {
     setResourceAlertToast(current => nextResourceAlertToast(current, alert?.summary));
   }, []);
@@ -1911,8 +1916,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
         )
       )}
-      {(webSearchToast || resourceAlertToast) && (
+      {(webSearchToast || resourceAlertToast || compactStatus.state === 'notice') && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col items-center gap-2 max-w-[92vw]">
+          {compactStatus.state === 'notice' && (
+            <div role="status" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
+              {compactStatus.message}
+            </div>
+          )}
           {resourceAlertToast && (
             <div role="alert" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
               <AlertTriangle size={14} className="shrink-0 text-amber-500" />

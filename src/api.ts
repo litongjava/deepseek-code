@@ -1268,7 +1268,9 @@ export function reconnectStream(
               onSystem(parsed.type, '', parsed);
             }
             if ((parsed.type === 'request_snapshot' || parsed.type === 'turn_timing') && onSystem) onSystem(parsed.type, '', parsed);
-            if (parsed.type === 'resource_alert' && onSystem) {
+            if (parsed.type === 'compaction_notice') {
+              onSystem?.('compaction_notice', parsed.message || '', parsed);
+            } else if (parsed.type === 'resource_alert' && onSystem) {
               onSystem('resource_alert', parsed.summary || '', parsed);
             }
             if (parsed.type === 'message_start' && onSystem) {
@@ -1888,6 +1890,8 @@ export async function sendMessageNative(
             } else if (event.type === 'request_snapshot') {
               flushPending();
               onSystem?.('request_snapshot', '', event);
+            } else if (event.type === 'compaction_notice') {
+              onSystem?.('compaction_notice', event.message || '', event);
             } else if (event.type === 'resource_alert') {
               onSystem?.('resource_alert', event.summary || '', event);
             } else if (event.type === 'message_start') {
@@ -2381,7 +2385,9 @@ export async function sendMessage(
             continue;
           }
 
-          if (parsed.type === 'resource_alert') {
+          if (parsed.type === 'compaction_notice') {
+            onSystem?.('compaction_notice', parsed.message || '', parsed);
+          } else if (parsed.type === 'resource_alert') {
             onSystem?.('resource_alert', parsed.summary || '', parsed);
             continue;
           }

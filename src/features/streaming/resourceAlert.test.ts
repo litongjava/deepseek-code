@@ -28,6 +28,15 @@ function harness(active = true) {
   return { callbacks: createStreamCallbacks(ctx), context: ctx, onResourceAlert, updates, message: () => messages[messages.length - 1] };
 }
 
+describe('compaction notices', () => {
+  it.each(['onSystemEvents', 'onSystemEventsLight'] as const)('%s shows the notice without changing chat history', callback => {
+    const { callbacks, context, updates } = harness();
+    callbacks[callback]('compaction_notice', 'Continuing with the existing context.', {});
+    expect(context.setCompactStatus).toHaveBeenCalledWith({ state: 'notice', message: 'Continuing with the existing context.' });
+    expect(updates()).toBe(0);
+  });
+});
+
 describe('resource alerts', () => {
   it.each(['onSystemEvents', 'onSystemEventsLight'] as const)('%s reports an active warning without touching the stream', callback => {
     const { callbacks, onResourceAlert, context, updates, message } = harness();

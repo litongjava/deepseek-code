@@ -360,6 +360,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
         return newMsgs;
       });
     }
+    if (event === 'compaction_notice' && message.trim()) setCompactStatus({ state: 'notice', message });
     if (event === 'compaction_start') setCompactStatus({ state: 'compacting' });
     if (event === 'compaction_done') {
       if (data?.messagesCompacted > 0) {
@@ -615,7 +616,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
   };
 
   const onSystemEventsLight = (event: string, message: string, data: any) => {
-    if (event === 'context_reset') { onSystemEvents(event, message, data); return; }
+    if (event === 'context_reset' || event === 'compaction_notice') { onSystemEvents(event, message, data); return; }
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
     if (event === 'resource_alert') { reportResourceAlert(message, data); return; }
     if (event === 'queued_input' && data?.queueItem) {
