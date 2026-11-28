@@ -133,12 +133,7 @@ pub async fn prepare_invocation(
     };
     let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let context = crate::services::context(&session.paths)?;
-    SkillsManager::with_path(session.paths.data_dir.join("skills")).ensure_installed()?;
-    let mut commands = deepseek_code_core::services::plugins::skill_commands(&context)?;
-    commands.extend(deepseek_code_core::skills::discovery::discover(
-        &session.paths.data_dir,
-        &session.workspace,
-    )?);
+    let commands = discover_commands(&context, &session.workspace)?;
     let Some(skill) = commands.get(name) else {
         return Ok(PreparedInvocation::NotHandled);
     };
@@ -363,6 +358,17 @@ fn isolated_child(
     Ok(destination)
 }
 
+pub(crate) fn discover_commands(
+    context: &deepseek_code_core::services::ServiceContext,
+    workspace: &std::path::Path,
+) -> anyhow::Result<BTreeMap<String, deepseek_code_core::skills::discovery::SkillCommand>> {
+    let data_dir = &context.paths.data_dir;
+    SkillsManager::with_path(data_dir.join("skills")).ensure_installed()?;
+    let mut discovered = deepseek_code_core::services::plugins::skill_commands(context)?;
+    discovered.extend(deepseek_code_core::skills::discovery::discover(data_dir, workspace)?);
+    Ok(discovered)
+}
+
 pub async fn load_for_workspace(
     paths: &RuntimePaths,
     workspace: &std::path::Path,
@@ -370,13 +376,7 @@ pub async fn load_for_workspace(
     // First-run installation of bundled/legacy files keeps its existing
     // behavior; the listing below comes only from the shared read-only resolver
     // used by the engine listing and the Skill tool.
-    SkillsManager::with_path(paths.data_dir.join("skills")).ensure_installed()?;
-    let context = crate::services::context(paths)?;
-    let mut discovered = deepseek_code_core::services::plugins::skill_commands(&context)?;
-    discovered.extend(deepseek_code_core::skills::discovery::discover(
-        &paths.data_dir,
-        workspace,
-    )?);
+    let discovered = discover_commands(&crate::services::context(paths)?, workspace)?;
     let mut commands = BTreeMap::new();
     for (name, skill) in discovered {
         let command = format!("/{name}");

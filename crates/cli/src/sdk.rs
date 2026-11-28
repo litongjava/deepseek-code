@@ -778,9 +778,15 @@ async fn run_inner(
                 envelope["uuid"] = json!(message_uuid);
                 crate::session::emit_json(&envelope)?;
             }
-            if let Some(command) = crate::headless_commands::parse(&message.text)
-                .filter(|_| message.source != UserSource::SessionStartHook)
-            {
+            let image_content = message
+                .content
+                .as_array()
+                .filter(|blocks| blocks.iter().any(|b| b["type"] == "image_url"))
+                .map(|_| message.content.clone());
+            let command = if image_content.is_none() && message.source != UserSource::SessionStartHook {
+                crate::headless_commands::parse(session, &message.text)?
+            } else { None };
+            if let Some(command) = command {
                 let requires_host = session.sdk_hooks.as_ref().is_some_and(|hooks| hooks.has_callbacks())
                     || !session.sdk_mcp.names().is_empty();
                 let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
@@ -826,11 +832,7 @@ async fn run_inner(
                 }
             }
             let mut terminal = None;
-            session.sdk_content = message
-                .content
-                .as_array()
-                .filter(|blocks| blocks.iter().any(|b| b["type"] == "image_url"))
-                .map(|_| message.content.clone());
+            session.sdk_content = image_content;
             let text = match session.sdk_overrides.initial_prompt.take() {
                 Some(initial) if !initial.trim().is_empty() => {
                     if message.text.trim().is_empty() {

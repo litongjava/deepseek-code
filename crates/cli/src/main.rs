@@ -1323,8 +1323,9 @@ async fn run(cli: &mut Cli) -> Result<()> {
                 )?;
                 }
             }
-            if let Some(command) = headless_commands::parse(&prompt).filter(|_| single) {
-                headless_commands::run(cli, &mut session, command).await?;
+            let command = if single { headless_commands::parse(&session, &prompt)? } else { None };
+            if let Some(command) = command {
+                headless_commands::run(cli, &session, command).await?;
             } else {
                 prompt_turn(cli, &mut session, &prompt, &mut input, TurnOrigin::command_line(cli, &prompt)).await?;
             }

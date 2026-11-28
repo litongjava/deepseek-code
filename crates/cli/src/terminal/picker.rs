@@ -27,7 +27,6 @@ pub struct Picker<'a> {
 /// Whether the terminal can show a picker; otherwise commands print text.
 pub fn available() -> bool {
     io::stdin().is_terminal() && io::stderr().is_terminal() && !crate::terminal::screen_reader()
-        && crate::terminal_output::COMMAND_OUTPUT.try_with(|_| ()).is_err()
 }
 
 /// An extra key a picker hands back with the entry it was pressed on.

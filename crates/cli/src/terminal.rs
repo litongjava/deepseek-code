@@ -442,9 +442,6 @@ mod answer_input;
 /// This cache is never appended to model conversation messages.
 pub(crate) fn print_recorded(text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    if crate::terminal_output::collect_command_output(format_args!("{text}\n")) {
-        return Ok(());
-    }
     release_handoff();
     let mut history = scrollback::Scrollback::take();
     let mut out = crate::terminal_output::stderr_locked();

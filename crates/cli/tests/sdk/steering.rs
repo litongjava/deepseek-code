@@ -565,3 +565,100 @@ async fn interrupt_manual_compact_reports_whether_the_boundary_was_saved() {
         assert!(client.finish().await.1.is_empty());
     }
 }
+
+#[tokio::test]
+async fn headless_commands_cannot_logout_export_or_switch_models() {
+    let server = Server::start(false, Mode::Text).await;
+    let root = tempfile::tempdir().unwrap();
+    let credentials = root.path().join("data/config/anthropic-oauth.dat");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(&credentials, b"disposable test marker").unwrap();
+    let export = root.path().join("export.txt");
+    let mut client = Client::start(root.path(), &server, &[]);
+    for (name, input) in [
+        ("/logout", "/logout".to_owned()),
+        ("/export", format!("/export {}", export.display())),
+    ] {
+        client.send(user(&input)).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], true);
+        assert_eq!(
+            result["error"],
+            format!("{name} is not available in SDK mode")
+        );
+    }
+    client.send(user("/model untrusted-change")).await;
+    assert_eq!(client.result().await["is_error"], true);
+    client.send(user("/model")).await;
+    assert_eq!(client.result().await["result"], "fixture-model");
+    for command in ["/status", "/context", "/history", "/cost", "/model list"] {
+        client.send(user(command)).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{command}: {result}");
+        assert_eq!(result["num_turns"], 0);
+    }
+    assert_eq!(
+        std::fs::read(credentials).unwrap(),
+        b"disposable test marker"
+    );
+    assert!(!export.exists());
+    assert!(streamed_requests(&server).is_empty());
+    client.finish().await;
+}
+
+#[tokio::test]
+async fn project_skills_shadow_unavailable_commands_in_sdk_and_print() {
+    let server = Server::start(false, Mode::Text).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = Client::start(root.path(), &server, &[]);
+    for name in ["debug", "loop"] {
+        let skill = root.path().join(".claude/skills").join(name);
+        std::fs::create_dir_all(&skill).unwrap();
+        let marker = format!("PROJECT_SKILL_{name}_EXPANDED");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Colliding test skill\n---\n{marker} $ARGUMENTS"
+            ),
+        )
+        .unwrap();
+        let input = format!("/{name} review_input");
+        client.send(user(&input)).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        assert!(streamed_requests(&server).last().unwrap()["messages"]
+            .to_string()
+            .contains(&marker));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcl"))
+            .arg("--path")
+            .arg(root.path())
+            .arg("--data-dir")
+            .arg(root.path().join("data"))
+            .args([
+                "--base-url",
+                &server.url,
+                "--api-key-env",
+                "CLAUDE_SDK_FIXTURE_KEY",
+                "--api-format",
+                "openai",
+                "--model",
+                "fixture-model",
+                "--print",
+                &input,
+            ])
+            .env("CLAUDE_SDK_FIXTURE_KEY", "fixture-only")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(streamed_requests(&server).last().unwrap()["messages"]
+            .to_string()
+            .contains(&marker));
+    }
+    assert_eq!(streamed_requests(&server).len(), 4);
+    assert!(client.finish().await.0.success());
+}

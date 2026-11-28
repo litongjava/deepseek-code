@@ -270,23 +270,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => { eprint!("{}\n", format_args!($($arg)*)) };
 }
 
-// Collect local slash-command output while retaining exclusive ownership of
-// protocol stdout for JSON frames. Other Tokio tasks keep their own writers.
-tokio::task_local! {
-    pub(crate) static COMMAND_OUTPUT: std::cell::RefCell<String>;
-}
-
-pub(crate) fn collect_command_output(args: fmt::Arguments<'_>) -> bool {
-    use fmt::Write;
-    COMMAND_OUTPUT
-        .try_with(|out| out.borrow_mut().write_fmt(args).unwrap())
-        .is_ok()
-}
-
 pub(crate) fn print_stdout(args: std::fmt::Arguments<'_>) {
-    if collect_command_output(args) {
-        return;
-    }
     if Stream::Stdout.endpoint().is_terminal() {
         display_result("stdout", stdout_locked().write_fmt(args));
     } else {
@@ -295,9 +279,6 @@ pub(crate) fn print_stdout(args: std::fmt::Arguments<'_>) {
 }
 
 pub(crate) fn print_stderr(args: std::fmt::Arguments<'_>) {
-    if collect_command_output(args) {
-        return;
-    }
     if Stream::Stderr.endpoint().is_terminal() {
         display_result("stderr", stderr_locked().write_fmt(args));
     } else {

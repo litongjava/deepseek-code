@@ -7,33 +7,64 @@ use crate::{
 use anyhow::{bail, Result};
 use serde_json::json;
 
+enum Builtin<'a> {
+    Compact,
+    Help,
+    Status,
+    Context,
+    Cost,
+    History,
+    Model,
+    Unavailable(&'a str),
+}
+
 pub(crate) struct Command<'a> {
-    line: &'a str,
-    name: &'a str,
+    builtin: Builtin<'a>,
     argument: &'a str,
 }
 
 impl Command<'_> {
     pub(crate) fn is_compaction(&self) -> bool {
-        self.name == "/compact"
+        matches!(self.builtin, Builtin::Compact)
     }
 }
 
-// Skills have their own invocation and permission handling inside Session::turn.
-pub(crate) fn parse(line: &str) -> Option<Command<'_>> {
+pub(crate) fn parse<'a>(session: &Session, line: &'a str) -> Result<Option<Command<'a>>> {
     let line = line.trim();
     let (name, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-    command_catalog::COMMANDS
-        .iter()
-        .any(|(cmd, _)| *cmd == name)
-        .then_some(Command {
-            line,
-            name,
-            argument: argument.trim(),
-        })
+    let Some(skill_name) = name.strip_prefix('/') else {
+        return Ok(None);
+    };
+    let builtin = match name {
+        "/compact" => Builtin::Compact,
+        "/help" => Builtin::Help,
+        "/status" => Builtin::Status,
+        "/context" => Builtin::Context,
+        "/cost" => Builtin::Cost,
+        "/history" => Builtin::History,
+        "/model" => Builtin::Model,
+        _ if command_catalog::COMMANDS
+            .iter()
+            .any(|(cmd, _)| *cmd == name) =>
+        {
+            let context = crate::services::context(&session.paths)?;
+            if crate::skill_commands::discover_commands(&context, &session.workspace)?
+                .get(skill_name)
+                .is_some_and(|skill| skill.user_invocable)
+            {
+                return Ok(None); // The ordinary turn owns skill expansion and permissions.
+            }
+            Builtin::Unavailable(name)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Command {
+        builtin,
+        argument: argument.trim(),
+    }))
 }
 
-pub(crate) async fn run(cli: &Cli, session: &mut Session, cmd: Command<'_>) -> Result<()> {
+pub(crate) async fn run(cli: &Cli, session: &Session, cmd: Command<'_>) -> Result<()> {
     let stream = cli.output_format == OutputFormat::StreamJson;
     if stream {
         let init = tokio::select! {
@@ -42,75 +73,26 @@ pub(crate) async fn run(cli: &Cli, session: &mut Session, cmd: Command<'_>) -> R
         };
         crate::sdk_messages::emit_init_once(|| init)?;
     }
-    let paths = session.paths.clone();
-    let message = match cmd.name {
-        "/compact" => manual_compact(session, cmd.argument, stream).await?,
-        "/help" => command_catalog::help(),
-        "/status" => crate::status_commands::text(session, cmd.argument).await?,
-        "/cd" | "/worktree"
-            if session.sdk_permissions.is_some()
-                && !cmd.argument.is_empty()
-                && !(cmd.name == "/worktree" && cmd.argument == "status") =>
-        {
-            bail!(
-                "{} changes the workspace. Start an SDK stream in the destination workspace.",
-                cmd.name
-            )
+    let message = match cmd.builtin {
+        Builtin::Compact => manual_compact(session, cmd.argument, stream).await?,
+        Builtin::Help => command_catalog::help(),
+        Builtin::Status if cmd.argument.is_empty() => {
+            crate::status_commands::text(session, "").await?
         }
-        "/clear" | "/new" | "/reset" | "/branch" | "/resume"
-            if session.sdk_permissions.is_some()
-                && !(cmd.name == "/resume" && cmd.argument.is_empty()) =>
-        {
-            bail!(
-                "{} switches sessions. Start a new SDK stream for the destination session.",
-                cmd.name
-            )
+        Builtin::Context if cmd.argument.is_empty() => repl::context_text(session)?,
+        Builtin::Cost if matches!(cmd.argument, "" | "local") => {
+            serde_json::to_string_pretty(&crate::display_commands::local_cost(session)?)?
         }
-        "/model" => {
-            match cmd.argument {
-                "" => {}
-                "list" => {
-                    return emit_result(
-                        cli,
-                        session,
-                        &serde_json::to_string_pretty(&session.sdk_models().await)?,
-                    )
-                }
-                name => session.sdk_set_model(name).await?,
-            }
-            session.binding_state().model.clone()
+        Builtin::History if cmd.argument.is_empty() => {
+            serde_json::to_string_pretty(&session.store.history(&session.id)?)?
         }
-        "/history" => serde_json::to_string_pretty(&session.store.history(&session.id)?)?,
-        _ => {
-            use crate::terminal_output::COMMAND_OUTPUT;
-            COMMAND_OUTPUT
-                .scope(Default::default(), async {
-                    if !repl::handle(cmd.line, &paths, session, None).await?
-                        && !crate::design_commands::handle(
-                            cli,
-                            cmd.name,
-                            cmd.argument,
-                            &paths,
-                            session,
-                        )
-                        .await?
-                        && !crate::batch_commands::handle(
-                            cli,
-                            cmd.name,
-                            cmd.argument,
-                            &paths,
-                            session,
-                        )
-                        .await?
-                    {
-                        bail!("{} requires an interactive session", cmd.name);
-                    }
-                    Ok::<_, anyhow::Error>(
-                        COMMAND_OUTPUT.with(|out| out.take().trim_end().to_owned()),
-                    )
-                })
-                .await?
-        }
+        Builtin::Model => match cmd.argument {
+            "" => session.binding_state().model.clone(),
+            "list" => serde_json::to_string_pretty(&session.sdk_models().await)?,
+            _ => bail!("Model changes require the set_model control request or the --model option"),
+        },
+        Builtin::Unavailable(name) => bail!("{name} is not available in SDK mode"),
+        _ => bail!("Unsupported arguments for a headless inspection command"),
     };
     emit_result(cli, session, &message)
 }
