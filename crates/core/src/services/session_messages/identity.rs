@@ -17,6 +17,21 @@ use std::{
 };
 
 const CACHE_CAPACITY: usize = 64;
+const REDIRECTS: [&str; 3] = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"];
+
+pub(crate) const GIT_OVERRIDE_REASON: &str =
+    "Git directory override in effect: peer identity cannot be verified";
+
+#[derive(Debug, thiserror::Error)]
+#[error("{GIT_OVERRIDE_REASON}")]
+pub(crate) struct GitDirectoryOverride;
+
+fn reject_git_redirects() -> Result<()> {
+    if REDIRECTS.iter().any(|key| std::env::var_os(key).is_some()) {
+        return Err(GitDirectoryOverride.into());
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("Git worktree identity lookup timed out")]
@@ -39,6 +54,10 @@ impl GitDirs {
                 "--absolute-git-dir",
             ],
         );
+        // A concurrent environment change cannot redirect the spawned command.
+        for key in REDIRECTS {
+            command.env_remove(key);
+        }
         let output = git_output(&mut command, Duration::from_secs(2))?;
         let mut lines = std::str::from_utf8(&output)?.lines();
         let common = Path::new(lines.next().context("Git returned no common directory")?);
@@ -107,6 +126,7 @@ struct GitKey {
 
 impl GitKey {
     fn read(cwd: &Path) -> Result<Self> {
+        reject_git_redirects()?;
         let cwd = cwd.canonicalize()?;
         let root = cwd
             .ancestors()
@@ -128,18 +148,12 @@ impl GitKey {
             )
             .canonicalize()?
         };
-        // Git resolves a relative GIT_COMMON_DIR from its invocation directory.
-        // Explicit discovery settings require a fresh lookup on every poll.
-        let common = if let Some(override_dir) = std::env::var_os("GIT_COMMON_DIR") {
-            cwd.join(override_dir).canonicalize()?
-        } else {
-            match fs::read_to_string(git.join("commondir")) {
-                Ok(link) => git
-                    .join(link.trim_end_matches(['\r', '\n']))
-                    .canonicalize()?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => git.clone(),
-                Err(e) => return Err(e.into()),
-            }
+        let common = match fs::read_to_string(git.join("commondir")) {
+            Ok(link) => git
+                .join(link.trim_end_matches(['\r', '\n']))
+                .canonicalize()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => git.clone(),
+            Err(e) => return Err(e.into()),
         };
         let standard_layout = common.join("objects").is_dir() && common.join("refs").is_dir();
         fn modified(path: &Path) -> Result<Option<SystemTime>> {
@@ -162,9 +176,6 @@ impl GitKey {
             dirs: GitDirs { git, common },
             standard_layout,
             discovery_env: [
-                "GIT_DIR",
-                "GIT_COMMON_DIR",
-                "GIT_WORK_TREE",
                 "GIT_CEILING_DIRECTORIES",
                 "GIT_DISCOVERY_ACROSS_FILESYSTEM",
             ]
@@ -289,6 +300,12 @@ impl Resolver {
                 self.verified.push_back((cwd, cached.clone()));
                 return Ok(cached);
             }
+        }
+        if before
+            .as_ref()
+            .is_err_and(|e| e.is::<GitDirectoryOverride>())
+        {
+            return before;
         }
         let actual = (self.lookup)(path)?;
         let key = GitKey::read(path)?;

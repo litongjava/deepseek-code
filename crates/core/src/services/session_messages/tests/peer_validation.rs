@@ -315,3 +315,84 @@ fn retargeting_the_recipient_gitfile_within_one_repository_blocks_the_claim() {
     assert!(owner.target.drain(1).unwrap().is_empty());
     assert_blocked(&context, &store, &recipient, &message);
 }
+
+// Only the child receives Git discovery variables. Other libtest threads can
+// create and validate real repositories while these cases run.
+fn check_discovery_environment(redirect: bool) -> Result<()> {
+    use std::process::Command;
+    if let Some(root) = std::env::var_os("I49_DISCOVERY_TEST_ROOT") {
+        let ctx = context(Path::new(&root))?;
+        let store = SessionStore::new(ctx.db.clone());
+        let recipient = std::env::var("I49_DISCOVERY_TEST_RECIPIENT")?;
+        let owner = Consumer::attach(&ctx.paths.data_dir, &recipient)?.unwrap();
+        if redirect {
+            assert!(owner.target.drain(1)?.is_empty());
+            let row = &inbox(&ctx, &recipient, false)?[0];
+            assert_eq!(row.state, "blocked");
+            assert_eq!(
+                row.blocked_reason.as_deref(),
+                Some("Git directory override in effect: peer identity cannot be verified")
+            );
+            assert!(store.history(&recipient)?.is_empty());
+            let (generation, consumers): (Option<i64>,i64) = ctx.db.fixture_directory(|c| c.query_row(
+                "SELECT generation,(SELECT count(*) FROM session_inbox_consumers WHERE session_id=?1) FROM session_inbox WHERE recipient=?1",
+                [&recipient],|r| Ok((r.get(0)?,r.get(1)?))))??;
+            assert_eq!((generation, consumers), (None, 0));
+            let sender = &row.sender;
+            let err = send(&ctx, sender, &recipient, "another message").unwrap_err();
+            assert!(err.is::<identity::GitDirectoryOverride>(), "{err:#}");
+            assert_eq!(inbox(&ctx, &recipient, false)?.len(), 1);
+        } else {
+            let inputs = drain_pending(&owner.target)?;
+            assert_eq!(inputs.len(), 1);
+            assert!(inputs[0].contains("ordinary discovery"));
+            assert_eq!(
+                inbox(&ctx, &recipient, false)?[0].state,
+                "context_committed"
+            );
+            assert!(owner.target.drain(1)?.is_empty());
+            assert_eq!(store.history(&recipient)?.len(), 1);
+        }
+        return Ok(());
+    }
+
+    let (_temp, ctx, store, sender, recipient) = fixture();
+    let tree = bind_managed_worktree(&ctx, &store, &sender);
+    send(&ctx, &sender, &recipient, "ordinary discovery")?;
+    let run = |key: &str, value: &Path| -> Result<()> {
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("I49_DISCOVERY_TEST_ROOT", &ctx.paths.data_dir)
+            .env("I49_DISCOVERY_TEST_RECIPIENT", &recipient)
+            .env(key, value)
+            .status()?;
+        ensure!(status.success(), "discovery child failed for {key}");
+        Ok(())
+    };
+    if redirect {
+        let git_dir = crate::worktree::session::git(&tree, &["rev-parse", "--absolute-git-dir"])?;
+        run("GIT_DIR", Path::new(&git_dir))?;
+        run(
+            "GIT_COMMON_DIR",
+            &crate::worktree::session::common_dir(&tree)?,
+        )?;
+        run("GIT_WORK_TREE", &tree)?;
+    } else {
+        run("GIT_DISCOVERY_ACROSS_FILESYSTEM", Path::new("1"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn directory_redirects_block_managed_peers_before_any_claim() -> Result<()> {
+    check_discovery_environment(true)
+}
+
+#[test]
+fn cross_filesystem_discovery_still_delivers_once() -> Result<()> {
+    check_discovery_environment(false)
+}

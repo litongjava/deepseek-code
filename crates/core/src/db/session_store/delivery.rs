@@ -8,7 +8,9 @@ use crate::services::{
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use session_messages::identity::{GitLookupTimeout, PeerProject, Resolver};
+use session_messages::identity::{
+    GitDirectoryOverride, GitLookupTimeout, PeerProject, Resolver, GIT_OVERRIDE_REASON,
+};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
 
@@ -703,7 +705,13 @@ fn peer_projects<'a>(
 fn authorized_project(project: Result<PeerProject>) -> Result<Option<PeerProject>> {
     match project {
         Ok(value) => Ok(Some(value)),
-        Err(e) if e.is::<rusqlite::Error>() || e.is::<GitLookupTimeout>() => Err(e),
+        Err(e)
+            if e.is::<rusqlite::Error>()
+                || e.is::<GitLookupTimeout>()
+                || e.is::<GitDirectoryOverride>() =>
+        {
+            Err(e)
+        }
         Err(_) => Ok(None),
     }
 }
@@ -1025,9 +1033,12 @@ impl DeliveryOwner {
                 s.stores.global().read(prepare)
             };
             *until = std::time::Instant::now() + budget;
-            let projects = match projects {
+            const TRUST_CHANGED: &str = "Sender or recipient project/trust changed";
+            let (projects, preflight_reason) = match projects {
+                Ok(value) => (value, TRUST_CHANGED),
                 Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
-                other => other?,
+                Err(e) if e.is::<GitDirectoryOverride>() => (None, GIT_OVERRIDE_REASON),
+                Err(e) => return Err(e),
             };
             let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
                 let sender_live: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM session_inbox i JOIN conversations c ON c.id=i.sender AND c.incarnation=i.sender_incarnation WHERE i.id=?1)", [&claim.id], |r| r.get(0))?;
@@ -1036,16 +1047,17 @@ impl DeliveryOwner {
                     return Ok(None);
                 }
                 let expected: (String,String) = c.query_row("SELECT project_source,coalesce(recipient_source,project_source) FROM session_inbox WHERE id=?1", [&claim.id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-                let allowed = match &projects {
+                let blocked_reason = match &projects {
                     Some((recipient, sender)) => match peer_projects(c, sender_id, &s.id, sender, recipient) {
-                        Ok((from, to)) => from == expected.0 && to == expected.1,
-                        Err(e) if e.downcast_ref::<rusqlite::Error>().is_some() => return Err(e),
-                        Err(_) => false,
+                        Ok((from, to)) if from == expected.0 && to == expected.1 => None,
+                        Err(e) if e.is::<rusqlite::Error>() => return Err(e),
+                        Err(e) if e.is::<GitDirectoryOverride>() => Some(GIT_OVERRIDE_REASON),
+                        _ => Some(TRUST_CHANGED),
                     },
-                    _ => false,
+                    None => Some(preflight_reason),
                 };
-                if !allowed {
-                    c.execute("UPDATE session_inbox SET state='blocked',blocked_reason='Sender or recipient project/trust changed' WHERE id=?1 AND state<>'blocked'", [&claim.id])?;
+                if let Some(reason) = blocked_reason {
+                    c.execute("UPDATE session_inbox SET state='blocked',blocked_reason=?2 WHERE id=?1 AND (state<>'blocked' OR blocked_reason IS NOT ?2)", params![claim.id, reason])?;
                     return Ok(None);
                 }
                 // The inbox lease excludes other consumers. Revalidate trust above,
