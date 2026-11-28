@@ -115,6 +115,23 @@ impl ToolLoopExecutor {
         Ok(())
     }
 
+    // The live loop appends complete tool exchanges. Keep its new rows with the
+    // host boundary so subsequent admissions or pressure checks see that view.
+    pub(super) fn retain_in_flight_additions<M: serde::Serialize>(
+        &mut self,
+        window: &[M],
+    ) -> Result<()> {
+        if self.in_flight_shard_users.is_some() {
+            for message in window
+                .get(self.messages.len()..)
+                .context("Live conversation lost its compacted prefix")?
+            {
+                self.messages.push(serde_json::to_value(message)?);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn reload_history(
         &mut self,
         shard: &crate::db::session_store::SessionDb,
@@ -134,7 +151,30 @@ impl ToolLoopExecutor {
         self.flush_replay_segment(shard, None)?;
         let (mut messages, boundary, (index, entries), (protected, pending), cut) =
             shard.read(|r| {
-                let (messages, boundary) = r.model_history(&self.provider.provider.api_format)?;
+                let (mut messages, boundary) =
+                    r.model_history(&self.provider.provider.api_format)?;
+                if let Some(seen) = &mut self.in_flight_shard_users {
+                    let mut live = self.messages.clone();
+                    for mut row in messages {
+                        if row["role"] == "user"
+                            && row["id"].as_str() != boundary.as_deref()
+                            && row["id"]
+                                .as_str()
+                                .is_some_and(|id| seen.insert(id.to_owned()))
+                        {
+                            row["content"] = match self.provider.provider.api_format {
+                                ApiFormat::OpenAI => serde_json::to_value(
+                                    multimodal::openai_content(&row["content"])?,
+                                )?,
+                                ApiFormat::Anthropic => serde_json::to_value(
+                                    multimodal::anthropic_content(&row["content"])?,
+                                )?,
+                            };
+                            live.push(row);
+                        }
+                    }
+                    messages = live;
+                }
                 let context = crate::services::turn_context::replay_at(
                     shard,
                     r,
@@ -142,7 +182,7 @@ impl ToolLoopExecutor {
                     &messages,
                 )?;
                 let protection = r.protected_inputs(&messages)?;
-                let cut = capture_cut
+                let cut = (capture_cut && self.in_flight_shard_users.is_none())
                     .then(|| {
                         r.compaction_window(
                             &messages,
@@ -162,16 +202,17 @@ impl ToolLoopExecutor {
         } else {
             None
         };
-        let microcompact_changed = if self.standalone_frontend {
-            crate::services::compaction::microcompact(
-                shard,
-                boundary.as_deref(),
-                &mut messages,
-                self.provider.model.context_window,
-            )?
-        } else {
-            false
-        };
+        let microcompact_changed =
+            if self.standalone_frontend && self.in_flight_shard_users.is_none() {
+                crate::services::compaction::microcompact(
+                    shard,
+                    boundary.as_deref(),
+                    &mut messages,
+                    self.provider.model.context_window,
+                )?
+            } else {
+                false
+            };
         self.protected_input = protected;
         self.pending_inputs = pending;
         self.session_reminders.resident_indexes = index;
@@ -355,6 +396,11 @@ impl ToolLoopExecutor {
         durable_len: usize,
         render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
     ) -> Result<MidTurnCompact> {
+        // Pressure on a host window is handled by replay_window, which can
+        // compact in memory without committing a boundary over unrelated rows.
+        if self.in_flight_shard_users.is_some() {
+            return Ok(MidTurnCompact::Unmanaged);
+        }
         let (Some(ExecutorHistory::Session(shard)), Some(_previous_assistant), Some(conv_id)) = (
             self.executor_history.clone(),
             self.parent_message_id.clone(),
@@ -526,6 +572,7 @@ impl ToolLoopExecutor {
                 });
             }
         };
+        gate.committed_mid_turn();
         generated.log_boundary(&boundary_id);
         if let Some(record) = &mut record {
             record.finish(&generated, &boundary_id);
@@ -584,7 +631,6 @@ impl ToolLoopExecutor {
         self.stop_hook_active = false;
         self.last_reported_input_tokens = None;
         self.last_request_message_tokens = None;
-        gate.committed_mid_turn();
 
         self.reload_history(&shard)?;
         self.mid_turn_continuation_cue = true;
@@ -740,8 +786,7 @@ impl ToolLoopExecutor {
 
     // A live window can refresh its durable prefix. A summary already owns
     // a snapshot, possibly cut before a queued input or at a partial boundary.
-    // Returns `true` when durable session history or microcompact refreshed the
-    // window so the caller can synchronize its in-memory `conversation_messages`.
+    // Return true whenever the live conversation must adopt the refreshed window.
     pub(super) async fn replay_window<M: serde::Serialize + serde::de::DeserializeOwned>(
         &mut self,
         gate: &AutoCompactionGate,
@@ -795,7 +840,23 @@ impl ToolLoopExecutor {
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
         let mut explicit_history = None;
-        if let (Some(durable_len), Some(ExecutorHistory::Session(shard))) =
+        if self.in_flight_shard_users.is_some() {
+            // Protect the newest complete exchange. If only the preceding
+            // boundary could be summarized, keep sending it while it fits.
+            let end = self
+                .messages
+                .iter()
+                .rposition(|row| row["role"] == "assistant")
+                .filter(|at| TokenCounter::estimate(&rows[*at..]) <= capacity)
+                .unwrap_or(self.messages.len());
+            if end <= 1 && estimated <= capacity {
+                return Ok(false);
+            }
+            explicit_history = Some(ExplicitHistory {
+                source: self.compaction_history(..end),
+                rendered_len: end,
+            });
+        } else if let (Some(durable_len), Some(ExecutorHistory::Session(shard))) =
             (durable_len, self.executor_history.clone())
         {
             let additions = window.split_off(durable_len);
@@ -833,7 +894,7 @@ impl ToolLoopExecutor {
             return Ok(microcompact_changed);
         }
 
-        if native {
+        if native || explicit_history.is_some() {
             if durable_len.is_none() {
                 return Ok(false);
             }
@@ -846,7 +907,8 @@ impl ToolLoopExecutor {
                         gate,
                         &shard,
                         explicit.source,
-                        &rows,
+                        rows.get(..explicit.rendered_len)
+                            .context("Explicit compaction prefix exceeds the live conversation")?,
                         MID_TURN_CONTINUATION_FOCUS,
                     )
                     .await;
@@ -874,16 +936,25 @@ impl ToolLoopExecutor {
                         shard.id(),
                     );
                 }
-                let additions = rows
-                    .into_iter()
-                    .skip(explicit.rendered_len)
-                    .map(serde_json::from_value)
-                    .collect::<serde_json::Result<Vec<M>>>()?;
-                *window = vec![serde_json::from_value(json!({
+                self.in_flight_shard_users.get_or_insert_with(|| {
+                    self.messages
+                        .iter()
+                        .filter(|row| row["role"] == "user")
+                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                        .collect()
+                });
+                let mut live = vec![json!({
                     "role":"user", "content":generated.text, "provider_content":generated.native,
-                }))?];
-                window.extend(additions);
-                return Ok(false);
+                })];
+                live.extend(rows.into_iter().skip(explicit.rendered_len));
+                *window = live
+                    .iter()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .collect::<serde_json::Result<_>>()?;
+                self.messages = live;
+                gate.committed();
+                return Ok(true);
             }
             let cut = physical_cut.context("Missing native compaction snapshot")?;
             let mut committed = false;

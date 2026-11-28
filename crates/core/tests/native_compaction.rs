@@ -102,7 +102,28 @@ async fn fixture(mode: u8) -> Fixture {
         }
     }));
     let captured = seen.clone();
-    let app = app.route("/tools/codex/v1/responses", post(move |Json(body): Json<Value>| {
+    let read_fixture = dir.path().join("host-evidence.txt");
+    let app = app.route("/tools/codex/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+        let (host_summary, next_read) = if mode == 8 {
+            let input = body["input"].to_string();
+            let summary = headers.get("x-dcl-request-kind").is_some_and(|kind| kind == "compaction");
+            let host_window = input.contains("HOST_SNAPSHOT_SUMMARY");
+            let next_read = if host_window && !summary {
+                let last_output = body["input"].as_array().unwrap().iter().rev()
+                    .find(|row| row["type"] == "function_call_output");
+                match last_output.map(|row| row["call_id"].as_str()) {
+                    None => Some(0),
+                    Some(Some("host-read-0")) => Some(1),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (summary && (host_window || input.contains("HOST_ORIGINAL")), next_read)
+        } else {
+            (false, None)
+        };
+        let read_fixture = read_fixture.clone();
         let step = captured.lock().unwrap().len();
         let first = step == 0;
         if mode == 4 {
@@ -129,7 +150,11 @@ async fn fixture(mode: u8) -> Fixture {
                 return (StatusCode::BAD_GATEWAY, [("retry-after", "0")], "unavailable").into_response();
             }
             let call = |id: &str, name: &str, arguments: Value| json!({"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":name,"arguments":arguments.to_string()});
-            let output = if mode == 5 {
+            let read = next_read.is_some();
+            let reply = if host_summary { "HOST_SNAPSHOT_SUMMARY" } else { "done" };
+            let output = if let Some(index) = next_read {
+                json!([call(&format!("host-read-{index}"), "Read", json!({"file_path":read_fixture, "offset":index + 1, "limit":1}))])
+            } else if mode == 5 {
                 match step {
                     1 => json!([call("search-1", "ToolLoad", json!({"names":["ListDir"]}))]),
                     2 => json!([call("list-1", "ListDir", json!({"path":"."}))]),
@@ -138,11 +163,11 @@ async fn fixture(mode: u8) -> Fixture {
             } else if mode == 4 && first {
                 json!([{"type":"function_call","id":"fc-image","call_id":"call-image","name":"ImageGenerate","arguments":json!({"prompt":"Create an icon","file_path":"assets/图标.png"}).to_string()}])
             } else {
-                json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}])
+                json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":reply}]}])
             };
             let data = json!({"type":"response.completed","response":{"id":"response","status":"completed","output":output,"usage":{"input_tokens":80,"output_tokens":1}}});
-            let tool_step = (mode == 4 && first) || (mode == 5 && step <= 2);
-            let delta = if tool_step { String::new() } else { format!("event: response.output_text.delta\ndata: {}\n\n", json!({"type":"response.output_text.delta","delta":"done"})) };
+            let tool_step = read || (mode == 4 && first) || (mode == 5 && step <= 2);
+            let delta = if tool_step { String::new() } else { format!("event: response.output_text.delta\ndata: {}\n\n", json!({"type":"response.output_text.delta","delta":reply})) };
             ([("Content-Type", "text/event-stream")], format!("{delta}event: response.completed\ndata: {data}\n\n")).into_response()
         }
     }));
@@ -177,7 +202,14 @@ async fn fixture(mode: u8) -> Fixture {
 #[tokio::test]
 async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input() {
     use deepseek_code_core::native_engine::tool_loop::EngineEvent;
-    for in_flight in [false, true] {
+    let large_steer = format!("HOST_LIVE_STEER {}", "s".repeat(185_000));
+    for (in_flight, steer) in [
+        (false, ""),
+        (true, ""),
+        (true, "HOST_LIVE_STEER"),
+        (true, large_steer.as_str()),
+    ] {
+        let repeats_compaction = steer == large_steer;
         let Fixture {
             dir,
             store,
@@ -196,13 +228,30 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
         }
         let mut messages = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
         if in_flight {
-            messages = vec![json!({"role":"user","content":prefix})];
+            std::fs::write(
+                dir.path().join("host-evidence.txt"),
+                "HOST_READ_ZERO\nHOST_READ_ONE\n",
+            )
+            .unwrap();
+            messages = vec![json!({"role":"user","content":format!("HOST_ORIGINAL {prefix}")})];
         }
         let request = serde_json::from_value(json!({
             "conversation_id":id,"messages":messages,"model":"gpt-6-astra",
-            "provider_id":"gateway","workspace_path":dir.path(),"max_tokens":1000,
+            "provider_id":"gateway","workspace_path":dir.path(),"max_tokens":1000,"max_turns":5,
         }))
         .unwrap();
+        if !steer.is_empty() {
+            use deepseek_code_core::services::input_queue::{enqueue, QueueMode, QueueOrigin};
+            enqueue(
+                &store.db,
+                &id,
+                "during-host-turn",
+                json!(steer),
+                QueueMode::Steer,
+                QueueOrigin::User,
+            )
+            .unwrap();
+        }
         let mut events = engine.send_message(request).await.unwrap();
         let mut completed = false;
         while let Some(event) = events.recv().await {
@@ -210,10 +259,8 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
             completed |= matches!(event, EngineEvent::MessageStop { ref full_text, .. } if full_text == "done");
         }
         assert!(completed);
-        assert_eq!(
-            compaction::count(&store.db, &id).unwrap().proven(),
-            u64::from(!in_flight)
-        );
+        let boundaries = compaction::count(&store.db, &id).unwrap().proven();
+        assert_eq!(boundaries, u64::from(!in_flight));
         let calls = seen.lock().unwrap();
         let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
         assert_eq!(
@@ -227,9 +274,71 @@ async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input(
         assert!(summary["input"].to_string().contains("ARCHIVED_EVIDENCE"));
         assert!(!summary["input"].to_string().contains("KEEP_CURRENT_INPUT"));
         let main = calls.last().unwrap()["input"].to_string();
-        assert!(main.contains("done"));
+        if in_flight {
+            let after_summary = &calls[attempts + 1..];
+            let mut main_posts: Vec<_> = after_summary.iter().collect();
+            if repeats_compaction {
+                // The large steer arrives after the first Read. A later pressure
+                // check summarizes that exchange while protecting the second Read.
+                assert_eq!(after_summary.len(), 3 + attempts + 1);
+                for (index, post) in main_posts.drain(2..2 + attempts + 1).enumerate() {
+                    assert_eq!(post.get("stream").is_none(), index < attempts);
+                    let input = post["input"].to_string();
+                    for marker in ["HOST_SNAPSHOT_SUMMARY", "HOST_LIVE_STEER", "HOST_READ_ZERO"] {
+                        assert!(input.contains(marker), "repeat compaction omitted {marker}");
+                    }
+                    assert!(!input.contains("Tests remain pending"));
+                    assert!(!input.contains("HOST_READ_ONE"));
+                }
+            }
+            assert_eq!(
+                main_posts.len(),
+                3,
+                "initial main request and two Read continuations"
+            );
+            for (step, post) in main_posts.iter().enumerate() {
+                let input = post["input"].as_array().unwrap();
+                let text = post["input"].to_string();
+                assert!(text.contains("HOST_SNAPSHOT_SUMMARY"), "main {step}");
+                assert!(
+                    !text.contains("Tests remain pending"),
+                    "main {step} replayed the shard seed"
+                );
+                let after_second_summary = repeats_compaction && step == 2;
+                if !after_second_summary {
+                    assert_eq!(
+                        text.matches("HOST_LIVE_STEER").count(),
+                        usize::from(!steer.is_empty() && step > 0),
+                        "main {step}"
+                    );
+                }
+                for (index, marker) in ["HOST_READ_ZERO", "HOST_READ_ONE"]
+                    .iter()
+                    .take(step)
+                    .enumerate()
+                {
+                    let id = format!("host-read-{index}");
+                    let items: Vec<_> = input.iter().filter(|row| row["call_id"] == id).collect();
+                    if after_second_summary && index == 0 && items.is_empty() {
+                        // This complete exchange is represented by the new summary.
+                        continue;
+                    }
+                    assert_eq!(items.len(), 2, "main {step}, call {id}");
+                    assert_eq!(items[0]["type"], "function_call");
+                    assert_eq!(items[1]["type"], "function_call_output");
+                    assert!(
+                        items[1]["output"].as_str().unwrap().contains(marker),
+                        "main {step}, call {id}"
+                    );
+                }
+            }
+        } else {
+            assert!(main.contains("done"));
+        }
         assert_eq!(main.contains("KEEP_CURRENT_INPUT"), !in_flight);
         assert!(!main.contains("ARCHIVED_EVIDENCE"));
+        eprintln!("host window={in_flight}, steer bytes={}, captured POSTs={}, durable boundaries={boundaries}",
+            steer.len(), calls.len());
         server.abort();
     }
 }

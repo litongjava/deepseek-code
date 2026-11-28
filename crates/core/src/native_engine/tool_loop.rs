@@ -384,6 +384,8 @@ pub struct ToolLoopExecutor {
     /// in every request; never saved to the transcript.
     context_reminders: Vec<String>,
     session_reminders: crate::prompt::SessionReminders,
+    /// Shard inputs already seen when reloading a compacted host-supplied conversation.
+    in_flight_shard_users: Option<std::collections::HashSet<String>>,
     /// The first typed input in the active turn, including later steers.
     protected_input: Option<usize>,
     pending_inputs: Vec<String>,
@@ -1961,6 +1963,7 @@ impl ToolLoopExecutor {
             prompt_profile: PromptProfile::Desktop,
             context_reminders: Vec::new(),
             session_reminders: Default::default(),
+            in_flight_shard_users: None,
             protected_input,
             pending_inputs: Vec::new(),
             replay_tools: Vec::new(),
@@ -6014,6 +6017,12 @@ impl ToolLoopExecutor {
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::Anthropic {
                 let messages = provider_transcript::openai(conversation_messages)?;
+                if self.in_flight_shard_users.is_some() {
+                    self.messages = messages
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<_>>()?;
+                }
                 return Box::pin(self.continue_openai(
                     gate,
                     Continuation {
@@ -6030,6 +6039,7 @@ impl ToolLoopExecutor {
             let api_key_len = self.provider.provider.api_key.len();
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
+            self.retain_in_flight_additions(&conversation_messages)?;
             let queued = self
                 .deliver_queued_inputs(std::mem::take(&mut after_tool_results))
                 .await?;
@@ -6750,6 +6760,9 @@ impl ToolLoopExecutor {
                     content: AnthropicContent::Blocks(tool_results),
                 });
                 after_tool_results = true;
+                if self.pending_plan_reset.is_some() {
+                    self.retain_in_flight_additions(&conversation_messages)?;
+                }
                 if let Some(boundary_id) = self.restore_plan_boundary()? {
                     after_tool_results = false;
                     conversation_messages = self.build_anthropic_messages()?;
@@ -6867,6 +6880,12 @@ impl ToolLoopExecutor {
             self.refresh_provider()?;
             if self.provider.provider.api_format != ApiFormat::OpenAI {
                 let messages = provider_transcript::anthropic(conversation_messages)?;
+                if self.in_flight_shard_users.is_some() {
+                    self.messages = messages
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<_>>()?;
+                }
                 return Box::pin(self.continue_anthropic(
                     gate,
                     Continuation {
@@ -6883,6 +6902,7 @@ impl ToolLoopExecutor {
             let api_key_len = self.provider.provider.api_key.len();
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
+            self.retain_in_flight_additions(&conversation_messages)?;
             let queued = self
                 .deliver_queued_inputs(std::mem::take(&mut after_tool_results))
                 .await?;
@@ -7782,6 +7802,9 @@ impl ToolLoopExecutor {
                     });
                 }
                 after_tool_results = true;
+                if self.pending_plan_reset.is_some() {
+                    self.retain_in_flight_additions(&conversation_messages)?;
+                }
                 if let Some(boundary_id) = self.restore_plan_boundary()? {
                     after_tool_results = false;
                     conversation_messages = self.build_openai_messages()?;
@@ -7860,6 +7883,14 @@ impl ToolLoopExecutor {
     }
 
     fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
+        if self.in_flight_shard_users.is_some() {
+            return Ok(self
+                .messages
+                .iter()
+                .cloned()
+                .map(serde_json::from_value)
+                .collect::<serde_json::Result<_>>()?);
+        }
         self.render_anthropic_messages(&self.message_additions())
     }
 
@@ -7966,6 +7997,14 @@ impl ToolLoopExecutor {
     }
 
     fn build_openai_messages(&self) -> Result<Vec<OpenAIMessage>> {
+        if self.in_flight_shard_users.is_some() {
+            return Ok(self
+                .messages
+                .iter()
+                .cloned()
+                .map(serde_json::from_value)
+                .collect::<serde_json::Result<_>>()?);
+        }
         self.render_openai_messages(&self.message_additions())
     }
 
