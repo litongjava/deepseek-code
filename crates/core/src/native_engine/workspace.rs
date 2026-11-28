@@ -165,6 +165,11 @@ pub(crate) fn private_workspace_owner(conn: &Connection, id: &str) -> Result<Opt
     anyhow::bail!("Private workspace ownership depth exceeded")
 }
 
+pub(crate) fn validate_source(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute() && path.is_dir(), "Project folder is unavailable");
+    Ok(())
+}
+
 /// A Home conversation always owns its working directory. Legacy paths and client
 /// overrides must not turn an unassigned conversation into access to a source tree.
 pub fn resolve_workspace(
@@ -189,7 +194,7 @@ fn resolve_workspace_inner(
     let private_owner = private_workspace_owner(conn, id)?;
     if let Some(mut project) = conversation_project(conn, id)? {
         let path = project.workspace_path.as_deref().context("Project has no working directory")?;
-        ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "Project folder is unavailable");
+        validate_source(Path::new(path))?;
         if let Some(worktree) = crate::worktree::session::resolve(conn, id, &project.id, Path::new(path))? {
             // The prompt and tools must agree on the actual working folder.
             project.workspace_path = Some(worktree.to_string_lossy().into_owned());

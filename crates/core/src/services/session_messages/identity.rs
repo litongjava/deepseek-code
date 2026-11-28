@@ -215,10 +215,7 @@ impl ProjectBinding {
 
     fn validate_source(&self, lookup: impl FnMut(&Path) -> Result<PathBuf>) -> Result<String> {
         project_repo::validate_trusted_folders(&self.folders)?;
-        ensure!(
-            self.path.is_absolute() && self.path.is_dir(),
-            "Project folder is unavailable"
-        );
+        workspace::validate_source(&self.path)?;
         if let Some(worktree) = &self.worktree {
             worktree.validate(&self.path, lookup)?;
         }
