@@ -385,6 +385,7 @@ pub struct ToolLoopExecutor {
     /// `<system-reminder>` blocks placed before the first user message's text
     /// in every request; never saved to the transcript.
     context_reminders: Vec<String>,
+    session_system_rules: String,
     session_reminders: crate::prompt::SessionReminders,
     /// Shard inputs already seen when reloading a compacted host-supplied conversation.
     in_flight_shard_users: Option<std::collections::HashSet<String>>,
@@ -1998,6 +1999,7 @@ impl ToolLoopExecutor {
             file_memory: None,
             prompt_profile: PromptProfile::Desktop,
             context_reminders: Vec::new(),
+            session_system_rules: String::new(),
             session_reminders: Default::default(),
             in_flight_shard_users: None,
             protected_input,
@@ -2811,6 +2813,12 @@ impl ToolLoopExecutor {
     /// lists travel in the first user message, not here.
     fn request_system_prompt(&self) -> Option<String> {
         let mut prompt = self.system_prompt.clone().unwrap_or_default();
+        if !self.session_system_rules.is_empty() {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(&self.session_system_rules);
+        }
         if !self.permission_host_available {
             prompt.push_str(
                 "\n\n# Interactive user\n- Interactive user: no (do not call AskUserQuestion)",
@@ -3452,6 +3460,7 @@ impl ToolLoopExecutor {
     }
 
     fn set_session_reminders(&mut self, parts: crate::prompt::SessionReminders) {
+        self.session_system_rules = parts.system_rules();
         self.session_reminders = parts.clone();
         self.standalone_frontend = parts.standalone_frontend;
         self.context_reminders = crate::prompt::first_message_reminders(parts);
@@ -8237,30 +8246,17 @@ impl ToolLoopExecutor {
         // Responses replays the compact window verbatim and ignores the display
         // text of its boundary row. A compact-time session reminder goes before
         // the opaque window, without changing any provider-issued item.
-        if built.first().is_some_and(|m| {
-            m.provider_content
-                .as_ref()
-                .is_some_and(|v| v["compaction"] == true)
-        }) {
-            let indexes: Vec<_> = additions[0]
-                .0
-                .iter()
-                .filter(|s| project_memory_context::is_index(s))
-                .map(String::as_str)
-                .collect();
-            if !indexes.is_empty() {
-                let before_summary = indexes.iter().any(|block| block.starts_with("<system-reminder>\n<session_memory>"));
-                built.insert(
-                    if before_summary { 0 } else { 1 },
-                    OpenAIMessage {
-                        role: "user".into(),
-                        content: OpenAIContent::Text(indexes.join("\n\n")),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        provider_content: None,
-                    },
-                );
+        if let Some(native) = built
+            .first()
+            .and_then(|m| m.provider_content.as_ref())
+            .filter(|v| v["compaction"] == true)
+        {
+            if let Some((at, reminders)) =
+                project_memory_context::boundary_reminders(&additions[0].0, native)
+            {
+                // Keep the sealed Git row directly after the complete opaque window.
+                let after_git = at == 1 && messages.get(1).is_some_and(|m| m["origin"] == "compaction_git");
+                built.insert(at + usize::from(after_git), reminders);
             }
         }
         Ok(built)

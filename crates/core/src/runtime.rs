@@ -476,6 +476,9 @@ pub(crate) fn replay_rows(
                 row["origin"] = json!("compaction");
             }
             history.push(row);
+            if let Some(git) = crate::services::git_snapshot::read_boundary(conn, &message.id)? {
+                history.push(crate::services::compaction::git_row(git));
+            }
             continue;
         }
         if message.role == "system" && !message.is_compact_boundary {
@@ -647,7 +650,13 @@ pub(crate) fn replay_rows(
                 item["origin"] = json!(origin);
             }
         }
+        let summary = message.is_compact_boundary || item["origin"] == "summary";
         history.push(item);
+        if summary {
+            if let Some(git) = crate::services::git_snapshot::read_boundary(conn, &message.id)? {
+                history.push(crate::services::compaction::git_row(git));
+            }
+        }
     }
     background_replay::merge(&mut history, reports);
     crate::native_engine::mcp_output::restore_history(&mut history, conn, id)?;

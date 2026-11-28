@@ -522,6 +522,11 @@ impl Stores {
             Some(Project::NewWorkspace(folder)) => vec![PathBuf::from(folder)],
             None => Vec::new(),
         };
+        let git = match &seed {
+            Seed::Fork(_, Branch::Summary { .. }, _) => roots.first()
+                .and_then(|cwd| crate::services::git_snapshot::capture_boundary(cwd)),
+            _ => None,
+        };
         let stage = op.stage(self);
         fs::create_dir(&stage)?;
         let session_dir = self.sessions().join(&op.key).join("memory");
@@ -606,6 +611,7 @@ impl Stores {
                         boundary,
                         configuration,
                         &memory,
+                        git.as_deref(),
                         meta.source
                             .as_ref()
                             .is_some_and(|s| s.provider_selection.is_some()),

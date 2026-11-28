@@ -542,6 +542,7 @@ pub(crate) fn commit_locked(
     prepared: &PreparedCompaction,
     generated: &GeneratedSummary,
     session_context: Option<&str>,
+    git: Option<&str>,
 ) -> Result<CompactionResult> {
     let summary = &generated.text;
     let id = &prepared.conversation_id;
@@ -579,7 +580,7 @@ pub(crate) fn commit_locked(
         id,
         order,
         &content,
-        boundary::Kind::Compaction,
+        boundary::Kind::Compaction(git),
         boundary::Storage::Shared,
     )?;
     conversation_repo::increment_message_count(tx, id)?;
@@ -991,6 +992,10 @@ pub fn apply_boundary(db: &impl crate::db::session_store::SessionAccess, id: &st
 
 /// Whether a real persisted boundary was applied to these messages. This is
 /// separate from request-recording provenance for host-supplied histories.
+pub(crate) fn git_row(reminder: String) -> Value {
+    json!({"role":"user", "origin":"compaction_git", "content":reminder})
+}
+
 pub(crate) fn apply_persisted_boundary(
     db: &impl crate::db::session_store::SessionAccess,
     id: &str,
@@ -1003,7 +1008,7 @@ pub(crate) fn apply_persisted_boundary(
         }
     }
     let boundary = db.select_session(id)?.latest_compact_content()?;
-    if let Some((message_id, content, native)) = boundary {
+    if let Some((message_id, content, native, git)) = boundary {
         let start = messages
             .iter()
             .rposition(|m| {
@@ -1024,6 +1029,13 @@ pub(crate) fn apply_persisted_boundary(
         messages[0]["origin"] = serde_json::json!("compaction");
         if let Some(native) = native {
             messages[0]["provider_content"] = native;
+        }
+        if let Some(git) = git {
+            // Model-history callers already carry this row; transcript callers do not.
+            let row = git_row(git);
+            if messages.get(1) != Some(&row) {
+                messages.insert(1, row);
+            }
         }
         return Ok(Some(message_id));
     }

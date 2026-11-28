@@ -1117,14 +1117,18 @@ impl QueryEngine {
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
         let snapshot_workspace = workspace.clone();
-        let git_snapshot = tokio::task::spawn_blocking(move || {
-            crate::services::git_snapshot::for_session(
-                &snapshot_root,
-                &snapshot_session,
-                &snapshot_workspace,
-            )
-        })
-        .await?;
+        let git_snapshot = if applied_compaction.is_none() {
+            tokio::task::spawn_blocking(move || {
+                crate::services::git_snapshot::for_session(
+                    &snapshot_root,
+                    &snapshot_session,
+                    &snapshot_workspace,
+                )
+            })
+            .await?
+        } else {
+            None
+        };
         // The environment and the date are frozen on the session's first
         // request so a later date or runtime change cannot rewrite the first
         // user message.
@@ -1508,9 +1512,8 @@ impl QueryEngine {
             )
             .await?;
         }
-        // Like the reference CLI, instructions, the environment and the Git
-        // snapshot open the first user message instead of the system prompt,
-        // which stays the same across projects and so shares one cache entry.
+        // Session facts and turn additions stay in user context; host-loaded
+        // instruction files are routed separately into the request system prompt.
         let turn_root = plugin_context.paths.data_dir.clone();
         let turn_session = conv_id.clone();
         let turn_messages = request.messages.clone();

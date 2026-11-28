@@ -213,7 +213,10 @@ pub fn authorize_owned_attachment(root: &Path, job: &Job, parent: &str) -> Resul
 /// Interactive controls may address the parent or the execution session. Both
 /// endpoints and any separately recorded idle child must still be current.
 pub fn authorize_attachment(root: &Path, job: &Job, session: &str) -> Result<()> {
-    ensure!(job.parent_session_id == session || job.session_id == session, "Task belongs to another session");
+    ensure!(
+        job.parent_session_id == session || job.session_id == session,
+        "Task belongs to another session"
+    );
     let Some(owners) = JobOwners::load(root, job)? else {
         ensure!(
             !root.join("global.db").try_exists()?,
@@ -298,10 +301,11 @@ pub fn inspect(root: &Path, id: &str) -> Result<JobSnapshot> {
 pub fn launch_of(root: &Path, id: &str) -> Result<Option<Launch>> {
     let path = directory(root, id)?.join("launch.json");
     match fs::read(&path) {
-        Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("Parsing task launch {}", path.display()))?,
-        )),
+        Ok(bytes) => {
+            Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                format!("Parsing task launch {}", path.display())
+            })?))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("Reading task launch {}", path.display())),
     }
@@ -325,9 +329,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn install_after_spawn_test_hook(
-    hook: impl FnOnce(&Path) -> Result<()> + 'static,
-) {
+pub(crate) fn install_after_spawn_test_hook(hook: impl FnOnce(&Path) -> Result<()> + 'static) {
     AFTER_SPAWN_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
@@ -412,9 +414,11 @@ fn create_worker_claim(dir: &Path, token: &str) -> Result<bool> {
 pub fn spawn_fact(root: &Path, id: &str) -> Result<Option<SpawnFact>> {
     let path = directory(root, id)?.join(SPAWN_FACT_FILE);
     match fs::read(&path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(
-            || format!("Parsing spawn fact {}", path.display()),
-        )?)),
+        Ok(bytes) => {
+            Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                format!("Parsing spawn fact {}", path.display())
+            })?))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("Reading spawn fact {}", path.display())),
     }
@@ -441,8 +445,7 @@ fn write_spawn_fact(dir: &Path, fact: &SpawnFact) -> Result<()> {
                 let existing: SpawnFact = serde_json::from_slice(&fs::read(&path)?)
                     .with_context(|| format!("Parsing spawn fact {}", path.display()))?;
                 ensure!(
-                    existing.token == fact.token
-                        && existing.supervisor_pid == fact.supervisor_pid,
+                    existing.token == fact.token && existing.supervisor_pid == fact.supervisor_pid,
                     "Spawn fact {} belongs to a different supervisor; refusing to replace it",
                     path.display()
                 );
@@ -527,8 +530,11 @@ pub(crate) fn directory(root: &Path, id: &str) -> Result<PathBuf> {
 }
 pub(crate) fn read_job(dir: &Path) -> Result<Job> {
     let path = dir.join("state.json");
-    let bytes = read_with_retry(|| fs::read(&path), |error| transient_state_error(error, &path))
-        .with_context(|| format!("Reading task state {}", path.display()))?;
+    let bytes = read_with_retry(
+        || fs::read(&path),
+        |error| transient_state_error(error, &path),
+    )
+    .with_context(|| format!("Reading task state {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("Parsing task state {}", path.display()))
 }
 
@@ -570,12 +576,10 @@ fn transient_state_error(error: &std::io::Error, path: &Path) -> bool {
 /// this to defer one observation instead of treating it as a dead worker.
 pub fn is_transient_state_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| {
-                error.kind() == std::io::ErrorKind::NotFound
-                    || (cfg!(windows) && matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32)))
-            })
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            error.kind() == std::io::ErrorKind::NotFound
+                || (cfg!(windows) && matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32)))
+        })
     })
 }
 fn observed(mut job: Job) -> Job {
@@ -637,6 +641,33 @@ impl Drop for SessionClaim {
 /// removed first, then only what the caller passes explicitly is applied;
 /// delegation forwards a deliberate model snapshot that way. A reserved job's
 /// exclusive token is passed to this supervisor and no other process.
+// Process-local ownership, never inferred from a stale task file or a recycled PID.
+static OWNED_SUPERVISORS: std::sync::Mutex<(usize, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((0, None));
+
+pub fn owned_background_activity() -> (usize, Option<std::time::Instant>) {
+    *OWNED_SUPERVISORS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct OwnedSupervisor;
+
+impl OwnedSupervisor {
+    fn acquire() -> Self {
+        OWNED_SUPERVISORS.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
+        Self
+    }
+}
+
+impl Drop for OwnedSupervisor {
+    fn drop(&mut self) {
+        let mut state = OWNED_SUPERVISORS.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 -= 1;
+        if state.0 == 0 {
+            state.1 = Some(std::time::Instant::now());
+        }
+    }
+}
+
 fn supervisor_command(
     supervisor: &Path,
     dir: &Path,
@@ -827,13 +858,14 @@ fn spawn_at(
         }
         None => None,
     };
-    let existing = match fs::read(dir.join("state.json")) {
-        Ok(bytes) => Some(serde_json::from_slice::<Job>(&bytes).with_context(|| {
-            format!("Parsing task state {}", dir.join("state.json").display())
-        })?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
+    let existing =
+        match fs::read(dir.join("state.json")) {
+            Ok(bytes) => Some(serde_json::from_slice::<Job>(&bytes).with_context(|| {
+                format!("Parsing task state {}", dir.join("state.json").display())
+            })?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
     let claim_token = worker_claim_token(&dir)?;
     let fact_present = dir.join(SPAWN_FACT_FILE).exists();
     let mut job = if let Some(mut job) = existing {
@@ -954,16 +986,35 @@ fn spawn_at(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    match command.spawn() {
+    // Hold admission across spawn (including failure) and through the reaper's exit record.
+    let keepalive = (!foreground).then(OwnedSupervisor::acquire);
+    // Capture supervisor diagnostics separately: stderr.log belongs to the supervised CLI.
+    let spawned = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("supervisor.stderr.log"))
+        .and_then(|log| command.stderr(Stdio::from(log)).spawn());
+    match spawned {
         Ok(mut child) => {
             if let Some(claim) = claim.as_mut() {
                 claim.committed = true;
             }
             let supervisor_pid = child.id();
-            // Reap when this host remains alive; dropping this thread on host
-            // exit does not terminate the independently owned supervisor process.
+            // The worker idle timer must not reclaim this supervisor's process tree.
+            let exit_path = dir.join("supervisor.exit.json");
             std::thread::spawn(move || {
-                let _ = child.wait();
+                let _keepalive = keepalive;
+                let record = match child.wait() {
+                    Ok(status) => {
+                        serde_json::json!({"pid": supervisor_pid, "observed_ms": now(), "exit_code": status.code(), "status": status.to_string()})
+                    }
+                    Err(error) => {
+                        serde_json::json!({"pid": supervisor_pid, "observed_ms": now(), "wait_error": error.to_string()})
+                    }
+                };
+                if let Err(error) = save(&exit_path, &record) {
+                    tracing::warn!(%supervisor_pid, %error, "Could not record supervisor exit");
+                }
             });
             // Test-only boundary: production compiles this to a no-op.
             after_spawn_test_hook(&dir)?;
@@ -1122,6 +1173,7 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<Option<std::process::Child>> {
     job.child_pid = Some(child.id());
     job.status = "running".into();
     let mut cancel_started: Option<std::time::Instant> = None;
+    let mut heartbeat_failure = None;
     loop {
         if let Some(status) = child.try_wait()? {
             job.exit_code = status.code();
@@ -1181,9 +1233,28 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<Option<std::process::Child>> {
         }
         job.heartbeat_ms = now();
         if let Err(error) = save(&dir.join("state.json"), job) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error).context("Saving supervisor heartbeat");
+            // A transient state-file lock is not a failure of the supervised CLI.
+            // Keep checking child exit/cancellation during the liveness lease.
+            let since = heartbeat_failure.get_or_insert_with(|| {
+                eprintln!(
+                    "{} heartbeat write failed (child {}): {error:#}",
+                    now(),
+                    child.id()
+                );
+                std::time::Instant::now()
+            });
+            if since.elapsed() >= Duration::from_secs(10) {
+                eprintln!(
+                    "{} persistent heartbeat failure; terminating child {}: {error:#}",
+                    now(),
+                    child.id()
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("Saving supervisor heartbeat");
+            }
+        } else if heartbeat_failure.take().is_some() {
+            eprintln!("{} heartbeat writes recovered", now());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -1191,7 +1262,9 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<Option<std::process::Child>> {
 }
 
 pub fn list(root: &Path, parent: Option<&str>) -> Result<Vec<Job>> {
-    list_matching(root, |job| parent.is_none_or(|id| authorize_job(root, job, id).is_ok()))
+    list_matching(root, |job| {
+        parent.is_none_or(|id| authorize_job(root, job, id).is_ok())
+    })
 }
 
 fn list_matching(root: &Path, include: impl Fn(&Job) -> bool) -> Result<Vec<Job>> {
@@ -1268,31 +1341,52 @@ fn job_process_may_be_alive(job: &Job) -> bool {
 
 /// Jobs whose parent and execution targets still match this CLI view.
 pub fn owned_jobs(root: &Path, parent: &str) -> Result<Vec<Job>> {
-    list_matching(root, |job| authorize_owned_attachment(root, job, parent).is_ok())
+    list_matching(root, |job| {
+        authorize_owned_attachment(root, job, parent).is_ok()
+    })
 }
 
-pub fn owned_by_session(root: &Path, parent: &crate::db::session_store::SessionDb) -> Result<Vec<Job>> {
+pub fn owned_by_session(
+    root: &Path,
+    parent: &crate::db::session_store::SessionDb,
+) -> Result<Vec<Job>> {
     let _guard = parent.hold_incarnation()?;
     owned_jobs(root, parent.id())
 }
 
-pub fn executing_in_session(root: &Path, session: &crate::db::session_store::SessionDb) -> Result<Vec<Job>> {
+pub fn executing_in_session(
+    root: &Path,
+    session: &crate::db::session_store::SessionDb,
+) -> Result<Vec<Job>> {
     let _guard = session.hold_incarnation()?;
     executing_in(root, session.id())
 }
 
 /// Jobs that can currently execute in the selected session.
 pub fn executing_in(root: &Path, session: &str) -> Result<Vec<Job>> {
-    list_matching(root, |job| job.session_id == session && authorize_attachment(root, job, session).is_ok())
+    list_matching(root, |job| {
+        job.session_id == session && authorize_attachment(root, job, session).is_ok()
+    })
 }
 
 /// Select the recorded execution endpoint for an interactive parent operation.
-pub fn owned_execution(root: &Path, parent: &crate::db::session_store::SessionDb, job: &Job) -> Result<crate::db::session_store::SessionDb> {
-    ensure!(job.parent_session_id == parent.id(), "Task belongs to another parent");
+pub fn owned_execution(
+    root: &Path,
+    parent: &crate::db::session_store::SessionDb,
+    job: &Job,
+) -> Result<crate::db::session_store::SessionDb> {
+    ensure!(
+        job.parent_session_id == parent.id(),
+        "Task belongs to another parent"
+    );
     participant_execution(root, parent, job)
 }
 
-pub fn participant_execution(root: &Path, participant: &crate::db::session_store::SessionDb, job: &Job) -> Result<crate::db::session_store::SessionDb> {
+pub fn participant_execution(
+    root: &Path,
+    participant: &crate::db::session_store::SessionDb,
+    job: &Job,
+) -> Result<crate::db::session_store::SessionDb> {
     let _guard = participant.hold_incarnation()?;
     let owners = JobOwners::load(root, job)?.context("Task lacks recorded participants")?;
     let stores = crate::db::session_store::Stores::open(root)?;
@@ -1639,7 +1733,9 @@ mod answer_cleanup_tests {
 }
 impl Drop for PendingAnswerCleanup {
     fn drop(&mut self) {
-        let Ok(_fence) = question_fence(&self.dir) else { return };
+        let Ok(_fence) = question_fence(&self.dir) else {
+            return;
+        };
         let pending = self.dir.join("pending-question.json");
         if fs::read(&pending)
             .ok()
@@ -1786,7 +1882,9 @@ pub fn acknowledge_foreground(root: &Path, id: &str, parent: &str) -> Result<()>
 }
 
 pub(crate) fn notification_text(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn collect_completed(
@@ -1850,10 +1948,17 @@ pub fn collect_completed(
         let excerpt: String = body.chars().take(16384).collect();
         let report = format!("[Background task report]\nTask: {}\nSource session: {}\nStatus: {}\nTitle: {}\n\n{}{}\n[End background task report]", job.id, execution_session, job.status, job.title, excerpt, if excerpt.len()<body.len() { "\n[Excerpt truncated; use /tasks show for details.]" } else { "" });
         let agent = store.db.background_agent(&job.id)?;
-        let description = agent.as_ref().and_then(|r| r["description"].as_str()).unwrap_or(&job.title);
+        let description = agent
+            .as_ref()
+            .and_then(|r| r["description"].as_str())
+            .unwrap_or(&job.title);
         let subject = if agent.is_some() { "Agent" } else { "Task" };
         let status = &job.status;
-        let verb = if status == "cancelled" { "was stopped" } else { status };
+        let verb = if status == "cancelled" {
+            "was stopped"
+        } else {
+            status
+        };
         let mut summary = format!("{subject} \"{description}\" {verb}");
         if status == "failed" {
             if let Some(reason) = body.lines().find(|line| !line.trim().is_empty()) {
@@ -2122,8 +2227,16 @@ mod tests {
                     &worker.root,
                     &worker.supervisor,
                     requested,
-                    if mismatch == "parent" { "another-parent" } else { "parent" },
-                    if mismatch == "session" { "another-child" } else { "child" },
+                    if mismatch == "parent" {
+                        "another-parent"
+                    } else {
+                        "parent"
+                    },
+                    if mismatch == "session" {
+                        "another-child"
+                    } else {
+                        "child"
+                    },
                     "fixture",
                     &[],
                     &id,
@@ -2280,8 +2393,9 @@ mod tests {
         assert!(envs
             .iter()
             .any(|(name, value)| *name == CONTROL_ENV && value.is_none()));
-        assert!(envs.iter().any(|(name, value)| *name == WORKER_ENV
-            && *value == Some(dir.as_os_str())));
+        assert!(envs
+            .iter()
+            .any(|(name, value)| *name == WORKER_ENV && *value == Some(dir.as_os_str())));
         // Delegation passes a deliberate snapshot; it is applied after the strip.
         assert!(envs.iter().any(|(name, value)| *name == WORKER_MODEL_ENV
             && *value == Some(std::ffi::OsStr::new("explicit-model"))));
@@ -2597,7 +2711,8 @@ mod tests {
         assert_eq!(events[0]["result"], "done");
         assert!(events_since(root.path(), &id, "foreign", 0).is_err());
     }
-    fn completed_report_fixture() -> (tempfile::TempDir, crate::runtime::RuntimePaths, String, Job) {
+    fn completed_report_fixture() -> (tempfile::TempDir, crate::runtime::RuntimePaths, String, Job)
+    {
         let (root, dir, _) = fixture("");
         let paths = crate::runtime::RuntimePaths::new(root.path().to_path_buf()).unwrap();
         let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
@@ -2629,9 +2744,14 @@ mod tests {
         let record = serde_json::json!({"parent_session_id":parent,"parent":parent,"session_id":job.session_id,
             "job_id":job.id,"agent_type":"general","description":"review","mode":"background",
             "status":"completed","created_at":"now","updated_at":"now","started_at":"now"});
-        store.db.save_child_owner(&pair, &serde_json::from_value(record.clone())?)?;
+        store
+            .db
+            .save_child_owner(&pair, &serde_json::from_value(record.clone())?)?;
         store.db.register_background_agent(&job.id, &record)?;
-        assert_eq!(collect_completed(&store, root.path(), &parent)?, ["● Agent \"review\" completed"]);
+        assert_eq!(
+            collect_completed(&store, root.path(), &parent)?,
+            ["● Agent \"review\" completed"]
+        );
         assert!(store.history(&parent)?.is_empty());
         drop(store);
         let store = crate::runtime::SessionStore::new(paths.open_database()?);
@@ -2647,7 +2767,11 @@ mod tests {
         let text = message["content"].as_str().unwrap();
         assert!(text.contains(&format!("<task-id>{}</task-id>", job.id)));
         assert!(text.contains("<result>[Background task report]"));
-        assert_eq!(text.matches("child answer &lt;/result&gt; &amp; more").count(), 1);
+        assert_eq!(
+            text.matches("child answer &lt;/result&gt; &amp; more")
+                .count(),
+            1
+        );
         assert_eq!(text.matches("</result>").count(), 1);
         assert!(collect_completed(&store, root.path(), &parent)?.is_empty());
         assert!(owner.poll_turn(false, 8)?.is_empty());
@@ -2855,10 +2979,34 @@ mod tests {
         let current = std::process::id();
         let dead = exited_pid();
         write_job(root.path(), "running-unknown-pids", "running", None, None);
-        write_job(root.path(), "running-live-child", "running", None, Some(current));
-        write_job(root.path(), "starting-live-supervisor", "starting", Some(current), None);
-        write_job(root.path(), "unresponsive-live", "unresponsive", Some(dead), Some(current));
-        let dead_job = write_job(root.path(), "running-dead", "running", Some(dead), Some(dead));
+        write_job(
+            root.path(),
+            "running-live-child",
+            "running",
+            None,
+            Some(current),
+        );
+        write_job(
+            root.path(),
+            "starting-live-supervisor",
+            "starting",
+            Some(current),
+            None,
+        );
+        write_job(
+            root.path(),
+            "unresponsive-live",
+            "unresponsive",
+            Some(dead),
+            Some(current),
+        );
+        let dead_job = write_job(
+            root.path(),
+            "running-dead",
+            "running",
+            Some(dead),
+            Some(dead),
+        );
         write_job(root.path(), "completed", "completed", Some(current), None);
         write_job(root.path(), "cancelled", "cancelled", Some(current), None);
         write_job(root.path(), "failed", "failed", Some(current), None);

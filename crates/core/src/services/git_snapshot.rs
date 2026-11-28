@@ -15,7 +15,7 @@ const MAX_SUBDIR_REPOS: usize = 8;
 const MAX_SNAPSHOT_CHARS: usize = 8000;
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git").args(args).current_dir(cwd).stdin(std::process::Stdio::null()).output().ok()?;
+    let output = std::process::Command::new("git").arg("--no-optional-locks").args(args).current_dir(cwd).stdin(std::process::Stdio::null()).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim_end().to_owned())
 }
 
@@ -87,7 +87,29 @@ fn child_repositories(cwd: &Path) -> Vec<std::path::PathBuf> {
 /// The snapshot text, or None outside a Git work tree and without immediate
 /// subdirectory repositories.
 pub fn take(cwd: &Path) -> Option<String> {
-    let heading = "# gitStatus\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n";
+    take_with_heading(cwd, "# gitStatus\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n")
+}
+
+/// Capture this context window's status without consulting the first-turn cache.
+pub(crate) fn capture_boundary(cwd: &Path) -> Option<String> {
+    take_with_heading(cwd, "# gitStatus\nThis is the git status at the time of compaction.\n")
+        .as_deref()
+        .map(reminder)
+}
+
+/// Both full and partial summaries carry the reminder in their own metadata.
+pub(crate) fn read_boundary(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let shard = conn.prepare_cached("SELECT 1 FROM sqlite_schema WHERE name='message_metadata'")?.exists([])?;
+    let sql = if shard {
+        "SELECT json_extract(value,'$.git_status') FROM message_metadata WHERE message_id=?1"
+    } else {
+        "SELECT json_extract(value,'$.git_status') FROM peripheral_settings WHERE key='message-origin:'||?1"
+    };
+    Ok(conn.prepare_cached(sql)?.query_row([id], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+}
+
+fn take_with_heading(cwd: &Path, heading: &str) -> Option<String> {
     if work_tree(cwd) {
         return Some(format!("{heading}\n{}", repository(cwd, MAX_STATUS_CHARS, 5, true)?));
     }

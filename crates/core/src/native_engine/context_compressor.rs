@@ -622,7 +622,7 @@ impl ContextCompressor {
         let inputs: Vec<_> = messages[..end]
             .iter()
             .enumerate()
-            .filter(|(_, m)| m["role"] == "user" && m["origin"] != "memory_change")
+            .filter(|(_, m)| m["role"] == "user" && m["origin"] != "memory_change" && m["origin"] != "compaction_git")
             .map(|(i, _)| i)
             .collect();
         let keep = match level {

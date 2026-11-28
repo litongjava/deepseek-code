@@ -1018,9 +1018,13 @@ impl ToolLoopExecutor {
             ),
             environment: Some(environment),
             date: Some(date),
-            git: crate::services::git_snapshot::for_session(root, id, &workspace)
-                .as_deref()
-                .map(crate::services::git_snapshot::reminder),
+            git: if self.applied_compaction {
+                None
+            } else {
+                crate::services::git_snapshot::for_session(root, id, &workspace)
+                    .as_deref()
+                    .map(crate::services::git_snapshot::reminder)
+            },
             loadable_tools: crate::prompt::loadable_tools_for_session(root, id, &builtin, &mcp),
             available_skills: crate::prompt::skills_for_session(root, id, &lines),
             inline_skills: crate::prompt::inline_skills_for_session(

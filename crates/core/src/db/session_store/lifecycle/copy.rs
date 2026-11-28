@@ -663,6 +663,7 @@ pub(super) fn copy_snapshot(
     boundary: Branch<'_>,
     configuration: Option<&NewSessionConfiguration>,
     memory: &crate::services::memory_files::prompt::Admission,
+    git: Option<&str>,
     copy_preferences: bool,
 ) -> Result<()> {
     let path = source
@@ -745,7 +746,7 @@ pub(super) fn copy_snapshot(
                 id,
                 order,
                 &content,
-                boundary::Kind::Compaction,
+                boundary::Kind::Compaction(git),
                 boundary::Storage::Shard(memory),
             )?;
         } else {
@@ -765,7 +766,7 @@ pub(super) fn copy_snapshot(
             )?;
             dst.execute(
                 "INSERT INTO message_metadata VALUES(?1,?2)",
-                [&message, r#"{"promptOrigin":"summary"}"#],
+                params![message, super::super::boundary::summary_metadata("summary", git)],
             )?;
         }
     }

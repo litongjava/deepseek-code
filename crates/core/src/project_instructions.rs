@@ -65,11 +65,8 @@ pub fn render(instructions: &[Instruction]) -> String {
         .join("\n\n")
 }
 
-/// The `<system-reminder>` blocks the reference CLI puts at the start of the
-/// first user message: one for the user's private instructions and one for the
-/// project's checked-in and local instructions, so the stable parts can be
-/// cached separately. The preamble leads the first non-empty block; an empty
-/// group produces no block.
+/// Host-loaded global and project instruction blocks for the session system prompt.
+/// The preamble leads the first non-empty block; an empty group produces no block.
 pub fn reminders(instructions: &[Instruction]) -> Vec<String> {
     let (user, project) = reminder_parts(instructions);
     [user, project].into_iter().flatten().collect()

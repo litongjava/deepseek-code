@@ -1,6 +1,7 @@
 //! A compressed window starts with the active project's index. Keep previously
 //! attached indexes out of summaries and provider-preserved user items.
 use super::*;
+use crate::native_engine::openai_client::OpenAIContentPart;
 
 pub(super) fn is_index(block: &str) -> bool {
     block
@@ -11,6 +12,56 @@ pub(super) fn is_index(block: &str) -> bool {
                     .iter()
                     .any(|scope| body.starts_with(&format!("<{scope}_memory>\n")))
         })
+}
+
+/// Responses may preserve visible user items alongside its opaque compaction item.
+/// Only omit a host block if the native window already supplies that user text.
+pub(super) fn boundary_reminders(
+    before: &[String],
+    native: &Value,
+) -> Option<(usize, OpenAIMessage)> {
+    let present = |block: &str| {
+        native["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["role"] == "user")
+            .any(|item| {
+                let content = &item["content"];
+                content.as_str() == Some(block)
+                    || content.as_array().into_iter().flatten().any(|part| {
+                        part["type"] == "input_text" && part["text"].as_str() == Some(block)
+                    })
+            })
+    };
+    let missing: Vec<_> = before
+        .iter()
+        // The initial Session path is not a compact-time Session index.
+        .filter(|block| !block.starts_with("<system-reminder>\n<session_memory_location>"))
+        .filter(|block| !present(block))
+        .cloned()
+        .collect();
+    let before_summary = missing
+        .iter()
+        .any(|block| block.starts_with("<system-reminder>\n<session_memory>"));
+    (!missing.is_empty()).then(|| {
+        (
+            usize::from(!native.is_null() && !before_summary),
+            OpenAIMessage {
+                role: "user".into(),
+                content: OpenAIContent::Multi(
+                    missing
+                        .into_iter()
+                        .map(|text| OpenAIContentPart::Text { text })
+                        .collect(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                provider_content: None,
+            },
+        )
+    })
 }
 
 impl ToolLoopExecutor {

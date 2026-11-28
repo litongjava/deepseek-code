@@ -352,11 +352,12 @@ async fn scenario(protocol: &'static str, plan: bool) {
                 !system.contains("<project_memory>")
                     && !system.contains("unique-body-recall-marker")
             );
-            let project = first.find("project-layout-marker").unwrap();
+            assert_eq!(system.matches("project-layout-marker").count(), 1);
+            assert!(!first.contains("project-layout-marker"));
             let global = first.find("<global_memory>").unwrap();
             let index = first.find("<project_memory>").unwrap();
             let date = first.find("Today's date is").unwrap();
-            assert!(project < global && global < index && index < date);
+            assert!(global < index && index < date);
             assert!(first[global..index].contains("global-index-row"));
             assert!(first[index..date].contains(PROJECT_ROW));
             assert!(!first.contains("<session_memory>"));

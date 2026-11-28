@@ -2,8 +2,8 @@
 use super::*;
 use crate::services::memory_files::prompt::{Admission, IndexState};
 
-pub(crate) enum Kind {
-    Compaction,
+pub(crate) enum Kind<'a> {
+    Compaction(Option<&'a str>),
     ApprovedPlan,
     Synced,
 }
@@ -20,7 +20,7 @@ pub(crate) fn create(
     session: &str,
     order: i64,
     content: &str,
-    kind: Kind,
+    kind: Kind<'_>,
     storage: Storage<'_>,
 ) -> Result<String> {
     let id = match storage {
@@ -49,7 +49,7 @@ pub(crate) fn seal(
     tx: &Connection,
     session: &str,
     id: &str,
-    kind: Kind,
+    kind: Kind<'_>,
     storage: Storage<'_>,
 ) -> Result<()> {
     ensure!(tx.execute(
@@ -57,11 +57,12 @@ pub(crate) fn seal(
         [id, session],
     )? == 1, "Invalid boundary owner or role");
     let origin = match kind {
-        Kind::Compaction => "compaction",
+        Kind::Compaction(_) => "compaction",
         Kind::ApprovedPlan => "approved_plan",
         Kind::Synced => "sync",
     };
-    let metadata = serde_json::json!({"promptOrigin":origin}).to_string();
+    let git = match kind { Kind::Compaction(git) => git, _ => None };
+    let metadata = summary_metadata(origin, git);
     match storage {
         Storage::Shard(_) | Storage::Frozen(_) => {
             if matches!(kind, Kind::Synced) {
@@ -74,7 +75,7 @@ pub(crate) fn seal(
             match storage {
                 Storage::Shard(memory) => {
                     memory.freeze(tx, Some(id))?;
-                    if matches!(kind, Kind::Compaction) {
+                    if matches!(kind, Kind::Compaction(_)) {
                         memory.freeze_summary(tx, id)?;
                     }
                 }
@@ -89,6 +90,14 @@ pub(crate) fn seal(
         }
     }
     Ok(())
+}
+
+pub(super) fn summary_metadata(origin: &str, git: Option<&str>) -> String {
+    let mut metadata = serde_json::json!({"promptOrigin":origin});
+    if let Some(reminder) = git {
+        metadata["git_status"] = reminder.into();
+    }
+    metadata.to_string()
 }
 
 /// A partial summary of the suffix keeps its earlier rows. The branch has a

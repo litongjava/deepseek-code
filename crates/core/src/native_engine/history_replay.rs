@@ -215,6 +215,9 @@ impl ToolLoopExecutor {
             };
         self.protected_input = protected;
         self.pending_inputs = pending;
+        if boundary.is_some() {
+            self.session_reminders.git = None;
+        }
         self.session_reminders.resident_indexes = index;
         self.session_reminders.skills =
             crate::services::turn_context::invoked_skills_reminder(&entries, &messages);
@@ -694,6 +697,18 @@ impl ToolLoopExecutor {
         let (mut wire, native_result) = match summary_only_wire {
             Some(wire) => (wire, None),
             None => {
+                // Durable rows lack the user-role host prefix used on main requests.
+                // In-flight rows are already rendered, including this prefix.
+                if self.in_flight_shard_users.is_none() {
+                    if let Some(first) = rows.iter().position(|row| row["role"] == "user") {
+                        if let Some((offset, reminders)) = project_memory_context::boundary_reminders(
+                            &self.context_reminders,
+                            &rows[first]["provider_content"],
+                        ) {
+                            rows.insert(first + offset, serde_json::to_value(reminders)?);
+                        }
+                    }
+                }
                 self.remove_compaction_indexes(&mut rows);
                 let wire = self.build_mid_turn_summary_wire(&rows)?;
                 let result = native::generate(
@@ -832,7 +847,8 @@ impl ToolLoopExecutor {
             if estimated <= capacity {
                 return Ok(false);
             }
-        } else if estimated <= (limit * 70 / 100).min(capacity) && (native || estimated <= threshold)
+        } else if estimated <= (limit * 70 / 100).min(capacity)
+            && (native || estimated <= threshold)
         {
             return Ok(false);
         }
@@ -943,9 +959,24 @@ impl ToolLoopExecutor {
                         .filter_map(|row| row["id"].as_str().map(str::to_owned))
                         .collect()
                 });
+                // This host-only boundary is frozen in the live window, not the shard.
+                if let Some(startup) = self.session_reminders.git.take() {
+                    self.context_reminders.retain(|block| block != &startup);
+                }
                 let mut live = vec![json!({
                     "role":"user", "content":generated.text, "provider_content":generated.native,
                 })];
+                if let Some(git) = crate::services::git_snapshot::capture_boundary(
+                    std::path::Path::new(&self.workspace_cwd),
+                ) {
+                    live.push(crate::services::compaction::git_row(git));
+                }
+                if let Some((at, reminders)) = project_memory_context::boundary_reminders(
+                    &self.context_reminders,
+                    &live[0]["provider_content"],
+                ) {
+                    live.insert(if at == 0 { 0 } else { live.len() }, serde_json::to_value(reminders)?);
+                }
                 live.extend(rows.into_iter().skip(explicit.rendered_len));
                 *window = live
                     .iter()
@@ -1021,7 +1052,7 @@ impl ToolLoopExecutor {
             let end = self.protected_input.unwrap_or_else(|| {
                 self.messages
                     .iter()
-                    .rposition(|m| m["role"] == "user")
+                    .rposition(|m| m["role"] == "user" && m["origin"] != "compaction_git")
                     .unwrap_or(self.messages.len())
             });
             if let Some(mut at) = compressor.retained_input(&self.messages, end, &level) {
@@ -1078,8 +1109,32 @@ impl ToolLoopExecutor {
             })?,
             _ => self.session_reminders.resident_indexes.clone(),
         };
-        let prefix_index = (!prefix_index.is_empty())
-            .then(|| json!({"role":"user","content":prefix_index.join("\n\n")}));
+        // Repack the classified host prefix, not the first user's own text.
+        // Remove it at its original rendering site before summarizing; a user's
+        // later quotation of the same material is not a host attachment.
+        if let Some(first) = rows.iter_mut().find(|m| m["role"] == "user") {
+            if !self.context_reminders.is_empty() && first["provider_content"].is_null() {
+                match &mut first["content"] {
+                    Value::String(text) => {
+                        let prefix = self.context_reminders.join("\n\n") + "\n\n";
+                        if text.starts_with(&prefix) {
+                            text.drain(..prefix.len());
+                        }
+                    }
+                    Value::Array(parts)
+                        if parts.len() >= self.context_reminders.len()
+                            && parts.iter().zip(&self.context_reminders).all(|(p, block)| {
+                                p["type"] == "text" && p["text"].as_str() == Some(block)
+                            }) =>
+                    {
+                        parts.drain(..self.context_reminders.len());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut parts = self.session_reminders.clone();
+        parts.resident_indexes = prefix_index;
         let mut suffix = rows.split_off(cut);
         self.remove_compaction_indexes(&mut rows);
         self.remove_compaction_indexes(&mut suffix);
@@ -1115,6 +1170,17 @@ impl ToolLoopExecutor {
                 rows
             }
         };
+        if let Some(at) = compressed.iter().position(|row| row["_is_summary"] == true) {
+            parts.git = None;
+            if let Some(git) = crate::services::git_snapshot::capture_boundary(
+                std::path::Path::new(&self.workspace_cwd),
+            ) {
+                compressed.insert(at + 1, crate::services::compaction::git_row(git));
+            }
+        }
+        let prefix = crate::prompt::first_message_reminders(parts);
+        let prefix_index =
+            (!prefix.is_empty()).then(|| json!({"role":"user","content":prefix.join("\n\n")}));
         let index_at = prefix_index.map(|index| {
             let at = compressed
                 .iter()
@@ -1134,7 +1200,8 @@ impl ToolLoopExecutor {
                     (i >= suffix_start
                         || Some(i) == index_at
                         || row["role"] == "system"
-                        || row["_is_summary"] == true)
+                        || row["_is_summary"] == true
+                        || row["origin"] == "compaction_git")
                         .then_some(row)
                 })
                 .collect();

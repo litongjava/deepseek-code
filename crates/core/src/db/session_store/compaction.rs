@@ -198,7 +198,8 @@ impl SessionRead<'_> {
         let prefix_len = if split_notification {
             0
         } else if boundary.is_some()
-            && prefix.len() == 1
+            && !prefix.is_empty()
+            && prefix[1..].iter().all(|row| row["origin"] == "compaction_git")
             && (prefix[0]["provider_content"]["compaction"] == true
                 || prefix[0]["origin"] == "compaction")
         {
@@ -238,11 +239,16 @@ impl SessionRead<'_> {
 }
 
 impl SessionDb {
+    fn compaction_git(&self) -> Option<String> {
+        self.workspace().ok().as_deref().and_then(crate::services::git_snapshot::capture_boundary)
+    }
+
     pub(crate) fn commit_compaction_window(
         &self,
         cut: &CompactionWindow,
         summary: &compaction::GeneratedSummary,
     ) -> Result<String> {
+        let git = self.compaction_git();
         let _guard = self.hold_incarnation()?;
         let memory = crate::services::memory_files::prompt::Admission::session(self)?;
         self.write_locked("seal compressed window", |w| {
@@ -250,7 +256,7 @@ impl SessionDb {
                 compaction::fingerprint(w.0, w.1)?.0 == cut.fingerprint,
                 "Session changed during compaction"
             );
-            w.commit_summary(summary, &memory, cut.before.as_deref())
+            w.commit_summary(summary, &memory, git.as_deref(), cut.before.as_deref())
         })
     }
 
@@ -264,6 +270,7 @@ impl SessionDb {
             !summary.text.trim().is_empty() && summary.text.chars().count() <= 32_000,
             "Empty or oversized compaction summary"
         );
+        let git = self.compaction_git();
         let _guard = self.hold_incarnation()?;
         let _locks = self.stores.key_lock(&self.key, false, false)?;
         let memory = crate::services::memory_files::prompt::Admission::session(self)?;
@@ -276,7 +283,7 @@ impl SessionDb {
                 "Session changed during compaction"
             );
             w.0.execute("DELETE FROM compaction_request", [])?;
-            w.commit_summary(summary, &memory, None)
+            w.commit_summary(summary, &memory, git.as_deref(), None)
         })
     }
 }
@@ -357,6 +364,7 @@ impl DeliveryOwner {
     ) -> Result<String> {
         layout::allow_entry()?;
         let s = &self.session;
+        let git = s.compaction_git();
         let _guard = s.hold_incarnation()?;
         s.require_active_compaction()?;
         ensure!(s.incarnation == claim.incarnation, "Wrong compaction owner");
@@ -374,7 +382,7 @@ impl DeliveryOwner {
                 compaction::fingerprint(w.0, w.1)?.0 == claim.fingerprint,
                 "Session changed during compaction"
             );
-            w.commit_summary(summary, &memory, claim.before.as_deref())
+            w.commit_summary(summary, &memory, git.as_deref(), claim.before.as_deref())
         })
     }
 }
@@ -458,10 +466,13 @@ impl SessionRepository<'_> {
         context: Option<&str>,
     ) -> Result<compaction::CompactionResult> {
         match &self.0 {
-            owned::Backend::Shared(_, _) => {
+            owned::Backend::Shared(db, id) => {
                 ensure!(prepared.incarnation.is_none(), "Compaction store changed");
+                let root = crate::data_layout::DataLayout::new(db.data_dir()).workspaces();
+                let git = db.engine_workspace(&root, id, None).ok()
+                    .and_then(|(cwd, _, _)| crate::services::git_snapshot::capture_boundary(&cwd));
                 self.write("commit compaction", |c, _| {
-                    compaction::commit_locked(c, prepared, generated, context)
+                    compaction::commit_locked(c, prepared, generated, context, git.as_deref())
                 })
             }
             owned::Backend::Admitted(s) => {
@@ -469,6 +480,7 @@ impl SessionRepository<'_> {
                     prepared.incarnation.as_deref() == Some(s.incarnation()),
                     "Compaction session was replaced"
                 );
+                let git = s.compaction_git();
                 let _locks = s.stores.key_lock(&s.key, false, false)?;
                 let memory = crate::services::memory_files::prompt::Admission::session(s)?;
                 s.require_active_compaction()?;
@@ -481,7 +493,7 @@ impl SessionRepository<'_> {
                         ensure!(w.0.execute("DELETE FROM compaction_request WHERE id=?1",[request])?==1,"Compaction request changed");
                     }
                     let message_id =
-                        w.commit_summary(generated, &memory, prepared.before.as_deref())?;
+                        w.commit_summary(generated, &memory, git.as_deref(), prepared.before.as_deref())?;
                     if let Some(context) = context {
                         state::set_local(
                             w.0,
@@ -508,6 +520,7 @@ impl SessionWrite<'_> {
         &self,
         summary: &compaction::GeneratedSummary,
         memory: &crate::services::memory_files::prompt::Admission,
+        git: Option<&str>,
         before: Option<&str>,
     ) -> Result<String> {
         let content = format!(
@@ -533,7 +546,7 @@ impl SessionWrite<'_> {
             self.1,
             order,
             &content,
-            boundary::Kind::Compaction,
+            boundary::Kind::Compaction(git),
             boundary::Storage::Shard(memory),
         )?;
         self.2.set(true);
@@ -604,7 +617,7 @@ fn legacy_fragments(
 impl SessionRepository<'_> {
     pub(crate) fn latest_compact_content(
         &self,
-    ) -> Result<Option<(String, String, Option<serde_json::Value>)>> {
+    ) -> Result<Option<(String, String, Option<serde_json::Value>, Option<String>)>> {
         self.read(|c,id| {
             let join=match self.0 {
                 owned::Backend::Admitted(_) => "LEFT JOIN native_boundaries b ON b.message_id=m.id",
@@ -613,7 +626,10 @@ impl SessionRepository<'_> {
             let mut q=c.prepare_cached(&format!("SELECT m.id,m.content,b.value FROM messages m {join}
                 WHERE m.conversation_id=?1 AND m.is_compact_boundary=1 ORDER BY m.sort_order DESC,m.rowid DESC LIMIT 1"))?;
             let row=q.query_row([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).optional()?;
-            row.map(|(message_id,text,native)|Ok((message_id,text,native.map(|s|serde_json::from_str(&s)).transpose()?))).transpose()
+            row.map(|(message_id, text, native)| {
+                let git = crate::services::git_snapshot::read_boundary(c, &message_id)?;
+                Ok((message_id, text, native.map(|s|serde_json::from_str(&s)).transpose()?, git))
+            }).transpose()
         })
     }
 }

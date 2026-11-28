@@ -217,6 +217,7 @@ pub async fn run_from_env() -> Result<bool> {
                     if owner_pid.is_some_and(service::process_exited) {
                         fatal.store(true,Ordering::Release);
                         if orphaned_since.get_or_insert_with(Instant::now).elapsed() > ORPHAN_GRACE {
+                            eprintln!("Worker exit: supervisor lost");
                             std::process::exit(1);
                         }
                     }
@@ -241,7 +242,13 @@ pub async fn run_from_env() -> Result<bool> {
                         coordination_active = turn_active;
                     }
                     let shell_active = deepseek_code_core::tools::background_shell::has_active();
-                    if should_expire(turn_active, shell_active, fatal.load(Ordering::Acquire), idle.elapsed()) {break;}
+                    let (owned_agents, last_agent_exit) = jobs::owned_background_activity();
+                    let elapsed = last_agent_exit.map_or(idle.elapsed(), |at| idle.elapsed().min(at.elapsed()));
+                    let is_fatal = fatal.load(Ordering::Acquire);
+                    if should_expire(turn_active, shell_active, owned_agents, is_fatal, elapsed) {
+                        eprintln!("Worker exit: {}", if is_fatal { "fatal worker state" } else { "idle timeout (600s)" });
+                        break;
+                    }
                     if (turn_active && !idle_child_active.load(Ordering::Acquire)) || shell_active {idle=Instant::now();}
                     if !turn_active && !fatal.load(Ordering::Acquire) {
                         if let Err(error) = child::start_pending(&worker, selected.as_ref(), expected_binding.as_deref(), &session, &active, &admission_released, &current_turn, &idle_child_active, &fatal, &mode_target).await {
@@ -339,7 +346,7 @@ pub async fn run_from_env() -> Result<bool> {
                         Request::Shutdown=>{
                             if active.load(Ordering::Acquire) {let _=service::reply(stream,&Reply::error("Session worker has an active turn; cancel or detach it explicitly")).await;}
                             else if deepseek_code_core::tools::background_shell::has_active() {let _=service::reply(stream,&Reply::error("Session worker owns running background shell tasks; stop them explicitly before shutdown")).await;}
-                            else {let _=service::reply(stream,&Reply::ok(None)).await;break;}
+                            else {let _=service::reply(stream,&Reply::ok(None)).await;eprintln!("Worker exit: explicit shutdown");break;}
                         },
                         Request::Submit{id,prompt,arguments,environment}=>{
                             if fatal.load(Ordering::Acquire) {let _=service::reply(stream,&Reply::error("Session worker is shutting down; prompt was not submitted")).await;continue;}
@@ -683,21 +690,20 @@ fn current_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str) -> Resu
 
 const ORPHAN_GRACE: Duration = Duration::from_secs(5);
 
-fn should_expire(turn: bool, shell: bool, fatal: bool, idle: Duration) -> bool {
-    !turn && (fatal || (!shell && idle > Duration::from_secs(300)))
+fn should_expire(turn: bool, shell: bool, owned_agents: usize, fatal: bool, idle: Duration) -> bool {
+    !turn && (fatal || (!shell && owned_agents == 0 && idle >= Duration::from_secs(600)))
 }
 #[cfg(test)]
 #[test]
 fn idle_expiry_keeps_managed_servers_alive_but_not_fatal_workers() {
-    assert!(!should_expire(false, true, false, Duration::from_secs(301)));
-    assert!(should_expire(false, false, false, Duration::from_secs(301)));
-    assert!(should_expire(false, true, true, Duration::from_secs(301)));
-    assert!(!should_expire(
-        false,
-        false,
-        false,
-        Duration::from_secs(299)
-    ));
+    let limit = Duration::from_secs(600);
+    assert!(!should_expire(false, true, 0, false, limit));
+    for count in [1, 2] {
+        assert!(!should_expire(false, false, count, false, limit * 2));
+    }
+    assert!(should_expire(false, false, 0, false, limit));
+    assert!(!should_expire(false, false, 0, false, limit - Duration::from_secs(1)));
+    assert!(should_expire(false, true, 2, true, Duration::ZERO));
 }
 #[cfg(test)]
 mod admission_tests {

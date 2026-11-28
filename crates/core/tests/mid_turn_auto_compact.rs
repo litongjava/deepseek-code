@@ -85,6 +85,8 @@ fn responses_sse(output: Value, delta_text: Option<&str>, input_tokens: u64) -> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
     None,
+    GitBoundary,
+    PlainBoundary,
     RetryTwice,
     Fallback,
     SoftLimit,
@@ -115,8 +117,21 @@ async fn run_with_failure(
     let marker_line = "BULKY_EVIDENCE_MARKER_0123456789 ".repeat(1400);
     std::fs::write(&big_file, &marker_line).unwrap();
 
+    let boundary_test = matches!(failure, Failure::GitBoundary | Failure::PlainBoundary);
+    if boundary_test {
+        if failure == Failure::GitBoundary {
+            assert!(std::process::Command::new("git").args(["init", "-q"])
+                .current_dir(dir.path()).output().unwrap().status.success());
+        }
+        std::fs::write(dir.path().join(GIT_STATES[0]), "fixture").unwrap();
+        std::fs::write(dir.path().join("second-evidence.txt"), &marker_line).unwrap();
+    }
     let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
+    if failure == Failure::None {
+        std::fs::write(paths.data_dir.join("AGENTS.md"), "compact-global-rule").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "compact-project-rule").unwrap();
+    }
     let model_id = match protocol {
         Protocol::OpenAIResponses => "gpt-6-astra",
         _ => "fixture-model",
@@ -169,7 +184,7 @@ async fn run_with_failure(
                         assert!(now.duration_since(previous.unwrap()) >= std::time::Duration::from_secs(1));
                     }
                     let status = match failure {
-                        Failure::None => None,
+                        Failure::None | Failure::GitBoundary | Failure::PlainBoundary => None,
                         Failure::RetryTwice if attempt >= 2 => None,
                         Failure::SoftLimit if main_step.load(Ordering::SeqCst) >= 9 => None,
                         Failure::BadRequest => Some(StatusCode::BAD_REQUEST),
@@ -249,14 +264,27 @@ async fn run_with_failure(
                 }
 
                 let step = main_step.fetch_add(1, Ordering::SeqCst);
-                let read_args = json!({"file_path": file_path});
+                let workspace = std::path::Path::new(&file_path).parent().unwrap();
+                // Change Git state only after recording the request, before the next iteration.
+                if boundary_test && matches!(step, 0 | 1) {
+                    std::fs::rename(workspace.join(GIT_STATES[step]), workspace.join(GIT_STATES[step + 1])).unwrap();
+                }
+                let second_turn = boundary_test && step == 3;
+                let short_read = boundary_test && matches!(step, 1 | 4);
+                let read_args = if short_read {
+                    json!({"file_path": workspace.join(format!("missing-{step}.txt"))})
+                } else if second_turn {
+                    json!({"file_path": workspace.join("second-evidence.txt")})
+                } else {
+                    json!({"file_path": file_path})
+                };
                 match protocol {
                     Protocol::OpenAIChat => {
-                        if step == 0 {
+                        if step == 0 || short_read || second_turn {
                             let delta = json!({
                                 "tool_calls": [{
                                     "index": 0,
-                                    "id": "call-read-1",
+                                    "id": if boundary_test { format!("boundary-read-{step}") } else { "call-read-1".to_string() },
                                     "type": "function",
                                     "function": {"name": "Read", "arguments": read_args.to_string()}
                                 }]
@@ -294,13 +322,13 @@ async fn run_with_failure(
                         }
                     }
                     Protocol::OpenAIResponses => {
-                        if step == 0 || (step < 9 && failure == Failure::SoftLimit) || (step == 1 && failure == Failure::HardDuringCooldown) {
+                        if step == 0 || short_read || second_turn || (step < 9 && failure == Failure::SoftLimit) || (step == 1 && matches!(failure, Failure::HardDuringCooldown | Failure::None)) {
                             let output = json!([{
                                 "type": "function_call",
                                 "id": format!("fc-read-{step}"),
                                 "call_id": format!("call-read-{step}"),
                                 "name": "Read",
-                                "arguments": if step == 0 {read_args.to_string()} else {json!({"file_path":format!("missing-{step}.txt")}).to_string()}
+                                "arguments": if step == 0 || boundary_test {read_args.to_string()} else {json!({"file_path":format!("missing-{step}.txt")}).to_string()}
                             }]);
                             (
                                 [("content-type", "text/event-stream")],
@@ -419,6 +447,22 @@ async fn run_with_failure(
             .await,
         deepseek_code_core::native_engine::engine_core::ExecutorWait::Completed
     ));
+    if boundary_test {
+        turn.finish(deepseek_code_core::db::turn_repo::TurnStatus::Completed).unwrap();
+        store.append(&id, "user", "Inspect the second evidence file").unwrap();
+        let mut next_turn = store.db.start_turn_timer(&id).unwrap();
+        let request = serde_json::from_value(json!({
+            "conversation_id": id, "messages": store.model_history(&id, &format).unwrap(),
+            "assistant_message_id": next_turn.ensure_segment().unwrap(),
+            "model": model_id, "provider_id": "fixture", "workspace_path": dir.path(), "max_tokens": 1000
+        })).unwrap();
+        let mut rx = engine.send_message_with_history(request, false).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(event) = rx.recv().await {
+                assert!(!matches!(event, EngineEvent::Error(_)), "{event:?}");
+            }
+        }).await.unwrap();
+    }
     if matches!(failure, Failure::HardLimit | Failure::HardDuringCooldown) {
         let rows = store
             .db
@@ -458,6 +502,75 @@ async fn run_with_failure(
     (dir, store, id, calls, events)
 }
 
+const GIT_STATES: [&str; 3] = ["git-initial.fixture", "git-at-boundary.fixture", "git-after-boundary.fixture"];
+
+async fn check_git_boundary(protocol: Protocol, repo: bool) {
+    let prefs = Preferences { autocompact_percent: Some(50.try_into().unwrap()), ..Default::default() };
+    let (_, _, _, calls, _) = run_with_failure(protocol, prefs, false,
+        if repo { Failure::GitBoundary } else { Failure::PlainBoundary }).await;
+    // Each turn: request a large Read, compact, request a small Read, finish.
+    // The second turn starts by replaying the first boundary from storage.
+    assert_eq!(calls.len(), 8);
+    let native = protocol == Protocol::OpenAIResponses;
+    for i in [1, 5] {
+        if native { assert!(calls[i].0.ends_with("/responses/compact")); }
+        else { assert_eq!(calls[i].1["x-dcl-request-kind"], "compaction"); }
+    }
+    let mut frozen = [None, None, None];
+    for (i, state) in [(0, 0), (2, 1), (3, 1), (4, 1), (6, 2), (7, 2)] {
+        let body = &calls[i].2;
+        let messages = body[if native { "input" } else { "messages" }].as_array().unwrap();
+        let wire = body.to_string();
+        if i != 0 {
+            assert!(wire.contains(if native { "opaque-mid-turn-summary" } else { "MID_TURN_SUMMARY" }), "missing boundary in request {i}");
+        }
+        let user: String = messages.iter().filter(|m| m["role"] == "user")
+            .map(|m| m["content"].to_string()).collect();
+        if repo {
+            let snapshot = user.split_once("# gitStatus").unwrap().1
+                .split_once("</system-reminder>").unwrap().0;
+            assert_eq!(frozen[state].get_or_insert_with(|| snapshot.to_owned()).as_str(), snapshot,
+                "Git snapshot changed while replaying boundary in request {i}");
+        }
+        for (marker, expected) in std::iter::once(("# gitStatus", repo))
+            .chain(GIT_STATES.iter().enumerate().map(|(j, &name)| (name, repo && j == state))) {
+            assert_eq!(user.matches(marker).count(), usize::from(expected), "request {i}, user: {marker}");
+            assert_eq!(wire.matches(marker).count(), usize::from(expected), "request {i}, whole body: {marker}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn git_boundary_text_replay() { check_git_boundary(Protocol::OpenAIChat, true).await; }
+
+#[tokio::test]
+async fn git_boundary_native_replay() { check_git_boundary(Protocol::OpenAIResponses, true).await; }
+
+#[tokio::test]
+async fn git_boundary_absent_outside_repo() {
+    for protocol in [Protocol::OpenAIChat, Protocol::OpenAIResponses] {
+        check_git_boundary(protocol, false).await;
+    }
+}
+
+fn assert_main_request_rules(body: &Value, system: &Value, standalone: bool) {
+    let system = system.to_string();
+    let wire = body.to_string();
+    for (marker, expected) in [
+        ("compact-global-rule", 1),
+        ("compact-project-rule", 1),
+        ("Shell & tool-batching tips for this session:", 1),
+        ("Launched using the dcl command", usize::from(standalone)),
+    ] {
+        assert_eq!(system.matches(marker).count(), expected, "system: {marker}");
+        assert_eq!(
+            wire.matches(marker).count(),
+            expected,
+            "whole request: {marker}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn openai_mid_turn_tool_loop_triggers_auto_compact_and_continues() {
     let prefs = Preferences {
@@ -470,6 +583,15 @@ async fn openai_mid_turn_tool_loop_triggers_auto_compact_and_continues() {
     // 1) Initial main request -> 2) mid-turn compaction request -> 3) resumed main request.
     assert_eq!(calls.len(), 3, "expected main + compact + main calls");
     assert_eq!(calls[1].1["x-dcl-request-kind"], "compaction");
+    for body in [&calls[0].2, &calls[2].2] {
+        let system = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "system")
+            .unwrap();
+        assert_main_request_rules(body, &system["content"], true);
+    }
     let resumed_body = calls[2].2.to_string();
     assert!(resumed_body.contains("MID_TURN_SUMMARY"));
     assert!(!resumed_body.contains("BULKY_EVIDENCE_MARKER_0123456789"));
@@ -543,6 +665,9 @@ async fn anthropic_mid_turn_tool_loop_triggers_auto_compact_and_continues() {
 
     assert_eq!(calls.len(), 3, "expected main + compact + main calls");
     assert_eq!(calls[1].1["x-dcl-request-kind"], "compaction");
+    for body in [&calls[0].2, &calls[2].2] {
+        assert_main_request_rules(body, &body["system"], true);
+    }
     let resumed_messages = calls[2].2["messages"].as_array().unwrap();
     // Valid Anthropic alternation: single user message containing the summary + continuation cue.
     assert_eq!(resumed_messages.len(), 1);
@@ -574,8 +699,21 @@ async fn native_responses_mid_turn_auto_compact_uses_responses_compact_and_conti
     let (_dir, _store, _id, calls, events) =
         run_with_failure(Protocol::OpenAIResponses, prefs, false, Failure::None).await;
 
-    assert_eq!(calls.len(), 3, "expected responses + /responses/compact + responses");
+    assert_eq!(calls.len(), 4, "expected main, compact and two replay requests");
     assert!(calls[1].0.ends_with("/responses/compact"));
+    for body in [&calls[0].2, &calls[2].2] {
+        assert_main_request_rules(body, &body["instructions"], false);
+    }
+    for (i, (path, _, body)) in calls.iter().enumerate() {
+        for marker in ["# Working environment", "Today's date is", "Inspect evidence.txt and summarize findings"] {
+            let user = body["input"].as_array().unwrap().iter().filter(|m| m["role"] == "user")
+                .map(|m| m["content"].to_string().matches(marker).count()).sum::<usize>();
+            let system = body["instructions"].to_string().matches(marker).count();
+            let total = body.to_string().matches(marker).count();
+            eprintln!("request {i} {path} {marker:?}: user={user} instructions={system} total={total}");
+            assert_eq!((user, system, total), (1, 0, 1), "request {i}: {marker}");
+        }
+    }
     let resumed_input = calls[2].2["input"].as_array().unwrap();
     assert!(resumed_input
         .iter()

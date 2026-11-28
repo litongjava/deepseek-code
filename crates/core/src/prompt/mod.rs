@@ -62,17 +62,10 @@ pub fn default_system_prompt(_profile: PromptProfile) -> String {
     static_sections(&MemoryConfig::default()).join("\n\n")
 }
 
-/// The CLI's constant runtime facts. They describe the frontend, so they travel
-/// in the first user message as their own reminder instead of the system prompt.
+/// The CLI's constant runtime facts, included only for a standalone frontend.
 pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal. No Desktop window or Bridge server.";
 
-pub fn standalone_frontend_reminder() -> String {
-    format!("<system-reminder>\n{STANDALONE_FRONTEND}\n</system-reminder>")
-}
-
-/// Static shell and tool-batching tips appended as the last `<system-reminder>`
-/// block of the first user message. Static across requests so prompt caching
-/// stays intact.
+/// Static shell and tool-batching tips for the session system prompt.
 pub const SESSION_TIPS: &str = r#"Shell & tool-batching tips for this session:
 - Combine sequential shell steps into ONE `Bash` call using `&&` (dependent steps), `;` with `echo '---'` (independent checks), `for` loops, or a self-contained multi-line script (~5–15 lines) when a workflow has variables, predictable fallbacks (missing dir, locked target), and final verification—instead of serial single-command turns. Use `set -euo pipefail` in Bash (or check `$LASTEXITCODE` and `try/catch` in PowerShell), and keep unrelated or high-risk irreversible actions separate.
   Examples (1 call instead of 5–10 separate turns):
@@ -91,10 +84,6 @@ pub const SESSION_TIPS: &str = r#"Shell & tool-batching tips for this session:
 - Foreground `Bash` persists `cwd` across calls: once you `cd` into a directory, do not repeat `cd <dir> &&` on every command; use `(cd <dir> && ...)` or `git -C <dir>` for one-off directory switches.
 - Foreground `Bash` kills its entire process tree (including auto-spawned helper daemons) when the call ends. Start any long-running service that must survive across calls (e.g. a frontend dev server like `vite`/`pnpm dev`, a backend server, or a local daemon) with `detach: true`, and never poll background jobs with `sleep`.
 - File placement: for project-related files, do NOT write them to the OS temp directory (`/tmp`, `$TEMP`, `AppData\Local\Temp`); write project-related temporary/scratch files under `./temp/`, project-related non-temporary files under `./permanent/`, and documentation under `./docs/` in the current workspace."#;
-
-pub fn session_tips_reminder() -> String {
-    format!("<system-reminder>\n{SESSION_TIPS}\n</system-reminder>")
-}
 
 /// The lead-in of the reminder that lists tools ToolLoad can load.
 pub const LOADABLE_TOOLS_LEAD_IN: &str =
@@ -540,8 +529,7 @@ pub fn date_reminder(date: &str) -> String {
     format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
 }
 
-/// The parts of the first user message in their stable order. Each present part
-/// becomes its own `<system-reminder>` block.
+/// Host-sourced startup context, before routing rules and reference data to their roles.
 #[derive(Debug, Default, Clone)]
 pub struct SessionReminders {
     pub user_instructions: Option<String>,
@@ -563,18 +551,26 @@ pub struct SessionReminders {
     pub skills: Option<String>,
 }
 
-/// The reminders that open the first user message: the CLI's frontend facts (when applicable),
-/// the user's own instructions, the project's instructions, the project experience
-/// index, the loadable tools, the skills, the environment, the resident memory
-/// indexes, the date, the Git snapshot, skills recovered after compaction,
-/// and the static session tips block.
+/// Only host-classified rules belong in the system prompt. Never infer provenance
+/// from reminder tags: catalogs, memory, skill bodies and messages can contain them too.
+impl SessionReminders {
+    pub(crate) fn system_rules(&self) -> String {
+        [
+            self.standalone_frontend.then_some(STANDALONE_FRONTEND),
+            self.user_instructions.as_deref(),
+            self.project_instructions.as_deref(),
+            Some(SESSION_TIPS),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    }
+}
+
+/// Reference data stays in user context, in stable order.
 pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     let mut blocks = Vec::new();
-    if parts.standalone_frontend {
-        blocks.push(standalone_frontend_reminder());
-    }
-    blocks.extend(parts.user_instructions);
-    blocks.extend(parts.project_instructions);
     blocks.extend(parts.experience);
     blocks.extend(parts.loadable_tools);
     blocks.extend(parts.available_skills);
@@ -584,7 +580,6 @@ pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     blocks.extend(parts.date);
     blocks.extend(parts.git);
     blocks.extend(parts.skills);
-    blocks.push(session_tips_reminder());
     blocks
 }
 
@@ -1514,7 +1509,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let mut environment = environment_reminder(Some(workspace.path()));
         add_project_to_environment(&mut environment, "Demo", &[workspace.path().to_str().unwrap()]);
-        let blocks = first_message_reminders(SessionReminders {
+        let parts = SessionReminders {
             user_instructions: Some("<system-reminder>\nuser rules\n</system-reminder>".into()),
             standalone_frontend: true,
             project_instructions: Some("<system-reminder>\nproject rules\n</system-reminder>".into()),
@@ -1533,29 +1528,33 @@ mod tests {
             date: Some(date_reminder("2026-11-19")),
             git: Some("<system-reminder>\n# gitStatus\n</system-reminder>".into()),
             skills: Some("<system-reminder>\ninvoked skills\n</system-reminder>".into()),
-        });
-        assert_eq!(blocks.len(), 13);
-        assert_eq!(blocks[0], standalone_frontend_reminder());
-        assert!(blocks[1].contains("user rules"));
-        assert!(!blocks[0].contains("! <command>"));
+        };
+        let rules = parts.system_rules();
+        let blocks = first_message_reminders(parts);
+        assert_eq!(blocks.len(), 9);
+        for rule in [STANDALONE_FRONTEND, "user rules", "project rules", SESSION_TIPS] {
+            assert_eq!(rules.matches(rule).count(), 1);
+            assert!(!blocks.iter().any(|block| block.contains(rule)));
+        }
+        for block in &blocks {
+            assert!(!rules.contains(block));
+        }
         for profile in [PromptProfile::Code, PromptProfile::Desktop] {
             assert!(compose_system_prompt(None, profile).contains("enter `! <command>` in the chat input"));
         }
-        assert!(blocks[2].contains("project rules"));
-        assert!(blocks[3].contains("experience marker"));
-        assert!(blocks[4].contains("Tools you can load with ToolLoad"));
-        assert!(blocks[5].contains("Available skills"));
-        assert!(blocks[6].contains("codegraph explore marker"));
-        assert!(blocks[7].starts_with("<system-reminder>\n# Working environment\n"));
-        assert!(blocks[7].contains(" - Project: Demo\n - Primary working directory: "));
-        assert!(blocks[7].contains(" - Platform: "));
-        assert!(!blocks[7].contains("Today's date"));
-        assert!(blocks[8].contains("MEMORY.md index marker"));
-        assert_eq!(blocks[9], date_reminder("2026-11-19"));
-        assert_eq!(blocks[10], "<system-reminder>\n# gitStatus\n</system-reminder>");
-        assert_eq!(blocks[11], "<system-reminder>\ninvoked skills\n</system-reminder>");
-        assert_eq!(blocks[12], session_tips_reminder());
-        // The terminal facts are a first-message reminder, never system text.
+        assert!(blocks[0].contains("experience marker"));
+        assert!(blocks[1].contains("Tools you can load with ToolLoad"));
+        assert!(blocks[2].contains("Available skills"));
+        assert!(blocks[3].contains("codegraph explore marker"));
+        assert!(blocks[4].starts_with("<system-reminder>\n# Working environment\n"));
+        assert!(blocks[4].contains(" - Project: Demo\n - Primary working directory: "));
+        assert!(blocks[4].contains(" - Platform: "));
+        assert!(!blocks[4].contains("Today's date"));
+        assert!(blocks[5].contains("MEMORY.md index marker"));
+        assert_eq!(blocks[6], date_reminder("2026-11-19"));
+        assert_eq!(blocks[7], "<system-reminder>\n# gitStatus\n</system-reminder>");
+        assert_eq!(blocks[8], "<system-reminder>\ninvoked skills\n</system-reminder>");
+        // The shared base doesn't assume the session has a terminal.
         let system = compose_system_prompt_in(None, PromptProfile::Code);
         assert!(!system.contains(STANDALONE_FRONTEND));
         assert!(!compose_system_prompt(None, PromptProfile::Desktop).contains(STANDALONE_FRONTEND));
@@ -1568,11 +1567,8 @@ mod tests {
         ] {
             assert!(!system.contains(absent), "{absent} in:\n{system}");
         }
-        // Absent optional parts are omitted, leaving only the static session tips block.
-        assert_eq!(
-            first_message_reminders(SessionReminders::default()),
-            vec![session_tips_reminder()]
-        );
+        assert!(first_message_reminders(SessionReminders::default()).is_empty());
+        assert_eq!(SessionReminders::default().system_rules(), SESSION_TIPS);
         for (index, block) in blocks.iter().enumerate() {
             println!("reminder {index}: {}", block.chars().take(150).collect::<String>());
         }
