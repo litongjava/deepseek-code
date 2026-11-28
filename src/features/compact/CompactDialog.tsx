@@ -1,47 +1,21 @@
-import { CompactStatus } from '../../stores/useChatStore';
-import { compactConversation, getContextSize } from '../../api';
-
 interface CompactDialogProps {
   activeId: string;
-  compactStatus: CompactStatus;
+  onCompact: (id: string, instruction: string) => Promise<void>;
   compactInstruction: string;
   setCompactInstruction: (v: string) => void;
-  setCompactStatus: (status: CompactStatus) => void;
   setShowCompactDialog: (show: boolean) => void;
-  setContextInfo: (info: { tokens: number; limit: number }) => void;
-  loadConversation: (id: string) => Promise<void>;
 }
 
 export default function CompactDialog({
   activeId,
-  compactStatus,
+  onCompact,
   compactInstruction,
   setCompactInstruction,
-  setCompactStatus,
   setShowCompactDialog,
-  setContextInfo,
-  loadConversation,
 }: CompactDialogProps) {
   const handleCompact = async () => {
     setShowCompactDialog(false);
-    if (!activeId || compactStatus.state === 'compacting') return;
-    setCompactStatus({ state: 'compacting' });
-    try {
-      const instruction = compactInstruction.trim() || undefined;
-      const result = await compactConversation(activeId, instruction);
-      await loadConversation(activeId);
-      const newContextInfo = await getContextSize(activeId);
-      setContextInfo(newContextInfo);
-      setCompactStatus({
-        state: 'done',
-        message: `Compacted ${result.messagesCompacted} messages, saved ~${result.tokensSaved} tokens`,
-      });
-      setTimeout(() => setCompactStatus({ state: 'idle' }), 4000);
-    } catch (err) {
-      console.error('Compact failed:', err);
-      setCompactStatus({ state: 'error', message: 'Compaction failed' });
-      setTimeout(() => setCompactStatus({ state: 'idle' }), 3000);
-    }
+    if (activeId) await onCompact(activeId, compactInstruction);
   };
 
   return (

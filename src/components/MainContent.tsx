@@ -8,7 +8,7 @@ import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, AlertTr
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconWebSearch } from './Icons';
 import DeepSeekCodeLogo from './DeepSeekCodeLogo';
-import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, compactConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
+import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
 import { listSkillCommands } from '../api/skills';
 import ToolPermissionPrompt from './ToolPermissionPrompt';
 import PermissionDialog, { ApprovalInfo } from './PermissionDialog';
@@ -31,7 +31,7 @@ import HomeModeSelector, { type HomeMode } from './HomeModeSelector';
 import PromptSuggestionsPanel from './PromptSuggestionsPanel';
 import FileUploadPreview, { PendingFile } from './FileUploadPreview';
 import AddFromGithubModal from './AddFromGithubModal';
-import CompactingStatus from '../features/compact/CompactingStatus';
+import { runManualCompact } from '../features/compact/runManualCompact';
 import CompactDialog from '../features/compact/CompactDialog';
 import CreateProjectDialog from '../features/project/CreateProjectDialog';
 import { useCreatedProject } from '../features/project/useCreatedProject';
@@ -453,8 +453,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
   const [resourceAlertToast, setResourceAlertToast] = useState<ResourceAlertToast | null>(null);
   useEffect(() => {
-    if (compactStatus.state !== 'notice') return;
-    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), 8000);
+    const duration = { notice: 8000, done: 4000, error: 3000, idle: 0, compacting: 0 }[compactStatus.state];
+    if (!duration) return;
+    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), duration);
     return () => clearTimeout(timer);
   }, [compactStatus, setCompactStatus]);
   const showResourceAlert = useCallback((alert: { summary?: string }) => {
@@ -682,6 +683,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setAskUserDialog(null);
     isCreatingRef.current = false;
     viewingIdRef.current = activeId || null;
+    setCompactStatus({ state: 'idle' });
     setReadyConversationId(null);
 
     // Pre-warm engine when user opens a conversation (init in background before they send)
@@ -1129,6 +1131,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     return true;
   };
 
+  const handleManualCompact = (conversationId: string, instruction: string) =>
+    runManualCompact(conversationId, instruction, loadConversation, () => viewingIdRef.current === conversationId);
+
   const handleSend = async (overrideText?: string) => {
     if (requestCodeProject()) return;
     if (modeChanging || (!activeId && isCreatingRef.current) || gitSetupPending) return;
@@ -1144,7 +1149,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       if (!project.folders?.length) { setProjectAddToast('Add a source folder before sending'); return; }
       if (project.folders.some(folder => !folder.trusted)) { setProjectToTrust(project); return; }
     }
-    if (await handleSlashCommand(effectiveText, activeId)) return;
+    if (await handleSlashCommand(effectiveText, activeId, handleManualCompact)) return;
     // Skill slug is already in the text (inserted when selected from menu)
     setSelectedSkill(null);
     const hasFiles = files.some(f => f.status === 'done');
@@ -1880,10 +1885,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
         )
       )}
-      {(webSearchToast || resourceAlertToast || compactStatus.state === 'notice') && (
+      {(webSearchToast || resourceAlertToast || compactStatus.message) && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col items-center gap-2 max-w-[92vw]">
-          {compactStatus.state === 'notice' && (
-            <div role="status" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
+          {compactStatus.message && (
+            <div role={compactStatus.state === 'error' ? 'alert' : 'status'} className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
               {compactStatus.message}
             </div>
           )}
@@ -2545,13 +2550,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       {showCompactDialog && (
         <CompactDialog
           activeId={activeId!}
-          compactStatus={compactStatus}
+          onCompact={handleManualCompact}
           compactInstruction={compactInstruction}
           setCompactInstruction={setCompactInstruction}
-          setCompactStatus={setCompactStatus}
           setShowCompactDialog={setShowCompactDialog}
-          setContextInfo={setContextInfo}
-          loadConversation={loadConversation}
         />
       )}
 
