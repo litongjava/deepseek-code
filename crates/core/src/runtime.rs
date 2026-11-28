@@ -237,6 +237,38 @@ pub(crate) fn replay_history(
     replay_history_with_ids(conn, id, format, native, false, None)
 }
 
+fn replay_history_filtered(
+    conn: &rusqlite::Connection,
+    id: &str,
+    format: &ApiFormat,
+    native: impl Fn(&str) -> Result<Option<Value>>,
+    include_provenance: bool,
+    before: Option<&str>,
+    skip_opaque_native: bool,
+) -> Result<(Vec<Value>, Option<String>)> {
+    let mut messages =
+        crate::db::model_results::read_messages(conn, id, |row, collapsed| (row, collapsed))?;
+    if let Some(input) = before {
+        let end = messages
+            .iter()
+            .position(|(row, _)| row.id == input)
+            .context("Admitted input missing")?;
+        messages.truncate(end);
+    }
+    if skip_opaque_native {
+        let mut readable = Vec::with_capacity(messages.len());
+        for (row, collapsed) in messages {
+            let is_opaque_native = row.is_compact_boundary
+                && native(&row.id)?.is_some_and(|value| value["compaction"] == true);
+            if !is_opaque_native {
+                readable.push((row, collapsed));
+            }
+        }
+        messages = readable;
+    }
+    replay_rows(conn, id, &messages, format, native, include_provenance)
+}
+
 pub(crate) fn replay_history_with_ids(
     conn: &rusqlite::Connection,
     id: &str,
@@ -245,23 +277,20 @@ pub(crate) fn replay_history_with_ids(
     include_provenance: bool,
     before: Option<&str>,
 ) -> Result<(Vec<Value>, Option<String>)> {
-    let messages =
-        crate::db::model_results::read_messages(conn, id, |row, collapsed| (row, collapsed))?;
-    let end = match before {
-        Some(input) => messages
-            .iter()
-            .position(|(row, _)| row.id == input)
-            .context("Admitted input missing")?,
-        None => messages.len(),
-    };
-    replay_rows(
-        conn,
-        id,
-        &messages[..end],
-        format,
-        native,
-        include_provenance,
-    )
+    replay_history_filtered(conn, id, format, native, include_provenance, before, false)
+}
+
+/// Replays durable history up to `before`, skipping opaque Responses native compaction
+/// boundary rows so a different provider/model can summarize from plain-text history.
+pub(crate) fn replay_readable_history_with_ids(
+    conn: &rusqlite::Connection,
+    id: &str,
+    format: &ApiFormat,
+    native: impl Fn(&str) -> Result<Option<Value>>,
+    include_provenance: bool,
+    before: Option<&str>,
+) -> Result<(Vec<Value>, Option<String>)> {
+    replay_history_filtered(conn, id, format, native, include_provenance, before, true)
 }
 
 struct ModelRequestStep {

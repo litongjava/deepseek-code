@@ -1886,3 +1886,22 @@ cargo test --locked -p deepseek-code-core --test session_db_delivery -- round2_p
 cargo check --locked -p deepseek-code-cli --all-targets
 cargo check --locked -p deepseek-code-desktop --all-targets
 ```
+
+### I46. GPT 原生 Responses 压缩后切 DeepSeek / 异源模型惰性重压缩
+
+改动范围：`crates/core/src/services/compaction/native.rs`、`crates/core/src/runtime.rs`、`crates/core/src/db/session_store/history.rs`、`crates/core/src/db/session_store/compaction.rs`、`crates/core/src/native_engine/engine_core.rs`、`crates/core/tests/cross_model_native_compaction.rs`。
+
+1. 当会话最新压缩边界是不透明的 Responses 原生压缩窗口（`provider_content.compaction == true`）且已切换到不匹配的 `(provider, base_url, model)`（例如 GPT-5/6 原生压缩后切 `deepseek-v4.1-flash` 或 `deepseek-chat`）时，发送下一轮消息不再被 `validate_history` 拦截，而是跳过不透明占位边界行从可读历史惰性重新摘要并原子提交新边界（插在压缩后首批用户消息之前，完整保留后续可读轮次），随后正常继续本轮请求并发送 `EngineEvent::CompactionNotice`。
+2. 切到异源模型后直接手动执行 `/compact`（`generate_compaction_recorded`）同样改为重放可读历史生成并提交新模型兼容的压缩边界。
+3. 未触发异源原生压缩窗口、或仍在原 `(provider, base_url, model)` 继续对话时保持零额外摘要开销。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib services::compaction::native
+cargo test --locked -p deepseek-code-core --lib runtime::model_history_step_replay_tests
+cargo test --locked -p deepseek-code-core --test compaction
+cargo test --locked -p deepseek-code-core --test cross_model_native_compaction
+cargo check --locked -p deepseek-code-cli --all-targets
+cargo check --locked -p deepseek-code-desktop --all-targets
+```

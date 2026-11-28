@@ -495,7 +495,10 @@ impl SessionWrite<'_> {
         Ok(id)
     }
     pub(crate) fn start_turn_at(&self, id: &str, at: &str) -> Result<()> {
-        ensure!(!self.3.pending, "Provider switch pending; worker is retiring");
+        ensure!(
+            !self.3.pending,
+            "Provider switch pending; worker is retiring"
+        );
         self.0.execute("INSERT INTO execution_turns(id,conversation_id,started_at,status) VALUES(?1,?2,?3,'running')",params![id,self.1,at])?;
         self.2.set(true);
         Ok(())
@@ -916,28 +919,52 @@ impl SessionRead<'_> {
         format: &crate::native_engine::provider_manager::ApiFormat,
         before: Option<&str>,
     ) -> Result<(Vec<Value>, Option<String>)> {
+        self.replay_before(format, before, false)
+    }
+
+    /// Replays durable history up to `before` with opaque Responses native compaction
+    /// boundaries excluded so another provider/model can build a compatible summary.
+    pub(crate) fn readable_history_before(
+        &self,
+        format: &crate::native_engine::provider_manager::ApiFormat,
+        before: Option<&str>,
+    ) -> Result<(Vec<Value>, Option<String>)> {
+        self.replay_before(format, before, true)
+    }
+
+    fn replay_before(
+        &self,
+        format: &crate::native_engine::provider_manager::ApiFormat,
+        before: Option<&str>,
+        readable_only: bool,
+    ) -> Result<(Vec<Value>, Option<String>)> {
         let id: String = self
             .0
             .query_row("SELECT id FROM manifest", [], |r| r.get(0))?;
-        crate::runtime::replay_history_with_ids(
-            self.0,
-            &id,
-            format,
-            |message| {
-                let raw: Option<String> = self
-                    .0
-                    .query_row(
-                        "SELECT value FROM native_boundaries WHERE message_id=?1",
-                        [message],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                raw.map(|v| serde_json::from_str(&v).map_err(Into::into))
-                    .transpose()
-            },
-            true,
-            before,
-        )
+        let load_native = |message: &str| {
+            let raw: Option<String> = self
+                .0
+                .query_row(
+                    "SELECT value FROM native_boundaries WHERE message_id=?1",
+                    [message],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            raw.map(|v| serde_json::from_str(&v).map_err(Into::into))
+                .transpose()
+        };
+        if readable_only {
+            crate::runtime::replay_readable_history_with_ids(
+                self.0,
+                &id,
+                format,
+                load_native,
+                true,
+                before,
+            )
+        } else {
+            crate::runtime::replay_history_with_ids(self.0, &id, format, load_native, true, before)
+        }
     }
 }
 impl SessionWrite<'_> {
@@ -994,35 +1021,59 @@ pub struct TranscriptExcerpt {
 }
 
 impl SessionRead<'_> {
-    pub fn occurrence_content(&self, message: &str, provider_id: &str, display: &str) -> Result<Option<Value>> {
+    pub fn occurrence_content(
+        &self,
+        message: &str,
+        provider_id: &str,
+        display: &str,
+    ) -> Result<Option<Value>> {
         let id = stream_occurrence_id(message, provider_id);
         Ok(self.mcp(&id, display)?.map(|(content, _, _)| content))
     }
 
-    pub fn changed_lines(&self) -> Result<(i64,i64)> {
+    pub fn changed_lines(&self) -> Result<(i64, i64)> {
         Ok(self.0.query_row("SELECT COALESCE(SUM(json_extract(output,'$.file_change.added')),0), COALESCE(SUM(json_extract(output,'$.file_change.removed')),0) FROM tool_calls WHERE json_valid(output) AND is_error=0", [], |r| Ok((r.get(0)?,r.get(1)?)))?)
     }
 
     pub fn output_tokens(&self) -> Result<i64> {
-        let mut query=self.0.prepare("SELECT id,output_tokens FROM model_requests WHERE output_tokens IS NOT NULL")?;
-        let mut counts=query.query_map([],|r| Ok((r.get::<_, String>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<std::collections::HashMap<_,_>>>()?;
-        for live in self.setting(super::settings::LIVE_REQUESTS)?.unwrap_or_default() {
-            if let (Some(id),Some(tokens))=(live.id, live.output_tokens) { counts.insert(id,i64::try_from(tokens).unwrap_or(i64::MAX)); }
+        let mut query = self.0.prepare(
+            "SELECT id,output_tokens FROM model_requests WHERE output_tokens IS NOT NULL",
+        )?;
+        let mut counts = query
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+        for live in self
+            .setting(super::settings::LIVE_REQUESTS)?
+            .unwrap_or_default()
+        {
+            if let (Some(id), Some(tokens)) = (live.id, live.output_tokens) {
+                counts.insert(id, i64::try_from(tokens).unwrap_or(i64::MAX));
+            }
         }
-        Ok(counts.into_values().fold(0i64,i64::saturating_add))
+        Ok(counts.into_values().fold(0i64, i64::saturating_add))
     }
 
     pub fn transcript_tail(&self) -> Result<Vec<TranscriptExcerpt>> {
         let mut messages=self.0.prepare("SELECT id,role,substr(content,-65536) FROM (SELECT id,role,content,sort_order,rowid AS sequence FROM messages ORDER BY sort_order DESC,rowid DESC LIMIT 20) ORDER BY sort_order,sequence")?;
         let mut calls=self.0.prepare("SELECT name,substr(input,1,8192),substr(output,-16384),is_error FROM (SELECT name,input,output,is_error,sort_order,rowid AS sequence FROM tool_calls WHERE message_id=?1 ORDER BY sort_order DESC,rowid DESC LIMIT 30) ORDER BY sort_order,sequence")?;
-        let mut rows=messages.query([])?;
-        let mut tail=Vec::new();
-        while let Some(row)=rows.next()? {
-            let role:String=row.get(1)?;
-            let tools=if role=="assistant" {
-                calls.query_map([row.get::<_,String>(0)?], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?
-            } else { Vec::new() };
-            tail.push(TranscriptExcerpt { role, text:row.get(2)?, tools });
+        let mut rows = messages.query([])?;
+        let mut tail = Vec::new();
+        while let Some(row) = rows.next()? {
+            let role: String = row.get(1)?;
+            let tools = if role == "assistant" {
+                calls
+                    .query_map([row.get::<_, String>(0)?], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?
+            } else {
+                Vec::new()
+            };
+            tail.push(TranscriptExcerpt {
+                role,
+                text: row.get(2)?,
+                tools,
+            });
         }
         Ok(tail)
     }

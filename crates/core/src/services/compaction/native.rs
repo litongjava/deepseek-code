@@ -41,18 +41,27 @@ fn compact_transport(provider: &ResolvedProvider) -> bool {
             .is_ok_and(|(protocol, _)| protocol == "openai-responses")
 }
 
-pub(crate) fn validate_history(messages: &[Value], provider: &ResolvedProvider) -> Result<()> {
-    for message in messages {
-        if let Some(native) = message
+pub(crate) fn matches_provider(native: &Value, provider: &ResolvedProvider) -> bool {
+    compact_transport(provider)
+        && native["provider"] == provider.provider.id
+        && native["base_url"] == provider.provider.base_url.trim_end_matches('/')
+        && native["model"] == provider.model.id
+}
+
+pub(crate) fn has_foreign_window(messages: &[Value], provider: &ResolvedProvider) -> bool {
+    messages.iter().any(|message| {
+        message
             .get("provider_content")
             .filter(|value| value["compaction"] == true)
-        {
-            ensure!(compact_transport(provider)
-                && native["provider"] == provider.provider.id
-                && native["base_url"] == provider.provider.base_url.trim_end_matches('/')
-                && native["model"] == provider.model.id,
-                "This session contains an opaque Responses compact window for another provider/model. Switch back to its original provider/model or branch from before compaction; the original transcript is retained.");
-        }
+            .is_some_and(|native| !matches_provider(native, provider))
+    })
+}
+
+pub(crate) fn validate_history(messages: &[Value], provider: &ResolvedProvider) -> Result<()> {
+    if has_foreign_window(messages, provider) {
+        anyhow::bail!(
+            "This session contains an opaque Responses compact window for another provider/model. Switch back to its original provider/model or branch from before compaction; the original transcript is retained."
+        );
     }
     Ok(())
 }

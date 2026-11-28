@@ -1156,9 +1156,13 @@ async fn summarize_history(
             limit.min(MAX_INPUT_TOKENS)
         };
         let prompt = targets.prompt(Stage::Final);
-        wire.append_instruction(&format!(
-            "{system}\n\n{prompt}Summary focus requested by the user:\n{focus}"
-        ))?;
+        let focus = focus.trim();
+        let instruction = if focus.is_empty() {
+            format!("{system}\n\n{}", prompt.trim_end())
+        } else {
+            format!("{system}\n\n{prompt}Summary focus requested by the user:\n{focus}")
+        };
+        wire.append_instruction(&instruction)?;
         let estimate = super::request_context::ContextUsage::from_body(
             &wire.api,
             &wire.body,

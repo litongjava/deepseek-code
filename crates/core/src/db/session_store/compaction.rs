@@ -239,6 +239,43 @@ impl SessionRead<'_> {
         )?;
         Ok((last_message, boundary, count.max(0) as usize))
     }
+
+    /// Returns `(last_message_id, latest_boundary_id, first_user_message_after_boundary)`
+    /// for safely committing a cross-model re-compaction right before post-boundary turns.
+    pub(crate) fn cross_model_compaction_cut(
+        &self,
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        let last_message: Option<String> = self
+            .0
+            .query_row(
+                "SELECT id FROM messages ORDER BY sort_order DESC, rowid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let boundary = self.boundary_id()?;
+        let cut_before: Option<String> = self
+            .0
+            .query_row(
+                "WITH cut AS (
+                     SELECT sort_order, rowid AS seq
+                     FROM messages
+                     WHERE is_compact_boundary=1
+                     ORDER BY sort_order DESC, rowid DESC
+                     LIMIT 1
+                 )
+                 SELECT id FROM messages
+                 WHERE role='user'
+                   AND is_compact_boundary=0
+                   AND (NOT EXISTS(SELECT 1 FROM cut) OR (sort_order, rowid) > (SELECT sort_order, seq FROM cut))
+                 ORDER BY sort_order ASC, rowid ASC
+                 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok((last_message, boundary, cut_before))
+    }
 }
 
 impl SessionDb {
@@ -291,6 +328,36 @@ impl SessionDb {
             );
             w.0.execute("DELETE FROM compaction_request", [])?;
             w.commit_summary(summary, &memory, git.as_deref(), None)
+        })
+    }
+
+    /// Commits a lazy cross-model re-compaction summary before `before` (if present),
+    /// verifying that neither the session tail nor its active boundary changed concurrently.
+    pub(crate) fn commit_cross_model_compaction(
+        &self,
+        expected_last_message: Option<&str>,
+        expected_boundary: Option<&str>,
+        before: Option<&str>,
+        summary: &compaction::GeneratedSummary,
+    ) -> Result<String> {
+        ensure!(
+            !summary.text.trim().is_empty() && summary.text.chars().count() <= 32_000,
+            "Empty or oversized compaction summary"
+        );
+        let git = self.compaction_git();
+        let _guard = self.hold_incarnation()?;
+        let _locks = self.stores.key_lock(&self.key, false, false)?;
+        let memory = crate::services::memory_files::prompt::Admission::session(self)?;
+        self.require_active_compaction()?;
+        self.write_locked("commit cross-model compaction", |w| {
+            let (current_last, current_boundary, _) =
+                SessionRead(w.0).cross_model_compaction_cut()?;
+            ensure!(
+                current_last.as_deref() == expected_last_message
+                    && current_boundary.as_deref() == expected_boundary,
+                "Session changed during cross-model compaction"
+            );
+            w.commit_summary(summary, &memory, git.as_deref(), before)
         })
     }
 }

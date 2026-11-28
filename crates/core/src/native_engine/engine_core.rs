@@ -1,6 +1,6 @@
-use crate::db::session_store::GlobalSetting;
 use crate::cache::FileCache;
 use crate::cost_tracker::{BudgetCheckResult, CostTracker};
+use crate::db::session_store::GlobalSetting;
 use crate::db::session_store::Stores;
 use crate::mcp::McpToolRegistry;
 use crate::native_engine::provider_manager::ProviderManager;
@@ -590,9 +590,12 @@ impl QueryEngine {
             .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
         let shard = self.db_manager.open_session(session)?;
-        let (mut history, boundary) =
+        let (mut history, mut boundary) =
             shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
-        crate::services::compaction::native::validate_history(&history, &provider)?;
+        if crate::services::compaction::native::has_foreign_window(&history, &provider) {
+            (history, boundary) =
+                shard.read(|r| r.readable_history_before(&provider.provider.api_format, before))?;
+        }
         if shard
             .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
             .is_some_and(|host| host.standalone_frontend)
@@ -692,6 +695,142 @@ impl QueryEngine {
                 options,
             )
             .await
+    }
+
+    async fn recompact_foreign_native_boundary(
+        &self,
+        selected: &crate::db::session_store::SessionDb,
+        request: &mut ChatRequest,
+    ) -> Result<Option<String>> {
+        let target_provider = {
+            let pm = self.provider_manager.lock().await;
+            if let Some(active) = pm.binding.resolve(None) {
+                Some(active)
+            } else if let Some(id) = request.provider_id.as_deref() {
+                pm.resolve_selected(id, &request.model)
+            } else {
+                pm.resolve_provider(&request.model).await
+            }
+        }
+        .ok_or_else(|| anyhow!("No provider found for model: {}", request.model))?;
+
+        let db_foreign = selected
+            .repository()
+            .latest_compact_content()?
+            .and_then(|(_, _, native, _)| native)
+            .filter(|value| value["compaction"] == true)
+            .is_some_and(|native| {
+                !crate::services::compaction::native::matches_provider(&native, &target_provider)
+            });
+        if !db_foreign {
+            return Ok(None);
+        }
+
+        let (expected_last, expected_boundary, cut_before) =
+            selected.read(|r| r.cross_model_compaction_cut())?;
+        let (readable_history, readable_boundary) = selected.read(|r| {
+            r.readable_history_before(&target_provider.provider.api_format, cut_before.as_deref())
+        })?;
+        anyhow::ensure!(
+            !readable_history.is_empty(),
+            "Cannot re-compact an opaque Responses window without readable history"
+        );
+
+        let mut options = super::request_options::RequestOptions::from_db(
+            &self.db_manager,
+            Some(&request.conversation_id),
+            "compaction",
+        )
+        .compaction("auto");
+        let transcript = serde_json::to_string(&readable_history)?;
+        let mut record = crate::native_engine::request_recording::CompactionRecord::start(
+            &mut options,
+            "auto",
+            &transcript,
+        );
+        let native = crate::services::compaction::native::supports(&target_provider);
+        let generated = self
+            .generate_replay_compaction(
+                selected.clone(),
+                target_provider.clone(),
+                &request.model,
+                crate::services::compaction::PROMPT,
+                "",
+                readable_history.clone(),
+                readable_boundary,
+                options,
+                native,
+            )
+            .await?;
+
+        let new_boundary = selected.commit_cross_model_compaction(
+            expected_last.as_deref(),
+            expected_boundary.as_deref(),
+            cut_before.as_deref(),
+            &generated,
+        )?;
+        if let Some(record) = &mut record {
+            record.finish(&generated, &new_boundary);
+        }
+        let mut summary_path = None;
+        let mut export_error = None;
+        match crate::services::compaction::export_summary(
+            self.db_manager.data_dir(),
+            &request.conversation_id,
+            readable_history.len(),
+            &generated.text,
+        ) {
+            Ok(path) => summary_path = Some(path.display().to_string()),
+            Err(error) => {
+                tracing::warn!("Cross-model compaction summary export failed: {error:#}");
+                export_error = Some(format!("{error:#}"));
+            }
+        }
+
+        let had_unpersisted_tail = expected_last.is_some() && expected_last == expected_boundary;
+        let (mut refreshed_history, refreshed_boundary) =
+            selected.read(|r| r.model_history(&target_provider.provider.api_format))?;
+        if had_unpersisted_tail {
+            let tail_start = request
+                .messages
+                .iter()
+                .rposition(|m| {
+                    m.get("provider_content")
+                        .is_some_and(|v| v["compaction"] == true)
+                })
+                .map(|idx| {
+                    let mut next = idx + 1;
+                    if request
+                        .messages
+                        .get(next)
+                        .is_some_and(|m| m["origin"] == "compaction_git")
+                    {
+                        next += 1;
+                    }
+                    next
+                })
+                .unwrap_or(0);
+            refreshed_history.extend(request.messages.drain(tail_start..));
+        }
+        request.messages = refreshed_history;
+        request.context_boundary = refreshed_boundary;
+
+        let target_label = if native {
+            target_provider.model.id.clone()
+        } else {
+            format!("plain-text summary for {}", target_provider.model.id)
+        };
+        let mut lines = vec![format!(
+            "Switched away from another model's Responses compaction window; re-compacted conversation history ({target_label})."
+        )];
+        if let Some(path) = summary_path {
+            lines.push("Summary saved to:".into());
+            lines.push(path);
+        }
+        if let Some(error) = export_error {
+            lines.push(format!("Summary export failed: {error}"));
+        }
+        Ok(Some(lines.join("\n")))
     }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
@@ -881,13 +1020,18 @@ impl QueryEngine {
         let id = conv_id.to_owned();
         let saved = tokio::task::spawn_blocking(move || db.engine_history(&id)).await??;
         let result = saved.map(|(binding, messages)| {
-            let start = messages.iter().rposition(|msg| msg.is_compact_boundary).unwrap_or(0);
+            let start = messages
+                .iter()
+                .rposition(|msg| msg.is_compact_boundary)
+                .unwrap_or(0);
             ConversationState {
                 conversation_id: conv_id.to_owned(),
                 binding,
-                messages: messages.into_iter().skip(start).map(|msg| {
-                    serde_json::json!({"role": msg.role, "content": msg.content})
-                }).collect(),
+                messages: messages
+                    .into_iter()
+                    .skip(start)
+                    .map(|msg| serde_json::json!({"role": msg.role, "content": msg.content}))
+                    .collect(),
                 system_prompt: None,
                 last_activity: Utc::now().to_rfc3339(),
                 turn_count: 0,
@@ -906,9 +1050,15 @@ impl QueryEngine {
         let state = self.conversation_states.lock().await.get(conv_id).cloned();
         if let Some(state) = state {
             let db = self.db_manager.clone();
-            tokio::task::spawn_blocking(move || db.save_engine_state(
-                &state.conversation_id, &state.binding, &state.last_activity, state.turn_count as i64,
-            )).await??;
+            tokio::task::spawn_blocking(move || {
+                db.save_engine_state(
+                    &state.conversation_id,
+                    &state.binding,
+                    &state.last_activity,
+                    state.turn_count as i64,
+                )
+            })
+            .await??;
         }
         Ok(())
     }
@@ -1049,9 +1199,9 @@ impl QueryEngine {
             db: Arc::new(selected.scoped_stores()),
             credentials: Arc::new(crate::services::EnvironmentCredentials),
         };
-        if let Some(router) =
-            plugin_context.global_setting::<crate::performance::RouterConfig>(GlobalSetting::MachinePreference("performance.router"))?
-        {
+        if let Some(router) = plugin_context.global_setting::<crate::performance::RouterConfig>(
+            GlobalSetting::MachinePreference("performance.router"),
+        )? {
             // Route only a fresh plain-text turn; never switch models mid tool conversation.
             if router.enabled
                 && request.provider_id.is_none()
@@ -1099,8 +1249,13 @@ impl QueryEngine {
         let workspaces_root = self.workspaces_dir.clone();
         let requested_workspace = request.workspace_path.clone();
         let (workspace, project, prompt_profile) = tokio::task::spawn_blocking(move || {
-            db.engine_workspace(&workspaces_root, &project_conv_id, requested_workspace.as_deref())
-        }).await??;
+            db.engine_workspace(
+                &workspaces_root,
+                &project_conv_id,
+                requested_workspace.as_deref(),
+            )
+        })
+        .await??;
         if !replay {
             crate::services::lifecycle_events::check_configuration(
                 &plugin_context,
@@ -1270,26 +1425,40 @@ impl QueryEngine {
         // The set of tools ToolLoad can offer and the model-invocable skills
         // are frozen into the first user message. A later discovery only adds a
         // change reminder to the latest message, never an edit to that prefix.
-        let allowed_tool_names = agent.as_ref().and_then(|definition| definition.tools.clone());
+        let allowed_tool_names = agent
+            .as_ref()
+            .and_then(|definition| definition.tools.clone());
         let tool_load_available = customization.loading("ToolLoad").enabled
             && allowed_tool_names
                 .as_ref()
                 .is_none_or(|names| names.iter().any(|name| name == "ToolLoad"));
         let mcp_tools = match &self.mcp_registry {
-            Some(registry) => crate::native_engine::tool_loop::discover_mcp_tools(registry).await?.0,
+            Some(registry) => {
+                crate::native_engine::tool_loop::discover_mcp_tools(registry)
+                    .await?
+                    .0
+            }
             None => Vec::new(),
         };
         let mcp_states = crate::mcp::states::load(&plugin_context.paths.data_dir);
-        let mcp_revisions = mcp_tools.iter().filter(|tool| {
-            use crate::mcp::states::{effective, server_of, McpState};
-            !customization.is_disabled(&tool.name)
-                && allowed_tool_names.as_ref().is_none_or(|names| names.contains(&tool.name))
-                && server_of(&tool.name).is_some_and(|server| match effective(&mcp_states, server) {
-                    McpState::User => true,
-                    McpState::OnDemand => tool_load_available,
-                    McpState::Off | McpState::UserOnly => false,
-                })
-        }).map(|tool| crate::prompt::catalog_revision(&tool.name, tool)).collect::<Result<Vec<_>>>()?;
+        let mcp_revisions = mcp_tools
+            .iter()
+            .filter(|tool| {
+                use crate::mcp::states::{effective, server_of, McpState};
+                !customization.is_disabled(&tool.name)
+                    && allowed_tool_names
+                        .as_ref()
+                        .is_none_or(|names| names.contains(&tool.name))
+                    && server_of(&tool.name).is_some_and(|server| {
+                        match effective(&mcp_states, server) {
+                            McpState::User => true,
+                            McpState::OnDemand => tool_load_available,
+                            McpState::Off | McpState::UserOnly => false,
+                        }
+                    })
+            })
+            .map(|tool| crate::prompt::catalog_revision(&tool.name, tool))
+            .collect::<Result<Vec<_>>>()?;
         let (loadable_builtin, loadable_mcp) = if tool_load_available {
             let goal_proposals = self
                 .local_goal_frontend
@@ -1335,115 +1504,138 @@ impl QueryEngine {
         let first_message_root = plugin_context.paths.data_dir.clone();
         let first_message_session = conv_id.clone();
         let experience_enabled = crate::experience::enabled(&plugin_context);
-        let experience_workspace = (!crate::experience::is_internal_workspace(
-            &workspace,
-            &self.workspaces_dir,
-        ))
-        .then(|| workspace.clone());
+        let experience_workspace =
+            (!crate::experience::is_internal_workspace(&workspace, &self.workspaces_dir))
+                .then(|| workspace.clone());
         let has_user_message = request
             .messages
             .iter()
             .any(|message| message.get("role").and_then(Value::as_str) == Some("user"));
-        let (loadable_tools, available_skills_listing, inline_skills, experience, set_changes, mcp_changes) =
-            tokio::task::spawn_blocking(move || {
-                let loadable_tools = crate::prompt::loadable_tools_for_session(
-                    &first_message_root,
-                    &first_message_session,
-                    &loadable_builtin,
-                    &loadable_mcp,
-                );
-                let available_skills = crate::prompt::skills_for_session(
-                    &first_message_root,
-                    &first_message_session,
-                    &available_skills,
-                );
-                let inline_skills = crate::prompt::inline_skills_for_session(
-                    &first_message_root,
-                    &first_message_session,
-                    &inline_blocks,
-                );
-                // One scan per turn feeds both the frozen block and the change
-                // reminder; the frozen file wins once the session has started.
-                let scanned = experience_workspace
-                    .as_deref()
-                    .map(crate::experience::scan)
-                    .unwrap_or_default();
-                let experience = crate::prompt::experience_for_session(
-                    &first_message_root,
-                    &first_message_session,
-                    experience_workspace.as_deref(),
-                    experience_enabled,
-                    &scanned.entries,
-                );
-                let experience_names = scanned
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name.clone())
-                    .collect::<Vec<_>>();
-                let changes = (has_user_message && !replay)
-                    .then(|| {
-                        let (now, gone) = if tool_load_available {
-                            crate::prompt::set_changes(
+        let (
+            loadable_tools,
+            available_skills_listing,
+            inline_skills,
+            experience,
+            set_changes,
+            mcp_changes,
+        ) = tokio::task::spawn_blocking(move || {
+            let loadable_tools = crate::prompt::loadable_tools_for_session(
+                &first_message_root,
+                &first_message_session,
+                &loadable_builtin,
+                &loadable_mcp,
+            );
+            let available_skills = crate::prompt::skills_for_session(
+                &first_message_root,
+                &first_message_session,
+                &available_skills,
+            );
+            let inline_skills = crate::prompt::inline_skills_for_session(
+                &first_message_root,
+                &first_message_session,
+                &inline_blocks,
+            );
+            // One scan per turn feeds both the frozen block and the change
+            // reminder; the frozen file wins once the session has started.
+            let scanned = experience_workspace
+                .as_deref()
+                .map(crate::experience::scan)
+                .unwrap_or_default();
+            let experience = crate::prompt::experience_for_session(
+                &first_message_root,
+                &first_message_session,
+                experience_workspace.as_deref(),
+                experience_enabled,
+                &scanned.entries,
+            );
+            let experience_names = scanned
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>();
+            let changes = (has_user_message && !replay)
+                .then(|| {
+                    let (now, gone) = if tool_load_available {
+                        crate::prompt::set_changes(
+                            &first_message_root,
+                            &first_message_session,
+                            crate::session_files::SET_CHANGE_LOADABLE_TOOLS,
+                            &loadable_names,
+                        )
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    let (new_skills, removed_skills) = crate::prompt::set_changes(
+                        &first_message_root,
+                        &first_message_session,
+                        crate::session_files::SET_CHANGE_SKILLS,
+                        &available_skill_names,
+                    );
+                    let (revisions, _) = crate::prompt::set_changes(
+                        &first_message_root,
+                        &first_message_session,
+                        crate::session_files::SET_CHANGE_SKILL_REVISIONS,
+                        &skill_revisions,
+                    );
+                    let updated = revisions
+                        .iter()
+                        .filter_map(|r| r.split_once(' '))
+                        .map(|(_, name)| name.to_owned())
+                        .filter(|name| !new_skills.contains(name))
+                        .collect();
+                    let (new_experience, removed_experience) =
+                        if experience_enabled && experience_workspace.is_some() {
+                            let (new, removed) = crate::prompt::set_changes(
                                 &first_message_root,
                                 &first_message_session,
-                                crate::session_files::SET_CHANGE_LOADABLE_TOOLS,
-                                &loadable_names,
-                            )
+                                crate::session_files::SET_CHANGE_EXPERIENCE,
+                                &experience_names,
+                            );
+                            let rendered = new
+                                .into_iter()
+                                .map(|name| {
+                                    scanned
+                                        .entries
+                                        .iter()
+                                        .find(|entry| entry.name == name)
+                                        .map(crate::experience::index_line)
+                                        .unwrap_or(name)
+                                })
+                                .collect();
+                            (rendered, removed)
                         } else {
                             (Vec::new(), Vec::new())
                         };
-                        let (new_skills, removed_skills) = crate::prompt::set_changes(
-                            &first_message_root,
-                            &first_message_session,
-                            crate::session_files::SET_CHANGE_SKILLS,
-                            &available_skill_names,
-                        );
-                        let (revisions, _) = crate::prompt::set_changes(
-                            &first_message_root, &first_message_session,
-                            crate::session_files::SET_CHANGE_SKILL_REVISIONS, &skill_revisions,
-                        );
-                        let updated = revisions.iter().filter_map(|r| r.split_once(' '))
-                            .map(|(_, name)| name.to_owned()).filter(|name| !new_skills.contains(name)).collect();
-                        let (new_experience, removed_experience) =
-                            if experience_enabled && experience_workspace.is_some() {
-                                let (new, removed) = crate::prompt::set_changes(
-                                    &first_message_root,
-                                    &first_message_session,
-                                    crate::session_files::SET_CHANGE_EXPERIENCE,
-                                    &experience_names,
-                                );
-                                let rendered = new
-                                    .into_iter()
-                                    .map(|name| {
-                                        scanned
-                                            .entries
-                                            .iter()
-                                            .find(|entry| entry.name == name)
-                                            .map(crate::experience::index_line)
-                                            .unwrap_or(name)
-                                    })
-                                    .collect();
-                                (rendered, removed)
-                            } else {
-                                (Vec::new(), Vec::new())
-                            };
-                        crate::prompt::changes_reminder(
-                            now,
-                            gone,
-                            new_skills,
-                            removed_skills,
-                            updated,
-                            new_experience,
-                            removed_experience,
-                        )
-                    })
-                    .flatten();
-                let mcp_changes = (has_user_message && !replay).then(|| {
-                    crate::prompt::mcp_changes_reminder(&first_message_root, &first_message_session, &mcp_revisions)
-                }).flatten();
-                (loadable_tools, available_skills, inline_skills, experience, changes, mcp_changes)
-            })
-            .await?;
+                    crate::prompt::changes_reminder(
+                        now,
+                        gone,
+                        new_skills,
+                        removed_skills,
+                        updated,
+                        new_experience,
+                        removed_experience,
+                    )
+                })
+                .flatten();
+            let mcp_changes = (has_user_message && !replay)
+                .then(|| {
+                    crate::prompt::mcp_changes_reminder(
+                        &first_message_root,
+                        &first_message_session,
+                        &mcp_revisions,
+                    )
+                })
+                .flatten();
+            (
+                loadable_tools,
+                available_skills,
+                inline_skills,
+                experience,
+                changes,
+                mcp_changes,
+            )
+        })
+        .await?;
         for reminder in set_changes.into_iter().chain(mcp_changes) {
             turn_blocks.push((reminder, None));
         }
@@ -1530,19 +1722,15 @@ impl QueryEngine {
         // The frozen environment keeps the first message stable; a date the
         // session outlived is announced once, on the message it was attached to.
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let date_reminder = (!replay && request
-            .messages
-            .iter()
-            .any(|message| message.get("role").and_then(Value::as_str) == Some("user")))
-            .then(|| {
-                crate::prompt::date_change_reminder(
-                    &turn_root,
-                    &turn_session,
-                    &frozen_date,
-                    &today,
-                )
-            })
-            .flatten();
+        let date_reminder = (!replay
+            && request
+                .messages
+                .iter()
+                .any(|message| message.get("role").and_then(Value::as_str) == Some("user")))
+        .then(|| {
+            crate::prompt::date_change_reminder(&turn_root, &turn_session, &frozen_date, &today)
+        })
+        .flatten();
         tokio::task::spawn_blocking(move || -> Result<()> {
             for (block, skill) in turn_blocks {
                 if let Some(entry) =
@@ -1575,7 +1763,9 @@ impl QueryEngine {
             use crate::services::memory_files::FileMemory;
             let memory = Some(FileMemory::session(&memory_context, memory_session.id())?);
             if applied_compaction.is_none() {
-                crate::services::memory_files::prompt::Admission::ensure_first_prefix(&memory_session)?;
+                crate::services::memory_files::prompt::Admission::ensure_first_prefix(
+                    &memory_session,
+                )?;
             }
             let (index, turns) = crate::services::turn_context::replay(
                 &memory_session,
@@ -1716,16 +1906,17 @@ impl QueryEngine {
             let state = ConversationState {
                 conversation_id: conv_id.clone(),
                 binding: crate::db::stored_binding::StoredBinding::from_row(
-                    request.provider_id.clone(), model.clone(),
+                    request.provider_id.clone(),
+                    model.clone(),
                 ),
                 messages: request.messages.clone(),
                 system_prompt: request.system_prompt.clone(),
                 last_activity: Utc::now().to_rfc3339(),
                 turn_count: 0,
                 status: ConversationStatus::Active,
-        };
-        self.update_conversation_state(&conv_id, state).await;
-        tracing::info!(module = "EngineCore", "Conversation state updated");
+            };
+            self.update_conversation_state(&conv_id, state).await;
+            tracing::info!(module = "EngineCore", "Conversation state updated");
         }
 
         if let Some(effort) = request.effort.as_deref() {
@@ -1784,9 +1975,10 @@ impl QueryEngine {
         } else {
             request.system_prompt.clone()
         };
-        let learning = if !replay && plugin_context
-            .global_setting::<bool>(GlobalSetting::LearningRecord("learning.enabled"))?
-            .unwrap_or(false)
+        let learning = if !replay
+            && plugin_context
+                .global_setting::<bool>(GlobalSetting::LearningRecord("learning.enabled"))?
+                .unwrap_or(false)
         {
             Some(crate::learning::TurnObservation::new(
                 plugin_context.clone(),
@@ -1930,6 +2122,10 @@ impl QueryEngine {
             "Execution session changed"
         );
         let selected = self.db_manager.resume_history(address)?;
+        let mut request = request;
+        let recompaction_notice = self
+            .recompact_foreign_native_boundary(&selected, &mut request)
+            .await?;
         let conv_id = request.conversation_id.clone();
         let options = SessionRequestOptions {
             system_prompt: request.system_prompt.clone(),
@@ -1962,6 +2158,9 @@ impl QueryEngine {
             std::ops::ControlFlow::Continue(turn) => turn,
             std::ops::ControlFlow::Break(events) => return Ok(events),
         };
+        if let Some(notice) = recompaction_notice {
+            let _ = event_tx.send(EngineEvent::CompactionNotice(notice)).await;
+        }
         use crate::db::session_store::settings::MODEL_REQUEST_OPTIONS;
         if option_store
             .read(|r| r.setting(MODEL_REQUEST_OPTIONS))?
@@ -2110,10 +2309,13 @@ impl QueryEngine {
                                 let _ = release.recv();
                             }
                             if let Some(message) = assistant {
-                                history.save_segment(&message, crate::db::session_store::SegmentUpdate {
-                                    text: Some(&full_text),
-                                    ..Default::default()
-                                })
+                                history.save_segment(
+                                    &message,
+                                    crate::db::session_store::SegmentUpdate {
+                                        text: Some(&full_text),
+                                        ..Default::default()
+                                    },
+                                )
                             } else {
                                 history.finish_response(&full_text)
                             }
@@ -2391,7 +2593,10 @@ impl QueryEngine {
     pub fn invalidate_child_bindings(
         &self,
         manager: &ProviderManager,
-        _owner: Option<(&str, &crate::native_engine::provider_manager::ResolvedProvider)>,
+        _owner: Option<(
+            &str,
+            &crate::native_engine::provider_manager::ResolvedProvider,
+        )>,
     ) {
         self.owned_children
             .lock()
@@ -2466,8 +2671,16 @@ impl QueryEngine {
             (owner.kind == "permission") == permission,
             "Incorrect response endpoint for request"
         );
-        if permission && matches!(answer.as_str(), "http_once" | "http_session" | "http_project" | "http_user") {
-            anyhow::ensure!(owner.tool_name.as_deref() == Some("WebFetchHttp"), "HTTP scope is unavailable for this request");
+        if permission
+            && matches!(
+                answer.as_str(),
+                "http_once" | "http_session" | "http_project" | "http_user"
+            )
+        {
+            anyhow::ensure!(
+                owner.tool_name.as_deref() == Some("WebFetchHttp"),
+                "HTTP scope is unavailable for this request"
+            );
         }
         if let Some(request) = &owner.plan {
             let manager = owner
@@ -2732,17 +2945,35 @@ fn validate_model_input(
 mod skill_listing_tests {
     #[test]
     fn skills_are_listed_as_text_lines_with_context() {
-        assert_eq!(super::skill_listing_line("deploy", "Ship it", None, false), "- deploy: Ship it");
-        assert_eq!(super::skill_listing_line("deploy", "Ship it", Some("fork"), false), "- deploy: Ship it (context: fork)");
-        assert_eq!(super::skill_listing_line("hidden", "Long text", None, true), "- hidden");
-        assert_eq!(super::skill_listing_line("hidden", "Long text", Some("fork"), true), "- hidden (context: fork)");
+        assert_eq!(
+            super::skill_listing_line("deploy", "Ship it", None, false),
+            "- deploy: Ship it"
+        );
+        assert_eq!(
+            super::skill_listing_line("deploy", "Ship it", Some("fork"), false),
+            "- deploy: Ship it (context: fork)"
+        );
+        assert_eq!(
+            super::skill_listing_line("hidden", "Long text", None, true),
+            "- hidden"
+        );
+        assert_eq!(
+            super::skill_listing_line("hidden", "Long text", Some("fork"), true),
+            "- hidden (context: fork)"
+        );
         // A multi-line description must not split the list entry.
-        assert_eq!(super::skill_listing_line("deploy", "Ship\nit  fast", Some("fork\n mode"), false), "- deploy: Ship it fast (context: fork mode)");
+        assert_eq!(
+            super::skill_listing_line("deploy", "Ship\nit  fast", Some("fork\n mode"), false),
+            "- deploy: Ship it fast (context: fork mode)"
+        );
         let listing = ["deploy", "hidden"]
             .map(|name| super::skill_listing_line(name, "Ship it", Some("fork"), name == "hidden"))
             .join("\n");
         println!("skills sample:\n{listing}");
-        assert_eq!(listing, "- deploy: Ship it (context: fork)\n- hidden (context: fork)");
+        assert_eq!(
+            listing,
+            "- deploy: Ship it (context: fork)\n- hidden (context: fork)"
+        );
     }
 }
 
@@ -2813,7 +3044,9 @@ mod resource_monitor_tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let paths = crate::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
         let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
-        let id = store.create(&workspace, "fixture-model", "fixture").unwrap();
+        let id = store
+            .create(&workspace, "fixture-model", "fixture")
+            .unwrap();
         let mut turn = store.db.start_turn_timer(&id).unwrap();
         let assistant_id = turn.ensure_segment().unwrap();
 

@@ -41,8 +41,12 @@ pub(in crate::native_engine) async fn summarize_replay(
     // A cold import or oversized history must still be recoverable from before
     // local compression. Count the typed rows with the normal turn estimator.
     let source_tokens = TokenCounter::estimate(&rows) as u64;
-    let mut text =
-        format!("Summary focus requested by the user:\n{focus}\n\nConversation JSON:\n[");
+    let focus = focus.trim();
+    let mut text = if focus.is_empty() {
+        "Conversation JSON:\n[".to_owned()
+    } else {
+        format!("Summary focus requested by the user:\n{focus}\n\nConversation JSON:\n[")
+    };
     let mut media = Vec::new();
     let count = rows.len();
     for (index, mut row) in rows.into_iter().enumerate() {
