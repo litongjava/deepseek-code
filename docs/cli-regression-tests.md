@@ -636,10 +636,12 @@ Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前�
 
 全部使用本地模拟接口和临时数据库，不发真实请求。
 
+- `cargo test --locked -p deepseek-code-core --test mid_turn_auto_compact --test native_compaction`：本地 Responses 网关模拟 429、503、400 和 401，逐次统计原生、文本摘要及主请求。核对 Retry-After 与退避时取消、单次边界提交、仍能装下时仅提示一次并在下个工具迭代重试，以及硬上限失败中的状态码、/compact 提示和工具结果续接。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream manual_compact`：用临时会话实际执行 `/compact`。429 后成功只新增一个边界；两条路径持续 429 时命令返回错误，历史保持原样。
 - `cargo test --locked -p deepseek-code-core --test compaction_cache_prefix`：主回合完成后重开引擎，通过本地 Chat、Anthropic Messages 和非 GPT Responses 接口比较完整请求体。摘要须保留主回合的系统指令、工具定义、首条消息的提醒和后续回答，末尾只追加一条含 keep 的用户指令。即使回复同时含正文与写文件调用，也只能提交正文；历史只增加摘要边界。按请求 ID 核对 SQLite 的输入和缓存读取 token 数，包括截断后的各次恢复请求。
 - `cargo test --locked -p deepseek-code-core --test compaction_history`：检查本地压缩和首轮收件箱投递后的历史完整性、Responses 不透明窗口的分段回退、结构化输出约束、Claude 推理模式下的前缀复用，以及原生网关的路由和鉴权。核对每日缓存分项、跨分支的物理请求数和 Bedrock 缓存读写。
 - `cargo test --locked -p deepseek-code-core --test native_compaction`：同一 GPT Responses 会话的主请求与原生压缩请求使用相同的 `prompt_cache_key`；分支使用自身会话的键。核对压缩请求可用字段和会话请求指标。真实服务端的命中率需用已启用记录的代理另行测量。
-- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream`：通过本地 OpenCode Go Chat 接口续接超阈值会话。角色帧和正文帧被合并为一个流元素时，摘要按 SSE 帧顺序解码，正文中的 JSON 字面文本原样写入边界，续接主请求只发送一次。若单个提供方帧内含两个 JSON 值，首个分段请求失败，保留原历史和解析位置，不重发、不写入边界、不发送主请求。
+- `cargo test --locked -p deepseek-code-cli --test compaction_summary_stream`：通过本地 OpenCode Go Chat 接口续接超阈值会话。角色帧和正文帧被合并为一个流元素时，摘要按 SSE 帧顺序解码，正文中的 JSON 字面文本原样写入边界，续接主请求只发送一次。若单个提供方帧内含两个 JSON 值，首个分段请求失败，保留原历史和解析位置，不重发、不写入边界。下一请求仍能装下时带原上下文继续，装不下时不发送主请求。如果本地估算可发送而提供方返回 413，错误中保留压缩失败原因和恢复方法。
 
 1. `cargo test --locked -p deepseek-code-core --test compaction_status_regressions`（3 项）：指令开销的 `unknown_parts` 不为 0 时估算不得标为完整；与压缩边界同一毫秒、但没有记录该边界的旧请求不得成为当前用量；旧分支复制了祖先边界且没有计数键时，次数为“未知（旧历史）”、可证明的自身次数为 0，不显示精确的祖先累计值。
 2. `cargo test --locked -p deepseek-code-core --test compaction_boundary_provenance`（6 项，均覆盖 OpenAI 与 Anthropic）：先按当前历史读取消息与压缩边界，再由另一入口提交新的压缩，随后用旧消息发出真实 HTTP 请求。断言服务端正文是旧上下文、不含新摘要，且每个请求快照记录的 `contextBoundary` 都不是新边界；没有可信来源的主机消息记录为未知边界。把执行器改回“发送时查询数据库最新边界”后这 4 项全部失败，证明它们确实覆盖该缺陷。

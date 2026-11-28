@@ -31,6 +31,7 @@ struct Request {
 #[derive(Clone, Default)]
 struct Fixture {
     malformed_first_fragment: bool,
+    reject_turn: bool,
     requests: Arc<Mutex<Vec<Request>>>,
 }
 
@@ -42,7 +43,11 @@ fn frame(delta: Value, finish: Value) -> String {
 async fn reply(
     State(fixture): State<Fixture>,
     Json(body): Json<Value>,
-) -> ([(&'static str, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(&'static str, &'static str); 1],
+    String,
+) {
     let text = body["messages"]
         .as_array()
         .unwrap()
@@ -64,6 +69,13 @@ async fn reply(
         });
         malformed
     };
+    if turn && fixture.reject_turn {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            [("content-type", "text/plain")],
+            "context limit".into(),
+        );
+    }
     let data = if malformed {
         // Valid partial text, then two JSON values inside a single data payload.
         frame(json!({"content":"discarded partial"}), Value::Null) + "data: {}\ndata: {}\n\n"
@@ -76,13 +88,31 @@ async fn reply(
             + &frame(json!({}), json!("stop"))
             + "data: [DONE]\n\n"
     };
-    ([("content-type", "text/event-stream")], data)
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/event-stream")],
+        data,
+    )
 }
 
-async fn scenario(malformed_first_fragment: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    Success,
+    Fits,
+    TooLarge,
+    Rejected,
+}
+
+async fn scenario(case: Scenario) {
+    let window: u32 = if case == Scenario::TooLarge {
+        750_000
+    } else {
+        1_000_000
+    };
     let (provider, model) = ("opencode-go", "deepseek-v4.1-flash");
     let state = Fixture {
-        malformed_first_fragment,
+        malformed_first_fragment: case != Scenario::Success,
+        reject_turn: case == Scenario::Rejected,
         ..Fixture::default()
     };
     let requests = state.requests.clone();
@@ -90,6 +120,7 @@ async fn scenario(malformed_first_fragment: bool) {
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     let app = Router::new()
         .route("/v1/chat/completions", post(reply))
+        .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
         .with_state(state);
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let fixture = tempfile::tempdir().unwrap();
@@ -109,7 +140,7 @@ async fn scenario(malformed_first_fragment: bool) {
         json!([{
             "id":provider, "builtin_id":provider, "name":"Local fixture",
             "base_url":base, "api_key":"test-only", "api_format":"openai", "enabled":true,
-            "models":[{"id":model, "name":"Fixture", "api":"openai-completions", "enabled":true, "context_window":1_000_000,
+            "models":[{"id":model, "name":"Fixture", "api":"openai-completions", "enabled":true, "context_window":window,
                 "max_tokens":32_000, "supports_web_search":false}]
         }])
         .to_string(),
@@ -174,7 +205,10 @@ async fn scenario(malformed_first_fragment: bool) {
         .shard_sql(&session, |db| get_messages_by_conversation(db, &session))
         .unwrap()
         .unwrap();
-    assert!(stderr.contains("threshold 800000"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("threshold {}", window * 80 / 100)),
+        "{stderr}"
+    );
     assert!(requests.iter().all(|request| request.budget == 32_000));
     assert_eq!(
         rows.iter()
@@ -186,7 +220,32 @@ async fn scenario(malformed_first_fragment: bool) {
     let boundaries: Vec<_> = rows.iter().filter(|row| row.is_compact_boundary).collect();
     let turns: Vec<_> = requests.iter().filter(|request| request.turn).collect();
     assert!(requests[0].fragment && requests[0].has_original);
-    if malformed_first_fragment {
+    if case == Scenario::Rejected {
+        assert!(!status.success(), "{result}");
+        let error = result["error"].as_str().unwrap();
+        for detail in [
+            "Automatic compaction failed",
+            "provider rejected",
+            "/compact",
+            "Invalid provider SSE JSON",
+        ] {
+            assert!(error.contains(detail), "{error}");
+        }
+        assert_eq!(requests.len(), 2);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].has_original && boundaries.is_empty());
+    } else if case == Scenario::Fits {
+        assert!(status.success(), "{result}");
+        assert_eq!(result["result"], REPLY);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].has_original && !turns[0].has_summary);
+        assert!(boundaries.is_empty());
+        assert!(
+            stdout.contains("Automatic compaction failed")
+                || stderr.contains("Automatic compaction failed")
+        );
+    } else if case == Scenario::TooLarge {
         assert!(!status.success(), "{result}");
         assert_eq!(result["subtype"], "error_during_execution");
         let error = result["error"].as_str().unwrap();
@@ -214,10 +273,130 @@ async fn scenario(malformed_first_fragment: bool) {
 
 #[tokio::test]
 async fn coalesced_sse_frames_preserve_the_complete_plain_text_summary() {
-    scenario(false).await;
+    scenario(Scenario::Success).await;
 }
 
 #[tokio::test]
 async fn malformed_provider_frame_stops_after_one_fragment_post_and_retains_history() {
-    scenario(true).await;
+    scenario(Scenario::TooLarge).await;
+}
+
+#[tokio::test]
+async fn failed_pre_turn_summary_sends_the_original_request_when_it_fits() {
+    scenario(Scenario::Fits).await;
+}
+
+#[tokio::test]
+async fn provider_context_rejection_keeps_the_pre_turn_compaction_failure() {
+    scenario(Scenario::Rejected).await;
+}
+
+/// Drive the same slash command a user runs in a resumed CLI session.
+async fn manual_native_compaction(persistent: bool) {
+    use axum::{http::StatusCode, response::IntoResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let native = Arc::new(AtomicUsize::new(0));
+    let summary = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let requests = native.clone();
+    let fallbacks = summary.clone();
+    let app = Router::new().fallback(post(move |uri: axum::http::Uri| {
+        let attempt = if uri.path().ends_with("/responses/compact") {
+            requests.fetch_add(1, Ordering::SeqCst)
+        } else {
+            assert!(uri.path().ends_with("/responses"));
+            fallbacks.fetch_add(1, Ordering::SeqCst);
+            0
+        };
+        async move {
+            if persistent || attempt == 0 {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "0")],
+                    "busy",
+                )
+                    .into_response();
+            }
+            Json(json!({"object":"response.compaction","output":[
+                {"type":"compaction","id":"compact-test","encrypted_content":"fixture-context"}
+            ]}))
+            .into_response()
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let id = store.create(temp.path(), "gpt-fixture", "local").unwrap();
+    store.append(&id, "user", "Read the fixture").unwrap();
+    store
+        .append(&id, "assistant", "The fixture is ready")
+        .unwrap();
+    let before = store.history(&id).unwrap();
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/providers.json"),
+        json!([{"id":"local","name":"Local","builtin_id":"openai","api_format":"openai",
+            "base_url":base,"api_key":"fixture-only","enabled":true,
+            "models":[{"id":"gpt-fixture","name":"Fixture","api":"openai-responses","enabled":true,
+                "context_window":64000,"max_tokens":1000,"supports_web_search":false}]}])
+        .to_string(),
+    )
+    .unwrap();
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dcl"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("DEEPSEEK_CODE") {
+            cli.env_remove(key);
+        }
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        cli.env("DEEPSEEK_CODE_DATA_DIR", &paths.data_dir)
+            .arg("--path")
+            .arg(temp.path())
+            .args(["--resume", &id, "query", "-p", "/compact Keep the fixture"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let diagnostic = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
+    assert_eq!(output.status.success(), !persistent, "{diagnostic}");
+    if persistent {
+        assert!(
+            diagnostic.contains("429") && diagnostic.contains("summary compaction failed"),
+            "{diagnostic}"
+        );
+        assert_eq!(native.load(Ordering::SeqCst), attempts);
+        assert_eq!(summary.load(Ordering::SeqCst), attempts);
+        assert_eq!(store.history(&id).unwrap(), before);
+    } else {
+        assert_eq!(native.load(Ordering::SeqCst), 2, "{diagnostic}");
+        assert_eq!(summary.load(Ordering::SeqCst), 0);
+        assert_eq!(store.history(&id).unwrap().len(), before.len() + 1);
+    }
+    assert_eq!(
+        deepseek_code_core::services::compaction::count(&store.db, &id)
+            .unwrap()
+            .proven(),
+        u64::from(!persistent)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn manual_compact_retries_429_and_commits_once() {
+    manual_native_compaction(false).await;
+}
+
+#[tokio::test]
+async fn manual_compact_persistent_429_reports_failure_and_preserves_history() {
+    manual_native_compaction(true).await;
 }

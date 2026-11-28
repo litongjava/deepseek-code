@@ -88,14 +88,17 @@ async fn fixture(mode: u8) -> Fixture {
             seen.lock().unwrap().push(body);
             arrived.notify_one();
             if mode == 2 { std::future::pending::<()>().await; }
-            if mode == 6 { released.notified().await; }
-            if mode == 1 || mode == 6 { return (StatusCode::BAD_GATEWAY, Json(json!({"error":"incomplete"}))); }
+            if mode == 6 && seen.lock().unwrap().len() == 1 { released.notified().await; }
+            if mode == 8 {
+                return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], "busy").into_response();
+            }
+            if mode == 1 || mode == 6 { return (StatusCode::BAD_GATEWAY, [("retry-after", "0")], Json(json!({"error":"incomplete"}))).into_response(); }
             (StatusCode::OK, Json(json!({"object":"response.compaction","output":if mode==7 {json!([
                 {"type":"function_call","call_id":"old","name":"TaskGet","arguments":"{}"},
                 {"type":"function_call_output","call_id":"old","output":format!("old page!{}!","QUJD".repeat(256))},
                 {"role":"user","content":[{"type":"input_text","text":format!("<task-notification>\n<kind>monitor</kind>\n<event>!{}!</event>\n</task-notification>","QUJD".repeat(256))}]},
                 {"type":"compaction","encrypted_content":"opaque exact content"}
-            ])} else {window()},"usage":{"input_tokens":150,"input_tokens_details":{"cached_tokens":112},"output_tokens":77}})))
+            ])} else {window()},"usage":{"input_tokens":150,"input_tokens_details":{"cached_tokens":112},"output_tokens":77}}))).into_response()
         }
     }));
     let captured = seen.clone();
@@ -122,6 +125,9 @@ async fn fixture(mode: u8) -> Fixture {
         }
         captured.lock().unwrap().push(body);
         async move {
+            if matches!(mode, 1 | 6) {
+                return (StatusCode::BAD_GATEWAY, [("retry-after", "0")], "unavailable").into_response();
+            }
             let call = |id: &str, name: &str, arguments: Value| json!({"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":name,"arguments":arguments.to_string()});
             let output = if mode == 5 {
                 match step {
@@ -149,7 +155,7 @@ async fn fixture(mode: u8) -> Fixture {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider: Provider = serde_json::from_value(json!({"id":"gateway","name":"gateway","builtin_id":"openai","api_format":"openai","base_url":format!("http://{}/tools/codex/v1",listener.local_addr().unwrap()),"api_key":"gateway-key","enabled":true,"models":[{"id":"gpt-6-astra","name":"model","api":"openai-responses","enabled":true,"supports_web_search":false,"max_tokens":8192,"context_window":if matches!(mode,3|7) {16000} else {256000}}]})).unwrap();
+    let provider: Provider = serde_json::from_value(json!({"id":"gateway","name":"gateway","builtin_id":"openai","api_format":"openai","base_url":format!("http://{}/tools/codex/v1",listener.local_addr().unwrap()),"api_key":"gateway-key","enabled":true,"models":[{"id":"gpt-6-astra","name":"model","api":"openai-responses","enabled":true,"supports_web_search":false,"max_tokens":8192,"context_window":if matches!(mode,3|7) {16000} else if mode == 8 {96000} else {256000}}]})).unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -166,6 +172,66 @@ async fn fixture(mode: u8) -> Fixture {
         Arc::new(FileCache::new()),
     );
     Fixture { dir, store, id, engine, seen, arrived, released, server }
+}
+
+#[tokio::test]
+async fn pressure_fallback_summarizes_only_the_cut_and_preserves_explicit_input() {
+    use deepseek_code_core::native_engine::tool_loop::EngineEvent;
+    for in_flight in [false, true] {
+        let Fixture {
+            dir,
+            store,
+            id,
+            engine,
+            seen,
+            server,
+            ..
+        } = fixture(8).await;
+        let prefix = format!("ARCHIVED_EVIDENCE {}", "a".repeat(185_000));
+        if !in_flight {
+            store.append(&id, "assistant", &prefix).unwrap();
+            store
+                .append_prompt(&id, "KEEP_CURRENT_INPUT", "typed")
+                .unwrap();
+        }
+        let mut messages = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
+        if in_flight {
+            messages = vec![json!({"role":"user","content":prefix})];
+        }
+        let request = serde_json::from_value(json!({
+            "conversation_id":id,"messages":messages,"model":"gpt-6-astra",
+            "provider_id":"gateway","workspace_path":dir.path(),"max_tokens":1000,
+        }))
+        .unwrap();
+        let mut events = engine.send_message(request).await.unwrap();
+        let mut completed = false;
+        while let Some(event) = events.recv().await {
+            assert!(!matches!(event, EngineEvent::Error(_)), "{event:?}");
+            completed |= matches!(event, EngineEvent::MessageStop { ref full_text, .. } if full_text == "done");
+        }
+        assert!(completed);
+        assert_eq!(
+            compaction::count(&store.db, &id).unwrap().proven(),
+            u64::from(!in_flight)
+        );
+        let calls = seen.lock().unwrap();
+        let attempts = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
+        assert_eq!(
+            calls
+                .iter()
+                .take_while(|r| r.get("stream").is_none())
+                .count(),
+            attempts
+        );
+        let summary = &calls[attempts];
+        assert!(summary["input"].to_string().contains("ARCHIVED_EVIDENCE"));
+        assert!(!summary["input"].to_string().contains("KEEP_CURRENT_INPUT"));
+        let main = calls.last().unwrap()["input"].to_string();
+        assert!(main.contains("done"));
+        assert_eq!(main.contains("KEEP_CURRENT_INPUT"), !in_flight);
+        assert!(!main.contains("ARCHIVED_EVIDENCE"));
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -416,11 +482,14 @@ async fn failure_and_cancellation_never_commit_opaque_state() {
         .expect("the mock 502 response should arrive within the watchdog")
         .expect_err("a gateway 502 must fail the compaction");
         let message = error.to_string();
-        assert!(message.contains("HTTP 502"), "unexpected error: {message}");
+        assert!(message.contains("502"), "unexpected error: {message}");
         assert!(!message.contains("Elapsed"), "unexpected timeout: {message}");
         assert_eq!(store.history(&id).unwrap(), before);
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        assert_eq!(opaque_state_count(&store,&id), 0);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2 * (deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1)
+        );
+        assert_eq!(opaque_state_count(&store, &id), 0);
         assert!(data.join("global.db").is_file());
         server.abort();
     }
@@ -494,10 +563,13 @@ async fn an_error_response_slower_than_200ms_would_misjudge_the_old_window() {
         .await
         .expect("the released 502 response should arrive")
         .expect_err("a gateway 502 must fail the compaction");
-    assert!(error.to_string().contains("HTTP 502"), "{error}");
+    assert!(error.to_string().contains("502"), "{error}");
     assert_eq!(store.history(&id).unwrap(), before);
-    assert_eq!(seen.lock().unwrap().len(), 1);
-    assert_eq!(opaque_state_count(&store,&id), 0);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        2 * (deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1)
+    );
+    assert_eq!(opaque_state_count(&store, &id), 0);
     assert!(data.join("global.db").is_file());
     server.abort();
 }
