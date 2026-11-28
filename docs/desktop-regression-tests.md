@@ -114,6 +114,8 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 
 用 `cargo test --locked -p deepseek-code-desktop --test conversation_generation_bridge` 检查手动压缩接口返回的摘要和计数、进行中回合的 409，以及提供商失败后历史保持原样。用 `npm run test:run -- src/features/compact/manualCompact.test.tsx` 检查对话框与 `/compact` 的焦点参数、刷新及错误提示。 Bridge 测试还覆盖同模型切换提供商、带编码的提供商 ID 与 [1m]、共用准入检查和拼错的请求字段。用 `npm run test:run -- src/components/review-navigation.test.tsx` 检查切换对话或卸载后，旧请求返回的历史、标题、上下文和错误不会覆盖当前对话。
 
+用 `cargo test --locked -p deepseek-code-desktop --test compact_provider_binding_bridge` 验证首次聊天将提供商与模型一起保存、旧会话只使用最近完成回合的提供商。选定的提供商不可用或会话没有可用的绑定记录时，检查接口返回 409，两个提供商都没有收到新的请求。
+
 ### D4. 技能目录（共享 core 路径）
 
 Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的发现入口，改动 `skills/discovery.rs`、`native_engine/engine_core.rs` 的技能列表或 `native_engine/skill_tool.rs` 时，除 `docs/cli-regression-tests.md` 的 N 节外，在桌面窗口确认：

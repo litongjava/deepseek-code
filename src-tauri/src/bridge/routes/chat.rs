@@ -170,7 +170,10 @@ pub(super) async fn start_authorized_chat(
             engine.sync_providers(providers_to_sync).await;
 
             let selected = match super::chat_admission::resolve_model(
-                &state, engine, &conv_id, &model, req.provider_id.as_deref(),
+                &state, engine, &conv_id, super::chat_admission::ModelRequest::Chat {
+                    model: &model,
+                    provider: req.provider_id.as_deref(),
+                },
             ).await {
                 Ok(selection) => selection,
                 Err(response) => return response,

@@ -95,6 +95,14 @@ pub(super) struct ChatModel {
     pub explicit_provider: bool,
 }
 
+pub(super) enum ModelRequest<'a> {
+    Chat {
+        model: &'a str,
+        provider: Option<&'a str>,
+    },
+    Compact(&'a deepseek_code_core::db::session_store::SessionDb),
+}
+
 /// The Desktop sends either a decoded provider/model pair or a persisted
 /// encodeURIComponent(provider)::model key. Keep the requested model selector
 /// (including virtual context-window suffixes) through the second resolution.
@@ -102,8 +110,7 @@ pub(super) async fn resolve_model(
     state: &AppState,
     engine: &NativeEngine,
     id: &str,
-    requested: &str,
-    provider: Option<&str>,
+    request: ModelRequest<'_>,
 ) -> Result<ChatModel, Response> {
     let current = state
         .db_manager
@@ -116,6 +123,17 @@ pub(super) async fn resolve_model(
         ));
     }
     let (stored_provider, stored_model) = split_model_key(&current.model);
+    let pick_model = || {
+        error(
+            StatusCode::CONFLICT,
+            "Pick a model in Desktop before compacting this conversation",
+        )
+    };
+    let (requested, provider) = match request {
+        ModelRequest::Chat { model, provider } => (model, provider),
+        ModelRequest::Compact(_) if stored_model.is_empty() => return Err(pick_model()),
+        ModelRequest::Compact(_) => ("", None),
+    };
     let (qualified, model) = if requested.is_empty() {
         (stored_provider, stored_model)
     } else if provider.is_some() {
@@ -142,16 +160,33 @@ pub(super) async fn resolve_model(
                     .then_some(std::borrow::Cow::Borrowed(current.provider.as_str()))
             }),
     };
-    let resolved = match provider.as_deref() {
-        Some(id) => engine.resolved_provider(id, model).await.ok(),
-        None => engine.resolve_provider(model).await,
-    }
-    .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chat model unavailable"))?;
+    let explicit_provider = provider.is_some() || matches!(request, ModelRequest::Compact(_));
+    let resolved = match request {
+        ModelRequest::Compact(session) => {
+            let id = match provider {
+                Some(id) => id,
+                None => session
+                    .read(|r| r.last_completed_turn_provider())
+                    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                    .ok_or_else(pick_model)?
+                    .into(),
+            };
+            engine.resolved_provider(&id, model).await.map_err(|_| error(
+                StatusCode::CONFLICT,
+                format!("provider {id} is unavailable for model {model}. Pick a model in Desktop before compacting this conversation"),
+            ))?
+        }
+        ModelRequest::Chat { .. } => match provider.as_deref() {
+            Some(id) => engine.resolved_provider(id, model).await.ok(),
+            None => engine.resolve_provider(model).await,
+        }
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Chat model unavailable"))?,
+    };
     Ok(ChatModel {
         provider_id: resolved.provider.id,
         api_format: resolved.provider.api_format,
         selector: model.to_owned(),
-        explicit_provider: provider.is_some(),
+        explicit_provider,
     })
 }
 

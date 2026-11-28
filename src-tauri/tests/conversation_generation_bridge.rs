@@ -440,6 +440,18 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
             None,
         )
         .unwrap();
+    // A Desktop admission carrying the stale provider can lease an existing
+    // conversation, but only the original creation can write its binding.
+    let (lease, _) = db
+        .admit_chat_execution_with_provider(
+            &conversation,
+            "fixture-model",
+            Some("fixture"),
+            None,
+            "typed",
+        )
+        .unwrap();
+    drop(lease);
     assert_eq!(
         db.desktop_context(&conversation)
             .unwrap()

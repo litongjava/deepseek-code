@@ -5,6 +5,53 @@ use deepseek_code_core::db::{
 };
 
 #[test]
+fn completed_turn_provider_uses_parent_requests_and_refuses_missing_evidence() -> Result<()> {
+    use deepseek_code_core::db::turn_repo::TurnStatus;
+    use serde_json::json;
+    let root = tempfile::tempdir()?;
+    let shard = Stores::open(root.path())?.create("legacy", Default::default())?;
+    let provider = || shard.read(|r| r.last_completed_turn_provider());
+    let complete = |requests, metrics_only| {
+        shard.write(|w| {
+            let turn = w.start_turn()?;
+            let segment = w.segment(&turn)?;
+            if metrics_only {
+                w.normalized_request(&segment, &requests)?;
+            } else {
+                w.snapshots(&segment, &requests)?;
+            }
+            w.finish_turn(&turn, TurnStatus::Completed, 10)
+        })
+    };
+    complete(
+        json!({"id":"metrics","number":1,"providerId":"older"}),
+        true,
+    )?;
+    assert_eq!(provider()?.as_deref(), Some("older"));
+    complete(
+        json!([
+            {"id":"parent","providerId":"chat"},
+            {"id":"auxiliary","source":"web_search","number":1,"providerId":"search"}
+        ]),
+        false,
+    )?;
+    assert_eq!(provider()?.as_deref(), Some("chat"));
+    shard.write(|w| {
+        let turn = w.start_turn()?;
+        let segment = w.segment(&turn)?;
+        w.snapshots(&segment, &json!([{"id":"failed","providerId":"other"}]))?;
+        w.finish_turn(&turn, TurnStatus::Failed, 10)
+    })?;
+    assert_eq!(provider()?.as_deref(), Some("chat"));
+    complete(
+        json!([{"id":"no-provider","source":"native_engine"}]),
+        false,
+    )?;
+    assert_eq!(provider()?, None);
+    Ok(())
+}
+
+#[test]
 fn directory_filters_titles_and_sizes_follow_the_selected_incarnation() -> Result<()> {
     let root = tempfile::tempdir()?;
     let stores = Stores::open(root.path())?;

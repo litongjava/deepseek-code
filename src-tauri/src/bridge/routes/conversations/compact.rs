@@ -99,7 +99,13 @@ pub(super) async fn handler(
         state.permission_manager.clone(),
         Arc::new(FileCache::new()),
     );
-    let selected = chat_admission::resolve_model(&state, &engine, &id, "", None).await?;
+    let selected = chat_admission::resolve_model(
+        &state,
+        &engine,
+        &id,
+        chat_admission::ModelRequest::Compact(&session),
+    )
+    .await?;
     let context = ServiceContext {
         paths,
         db: db.clone(),
