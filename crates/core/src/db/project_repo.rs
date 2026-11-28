@@ -15,7 +15,7 @@ pub struct ProjectRow {
     pub folders: Vec<ProjectFolder>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectFolder {
     pub path: String,
     pub trusted: bool,
@@ -209,11 +209,25 @@ pub fn trust_folders(conn: &Connection, id: &str, paths: &[String]) -> Result<()
 
 pub fn require_trusted(conn: &Connection, id: &str) -> Result<ProjectRow> {
     let project = get_project(conn, id)?.ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-    anyhow::ensure!(!project.folders.is_empty(), "Add at least one folder to this project");
-    anyhow::ensure!(project.folders.iter().all(|f| f.trusted), "Trust all project folders before starting a chat");
-    let normalized = normalize_folders(&project.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>())?;
-    anyhow::ensure!(normalized == project.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(), "Project folders have changed; select and trust them again");
+    validate_trusted_folders(&project.folders)?;
     Ok(project)
+}
+
+pub(crate) fn validate_trusted_folders(folders: &[ProjectFolder]) -> Result<()> {
+    anyhow::ensure!(
+        !folders.is_empty(),
+        "Add at least one folder to this project"
+    );
+    anyhow::ensure!(
+        folders.iter().all(|f| f.trusted),
+        "Trust all project folders before starting a chat"
+    );
+    let paths: Vec<_> = folders.iter().map(|f| f.path.clone()).collect();
+    anyhow::ensure!(
+        normalize_folders(&paths)? == paths,
+        "Project folders have changed; select and trust them again"
+    );
+    Ok(())
 }
 
 pub fn insert_project_file(

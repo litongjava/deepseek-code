@@ -8,8 +8,16 @@ use crate::services::{
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use session_messages::identity::{
+    GitDirectoryOverride, GitLookupTimeout, PeerProject, Resolver, GIT_OVERRIDE_REASON,
+};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -452,51 +460,62 @@ impl SessionDb {
             Ok(c.query_row("SELECT id,sender,recipient,?2,created_at,state,read,blocked_reason FROM session_inbox WHERE id=?1",
                 [id,text], session_messages::row)?)
         };
-        self.stores
-            .global()
-            .write("send peer", &self.id, false, |c| {
-                if let Some((id, s, r, h)) = c
-                    .query_row("SELECT i.id,i.sender_incarnation,i.recipient,i.payload FROM session_inbox_operations o JOIN session_inbox i ON i.id=o.message_id WHERE operation_id=?1", [operation], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                        ))
-                    })
-                    .optional()?
-                {
-                    ensure!(
-                        s == self.incarnation && r == to.id && h == hash,
-                        "Peer operation conflict"
-                    );
-                    return message(c, &id);
-                }
-                let (source, destination) = peer_projects(c, &self.stores.root.path, &self.id, &to.id)?;
-                let (count, bytes): (i64, i64) =
-                    c.query_row("SELECT count(*),coalesce(sum(size),0) FROM session_inbox WHERE recipient=?1 AND state IN ('queued','claimed','blocked')", [&to.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let replay = |c: &Connection| -> Result<Option<session_messages::Message>> {
+            if let Some((id, s, r, h)) = c
+                .query_row("SELECT i.id,i.sender_incarnation,i.recipient,i.payload FROM session_inbox_operations o JOIN session_inbox i ON i.id=o.message_id WHERE operation_id=?1", [operation], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .optional()?
+            {
                 ensure!(
-                    count < 256 && bytes + text.len() as i64 <= 1024 * 1024,
-                    "Recipient inbox is full"
+                    s == self.incarnation && r == to.id && h == hash,
+                    "Peer operation conflict"
                 );
-                let id = to.new_message_id();
-                c.execute(
-                    "INSERT INTO session_inbox(id,sender,recipient,project_source,payload,size,created_at,sender_incarnation,recipient_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                    params![
-                        id,
-                        self.id,
-                        to.id,
-                        source,
-                        hash,
-                        text.len(),
-                        chrono::Utc::now().to_rfc3339(),
-                        self.incarnation,
-                        destination
-                    ],
-                )?;
-                c.execute("INSERT INTO session_inbox_operations VALUES(?1,?2,?3)", params![self.id, operation, id])?;
-                message(c, &id)
-            })
+                return message(c, &id).map(Some);
+            }
+            Ok(None)
+        };
+        if let Some(existing) = self.stores.global().read(replay)? {
+            return Ok(existing);
+        }
+        let (from, dest) = self
+            .stores
+            .global()
+            .read(|c| Resolver::default().pair(c, &self.id, &to.id))?;
+        self.stores.global().write("send peer", &self.id, false, |c| {
+            if let Some(existing) = replay(c)? {
+                return Ok(existing);
+            }
+            let (source, destination) = peer_projects(c, &self.id, &to.id, &from, &dest)?;
+            let (count, bytes): (i64, i64) =
+                c.query_row("SELECT count(*),coalesce(sum(size),0) FROM session_inbox WHERE recipient=?1 AND state IN ('queued','claimed','blocked')", [&to.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            ensure!(
+                count < 256 && bytes + text.len() as i64 <= 1024 * 1024,
+                "Recipient inbox is full"
+            );
+            let id = to.new_message_id();
+            c.execute(
+                "INSERT INTO session_inbox(id,sender,recipient,project_source,payload,size,created_at,sender_incarnation,recipient_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    id,
+                    self.id,
+                    to.id,
+                    source,
+                    hash,
+                    text.len(),
+                    chrono::Utc::now().to_rfc3339(),
+                    self.incarnation,
+                    destination
+                ],
+            )?;
+            c.execute("INSERT INTO session_inbox_operations VALUES(?1,?2,?3)", params![self.id, operation, id])?;
+            message(c, &id)
+        })
     }
     pub(crate) fn pending_peer_count(&self) -> Result<i64> {
         let _locks = self.stores.key_lock(&self.key, false, false)?;
@@ -632,6 +651,8 @@ impl SessionDb {
             session: self.clone(),
             _lease: lease,
             _consumer: consumer,
+            peer_resolver: Resolver::default(),
+            blocked_cursor: 0,
             live_handoffs: Default::default(),
             deferred_steer: false,
         })
@@ -674,9 +695,15 @@ fn paused(c: &Connection, id: &str) -> Result<bool> {
         |r| r.get(0),
     )?)
 }
-fn peer_projects(c: &Connection, root: &Path, from: &str, to: &str) -> Result<(String, String)> {
-    let source = session_messages::project(c, root, from)?;
-    let destination = session_messages::project(c, root, to)?;
+fn peer_projects<'a>(
+    c: &Connection,
+    from: &str,
+    to: &str,
+    sender: &'a PeerProject,
+    recipient: &'a PeerProject,
+) -> Result<(&'a str, &'a str)> {
+    let source = sender.confirm(c, from)?;
+    let destination = recipient.confirm(c, to)?;
     if source != destination {
         let paired: bool = c.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_member_sessions a
@@ -691,10 +718,33 @@ fn peer_projects(c: &Connection, root: &Path, from: &str, to: &str) -> Result<(S
     }
     Ok((source, destination))
 }
+fn authorized_project(project: Result<PeerProject>) -> Result<Option<PeerProject>> {
+    match project {
+        Ok(value) => Ok(Some(value)),
+        Err(e)
+            if e.is::<rusqlite::Error>()
+                || e.is::<GitLookupTimeout>()
+                || e.is::<GitDirectoryOverride>() =>
+        {
+            Err(e)
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+struct PeerCandidate {
+    claim: Claim,
+    size: usize,
+    rowid: i64,
+    blocked: bool,
+}
+
 pub struct DeliveryOwner {
     pub(super) session: SessionDb,
     _lease: std::sync::Arc<ExecutionLease>,
     _consumer: ExecutionLease,
+    peer_resolver: Resolver,
+    blocked_cursor: i64,
     live_handoffs: std::collections::HashMap<String,String>,
     deferred_steer: bool,
 }
@@ -715,10 +765,38 @@ struct Claim {
 }
 pub(crate) const TURN_POLL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Bound each writer acquisition for live queue delivery. Resolving memory,
+/// Identity preparation pauses the discovery clock. Every preflight in this
+/// poll draws from one allowance, including work on a candidate that defers.
+struct PeerPollBudget {
+    discovery_until: Instant,
+    preparation_left: Duration,
+}
+
+impl PeerPollBudget {
+    fn new(discovery_wait: Duration) -> Self {
+        Self {
+            discovery_until: Instant::now() + discovery_wait,
+            preparation_left: Duration::from_millis(2500),
+        }
+    }
+
+    fn prepare<T>(&mut self, lookup: impl FnOnce(Instant) -> Result<T>) -> Result<T> {
+        if self.preparation_left.is_zero() {
+            return Err(GitLookupTimeout.into());
+        }
+        let start = Instant::now();
+        let result = lookup(start + self.preparation_left);
+        let spent = start.elapsed();
+        self.preparation_left = self.preparation_left.saturating_sub(spent);
+        self.discovery_until += spent;
+        result
+    }
+}
+
+/// Bound each writer acquisition for live delivery. Resolving memory,
 /// hashing files and flushing a committed WAL can each outlast a poll interval.
-fn write_wait(until: std::time::Instant, live_input: bool) -> std::time::Duration {
-    if live_input {
+fn write_wait(until: std::time::Instant, live: bool) -> std::time::Duration {
+    if live {
         TURN_POLL_WAIT
     } else {
         until.saturating_duration_since(std::time::Instant::now())
@@ -731,9 +809,14 @@ impl DeliveryOwner {
         self._consumer.duplicate_descriptor()
     }
 
-    pub(crate) fn poll_peer_context(&mut self, limit:usize) -> Result<Vec<DeliveredInput>> {
-        self.session.validate_peer_endpoint()?;
-        self.poll_turn(true,limit)
+    #[cfg(test)]
+    pub(crate) fn set_peer_resolver(&mut self, resolver: Resolver) {
+        self.peer_resolver = resolver;
+    }
+
+    pub(crate) fn poll_peer_context(&mut self, limit: usize) -> Result<Vec<DeliveredInput>> {
+        self.session.check_directory()?;
+        self.poll_inputs(true, limit, true)
     }
 
     /// Start at most one durable generation per acknowledged user delivery.
@@ -891,31 +974,24 @@ impl DeliveryOwner {
         crate::db::turn_repo::TurnTimer::from_dispatch(self.session.clone(), &turn)
     }
     pub fn next_peer(&mut self) -> Result<Option<Handoff>> {
-        self.peer_before(
-            usize::MAX,
-            std::time::Instant::now() + super::WRITE_DEADLINE,
-            false,
-        )
+        let mut batch = self.peer_candidates(1)?;
+        let mut budget = PeerPollBudget::new(super::WRITE_DEADLINE);
+        self.peer_before(&mut batch, usize::MAX, &mut budget, false, false)
     }
 
-    fn peer_before(
-        &mut self,
-        max_bytes: usize,
-        until: std::time::Instant,
-        live: bool,
-    ) -> Result<Option<Handoff>> {
-        layout::allow_entry()?;
+    fn peer_candidates(&self, limit: usize) -> Result<std::vec::IntoIter<PeerCandidate>> {
         let s = &self.session;
-        let claims = s.stores.global().read(|c| {
+        s.stores.global().read(|c| {
             let mut q = c.prepare(
-                "SELECT id,payload,sender,coalesce(generation,0),size FROM session_inbox
+                "SELECT id,payload,sender,coalesce(generation,0),size,rowid,state='blocked' FROM session_inbox
                 WHERE recipient=?1 AND state IN ('claimed','queued','blocked')
-                ORDER BY CASE state WHEN 'claimed' THEN 0 ELSE 1 END,rowid",
+                ORDER BY CASE state WHEN 'claimed' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                         CASE WHEN state='blocked' AND rowid<=?2 THEN 1 ELSE 0 END,rowid LIMIT ?3",
             )?;
             let result = q
-                .query_map([&s.id], |r| {
-                    Ok((
-                        Claim {
+                .query_map(params![s.id, self.blocked_cursor, limit.min(8)], |r| {
+                    Ok(PeerCandidate {
+                        claim: Claim {
                             origin: "peer".into(),
                             prompt_origin: "peer".into(),
                             id: r.get(0)?,
@@ -925,41 +1001,115 @@ impl DeliveryOwner {
                             steer: false,
                             revision: r.get(3)?,
                         },
-                        r.get::<_, usize>(4)?,
-                    ))
+                        size: r.get(4)?,
+                        rowid: r.get(5)?,
+                        blocked: r.get(6)?,
+                    })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(result)
-        })?;
-        for (mut claim, size) in claims {
+            Ok(result.into_iter())
+        })
+    }
+
+    fn peer_before(
+        &mut self,
+        batch: &mut std::vec::IntoIter<PeerCandidate>,
+        max_bytes: usize,
+        budget: &mut PeerPollBudget,
+        live: bool,
+        validate_recipient: bool,
+    ) -> Result<Option<Handoff>> {
+        let s = &self.session;
+        for PeerCandidate {
+            mut claim,
+            size,
+            rowid,
+            blocked,
+        } in batch.by_ref()
+        {
+            if std::time::Instant::now() >= budget.discovery_until {
+                return Ok(None);
+            }
             if size > max_bytes {
                 return Ok(None);
             }
             if self.has_receipt(&claim)? {
+                // A pure acknowledgement needs no endpoint lookup. Returning a
+                // previously committed body to this public consumer still needs
+                // the same recipient authorization as a fresh public delivery.
+                if validate_recipient && self.live_handoffs.contains_key(&claim.id) {
+                    match budget
+                        .prepare(|end| s.validate_peer_endpoint(&mut self.peer_resolver, Some(end)))
+                    {
+                        Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
+                        result => result?,
+                    }
+                }
                 // The authorized generation already committed its local effect.
                 // Its frozen claim is sufficient for the acknowledgement CAS.
-                return self.complete(claim, until, live).map(Some);
+                return self.complete(claim, budget.discovery_until, live).map(Some);
             }
-            let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, until.saturating_duration_since(std::time::Instant::now()), |c| {
+            if blocked {
+                // Rotate bounded rechecks so an unchanged blocked row cannot
+                // permanently hide another sender whose authorization recovered.
+                self.blocked_cursor = rowid;
+            }
+            let sender_id = claim.sender.as_deref().expect("peer claim has a sender");
+            let projects = budget.prepare(|end| {
+                let prepare = |c: &Connection| {
+                    let recipient = self.peer_resolver.project(c, &s.id, Some(end));
+                    let recipient = if validate_recipient {
+                        Some(recipient?)
+                    } else {
+                        authorized_project(recipient)?
+                    };
+                    let Some(recipient) = recipient else {
+                        return Ok(None);
+                    };
+                    let sender =
+                        authorized_project(self.peer_resolver.project(c, sender_id, Some(end)))?;
+                    Ok(sender.map(|sender| (recipient, sender)))
+                };
+                if validate_recipient {
+                    s.read_peer_endpoint(prepare)
+                } else {
+                    s.stores.global().read(prepare)
+                }
+            });
+            const TRUST_CHANGED: &str = "Sender or recipient project/trust changed";
+            let (projects, preflight_reason) = match projects {
+                Ok(value) => (value, TRUST_CHANGED),
+                Err(e) if e.is::<GitLookupTimeout>() => return Ok(None),
+                Err(e) if e.is::<GitDirectoryOverride>() => (None, GIT_OVERRIDE_REASON),
+                Err(e) => return Err(e),
+            };
+            let authorized = s.stores.global().write_with_deadline("claim inbox", &s.id, true, budget.discovery_until.saturating_duration_since(std::time::Instant::now()), |c| {
                 let sender_live: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM session_inbox i JOIN conversations c ON c.id=i.sender AND c.incarnation=i.sender_incarnation WHERE i.id=?1)", [&claim.id], |r| r.get(0))?;
                 if !sender_live {
                     c.execute("UPDATE session_inbox SET state='undeliverable',blocked_reason='Sender retired before local delivery' WHERE id=?1", [&claim.id])?;
                     return Ok(None);
                 }
                 let expected: (String,String) = c.query_row("SELECT project_source,coalesce(recipient_source,project_source) FROM session_inbox WHERE id=?1", [&claim.id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-                let allowed = match peer_projects(
-                    c,
-                    &s.stores.root.path,
-                    claim.sender.as_ref().unwrap(),
-                    &s.id,
-                ) {
-                    Ok(project) => project == expected,
-                    Err(e) if e.downcast_ref::<rusqlite::Error>().is_some() => return Err(e),
-                    Err(_) => false,
+                let blocked_reason = match &projects {
+                    Some((recipient, sender)) => match peer_projects(c, sender_id, &s.id, sender, recipient) {
+                        Ok((from, to)) if from == expected.0 && to == expected.1 => None,
+                        Err(e) if e.is::<rusqlite::Error>() => return Err(e),
+                        Err(e) if e.is::<GitDirectoryOverride>() => Some(GIT_OVERRIDE_REASON),
+                        _ => Some(TRUST_CHANGED),
+                    },
+                    None => Some(preflight_reason),
                 };
-                if !allowed {
-                    c.execute("UPDATE session_inbox SET state='blocked',blocked_reason='Sender or recipient project/trust changed' WHERE id=?1 AND state<>'blocked'", [&claim.id])?;
+                if let Some(reason) = blocked_reason {
+                    c.execute("UPDATE session_inbox SET state='blocked',blocked_reason=?2 WHERE id=?1 AND (state<>'blocked' OR blocked_reason IS NOT ?2)", params![claim.id, reason])?;
                     return Ok(None);
+                }
+                // The inbox lease excludes other consumers. Revalidate trust above,
+                // then retry an unfinished claim with its original generation.
+                if let Some(generation) = c.query_row(
+                    "SELECT generation FROM session_inbox WHERE id=?1 AND state='claimed'",
+                    [&claim.id], |r| r.get::<_, i64>(0),
+                ).optional()? {
+                    return Ok(Some(generation));
                 }
                 let generation: i64 = c.query_row("INSERT INTO session_inbox_consumers VALUES(?1,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1 RETURNING generation", [&s.id], |r| r.get(0))?;
                 ensure!(
@@ -972,7 +1122,7 @@ impl DeliveryOwner {
                 continue;
             };
             claim.revision = generation;
-            return self.complete(claim, until, live).map(Some);
+            return self.complete(claim, budget.discovery_until, live).map(Some);
         }
         Ok(None)
     }
@@ -981,24 +1131,51 @@ impl DeliveryOwner {
     }
 
     /// A batch contains at most eight items. Peers share a discovery deadline,
-    /// while live queue entries each get a bounded wait at the next writer.
+    /// while completing a live claim gets a fresh bounded wait at each writer.
     /// An ack-only retry injects content only if this same live owner committed it.
     pub(crate) fn poll_turn(&mut self, peers: bool, limit: usize) -> Result<Vec<DeliveredInput>> {
+        self.poll_inputs(peers, limit, false)
+    }
+
+    fn poll_inputs(
+        &mut self,
+        peers: bool,
+        limit: usize,
+        validate_recipient: bool,
+    ) -> Result<Vec<DeliveredInput>> {
         use crate::db::message_repo;
-        let until = std::time::Instant::now() + TURN_POLL_WAIT;
         if !peers {
             self.deferred_steer = false;
+        }
+        let mut peer_batch = if peers {
+            match self.peer_candidates(limit) {
+                Ok(batch) => Some(batch),
+                Err(error) if crate::db::is_contention(&error) => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let mut budget = PeerPollBudget::new(TURN_POLL_WAIT);
+        if validate_recipient && peer_batch.as_ref().is_some_and(|batch| batch.len() == 0) {
+            match budget.prepare(|end| {
+                self.session
+                    .validate_peer_endpoint(&mut self.peer_resolver, Some(end))
+            }) {
+                Err(e) if e.is::<GitLookupTimeout>() => return Ok(Vec::new()),
+                result => result?,
+            }
         }
         let mut remaining = 128 * 1024;
         let mut inputs = Vec::new();
         for _ in 0..limit.min(8) {
-            if peers && std::time::Instant::now() >= until {
+            if peers && Instant::now() >= budget.discovery_until {
                 break;
             }
-            let next = if peers {
-                self.peer_before(remaining, until, true)
+            let next = if let Some(batch) = &mut peer_batch {
+                self.peer_before(batch, remaining, &mut budget, true, validate_recipient)
             } else {
-                self.queue_before(QueueMode::Steer, None, until, true, None)
+                self.queue_before(QueueMode::Steer, None, budget.discovery_until, true, None)
             };
             let handoff = match next {
                 Ok(Some(value)) => value,
@@ -1072,7 +1249,6 @@ impl DeliveryOwner {
     }
     fn complete(&mut self, claim: Claim, until: std::time::Instant, live: bool) -> Result<Handoff> {
         let s = &self.session;
-        let live_input = live && claim.sender.is_none();
         s.stores.step(Phase::DeliveryClaimed)?;
         let fresh = if self.has_receipt(&claim)? {
             false
@@ -1090,7 +1266,7 @@ impl DeliveryOwner {
             let memory = typed
                 .then(|| crate::services::memory_files::prompt::Admission::session(s))
                 .transpose()?;
-            let delivered = s.write_locked_with_deadline("deliver input", write_wait(until, live_input), |tx| {
+            let delivered = s.write_locked_with_deadline("deliver input", write_wait(until, live), |tx| {
                 ensure!(claim.sender.is_none() || !tx.3.retiring_here,"Provider switch pending; inbox retained");
                 if let Some(tool) = &claim.target {
                     let exists: bool = tx.0.query_row(
@@ -1155,7 +1331,7 @@ impl DeliveryOwner {
             if !delivered {
                 s.stores
                     .global()
-                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, write_wait(until, live_input), |c| {
+                    .write_with_deadline("cancel rewound tool delivery", &s.id, true, write_wait(until, live), |c| {
                         ensure!(
                             c.execute("UPDATE session_input_queue SET state='cancelled', revision=revision+1 WHERE session_id=?1 AND delivery_id=?2 AND revision=?3 AND state='claimed'", params![s.id, claim.id, claim.revision])? == 1,
                             "Stale tool claim"
@@ -1191,7 +1367,7 @@ impl DeliveryOwner {
         // durable in G, flush the committed receipt (also on ack-only replay).
         // A pinned reader can postpone the checkpoint; the G claim stays live.
         s.connection_under_lock(rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE, |c| {
-            let _wait = crate::db::BusyTimeoutGuard::within(c, write_wait(until, live_input))?;
+            let _wait = crate::db::BusyTimeoutGuard::within(c, write_wait(until, live))?;
             let busy: i64 = c.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| r.get(0))?;
             if busy != 0 {
                 return Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
@@ -1205,7 +1381,7 @@ impl DeliveryOwner {
         s.stores.step(Phase::DeliveryCommitted)?;
         s.stores
             .global()
-            .write_with_deadline("acknowledge delivery", &s.id, true, write_wait(until, live_input), |c| {
+            .write_with_deadline("acknowledge delivery", &s.id, true, write_wait(until, live), |c| {
                 let changed = if claim.sender.is_some() {
                     c.execute("UPDATE session_inbox SET state='context_committed',blocked_reason=NULL,committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND recipient=?2 AND state='claimed' AND generation=?3", params![claim.id, s.id, claim.revision])?
                 } else {

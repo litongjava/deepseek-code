@@ -9,6 +9,58 @@ pub mod directories;
 mod file_lock;
 pub use file_lock::{lock_file, try_lock_file, unlock_file};
 
+#[cfg(windows)]
+pub(crate) fn windows_file_id(file: &fs::File) -> Result<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectoryId {
+    object: (u64, u64),
+    created: std::time::SystemTime,
+}
+
+pub(crate) fn directory_id(path: &Path) -> Result<DirectoryId> {
+    #[cfg(unix)]
+    let (metadata, object) = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        let object = (metadata.dev(), metadata.ino());
+        (metadata, object)
+    };
+    #[cfg(windows)]
+    let (metadata, object) = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        let file = fs::File::options()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)?;
+        (file.metadata()?, windows_file_id(&file)?)
+    };
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "Expected a directory at {}",
+        path.display()
+    );
+    // Filesystems may recycle the numeric file ID after removal. Include birth
+    // time where available, or the directory modification time otherwise.
+    Ok(DirectoryId {
+        object,
+        created: metadata.created().or_else(|_| metadata.modified())?,
+    })
+}
+
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///
 /// A child process forked by any thread inherits a copy of the descriptor

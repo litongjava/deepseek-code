@@ -7,7 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
-pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
+pub(crate) fn git_command(cwd: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     let cwd_text = cwd.to_string_lossy();
     let cwd_text = super::git_path_text(&cwd_text);
@@ -26,6 +26,10 @@ pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
         command.creation_flags(0x08000000);
     }
     command
+}
+
+pub(crate) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
+    git_command(cwd, args)
         .output()
         .context("Could not run Git. Check that Git is installed")
 }
@@ -305,36 +309,91 @@ pub fn resolve(
     project_id: &str,
     source: &Path,
 ) -> Result<Option<PathBuf>> {
-    let saved: Option<(String, String, String)> = conn.query_row(
-        "SELECT source_path, repo_path, path FROM conversation_worktrees WHERE conversation_id = ?1 AND project_id = ?2",
-        params![id, project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
-    let Some((original, repo, path)) = saved else {
+    let Some(saved) = SavedWorktree::read(conn, id, project_id)? else {
         return Ok(None);
     };
-    ensure!(
-        Path::new(&original).canonicalize()? == source.canonicalize()?,
-        "Project source folder changed; start a new conversation for this folder"
-    );
-    let path = PathBuf::from(path);
-    ensure!(
-        path.is_absolute() && path.is_dir(),
-        "Conversation worktree is unavailable; restore it before continuing"
-    );
-    if super::hooks::resolve(conn, id, &path)? {
-        return Ok(Some(path));
+    saved.validate(source, common_dir)?;
+    Ok(Some(saved.path))
+}
+
+pub(crate) fn common_dir(cwd: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)
+    .canonicalize()?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SavedWorktree {
+    source: PathBuf,
+    repo: PathBuf,
+    path: PathBuf,
+    hook: Option<String>,
+}
+
+impl SavedWorktree {
+    pub(crate) fn read(conn: &Connection, id: &str, project_id: &str) -> Result<Option<Self>> {
+        let saved = conn.query_row(
+            "SELECT source_path, repo_path, path FROM conversation_worktrees WHERE conversation_id=?1 AND project_id=?2",
+            params![id, project_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+        ).optional()?;
+        let Some((source, repo, path)) = saved else {
+            return Ok(None);
+        };
+        let hook = conn.query_row(
+            "SELECT metadata FROM conversation_worktree_backends WHERE conversation_id=?1 AND backend='hook'",
+            [id], |r| r.get(0),
+        ).optional()?;
+        Ok(Some(Self {
+            source: source.into(),
+            repo: repo.into(),
+            path: path.into(),
+            hook,
+        }))
     }
-    let common = |cwd: &Path| -> Result<PathBuf> {
-        Ok(PathBuf::from(git(
-            cwd,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?)
-        .canonicalize()?)
-    };
-    ensure!(
-        common(&path)? == common(Path::new(&repo))?,
-        "Conversation worktree no longer belongs to this repository"
-    );
-    Ok(Some(path))
+
+    /// The saved working directory preserves the project's path relative to
+    /// its source repository, even when the project is below the checkout root.
+    pub(crate) fn validate_git_root(&self, cwd: &Path, top: &Path) -> Result<()> {
+        let repo = self.repo.canonicalize()?;
+        let matches = if cwd == self.repo {
+            top == repo
+        } else {
+            let source = self.source.canonicalize()?;
+            let relative = source.strip_prefix(&repo)?;
+            top.join(relative) == cwd.canonicalize()?
+        };
+        ensure!(
+            matches,
+            "Git worktree root does not match the saved session"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validate(
+        &self,
+        source: &Path,
+        mut lookup: impl FnMut(&Path) -> Result<PathBuf>,
+    ) -> Result<()> {
+        ensure!(
+            self.source.canonicalize()? == source.canonicalize()?,
+            "Project source folder changed; start a new conversation for this folder"
+        );
+        ensure!(
+            self.path.is_absolute() && self.path.is_dir(),
+            "Conversation worktree is unavailable; restore it before continuing"
+        );
+        if let Some(hook) = &self.hook {
+            super::hooks::validate_saved_path(hook, &self.path)?;
+        } else {
+            ensure!(
+                lookup(&self.path)? == lookup(&self.repo)?,
+                "Conversation worktree no longer belongs to this repository"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A task worktree created on `agent/<task_id>`. Cleanup is never forced: a

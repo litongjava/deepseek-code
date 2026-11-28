@@ -200,18 +200,7 @@ pub(super) fn file_identity(path: &Path) -> Result<(u64, u64)> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
-        };
-        let file = File::open(path)?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
-        Ok((
-            u64::from(info.dwVolumeSerialNumber),
-            u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
-        ))
+        crate::fs::windows_file_id(&File::open(path)?)
     }
 }
 

@@ -9,7 +9,6 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 #[cfg(test)]
 use rusqlite::params;
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -185,12 +184,8 @@ pub async fn create(
     Ok(Some(path))
 }
 
-pub(super) fn resolve(conn: &rusqlite::Connection, session: &str, path: &Path) -> Result<bool> {
-    let metadata:Option<String>=conn.query_row("SELECT metadata FROM conversation_worktree_backends WHERE conversation_id=?1 AND backend='hook'",[session],|row|row.get(0)).optional()?;
-    let Some(metadata) = metadata else {
-        return Ok(false);
-    };
-    let metadata: Value = serde_json::from_str(&metadata)?;
+pub(super) fn validate_saved_path(metadata: &str, path: &Path) -> Result<()> {
+    let metadata: Value = serde_json::from_str(metadata)?;
     ensure!(
         path.canonicalize()?
             == PathBuf::from(
@@ -206,7 +201,7 @@ pub(super) fn resolve(conn: &rusqlite::Connection, session: &str, path: &Path) -
             "Hook worktree directory was replaced"
         );
     }
-    Ok(true)
+    Ok(())
 }
 
 pub fn status(db: &impl SessionAccess, session: &str) -> Result<Option<Value>> {
