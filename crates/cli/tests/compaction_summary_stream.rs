@@ -684,7 +684,7 @@ async fn manual_fallback_replays_the_same_twelve_read_results_as_native() {
     assert_eq!(outputs.len(), 12);
     assert_eq!(
         outputs[0]["output"],
-        deepseek_code_core::services::compaction::microcompact::CLEARED_TOOL_RESULT
+        format!("REVIEW_OLD_TOOL {}", "x".repeat(1100))
     );
     assert_eq!(outputs[11]["output"], "READ_RESULT_11");
     assert_eq!(

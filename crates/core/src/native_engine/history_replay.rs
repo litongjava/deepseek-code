@@ -178,13 +178,14 @@ impl ToolLoopExecutor {
         &mut self,
         shard: &crate::db::session_store::SessionDb,
     ) -> Result<()> {
-        self.reload_with_cut(shard, false).map(drop)
+        self.reload_with_cut(shard, false, None).map(drop)
     }
 
     fn reload_with_cut(
         &mut self,
         shard: &crate::db::session_store::SessionDb,
         capture_cut: bool,
+        snapshot: Option<&mut Vec<Value>>,
     ) -> Result<(
         Option<crate::db::session_store::CompactionWindow>,
         bool,
@@ -244,6 +245,12 @@ impl ToolLoopExecutor {
         } else {
             None
         };
+        // Freeze the physical selection before rendering the standalone live
+        // window. Its durable message/result cursors can split a single turn.
+        if let Some(snapshot) = snapshot {
+            let end = cut.as_ref().map_or(messages.len(), |cut| cut.prefix_len);
+            snapshot.extend_from_slice(&messages[..end]);
+        }
         let microcompact_changed =
             if self.standalone_frontend && self.in_flight_window.is_none() {
                 crate::services::compaction::microcompact(
@@ -493,7 +500,8 @@ impl ToolLoopExecutor {
         // both microcompact and full summarization see the latest progress.
         self.flush_replay_segment(&shard, Some(current_text))?;
         let additions = window.split_off(durable_len.min(window.len()));
-        let (_, microcompact_changed, _) = self.reload_with_cut(&shard, false)?;
+        let mut snapshot = Vec::new();
+        let (_, microcompact_changed, _) = self.reload_with_cut(&shard, false, Some(&mut snapshot))?;
         *window = render(self, &self.message_additions())?;
         window.extend(additions.clone());
 
@@ -572,8 +580,8 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(crate::data_layout::data_root_of);
         let generation = async {
-            let input = self.compaction_history(..);
-            self.generate_auto_compaction(gate, &shard, input, window, &focus)
+            let input = CompactionHistory(snapshot);
+            self.generate_auto_compaction(gate, &shard, input, &focus)
                 .await
         };
 
@@ -729,7 +737,7 @@ impl ToolLoopExecutor {
         &self,
         shard: &crate::db::session_store::SessionDb,
         history: CompactionHistory,
-        summary_only_wire: Option<super::super::followup::WireRequest>,
+        native_transport: bool,
         system: &str,
         focus: &str,
         has_main_turn: bool,
@@ -739,13 +747,21 @@ impl ToolLoopExecutor {
         let system = format!("{system}\n\n{STATE_INSTRUCTIONS}");
         let mut rows = multimodal::normalize_messages(&history.0)?;
         rows.retain(|row| row["origin"] != "memory_change");
+        shard.read(|r| crate::services::compaction::microcompact::consolidate(
+            &mut rows, r, self.parent_message_id.is_some(),
+        ))?;
         let selected = shard.scoped_stores();
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
             shard.clone(),
         ));
-        let (mut wire, native_result) = match summary_only_wire {
-            Some(wire) => (wire, None),
-            None => {
+        let (mut wire, native_result) = if !native_transport {
+                let additions = self.message_additions_for(&rows);
+                let wire = match self.provider.provider.api_format {
+                    ApiFormat::Anthropic => self.build_mid_turn_summary_wire(&self.render_anthropic_rows(&rows, &additions)?)?,
+                    ApiFormat::OpenAI => self.build_mid_turn_summary_wire(&self.render_openai_rows(&rows, &additions)?)?,
+                };
+                (wire, None)
+            } else {
                 // Durable rows lack the user-role host prefix used on main requests.
                 // In-flight rows are already rendered, including this prefix.
                 if self.in_flight_window.is_none() {
@@ -772,7 +788,6 @@ impl ToolLoopExecutor {
                 )
                 .await;
                 (wire, Some(result))
-            }
         };
         let summary = async {
             wire.allow_text_summary();
@@ -801,12 +816,11 @@ impl ToolLoopExecutor {
         }
     }
 
-    async fn generate_auto_compaction<M: serde::Serialize>(
+    async fn generate_auto_compaction(
         &self,
         gate: &AutoCompactionGate,
         shard: &crate::db::session_store::SessionDb,
         input: CompactionHistory,
-        window: &[M],
         focus: &str,
     ) -> Result<(
         crate::services::compaction::GeneratedSummary,
@@ -824,17 +838,11 @@ impl ToolLoopExecutor {
                 "auto",
                 &serde_json::to_string(&input.0)?,
             );
-            let summary_only_wire = if crate::services::compaction::native::supports(&self.provider)
-            {
-                None
-            } else {
-                Some(self.build_mid_turn_summary_wire(window)?)
-            };
             let generated = self
                 .generate_compaction_snapshot(
                     shard,
                     input,
-                    summary_only_wire,
+                    crate::services::compaction::native::supports(&self.provider),
                     crate::services::compaction::PROMPT,
                     focus,
                     true,
@@ -923,6 +931,7 @@ impl ToolLoopExecutor {
         {
             return Ok(false);
         }
+        let mut snapshot = Vec::new();
         let mut physical_cut = None;
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
@@ -936,7 +945,7 @@ impl ToolLoopExecutor {
             (durable_len, self.executor_history.clone())
         {
             let additions = window.split_off(durable_len);
-            let (cut, changed, explicit) = self.reload_with_cut(&shard, true)?;
+            let (cut, changed, explicit) = self.reload_with_cut(&shard, true, Some(&mut snapshot))?;
             physical_cut = cut;
             microcompact_changed = changed;
             *window = render(self, &self.message_additions())?;
@@ -983,8 +992,6 @@ impl ToolLoopExecutor {
                         gate,
                         &shard,
                         explicit.source,
-                        rows.get(..explicit.rendered_len)
-                            .context("Explicit compaction prefix exceeds the live conversation")?,
                         MID_TURN_CONTINUATION_FOCUS,
                     )
                     .await;
@@ -1072,8 +1079,7 @@ impl ToolLoopExecutor {
                     .generate_auto_compaction(
                         gate,
                         &shard,
-                        self.compaction_history(..cut.prefix_len),
-                        &window[..end],
+                        CompactionHistory(snapshot),
                         self.system_prompt.as_deref().unwrap_or(""),
                     )
                     .await;

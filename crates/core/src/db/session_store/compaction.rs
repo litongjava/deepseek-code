@@ -40,6 +40,31 @@ pub(super) fn queued_turn_input(c: &Connection) -> Result<Option<String>> {
 }
 
 impl SessionRead<'_> {
+    pub(crate) fn has_running_turn(&self) -> Result<bool> {
+        Ok(self.0.prepare_cached("SELECT 1 FROM execution_turns WHERE status='running' LIMIT 1")?.exists([])?)
+    }
+
+    pub(crate) fn compaction_turn_start(&self, id: &str, origin: Option<&str>) -> Result<bool> {
+        // A next-turn delivery starts its own exchange even for a notification.
+        if self.0.prepare_cached("SELECT 1 FROM delivery_generations WHERE delivery_id=?1")?.exists([id])? {
+            return Ok(true);
+        }
+        if !matches!(origin, None | Some("typed" | "generated" | "scheduled" | "delegation" | "mcp_prompt" | "continuation" | "goal_continuation" | "error_resume" | "legacy_queue")) {
+            return Ok(false);
+        }
+        Ok(self.0.prepare_cached("SELECT 1 FROM messages WHERE id=?1 AND role='user'
+            AND NOT is_compact_boundary AND NOT EXISTS (SELECT 1 FROM delivery_receipts WHERE delivery_id=?1)")?.exists([id])?)
+    }
+
+    pub(crate) fn successful_compaction_result(&self, id: &str) -> Result<Option<(String, Option<String>, String)>> {
+        Ok(self.0.prepare_cached("SELECT t.name,t.input,t.output FROM tool_calls t
+            JOIN context_search_sources s ON s.kind='tool' AND s.id=t.id
+            WHERE t.id=?1 AND t.is_error=0 AND typeof(t.output)='text' AND s.size>=0
+            AND t.name!='ContextSearch' AND t.model_recovery IS NULL
+            AND NOT EXISTS (SELECT 1 FROM tool_call_origins WHERE tool_call_id=t.id)")?
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?)
+    }
+
     pub fn queued_turn_input(&self) -> Result<Option<String>> {
         queued_turn_input(self.0)
     }

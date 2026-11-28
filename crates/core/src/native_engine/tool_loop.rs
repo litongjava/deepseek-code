@@ -3815,15 +3815,19 @@ impl ToolLoopExecutor {
     /// context reminders open the first user message, and recorded turn
     /// context follows the message it was recorded for.
     fn message_additions(&self) -> Vec<(Vec<String>, Vec<String>)> {
+        self.message_additions_for(&self.messages)
+    }
+
+    fn message_additions_for(&self, messages: &[Value]) -> Vec<(Vec<String>, Vec<String>)> {
         let target = (!self.context_reminders.is_empty())
             .then(|| {
-                self.messages
+                messages
                     .iter()
                     .position(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
             })
             .flatten();
         let mut additions: Vec<_> =
-            crate::services::turn_context::resolve(&self.turn_context, &self.messages)
+            crate::services::turn_context::resolve(&self.turn_context, messages)
                 .into_iter()
                 .enumerate()
                 .map(|(index, after)| {
@@ -3834,7 +3838,7 @@ impl ToolLoopExecutor {
                             } else {
                                 Vec::new()
                             };
-                            if let Some(id) = self.messages[index]["id"].as_str() {
+                            if let Some(id) = messages[index]["id"].as_str() {
                                 let key = format!("before-message:{id}");
                                 for entry in self.turn_context.iter().filter(|e| e.key == key) {
                                     before.extend(entry.blocks.iter().cloned());
@@ -3847,7 +3851,7 @@ impl ToolLoopExecutor {
                 })
                 .collect();
         if self.mid_turn_continuation_cue {
-            if let Some(first) = self.messages.first() {
+            if let Some(first) = messages.first() {
                 let is_native = first
                     .get("provider_content")
                     .is_some_and(|v| v["compaction"] == true);
@@ -4898,69 +4902,12 @@ impl ToolLoopExecutor {
         }
     }
 
-    fn apply_reasoning_prompt(&mut self) {
+    pub(super) fn apply_reasoning_prompt(&mut self) {
         if matches!(self.reasoning_mode, ReasoningMode::Deep) {
             if let Some(ref sp) = self.system_prompt {
                 self.system_prompt = Some(format!("{}\n\nYou are in deep reasoning mode. For any destructive operations, you MUST ask for user confirmation before proceeding.", sp));
             } else {
                 self.system_prompt = Some("You are in deep reasoning mode. For any destructive operations, you MUST ask for user confirmation before proceeding.".to_string());
-            }
-        }
-    }
-
-    pub(super) async fn replay_request(&mut self) -> Result<super::followup::WireRequest> {
-        if self.executor_history.is_none() {
-            self.compress_history();
-        }
-        match self.provider.provider.api_format {
-            ApiFormat::Anthropic => {
-                let mut messages = self.build_anthropic_messages()?;
-                self.apply_reasoning_prompt();
-                let _ = self
-                    .replay_window(
-                        &self.compaction_gate.clone(),
-                        &mut messages,
-                        None,
-                        false,
-                        Self::render_anthropic_messages,
-                    )
-                    .await?;
-                let prepared = self.prepare_request()?;
-                let body = self.anthropic_client.request_body(
-                    &self.provider,
-                    messages,
-                    prepared.system_prompt.as_deref(),
-                    prepared.tools,
-                    self.max_tokens,
-                    matches!(self.reasoning_mode, ReasoningMode::Deep),
-                )?;
-                Ok(super::followup::WireRequest {
-                    api: "anthropic-messages".into(),
-                    body,
-                    builtin_vision: None,
-                })
-            }
-            ApiFormat::OpenAI => {
-                let mut messages = self.build_openai_messages()?;
-                self.apply_reasoning_prompt();
-                let _ = self
-                    .replay_window(
-                        &self.compaction_gate.clone(),
-                        &mut messages,
-                        None,
-                        false,
-                        Self::render_openai_messages,
-                    )
-                    .await?;
-                let prepared = self.prepare_request()?;
-                self.openai_client.request_body(
-                    &self.provider,
-                    messages,
-                    prepared.system_prompt.as_deref(),
-                    prepared.tools,
-                    self.max_tokens,
-                    self.conv_id.as_deref(),
-                )
             }
         }
     }
@@ -8025,7 +7972,15 @@ impl ToolLoopExecutor {
         &self,
         additions: &[(Vec<String>, Vec<String>)],
     ) -> Result<Vec<AnthropicMessage>> {
-        let messages = self.prepare_main_history()?;
+        self.render_anthropic_rows(&self.prepare_main_history()?, additions)
+    }
+
+    fn render_anthropic_rows(
+        &self,
+        messages: &[Value],
+        additions: &[(Vec<String>, Vec<String>)],
+    ) -> Result<Vec<AnthropicMessage>> {
+
         Ok(messages
             .iter()
             .enumerate()
@@ -8139,11 +8094,19 @@ impl ToolLoopExecutor {
         &self,
         additions: &[(Vec<String>, Vec<String>)],
     ) -> Result<Vec<OpenAIMessage>> {
+        self.render_openai_rows(&self.prepare_main_history()?, additions)
+    }
+
+    fn render_openai_rows(
+        &self,
+        messages: &[Value],
+        additions: &[(Vec<String>, Vec<String>)],
+    ) -> Result<Vec<OpenAIMessage>> {
         // Responses accepts content arrays for user messages, so the stable
         // instruction blocks stay separate for caching. Chat Completions keeps
         // one string because several compatible servers reject arrays there.
         let separate_parts = super::provider_runtime::responses_api(&self.provider);
-        let messages = self.prepare_main_history()?;
+
         let mut built: Vec<_> = messages
             .iter()
             .enumerate()

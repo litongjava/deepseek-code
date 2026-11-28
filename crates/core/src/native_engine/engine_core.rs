@@ -596,23 +596,6 @@ impl QueryEngine {
             (history, boundary) =
                 shard.read(|r| r.readable_history_before(&provider.provider.api_format, before))?;
         }
-        if shard
-            .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
-            .is_some_and(|host| host.standalone_frontend)
-        {
-            use crate::db::session_store::settings::{Microcompact, MICROCOMPACT};
-            let boundary = boundary.as_deref().unwrap_or_default();
-            let mut state = shard
-                .repository()
-                .preference(MICROCOMPACT)?
-                .filter(|state| state.boundary == boundary)
-                .unwrap_or_else(|| Microcompact::for_boundary(boundary));
-            crate::services::compaction::microcompact::replay(
-                &mut history,
-                &mut state,
-                provider.model.context_window,
-            )?;
-        }
         let native = crate::services::compaction::native::supports(&provider);
         self.generate_replay_compaction(
             shard,
@@ -679,16 +662,14 @@ impl QueryEngine {
         };
         turn.executor.restore_request_context().await?;
         let durable = turn.executor.compaction_history(..);
-        let summary_only_wire = if native {
-            None
-        } else {
-            Some(turn.executor.replay_request().await?)
-        };
+        if !native {
+            turn.executor.apply_reasoning_prompt();
+        }
         turn.executor
             .generate_compaction_snapshot(
                 &shard,
                 durable,
-                summary_only_wire,
+                native,
                 system,
                 instructions,
                 has_main_turn,

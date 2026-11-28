@@ -1125,3 +1125,100 @@ async fn base64_model_boundary_native_compaction_projects_stored_protocol_result
 
 #[path = "native_compaction/model_output.rs"]
 mod model_output;
+
+#[tokio::test]
+async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_original() -> anyhow::Result<()> {
+    use deepseek_code_core::db::message_repo::{insert_tool_call, UNFINISHED_TOOL_RESULT};
+    let f = fixture(8).await;
+    let store = &f.store;
+    let id = &f.id;
+    let notice = |task: &str, text: &str| format!(
+        "<task-notification>\n<task-id>{task}</task-id>\n<summary>{text}</summary>\n</task-notification>"
+    );
+    for (task, text, origin) in [
+        ("a","earliest notice","task_notification"),
+        ("b","other task","task_notification"),
+        ("a","middle notice","task_notification"),
+        ("a","typed quotation","typed"),
+        ("a","latest notice","task_notification"),
+    ] {
+        let msg = notice(task, text);
+        store.append_user_content(id, &msg, &json!([{"type":"text","text":msg}]), origin)?;
+    }
+    let old = format!("ARCHIVED_NEEDLE\n{}\nfin🙂", "word ".repeat(260));
+    let failed = format!("compile --strict\nexit code 17\nerror: expected module\n{}", "trace ".repeat(220));
+    let recent = format!("recent read\n{}", "data ".repeat(220));
+    let tool = |message: &str, call: &str, text: Option<&str>, error: bool, order: i64| {
+        store.db.shard_sql(id, |db| insert_tool_call(db, call, message, "Read",
+            Some(r#"{"file_path":"src/main.rs"}"#), text, error, order))?
+    };
+    let first = store.append(id, "assistant", "Remaining: verify the fixture.")?;
+    tool(&first, "old", Some(&old), false, 0)?;
+    tool(&first, "failed", Some(&failed), true, 1)?;
+    tool(&first, "interrupted", None, false, 2)?;
+    for i in 0..9 {
+        store.append_prompt(id, &format!("Turn {i}"), "typed")?;
+        let replied = store.append(id, "assistant", "Read the previous result.")?;
+        if i == 0 {
+            tool(&replied, "recent", Some(&recent), false, 0)?;
+        }
+    }
+    store.append_prompt(id, "Continue the unfinished work.", "typed")?;
+    let mut turn = store.db.start_turn_timer(id)?;
+    let current = turn.ensure_segment()?;
+    tool(&current, "current", Some(&old), false, 0)?;
+    for text in ["active first", "active latest"] {
+        store.append_prompt(id, &notice("live", text), "task_notification")?;
+    }
+    let before = || -> anyhow::Result<_> {
+        Ok(serde_json::to_vec(&store.model_history(id, &ApiFormat::OpenAI)?)?)
+    };
+    let normal = before()?;
+    let prepared = compaction::prepare(&store.db, id)?;
+    let generated = f.engine.generate_compaction(id, "gateway", "gpt-6-astra", "Summarize", "", "retain evidence").await?;
+    assert_eq!(before()?, normal);
+    {
+        let requests = f.seen.lock().unwrap();
+        let (fallback, attempts) = requests.split_last().unwrap();
+        let (instruction, rows) = fallback["input"].as_array().unwrap().split_last().unwrap();
+        let state = "Completed / Verified / Remaining / Not done";
+        assert!(instruction.to_string().contains(state));
+        assert!(!attempts.is_empty());
+        for native in attempts {
+            assert_eq!(native["input"].as_array().unwrap(), rows);
+            assert!(native["instructions"].as_str().unwrap().contains(state));
+        }
+        let rendered = json!(rows).to_string();
+        for text in ["earliest notice", "middle notice"] {
+            assert!(!rendered.contains(text), "{text}");
+        }
+        for text in ["other task", "typed quotation", "latest notice", "active first", "active latest",
+                     "Remaining: verify the fixture.", "Continue the unfinished work."] {
+            assert!(rendered.contains(text), "{text}");
+        }
+        let output = |call| {
+            let at = rows.iter().position(|row| row["type"] == "function_call" && row["call_id"] == call).unwrap();
+            let matching: Vec<_> = rows[at + 1..].iter().filter(|row| row["type"] == "function_call_output" && row["call_id"] == call).collect();
+            assert_eq!(matching.len(), 1);
+            matching[0]["output"].as_str().unwrap()
+        };
+        let placeholder = output("old");
+        assert_eq!(placeholder.lines().count(), 1);
+        for part in ["Read", "src/main.rs", &format!("3 lines, {} bytes", old.len()), "use ContextSearch to retrieve if needed"] {
+            assert!(placeholder.contains(part), "{placeholder}");
+        }
+        assert_eq!(output("failed"), failed);
+        assert_eq!(output("interrupted"), UNFINISHED_TOOL_RESULT);
+        assert_eq!(output("recent"), recent);
+        assert_eq!(output("current"), old);
+    }
+    let boundary = compaction::commit(&store.db, prepared, &generated.text)?;
+    let found: Value = serde_json::from_str(&store.db.open_session(id)?.context_search(json!({
+        "query":"ARCHIVED_NEEDLE", "role":"tool", "range":"before", "boundary_id":boundary.message_id
+    }))?)?;
+    assert!(found["matches"].as_array().unwrap().iter().any(|hit|
+        hit["tool_call_id"] == "old" && hit["excerpt"].as_str().unwrap().contains("ARCHIVED_NEEDLE")
+    ));
+    f.server.abort();
+    Ok(())
+}
