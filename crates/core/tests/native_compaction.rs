@@ -1176,6 +1176,11 @@ async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_orig
     tool(&first, "old", Some(&old), false, 0)?;
     tool(&first, "failed", Some(&failed), true, 1)?;
     tool(&first, "interrupted", None, false, 2)?;
+    let hook_failure = format!(
+        "{}\nPostToolUseFailure context: inspect dependency",
+        json!({"exit_code":42,"stderr":format!("missing dependency {}", "trace ".repeat(200))})
+    );
+    tool(&first, "hook-failure", Some(&hook_failure), false, 3)?;
     for i in 0..9 {
         store.append_prompt(id, &format!("Turn {i}"), "typed")?;
         let replied = store.append(id, "assistant", "Read the previous result.")?;
@@ -1275,11 +1280,18 @@ async fn compaction_consolidates_only_archived_rows_and_search_recovers_the_orig
             assert!(placeholder.contains(part), "{placeholder}");
         }
         assert_eq!(output("failed"), failed);
+        assert_eq!(output("hook-failure"), hook_failure);
         assert_eq!(output("interrupted"), UNFINISHED_TOOL_RESULT);
         assert_eq!(output("recent"), recent);
         assert_eq!(output("current"), old);
     }
     let boundary = compaction::commit(&store.db, prepared, &generated.text)?;
+    let saved: String = store.db.shard_sql(id, |db| {
+        db.query_row("SELECT output FROM tool_calls WHERE id='old'", [], |row| {
+            row.get(0)
+        })
+    })??;
+    assert_eq!(saved, old);
     let found: Value = serde_json::from_str(&store.db.open_session(id)?.context_search(json!({
         "query":"ARCHIVED_NEEDLE", "role":"tool", "range":"before", "boundary_id":boundary.message_id
     }))?)?;

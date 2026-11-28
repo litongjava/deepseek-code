@@ -270,6 +270,7 @@ fn clear_archived_result(
     // ContextSearch skips oversized structured sources and binary-only
     // results. Preserve their existing recovery information in the row.
     if output.len() <= MICROCOMPACT_MIN_CHARS
+        || output.starts_with("Error: ")
         || (crate::db::context_search_repo::projection_name(&name).is_some()
             && output.len() > crate::db::context_search_repo::MAX_CHUNK_BYTES)
     {
@@ -291,9 +292,14 @@ fn clear_archived_result(
     if !retrievable {
         return Ok(());
     }
-    if let Ok(value) = serde_json::from_str::<Value>(&output) {
+    // A post-tool hook may append text after the JSON result.
+    if let Some(Ok(value)) = serde_json::Deserializer::from_str(&output)
+        .into_iter::<Value>()
+        .next()
+    {
         if value["exit_code"].as_i64().is_some_and(|code| code != 0)
-            || value["signal"].as_i64().is_some()
+            || !value["signal"].is_null()
+            || value["timed_out"] == true
             || value["is_error"] == true
             || value["success"] == false
             || matches!(
