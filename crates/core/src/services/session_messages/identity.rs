@@ -46,6 +46,9 @@ impl GitKey {
         let git_dir = if marker.is_dir() {
             marker.canonicalize().ok()?
         } else {
+            if !marker.is_file() {
+                return None;
+            }
             let link = fs::read_to_string(&marker).ok()?;
             marker
                 .parent()?

@@ -1221,6 +1221,22 @@ mod tests {
         assert_eq!(inbox(&context, &recipient, false).unwrap().len(), 2);
     }
 
+    #[track_caller]
+    fn drain_pending(target: &Target) -> Result<Vec<String>> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let delivered = target.drain(8)?;
+            if !delivered.is_empty() {
+                return Ok(delivered);
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "pending inbox poll never reached delivery or its injected fault"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn transaction_ack_is_atomic_and_replays_once_under_consumer_ownership() {
         let (_temp, context, store, sender, recipient) = fixture();
@@ -1231,7 +1247,8 @@ mod tests {
         assert!(receiver_active(&context.paths.data_dir, &recipient).unwrap());
         assert!(Consumer::attach(&context.paths.data_dir, &recipient).is_err());
         context.db.fixture_shard(&recipient, |conn|conn.execute_batch("CREATE TRIGGER reject_inbox_context BEFORE INSERT ON messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")).unwrap().unwrap();
-        assert!(owner.target.drain(8).is_err());
+        let error = drain_pending(&owner.target).unwrap_err();
+        assert_eq!(crate::db::sqlite_extended_code(&error), Some(1811));
         assert_eq!(
             inbox(&context, &recipient, false).unwrap()[0].state,
             "claimed"
@@ -1243,7 +1260,7 @@ mod tests {
             .unwrap()
             .unwrap();
         mark_read(&context, &recipient, &message.id).unwrap();
-        let context_rows = owner.target.drain(8).unwrap();
+        let context_rows = drain_pending(&owner.target).unwrap();
         assert_eq!(context_rows.len(), 1);
         assert!(context_rows[0].contains("check cancellation"));
         assert_eq!(
@@ -1379,7 +1396,7 @@ mod tests {
             .unwrap()
             .unwrap();
         context.db.fixture_shard(&recipient, |conn|conn.execute_batch("CREATE TRIGGER reject_inbox_context BEFORE INSERT ON messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")).unwrap().unwrap();
-        let error = owner.target.drain(8).unwrap_err();
+        let error = drain_pending(&owner.target).unwrap_err();
         let text = format!("{error:#}");
         assert!(
             text.contains("deliver input failed after"),
@@ -1411,7 +1428,7 @@ mod tests {
             .fixture_shard(&recipient, |conn| conn.execute_batch("DROP TRIGGER reject_inbox_context"))
             .unwrap()
             .unwrap();
-        assert_eq!(owner.target.drain(8).unwrap().len(), 1);
+        assert_eq!(drain_pending(&owner.target).unwrap().len(), 1);
         drop(owner);
     }
 
@@ -1450,7 +1467,7 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let error = owner.target.drain(8).unwrap_err();
+        let error = drain_pending(&owner.target).unwrap_err();
         let text = format!("{error:#}");
         assert!(
             text.contains("acknowledge delivery failed after"),
@@ -1480,7 +1497,7 @@ mod tests {
             .fixture_directory(|conn| conn.execute_batch("DROP TRIGGER reject_inbox_ack"))
             .unwrap()
             .unwrap();
-        let delivered = owner.target.drain(8).unwrap();
+        let delivered = drain_pending(&owner.target).unwrap();
         assert_eq!(delivered.len(), 1);
         assert!(delivered[0].contains("rolled back body"));
         assert_eq!(store.history(&recipient).unwrap().len(), 1);
@@ -1593,7 +1610,7 @@ mod tests {
         let resumed = Consumer::attach(&context.paths.data_dir, &recipient)
             .unwrap()
             .unwrap();
-        let delivered = resumed.target.drain(8).unwrap();
+        let delivered = drain_pending(&resumed.target).unwrap();
         assert_eq!(delivered.len(), 1);
         assert!(delivered[0].contains("survives revocation"));
         assert!(resumed.target.drain(8).unwrap().is_empty());
@@ -1714,11 +1731,13 @@ mod tests {
         assert!(queued[0].blocked_reason.is_some());
         assert!(store.history(&recipient).unwrap().is_empty());
     }
-    #[test]
-    fn managed_worktree_peers_share_source_identity_and_inbox() {
-        let (_temp, context, store, sender, recipient) = fixture();
+    fn bind_managed_worktree(
+        context: &ServiceContext,
+        store: &SessionStore,
+        session: &str,
+    ) -> PathBuf {
         let source = store
-            .workspace(&sender, &context.paths.data_dir.join("data/workspaces"))
+            .workspace(session, &context.paths.data_dir.join("data/workspaces"))
             .unwrap();
         for args in [
             vec!["init", "-q"],
@@ -1735,14 +1754,24 @@ mod tests {
                 .success());
         }
         let worktree = crate::worktree::session::prepare(&source, None, true).unwrap();
-        let project = super::super::session_trust::inspect(&context.db, &recipient).unwrap();
+        let project = super::super::session_trust::inspect(&context.db, session).unwrap();
         context
             .db
             .fixture_directory(|conn| {
-                worktree.save(conn, &recipient, &project.id, source.to_str().unwrap())
+                worktree.save(conn, session, &project.id, source.to_str().unwrap())
             })
             .unwrap()
             .unwrap();
+        worktree.path
+    }
+
+    #[test]
+    fn managed_worktree_peers_share_source_identity_and_inbox() {
+        let (_temp, context, store, sender, recipient) = fixture();
+        let source = store
+            .workspace(&sender, &context.paths.data_dir.join("data/workspaces"))
+            .unwrap();
+        bind_managed_worktree(&context, &store, &recipient);
         assert_ne!(
             store
                 .workspace(&recipient, &context.paths.data_dir.join("data/workspaces"))
@@ -1754,6 +1783,130 @@ mod tests {
         let owner = Consumer::attach(&context.paths.data_dir, &recipient)
             .unwrap()
             .unwrap();
-        assert_eq!(owner.target.drain(8).unwrap().len(), 1);
+        assert_eq!(drain_pending(&owner.target).unwrap().len(), 1);
+    }
+    #[test]
+    fn slow_managed_sender_validation_delivers_once_and_rechecks_changed_git_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (temp, context, store, sender, recipient) = fixture();
+        let path = bind_managed_worktree(&context, &store, &sender);
+        let message = send(&context, &sender, &recipient, "slow sender").unwrap();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let calls = lookups.clone();
+        let probe = context.clone();
+        let resolver = identity::Resolver::new(move |cwd| {
+            // The caller must allow another connection to take the directory writer.
+            let (release, holder) = hold_writer(&probe);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            release.send(()).unwrap();
+            holder.join().unwrap();
+            calls.fetch_add(1, Ordering::Relaxed);
+            crate::worktree::session::common_dir(cwd)
+        });
+        owner
+            .delivery
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .set_peer_resolver(resolver);
+        let mut delivered = Vec::new();
+        for _ in 0..3 {
+            delivered = owner.target.drain(8).unwrap();
+            if !delivered.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(delivered.len(), 1);
+        assert!(delivered[0].contains("slow sender"));
+        let rows = inbox(&context, &recipient, false).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, message.id);
+        assert_eq!(rows[0].state, "context_committed");
+        assert_eq!(store.history(&recipient).unwrap().len(), 1);
+        assert!(owner.target.drain(8).unwrap().is_empty());
+        assert_eq!(lookups.load(Ordering::Relaxed), 2);
+
+        send(&context, &sender, &recipient, "cached sender").unwrap();
+        assert_eq!(drain_pending(&owner.target).unwrap().len(), 1);
+        assert_eq!(
+            lookups.load(Ordering::Relaxed),
+            2,
+            "unchanged worktree reran Git"
+        );
+
+        let pending = send(&context, &sender, &recipient, "changed sender").unwrap();
+        let other = temp.path().join("other");
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&other)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            path.join(".git"),
+            format!("gitdir: {}\n", other.join(".git").display()),
+        )
+        .unwrap();
+        assert!(owner.target.drain(8).unwrap().is_empty());
+        let blocked = inbox(&context, &recipient, false)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == pending.id)
+            .unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(store.history(&recipient).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_busy_shard_preserves_the_claim_generation_until_delivery() {
+        use std::{sync::mpsc, time::Duration};
+        let (_temp, context, store, sender, recipient) = fixture();
+        let message = send(&context, &sender, &recipient, "busy shard").unwrap();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let (locked, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let db = context.db.clone();
+        let id = recipient.clone();
+        let holder = std::thread::spawn(move || {
+            db.fixture_shard(&id, |conn| {
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                locked.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(20)).unwrap();
+                conn.execute_batch("ROLLBACK").unwrap();
+            })
+            .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        for _ in 0..3 {
+            assert!(owner.target.drain(8).unwrap().is_empty());
+            let claim = context
+                .db
+                .fixture_directory(|conn| {
+                    conn.query_row(
+                        "SELECT state,generation FROM session_inbox WHERE id=?1",
+                        [&message.id],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim, ("claimed".into(), 1));
+        }
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(drain_pending(&owner.target).unwrap().len(), 1);
+        assert_eq!(
+            inbox(&context, &recipient, false).unwrap()[0].state,
+            "context_committed"
+        );
+        assert_eq!(store.history(&recipient).unwrap().len(), 1);
+        assert!(owner.target.drain(8).unwrap().is_empty());
     }
 }

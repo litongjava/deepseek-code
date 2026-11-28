@@ -306,13 +306,20 @@ pub fn resolve(
     source: &Path,
 ) -> Result<Option<PathBuf>> {
     resolve_with(conn, id, project_id, source, |path, repo| {
-        ensure!(common_dir(path)? == common_dir(repo)?, "Conversation worktree no longer belongs to this repository");
+        ensure!(
+            common_dir(path)? == common_dir(repo)?,
+            "Conversation worktree no longer belongs to this repository"
+        );
         Ok(())
     })
 }
 
 pub(crate) fn common_dir(cwd: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(git(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize()?)
+    Ok(PathBuf::from(git(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)
+    .canonicalize()?)
 }
 
 pub(crate) fn resolve_with(

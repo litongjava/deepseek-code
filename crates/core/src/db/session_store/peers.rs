@@ -64,9 +64,14 @@ impl Stores {
 }
 
 impl super::SessionDb {
-    pub(crate) fn validate_peer_endpoint(&self, resolver: &mut session_messages::identity::Resolver)->Result<()>{
-        let _guard=self.stores.key_lock(&self.key,false,false)?;
+    pub(crate) fn validate_peer_endpoint(
+        &self,
+        resolver: &mut session_messages::identity::Resolver,
+    ) -> Result<()> {
+        let _guard = self.stores.key_lock(&self.key, false, false)?;
         self.check_directory()?;
-        self.stores.global().read(|c|resolver.project(c,self.id()).map(drop))
+        self.stores
+            .global()
+            .read(|c| resolver.project(c, self.id()).map(drop))
     }
 }

@@ -5,11 +5,11 @@ use crate::services::{
     input_queue::{self, DeliveredInput, QueueError, QueueMode},
     session_messages::{self, ExecutionLease},
 };
-use session_messages::identity::{PeerProject, Resolver};
-use std::collections::HashMap;
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use session_messages::identity::{PeerProject, Resolver};
+use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::Path};
 
@@ -444,58 +444,61 @@ impl SessionDb {
                 [id,text], session_messages::row)?)
         };
         let replay = |c: &Connection| -> Result<Option<session_messages::Message>> {
-                if let Some((id, s, r, h)) = c
-                    .query_row("SELECT i.id,i.sender_incarnation,i.recipient,i.payload FROM session_inbox_operations o JOIN session_inbox i ON i.id=o.message_id WHERE operation_id=?1", [operation], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                        ))
-                    })
-                    .optional()?
-                {
-                    ensure!(
-                        s == self.incarnation && r == to.id && h == hash,
-                        "Peer operation conflict"
-                    );
-                    return message(c, &id).map(Some);
-                }
+            if let Some((id, s, r, h)) = c
+                .query_row("SELECT i.id,i.sender_incarnation,i.recipient,i.payload FROM session_inbox_operations o JOIN session_inbox i ON i.id=o.message_id WHERE operation_id=?1", [operation], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .optional()?
+            {
+                ensure!(
+                    s == self.incarnation && r == to.id && h == hash,
+                    "Peer operation conflict"
+                );
+                return message(c, &id).map(Some);
+            }
             Ok(None)
         };
         if let Some(existing) = self.stores.global().read(replay)? {
             return Ok(existing);
         }
-        let (from, dest) = self.stores.global().read(|c| Resolver::default().pair(c, &self.id, &to.id))?;
+        let (from, dest) = self
+            .stores
+            .global()
+            .read(|c| Resolver::default().pair(c, &self.id, &to.id))?;
         self.stores.global().write("send peer", &self.id, false, |c| {
-                if let Some(existing) = replay(c)? {
-                    return Ok(existing);
-                }
-                let (source, destination) = peer_projects(c, &self.id, &to.id, &from, &dest)?;
-                let (count, bytes): (i64, i64) =
-                    c.query_row("SELECT count(*),coalesce(sum(size),0) FROM session_inbox WHERE recipient=?1 AND state IN ('queued','claimed','blocked')", [&to.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                ensure!(
-                    count < 256 && bytes + text.len() as i64 <= 1024 * 1024,
-                    "Recipient inbox is full"
-                );
-                let id = to.new_message_id();
-                c.execute(
-                    "INSERT INTO session_inbox(id,sender,recipient,project_source,payload,size,created_at,sender_incarnation,recipient_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                    params![
-                        id,
-                        self.id,
-                        to.id,
-                        source,
-                        hash,
-                        text.len(),
-                        chrono::Utc::now().to_rfc3339(),
-                        self.incarnation,
-                        destination
-                    ],
-                )?;
-                c.execute("INSERT INTO session_inbox_operations VALUES(?1,?2,?3)", params![self.id, operation, id])?;
-                message(c, &id)
-            })
+            if let Some(existing) = replay(c)? {
+                return Ok(existing);
+            }
+            let (source, destination) = peer_projects(c, &self.id, &to.id, &from, &dest)?;
+            let (count, bytes): (i64, i64) =
+                c.query_row("SELECT count(*),coalesce(sum(size),0) FROM session_inbox WHERE recipient=?1 AND state IN ('queued','claimed','blocked')", [&to.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            ensure!(
+                count < 256 && bytes + text.len() as i64 <= 1024 * 1024,
+                "Recipient inbox is full"
+            );
+            let id = to.new_message_id();
+            c.execute(
+                "INSERT INTO session_inbox(id,sender,recipient,project_source,payload,size,created_at,sender_incarnation,recipient_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    id,
+                    self.id,
+                    to.id,
+                    source,
+                    hash,
+                    text.len(),
+                    chrono::Utc::now().to_rfc3339(),
+                    self.incarnation,
+                    destination
+                ],
+            )?;
+            c.execute("INSERT INTO session_inbox_operations VALUES(?1,?2,?3)", params![self.id, operation, id])?;
+            message(c, &id)
+        })
     }
     pub(crate) fn pending_peer_count(&self) -> Result<i64> {
         let _locks = self.stores.key_lock(&self.key, false, false)?;
@@ -674,7 +677,13 @@ fn paused(c: &Connection, id: &str) -> Result<bool> {
         |r| r.get(0),
     )?)
 }
-fn peer_projects<'a>(c: &Connection, from: &str, to: &str, sender: &'a PeerProject, recipient: &'a PeerProject) -> Result<(&'a str, &'a str)> {
+fn peer_projects<'a>(
+    c: &Connection,
+    from: &str,
+    to: &str,
+    sender: &'a PeerProject,
+    recipient: &'a PeerProject,
+) -> Result<(&'a str, &'a str)> {
     let source = sender.confirm(c, from)?;
     let destination = recipient.confirm(c, to)?;
     if source != destination {
@@ -742,9 +751,10 @@ impl DeliveryOwner {
         self.peer_resolver = resolver;
     }
 
-    pub(crate) fn poll_peer_context(&mut self, limit:usize) -> Result<Vec<DeliveredInput>> {
-        self.session.validate_peer_endpoint(&mut self.peer_resolver)?;
-        self.poll_turn(true,limit)
+    pub(crate) fn poll_peer_context(&mut self, limit: usize) -> Result<Vec<DeliveredInput>> {
+        self.session
+            .validate_peer_endpoint(&mut self.peer_resolver)?;
+        self.poll_turn(true, limit)
     }
 
     /// Start at most one durable generation per acknowledged user delivery.
@@ -903,7 +913,12 @@ impl DeliveryOwner {
     }
     pub fn next_peer(&mut self) -> Result<Option<Handoff>> {
         let mut batch = self.prepare_peers()?;
-        self.peer_before(&mut batch, usize::MAX, std::time::Instant::now() + super::WRITE_DEADLINE, false)
+        self.peer_before(
+            &mut batch,
+            usize::MAX,
+            std::time::Instant::now() + super::WRITE_DEADLINE,
+            false,
+        )
     }
 
     fn prepare_peers(&mut self) -> Result<PeerBatch> {
@@ -936,11 +951,17 @@ impl DeliveryOwner {
         let mut projects = HashMap::new();
         if !claims.is_empty() {
             s.stores.global().read(|c| {
-                for id in std::iter::once(s.id.as_str()).chain(claims.iter().filter_map(|(claim, _)| claim.sender.as_deref())) {
+                for id in std::iter::once(s.id.as_str()).chain(
+                    claims
+                        .iter()
+                        .filter_map(|(claim, _)| claim.sender.as_deref()),
+                ) {
                     if !projects.contains_key(id) {
                         let project = match self.peer_resolver.project(c, id) {
                             Ok(project) => Some(project),
-                            Err(err) if err.downcast_ref::<rusqlite::Error>().is_some() => return Err(err),
+                            Err(err) if err.downcast_ref::<rusqlite::Error>().is_some() => {
+                                return Err(err)
+                            }
                             Err(_) => None,
                         };
                         projects.insert(id.to_owned(), project);
@@ -949,11 +970,18 @@ impl DeliveryOwner {
                 Ok(())
             })?;
         }
-        Ok(PeerBatch { claims: claims.into_iter(), projects })
+        Ok(PeerBatch {
+            claims: claims.into_iter(),
+            projects,
+        })
     }
 
     fn peer_before(
-        &mut self, batch: &mut PeerBatch, max_bytes: usize, until: std::time::Instant, live: bool,
+        &mut self,
+        batch: &mut PeerBatch,
+        max_bytes: usize,
+        until: std::time::Instant,
+        live: bool,
     ) -> Result<Option<Handoff>> {
         let s = &self.session;
         for (mut claim, size) in batch.claims.by_ref() {
