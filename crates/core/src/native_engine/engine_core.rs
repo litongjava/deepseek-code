@@ -665,7 +665,7 @@ impl QueryEngine {
             anyhow::bail!("Cannot prepare a summary request");
         };
         turn.executor.restore_request_context().await?;
-        let durable = turn.executor.compaction_history(native)?;
+        let durable = turn.executor.compaction_history(..);
         let summary_only_wire = if native {
             None
         } else {

@@ -5,6 +5,16 @@ const MID_TURN_CONTINUATION_FOCUS: &str = "This automatic compaction runs mid-tu
 
 const NATIVE_MID_TURN_CONTINUATION_PROMPT: &str = "Context was automatically compacted mid-turn. Continue executing the current task immediately from where you left off without waiting for a new user prompt.";
 
+/// A selection from the executor's canonical model history, before wire rendering.
+pub(in crate::native_engine) struct CompactionHistory(Vec<Value>);
+
+// Host-provided history can be absent from the shard. Keep any later live
+// messages outside that snapshot and reattach them after in-flight compaction.
+struct ExplicitHistory {
+    source: CompactionHistory,
+    rendered_len: usize,
+}
+
 pub(super) enum MidTurnCompact {
     /// Mid-turn auto-compact is active and checked; context is below threshold.
     Managed,
@@ -116,7 +126,11 @@ impl ToolLoopExecutor {
         &mut self,
         shard: &crate::db::session_store::SessionDb,
         capture_cut: bool,
-    ) -> Result<(Option<crate::db::session_store::CompactionWindow>, bool)> {
+    ) -> Result<(
+        Option<crate::db::session_store::CompactionWindow>,
+        bool,
+        Option<ExplicitHistory>,
+    )> {
         self.flush_replay_segment(shard, None)?;
         let (mut messages, boundary, (index, entries), (protected, pending), cut) =
             shard.read(|r| {
@@ -140,6 +154,14 @@ impl ToolLoopExecutor {
                     .transpose()?;
                 Ok((messages, boundary, context, protection, cut))
             })?;
+        let explicit_len = if capture_cut
+            && crate::services::compaction::native::supports(&self.provider)
+            && !messages.starts_with(&self.messages)
+        {
+            Some(self.build_openai_messages()?.len())
+        } else {
+            None
+        };
         let microcompact_changed = if self.standalone_frontend {
             crate::services::compaction::microcompact(
                 shard,
@@ -158,7 +180,11 @@ impl ToolLoopExecutor {
         self.context_reminders =
             crate::prompt::first_message_reminders(self.session_reminders.clone());
         self.turn_context = entries;
-        self.messages = messages;
+        let previous = std::mem::replace(&mut self.messages, messages);
+        let explicit = explicit_len.map(|rendered_len| ExplicitHistory {
+            source: CompactionHistory(previous),
+            rendered_len,
+        });
         self.applied_compaction = boundary.is_some();
         if boundary.is_some() {
             self.shell_cwd_needs_report
@@ -167,7 +193,7 @@ impl ToolLoopExecutor {
                 .store(0, std::sync::atomic::Ordering::Release);
         }
         self.context_boundary_id = boundary;
-        Ok((cut, microcompact_changed))
+        Ok((cut, microcompact_changed, explicit))
     }
 
     fn build_mid_turn_summary_wire<M: serde::Serialize>(
@@ -371,7 +397,7 @@ impl ToolLoopExecutor {
         // both microcompact and full summarization see the latest progress.
         self.flush_replay_segment(&shard, Some(current_text))?;
         let additions = window.split_off(durable_len.min(window.len()));
-        let (_, microcompact_changed) = self.reload_with_cut(&shard, false)?;
+        let (_, microcompact_changed, _) = self.reload_with_cut(&shard, false)?;
         *window = render(self, &self.message_additions())?;
         window.extend(additions.clone());
 
@@ -450,9 +476,7 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(crate::data_layout::data_root_of);
         let generation = async {
-            let input = self.compaction_history(crate::services::compaction::native::supports(
-                &self.provider,
-            ))?;
+            let input = self.compaction_history(..);
             self.generate_auto_compaction(gate, &shard, input, window, &focus)
                 .await
         };
@@ -595,14 +619,11 @@ impl ToolLoopExecutor {
         self.reload_history(&shard)
     }
 
-    /// Opaque Responses compaction preserves the stored protocol output, including
-    /// structured tool results. A normal turn may render a shorter CLI preview.
-    pub(in crate::native_engine) fn compaction_history(&self, native: bool) -> Result<Vec<Value>> {
-        if native {
-            multimodal::normalize_messages(&self.messages)
-        } else {
-            self.prepare_main_history()
-        }
+    pub(in crate::native_engine) fn compaction_history(
+        &self,
+        cut: impl std::slice::SliceIndex<[Value], Output = [Value]>,
+    ) -> CompactionHistory {
+        CompactionHistory(self.messages[cut].to_vec())
     }
 
     /// The native endpoint and its fallback serialize the same frozen rows.
@@ -610,7 +631,7 @@ impl ToolLoopExecutor {
     pub(in crate::native_engine) async fn generate_compaction_snapshot(
         &self,
         shard: &crate::db::session_store::SessionDb,
-        mut rows: Vec<Value>,
+        history: CompactionHistory,
         summary_only_wire: Option<super::super::followup::WireRequest>,
         system: &str,
         focus: &str,
@@ -618,6 +639,7 @@ impl ToolLoopExecutor {
         mut options: super::super::request_options::RequestOptions,
     ) -> Result<crate::services::compaction::GeneratedSummary> {
         use crate::services::compaction::{checkpoint::Checkpoint, native};
+        let mut rows = multimodal::normalize_messages(&history.0)?;
         rows.retain(|row| row["origin"] != "memory_change");
         let selected = shard.scoped_stores();
         options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
@@ -671,7 +693,7 @@ impl ToolLoopExecutor {
         &self,
         gate: &AutoCompactionGate,
         shard: &crate::db::session_store::SessionDb,
-        input: Vec<Value>,
+        input: CompactionHistory,
         window: &[M],
         focus: &str,
     ) -> Result<(
@@ -688,7 +710,7 @@ impl ToolLoopExecutor {
             let record = super::super::request_recording::CompactionRecord::start(
                 &mut options,
                 "auto",
-                &serde_json::to_string(&input)?,
+                &serde_json::to_string(&input.0)?,
             );
             let summary_only_wire = if crate::services::compaction::native::supports(&self.provider)
             {
@@ -772,32 +794,28 @@ impl ToolLoopExecutor {
         let mut physical_cut = None;
         let mut microcompact_changed = false;
         let mut persisted_len = window.len();
-        let mut durable_window = None;
+        let mut explicit_history = None;
         if let (Some(durable_len), Some(ExecutorHistory::Session(shard))) =
             (durable_len, self.executor_history.clone())
         {
-            let original = values(window)?;
             let additions = window.split_off(durable_len);
-            let (cut, changed) = self.reload_with_cut(&shard, true)?;
+            let (cut, changed, explicit) = self.reload_with_cut(&shard, true)?;
             physical_cut = cut;
             microcompact_changed = changed;
             *window = render(self, &self.message_additions())?;
             persisted_len = window.len();
-            let durable = values(window)?;
             // An explicit request can carry a window that the durable shard does
             // not contain (for example a replayed conversation). Compact that
             // in-flight window instead of rewriting the stored history.
-            let matches = original.len() >= durable.len() && original[..durable.len()] == durable[..];
-            durable_window = (!matches).then_some(original);
-            window.extend(additions);
-            rows = if native {
-                match &durable_window {
-                    Some(provided) => provided.clone(),
-                    None => values(window)?,
+            if let Some(history) = explicit {
+                if rows[..durable_len] != values(window)? {
+                    explicit_history = Some(history);
                 }
-            } else {
-                values(window)?
-            };
+            }
+            window.extend(additions);
+            if explicit_history.is_none() {
+                rows = values(window)?;
+            }
         }
         let compressor = ContextCompressor::new(None).with_overrides(&self.projected_results);
         let estimated = TokenCounter::estimate(&rows);
@@ -822,13 +840,13 @@ impl ToolLoopExecutor {
             let Some(ExecutorHistory::Session(shard)) = self.executor_history.clone() else {
                 anyhow::bail!("Native Responses compression requires durable session history");
             };
-            if let Some(provided) = durable_window {
+            if let Some(explicit) = explicit_history {
                 let result = self
                     .generate_auto_compaction(
                         gate,
                         &shard,
-                        provided.clone(),
-                        &provided,
+                        explicit.source,
+                        &rows,
                         MID_TURN_CONTINUATION_FOCUS,
                     )
                     .await;
@@ -836,8 +854,8 @@ impl ToolLoopExecutor {
                     Ok(pair) => pair,
                     Err(error) => {
                         let cause = format!("{error:#}");
-                        self.check_uncompressed_request(&cause, &provided).await?;
-                        *window = provided
+                        self.check_uncompressed_request(&cause, &rows).await?;
+                        *window = rows
                             .into_iter()
                             .map(serde_json::from_value)
                             .collect::<serde_json::Result<_>>()?;
@@ -856,9 +874,15 @@ impl ToolLoopExecutor {
                         shard.id(),
                     );
                 }
+                let additions = rows
+                    .into_iter()
+                    .skip(explicit.rendered_len)
+                    .map(serde_json::from_value)
+                    .collect::<serde_json::Result<Vec<M>>>()?;
                 *window = vec![serde_json::from_value(json!({
                     "role":"user", "content":generated.text, "provider_content":generated.native,
                 }))?];
+                window.extend(additions);
                 return Ok(false);
             }
             let cut = physical_cut.context("Missing native compaction snapshot")?;
@@ -879,7 +903,7 @@ impl ToolLoopExecutor {
                     .generate_auto_compaction(
                         gate,
                         &shard,
-                        rows,
+                        self.compaction_history(..cut.prefix_len),
                         &window[..end],
                         self.system_prompt.as_deref().unwrap_or(""),
                     )
