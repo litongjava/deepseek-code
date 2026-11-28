@@ -664,9 +664,9 @@ async fn environment_is_its_own_responses_part_in_first_message_order() {
         "{parts:?}"
     );
     let text = |index: usize| parts[index]["text"].as_str().unwrap();
-    assert!(text(0).starts_with("<system-reminder>\n") && text(0).contains("user marker"));
-    assert!(!text(0).contains("project marker"));
-    assert_eq!(text(1), crate::prompt::standalone_frontend_reminder());
+    assert_eq!(text(0), crate::prompt::standalone_frontend_reminder());
+    assert!(text(1).starts_with("<system-reminder>\n") && text(1).contains("user marker"));
+    assert!(!text(1).contains("project marker"));
     assert!(text(2).starts_with("<system-reminder>\n") && text(2).contains("project marker"));
     assert!(text(3).starts_with("<system-reminder>\nTools you can load with ToolLoad"));
     assert!(text(4).starts_with("<system-reminder>\nAvailable skills:"));

@@ -64,7 +64,7 @@ pub fn default_system_prompt(_profile: PromptProfile) -> String {
 
 /// The CLI's constant runtime facts. They describe the frontend, so they travel
 /// in the first user message as their own reminder instead of the system prompt.
-pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal.no Desktop window or Bridge server; use native tools directly. For an interactive command like `gcloud auth login`, tell the user to enter `! <command>` and its output appears here.";
+pub const STANDALONE_FRONTEND: &str = "Launched using the dcl command and running directly in a terminal. No Desktop window or Bridge server.";
 
 pub fn standalone_frontend_reminder() -> String {
     format!("<system-reminder>\n{STANDALONE_FRONTEND}\n</system-reminder>")
@@ -563,17 +563,17 @@ pub struct SessionReminders {
     pub skills: Option<String>,
 }
 
-/// The reminders that open the first user message: the user's own instructions,
-/// the CLI's frontend facts, the project's instructions, the project experience
+/// The reminders that open the first user message: the CLI's frontend facts (when applicable),
+/// the user's own instructions, the project's instructions, the project experience
 /// index, the loadable tools, the skills, the environment, the resident memory
 /// indexes, the date, the Git snapshot, skills recovered after compaction,
 /// and the static session tips block.
 pub fn first_message_reminders(parts: SessionReminders) -> Vec<String> {
     let mut blocks = Vec::new();
-    blocks.extend(parts.user_instructions);
     if parts.standalone_frontend {
         blocks.push(standalone_frontend_reminder());
     }
+    blocks.extend(parts.user_instructions);
     blocks.extend(parts.project_instructions);
     blocks.extend(parts.experience);
     blocks.extend(parts.loadable_tools);
@@ -1535,9 +1535,12 @@ mod tests {
             skills: Some("<system-reminder>\ninvoked skills\n</system-reminder>".into()),
         });
         assert_eq!(blocks.len(), 13);
-        assert!(blocks[0].contains("user rules"));
-        assert_eq!(blocks[1], standalone_frontend_reminder());
-        assert!(blocks[1].contains("! <command>"), "the CLI's command hint travels with its frontend facts");
+        assert_eq!(blocks[0], standalone_frontend_reminder());
+        assert!(blocks[1].contains("user rules"));
+        assert!(!blocks[0].contains("! <command>"));
+        for profile in [PromptProfile::Code, PromptProfile::Desktop] {
+            assert!(compose_system_prompt(None, profile).contains("enter `! <command>` in the chat input"));
+        }
         assert!(blocks[2].contains("project rules"));
         assert!(blocks[3].contains("experience marker"));
         assert!(blocks[4].contains("Tools you can load with ToolLoad"));
@@ -1562,7 +1565,6 @@ mod tests {
             "MCP tools available on demand",
             "Tools you can load with ToolLoad",
             "Available skills:",
-            "! <command>",
         ] {
             assert!(!system.contains(absent), "{absent} in:\n{system}");
         }
