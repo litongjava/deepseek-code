@@ -111,6 +111,19 @@ impl ProjectBinding {
             id: project_id,
         })
     }
+
+    fn validate_source(&self, lookup: impl FnMut(&Path) -> Result<PathBuf>) -> Result<String> {
+        project_repo::validate_trusted_folders(&self.folders)?;
+        ensure!(
+            self.path.is_absolute() && self.path.is_dir(),
+            "Project folder is unavailable"
+        );
+        if let Some(worktree) = &self.worktree {
+            worktree.validate(&self.path, lookup)?;
+        }
+        let source = self.path.canonicalize()?.to_string_lossy().into_owned();
+        Ok(if cfg!(windows) { source.to_lowercase() } else { source })
+    }
 }
 
 pub(crate) struct PeerProject {
@@ -118,7 +131,7 @@ pub(crate) struct PeerProject {
     binding: ProjectBinding,
     // Linkage checked by Git during preparation. A retarget while waiting for
     // the writer invalidates the evidence without launching another process.
-    git_keys: Vec<(PathBuf, Option<GitKey>)>,
+    git_keys: Vec<(PathBuf, Option<GitKey>, PathBuf)>,
 }
 
 impl PeerProject {
@@ -127,12 +140,13 @@ impl PeerProject {
             self.binding == ProjectBinding::read(conn, id)?,
             "Message project changed during authorization"
         );
-        ensure!(
-            self.git_keys
-                .iter()
-                .all(|(path, key)| GitKey::read(path) == *key),
-            "Git worktree identity changed during authorization"
-        );
+        let source = self.binding.validate_source(|cwd| {
+            let (_, key, common) = self.git_keys.iter().find(|(path, _, _)| path == cwd)
+                .context("Missing verified Git identity")?;
+            ensure!(GitKey::read(cwd) == *key, "Git worktree identity changed during authorization");
+            Ok(common.clone())
+        })?;
+        ensure!(source == self.source, "Message project source changed during authorization");
         Ok(&self.source)
     }
 }
@@ -178,27 +192,15 @@ impl Resolver {
 
     pub(crate) fn project(&mut self, conn: &Connection, id: &str) -> Result<PeerProject> {
         let binding = ProjectBinding::read(conn, id)?;
-        project_repo::validate_trusted_folders(&binding.folders)?;
-        ensure!(
-            binding.path.is_absolute() && binding.path.is_dir(),
-            "Project folder is unavailable"
-        );
         let mut git_keys = Vec::new();
-        if let Some(worktree) = &binding.worktree {
-            worktree.validate(&binding.path, |cwd| {
-                let key = GitKey::read(cwd);
-                let common = self.common_dir(cwd, key.as_ref())?;
-                git_keys.push((cwd.to_owned(), key));
-                Ok(common)
-            })?;
-        }
-        let source = binding.path.canonicalize()?.to_string_lossy().into_owned();
+        let source = binding.validate_source(|cwd| {
+            let key = GitKey::read(cwd);
+            let common = self.common_dir(cwd, key.as_ref())?;
+            git_keys.push((cwd.to_owned(), key, common.clone()));
+            Ok(common)
+        })?;
         Ok(PeerProject {
-            source: if cfg!(windows) {
-                source.to_lowercase()
-            } else {
-                source
-            },
+            source,
             binding,
             git_keys,
         })
