@@ -1,6 +1,7 @@
 mod context_search_index;
 pub(crate) mod context_search_repo;
 pub mod conversation_repo;
+pub mod stored_binding;
 pub mod diff_repo;
 pub mod h5_repo;
 pub mod im_config_repo;

@@ -72,7 +72,10 @@ async fn create(State(state): State<AppState>, Json(input): Json<ProjectInput>) 
 async fn detail(Path(id): Path<String>, State(state): State<AppState>) -> ApiResult {
     let (project, files, chats) = database(&state, move |db| db.project_detail(&id)).await?;
     let mut result = json!(project);
-    result["conversations"] = json!(chats);
+    result["conversations"] = json!(chats
+        .into_iter()
+        .map(|row| row.with_desktop_model_key())
+        .collect::<Vec<_>>());
     result["files"] = json!(files);
     Ok(Json(result))
 }
@@ -146,7 +149,7 @@ async fn create_chat(
         )
     })
     .await?;
-    Ok(Json(json!(chat)))
+    Ok(Json(json!(chat.with_desktop_model_key())))
 }
 
 pub fn routes() -> Router<AppState> {

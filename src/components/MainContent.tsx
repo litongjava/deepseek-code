@@ -2,13 +2,13 @@ import { contentBlocks, hasUnavailableImages, readImageDataUrl, replaceUserText,
 import { useComposerDrop } from '../features/chat/useComposerDrop';
 import PlanApprovalController from '../features/chat/PlanApprovalController';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { planModeFromTool, approvedPermissionModeFromTool } from '../features/streaming/planMode';
 import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, AlertTriangle, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, Loader2, Smartphone, Terminal, Monitor } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconWebSearch } from './Icons';
 import DeepSeekCodeLogo from './DeepSeekCodeLogo';
-import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, compactConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
+import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
 import { listSkillCommands } from '../api/skills';
 import ToolPermissionPrompt from './ToolPermissionPrompt';
 import PermissionDialog, { ApprovalInfo } from './PermissionDialog';
@@ -31,7 +31,7 @@ import HomeModeSelector, { type HomeMode } from './HomeModeSelector';
 import PromptSuggestionsPanel from './PromptSuggestionsPanel';
 import FileUploadPreview, { PendingFile } from './FileUploadPreview';
 import AddFromGithubModal from './AddFromGithubModal';
-import CompactingStatus from '../features/compact/CompactingStatus';
+import { runManualCompact } from '../features/compact/runManualCompact';
 import CompactDialog from '../features/compact/CompactDialog';
 import CreateProjectDialog from '../features/project/CreateProjectDialog';
 import { useCreatedProject } from '../features/project/useCreatedProject';
@@ -294,6 +294,20 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   // Per-conversation message buffer for multi-conversation streaming isolation
   const viewingIdRef = useRef<string | null>(null);
+  const viewGeneration = useRef(0);
+  useLayoutEffect(() => {
+    viewingIdRef.current = activeId || null;
+    return () => {
+      viewingIdRef.current = null;
+      viewGeneration.current++;
+    };
+  }, [activeId]);
+
+  const captureView = (id: string) => {
+    const generation = viewGeneration.current;
+    return () => viewingIdRef.current === id && viewGeneration.current === generation;
+  };
+
   const messagesBufferRef = useRef(new Map<string, any[]>());
 
   const {
@@ -453,8 +467,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
   const [resourceAlertToast, setResourceAlertToast] = useState<ResourceAlertToast | null>(null);
   useEffect(() => {
-    if (compactStatus.state !== 'notice') return;
-    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), 8000);
+    const duration = { notice: 8000, done: 4000, error: 3000, idle: 0, compacting: 0 }[compactStatus.state];
+    if (!duration) return;
+    const timer = setTimeout(() => setCompactStatus({ state: 'idle' }), duration);
     return () => clearTimeout(timer);
   }, [compactStatus, setCompactStatus]);
   const showResourceAlert = useCallback((alert: { summary?: string }) => {
@@ -681,7 +696,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setActiveTasks(new Map());
     setAskUserDialog(null);
     isCreatingRef.current = false;
-    viewingIdRef.current = activeId || null;
+    setCompactStatus({ state: 'idle' });
     setReadyConversationId(null);
 
     // Pre-warm engine when user opens a conversation (init in background before they send)
@@ -807,7 +822,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           }
         }).catch(() => {});
       }
-      getContextSize(activeId).then(setContextInfo).catch(() => { });
+      const isCurrent = captureView(activeId);
+      getContextSize(activeId).then(context => { if (isCurrent()) setContextInfo(context); }).catch(() => { });
       isAtBottomRef.current = true;
 
       // Handle initialMessage from Project page navigation
@@ -847,14 +863,15 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     };
   }, [abortStreamSession]);
 
-  const loadConversation = async (conversationId: string) => {
+  const loadConversation = async (conversationId: string, isCurrent = captureView(conversationId)) => {
+    if (!isCurrent()) return;
     let loaded = false;
     console.log('[MainContent] loadConversation called for:', conversationId);
     stopPolling();
     try {
       console.log('[MainContent] Calling getConversation...');
       const data = await getConversation(conversationId);
-      if (viewingIdRef.current !== conversationId) return;
+      if (!isCurrent()) return;
       console.log('[MainContent] getConversation returned:', data ? 'success' : 'null', 'messages:', data?.messages?.length);
       // Restore conversation model. If the stored model isn't available in the
       // current user_mode (typical case: user switched modes after the conv was
@@ -915,7 +932,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       // 检查是否有活跃的后台生成
       try {
         const genStatus = await getGenerationStatus(conversationId);
-        if (viewingIdRef.current !== conversationId) return;
+        if (!isCurrent()) return;
         if (genStatus.active && genStatus.status === 'generating') {
           // 追加占位 assistant 消息（如果最后一条不是 assistant）
           setMessages(prev => {
@@ -959,11 +976,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           pollingRef.current = setInterval(async () => {
             try {
               const s = await getGenerationStatus(conversationId);
-              if (viewingIdRef.current !== conversationId) return;
+              if (!isCurrent()) return;
               if (s.active && s.assistant_id && s.assistant_id !== polledAssistantId) {
                 polledAssistantId = s.assistant_id;
                 stopPolling();
-                await loadConversation(conversationId);
+                await loadConversation(conversationId, isCurrent);
                 return;
               }
               if (!s.active || s.status !== 'generating') {
@@ -971,17 +988,18 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 stopPolling();
                 setLoading(false);
                 const final_ = await getConversation(conversationId);
-                if (viewingIdRef.current !== conversationId) return;
+                if (!isCurrent()) return;
                 setMessages((final_.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg)));
                 isAtBottomRef.current = true;
                 scheduleScrollToBottomAfterRender();
                 if (final_.title) setConversationTitle(final_.title);
-                getContextSize(conversationId).then(setContextInfo).catch(() => { });
+                getContextSize(conversationId).then(context => { if (isCurrent()) setContextInfo(context); }).catch(() => { });
                 return;
               }
               // 跨进程轮询：内容在另一个进程，从数据库拉最新消息
               if (s.crossProcess) {
                 const fresh = await getConversation(conversationId);
+                if (!isCurrent()) return;
                 const freshMsgs = (fresh.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg));
                 isAtBottomRef.current = true;
                 scheduleScrollToBottomAfterRender();
@@ -1011,6 +1029,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 return newMsgs;
               });
             } catch (e) {
+              if (!isCurrent()) return;
               console.error('[Polling] error:', e);
               stopPolling();
               setLoading(false);
@@ -1021,13 +1040,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
       } catch {
         // generation-status 接口失败不影响正常加载
-        setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     } catch (err) {
       console.error(err);
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     } finally {
-      if (loaded && viewingIdRef.current === conversationId) setReadyConversationId(conversationId);
+      if (loaded && isCurrent()) setReadyConversationId(conversationId);
     }
   };
 
@@ -1129,6 +1148,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     return true;
   };
 
+  const handleManualCompact = (conversationId: string, instruction: string) =>
+    runManualCompact(conversationId, instruction, loadConversation, captureView(conversationId));
+
   const handleSend = async (overrideText?: string) => {
     if (requestCodeProject()) return;
     if (modeChanging || (!activeId && isCreatingRef.current) || gitSetupPending) return;
@@ -1144,7 +1166,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       if (!project.folders?.length) { setProjectAddToast('Add a source folder before sending'); return; }
       if (project.folders.some(folder => !folder.trusted)) { setProjectToTrust(project); return; }
     }
-    if (await handleSlashCommand(effectiveText, activeId)) return;
+    if (await handleSlashCommand(effectiveText, activeId, handleManualCompact)) return;
     // Skill slug is already in the text (inserted when selected from menu)
     setSelectedSkill(null);
     const hasFiles = files.some(f => f.status === 'done');
@@ -1880,10 +1902,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
         )
       )}
-      {(webSearchToast || resourceAlertToast || compactStatus.state === 'notice') && (
+      {(webSearchToast || resourceAlertToast || compactStatus.message) && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col items-center gap-2 max-w-[92vw]">
-          {compactStatus.state === 'notice' && (
-            <div role="status" className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
+          {compactStatus.message && (
+            <div role={compactStatus.state === 'error' ? 'alert' : 'status'} className="max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text">
               {compactStatus.message}
             </div>
           )}
@@ -2545,13 +2567,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       {showCompactDialog && (
         <CompactDialog
           activeId={activeId!}
-          compactStatus={compactStatus}
+          onCompact={handleManualCompact}
           compactInstruction={compactInstruction}
           setCompactInstruction={setCompactInstruction}
-          setCompactStatus={setCompactStatus}
           setShowCompactDialog={setShowCompactDialog}
-          setContextInfo={setContextInfo}
-          loadConversation={loadConversation}
         />
       )}
 

@@ -233,6 +233,7 @@ impl crate::db::DbManager {
             .workspace_path
             .as_deref()
             .context("Project has no folder")?;
+        let binding = super::CreateOptions::from_desktop_model(model)?;
         let prepared =
             crate::worktree::session::prepare(std::path::Path::new(source), branch, use_worktree)?;
         let chat = uuid::Uuid::new_v4().to_string();
@@ -254,8 +255,8 @@ impl crate::db::DbManager {
                             tx,
                             &chat,
                             title,
-                            model,
-                            None,
+                            binding.model.as_deref(),
+                            binding.provider.as_deref(),
                             Some(&prepared.path.to_string_lossy()),
                             Some(id),
                             false,

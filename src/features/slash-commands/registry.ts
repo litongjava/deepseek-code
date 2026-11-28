@@ -3,14 +3,14 @@ import { useChatStore } from '../../stores/useChatStore';
 import { useStreamingStore } from '../../stores/useStreamingStore';
 import { useProjectStore } from '../../stores/useProjectStore';
 import {
-  compactConversation,
   deleteMessagesFrom,
   branchConversation,
   getUserUsage,
   getSkills,
 } from '../../api';
 
-type SlashCommand = (activeId: string | null, args: string) => boolean | Promise<boolean>;
+type ManualCompact = (id: string, instruction: string) => Promise<void>;
+type SlashCommand = (activeId: string | null, args: string, compact: ManualCompact) => boolean | Promise<boolean>;
 
 function sysMsg(content: string) {
   const { setMessages } = useChatStore.getState();
@@ -76,19 +76,9 @@ const cmdCost: SlashCommand = () => {
   return true;
 };
 
-const cmdCompact: SlashCommand = (activeId) => {
-  if (activeId) {
-    compactConversation(activeId)
-      .then((result) => {
-        sysMsg(
-          `**Conversation compacted.**\n\nSaved ${result.tokensSaved?.toLocaleString() || 0} tokens (${result.messagesCompacted || 0} messages compacted).`,
-        );
-      })
-      .catch((err) => {
-        sysMsg(`Compact failed: ${err}`);
-      });
-  }
+const cmdCompact: SlashCommand = async (activeId, args, compact) => {
   clearInput();
+  if (activeId) await compact(activeId, args);
   return true;
 };
 
@@ -396,7 +386,7 @@ const commandMap: Record<string, SlashCommand> = {
   '/export': cmdExport,
 };
 
-export async function handleSlashCommand(text: string, activeId: string | null): Promise<boolean> {
+export async function handleSlashCommand(text: string, activeId: string | null, compact: ManualCompact): Promise<boolean> {
   const trimmed = text.trim();
   if (!trimmed.startsWith('/')) return false;
   const parts = trimmed.split(/\s+/);
@@ -405,7 +395,7 @@ export async function handleSlashCommand(text: string, activeId: string | null):
 
   const handler = commandMap[cmd];
   if (handler) {
-    return await handler(activeId, args);
+    return await handler(activeId, args, compact);
   }
   return false;
 }

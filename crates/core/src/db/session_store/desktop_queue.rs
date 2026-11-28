@@ -88,6 +88,14 @@ impl super::SessionRead<'_> {
     }
 }
 
+impl super::SessionDb {
+    pub fn acquire_settled_execution(&self) -> Result<ExecutionLease> {
+        let lease = self.acquire_execution()?;
+        self.settle_abandoned(&lease)?;
+        Ok(lease)
+    }
+}
+
 impl Stores {
     pub fn chat_execution_lease(&self, id: &str, model: &str) -> Result<ExecutionLease> {
         Ok(self
@@ -103,18 +111,28 @@ impl Stores {
         first: Option<&serde_json::Value>,
         origin: &str,
     ) -> Result<(ExecutionLease, bool)> {
+        self.admit_chat_execution_with_provider(id, model, None, first, origin)
+    }
+
+    pub fn admit_chat_execution_with_provider(
+        &self,
+        id: &str,
+        model: &str,
+        provider: Option<&str>,
+        first: Option<&serde_json::Value>,
+        origin: &str,
+    ) -> Result<(ExecutionLease, bool)> {
         let row = self
             .global()
             .read_directory_row(id, |c| super::directory::one(c, id))?;
         let Some(row) = row else {
-            let options = super::conversations::first_chat_options(model, first, origin)?;
+            let options = super::conversations::first_chat_options(model, provider, first, origin)?;
             return self.create_chat_with_lease(id, options);
         };
         let session = self.open_listed(&row)?;
-        let lease = session.acquire_execution()?;
-        session.settle_abandoned(&lease)?;
-        let options = super::conversations::first_chat_options(model, first, origin)?;
-        let sealed_first = session.consume_sealed_first(options.first_message.as_ref())?;
+        let lease = session.acquire_settled_execution()?;
+        let first_message = super::conversations::first_chat_message(first, origin)?;
+        let sealed_first = session.consume_sealed_first(first_message.as_ref())?;
         Ok((lease, sealed_first))
     }
     pub fn existing_chat_lease(&self, id: &str) -> Result<ExecutionLease> {
