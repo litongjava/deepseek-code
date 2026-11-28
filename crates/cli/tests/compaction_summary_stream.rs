@@ -291,6 +291,45 @@ async fn provider_context_rejection_keeps_the_pre_turn_compaction_failure() {
     scenario(Scenario::Rejected).await;
 }
 
+fn write_responses_fixture(paths: &RuntimePaths, base: &str) {
+    deepseek_code_core::data_layout::write_config_file(
+        paths.data_dir.join("config/providers.json"),
+        json!([{"id":"local","name":"Local","builtin_id":"openai","api_format":"openai",
+            "base_url":base,"api_key":"fixture-only","enabled":true,
+            "models":[{"id":"gpt-fixture","name":"Fixture","api":"openai-responses","enabled":true,
+                "context_window":64000,"max_tokens":1000,"supports_web_search":false}]}])
+        .to_string(),
+    )
+    .unwrap();
+}
+
+async fn resumed_query(
+    paths: &RuntimePaths,
+    workspace: &std::path::Path,
+    id: &str,
+    prompt: &str,
+) -> std::process::Output {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dcl"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("DEEPSEEK_CODE") {
+            cli.env_remove(key);
+        }
+    }
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        cli.env("DEEPSEEK_CODE_DATA_DIR", &paths.data_dir)
+            .arg("--path")
+            .arg(workspace)
+            .args(["--resume", id, "query", "-p", prompt])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
 /// Drive the same slash command a user runs in a resumed CLI session.
 async fn manual_native_compaction(persistent: bool) {
     use axum::{http::StatusCode, response::IntoResponse};
@@ -334,34 +373,8 @@ async fn manual_native_compaction(persistent: bool) {
         .append(&id, "assistant", "The fixture is ready")
         .unwrap();
     let before = store.history(&id).unwrap();
-    deepseek_code_core::data_layout::write_config_file(
-        paths.data_dir.join("config/providers.json"),
-        json!([{"id":"local","name":"Local","builtin_id":"openai","api_format":"openai",
-            "base_url":base,"api_key":"fixture-only","enabled":true,
-            "models":[{"id":"gpt-fixture","name":"Fixture","api":"openai-responses","enabled":true,
-                "context_window":64000,"max_tokens":1000,"supports_web_search":false}]}])
-        .to_string(),
-    )
-    .unwrap();
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_dcl"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("DEEPSEEK_CODE") {
-            cli.env_remove(key);
-        }
-    }
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        cli.env("DEEPSEEK_CODE_DATA_DIR", &paths.data_dir)
-            .arg("--path")
-            .arg(temp.path())
-            .args(["--resume", &id, "query", "-p", "/compact Keep the fixture"])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    write_responses_fixture(&paths, &base);
+    let output = resumed_query(&paths, temp.path(), &id, "/compact Keep the fixture").await;
     let diagnostic = format!(
         "{} {}",
         String::from_utf8_lossy(&output.stdout),
@@ -399,4 +412,109 @@ async fn manual_compact_retries_429_and_commits_once() {
 #[tokio::test]
 async fn manual_compact_persistent_429_reports_failure_and_preserves_history() {
     manual_native_compaction(true).await;
+}
+
+#[tokio::test]
+async fn manual_fallback_replays_the_same_twelve_read_results_as_native() {
+    use axum::{http::StatusCode, response::IntoResponse};
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let capture = requests.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let app = Router::new().fallback(post(move |uri: axum::http::Uri, Json(body): Json<Value>| {
+        let native = uri.path().ends_with("/responses/compact");
+        capture.lock().unwrap().push((native, body["input"].clone()));
+        async move {
+            if native {
+                return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], "busy").into_response();
+            }
+            let event = json!({"type":"response.completed","response":{"id":"local-response","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture summary"}]}],
+                "usage":{"input_tokens":100,"output_tokens":5}}});
+            let delta = json!({"type":"response.output_text.delta","delta":"fixture summary"});
+            ([("content-type","text/event-stream")],format!("event: response.output_text.delta\ndata: {delta}\n\nevent: response.completed\ndata: {event}\n\n")).into_response()
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let id = store.create(temp.path(), "gpt-fixture", "local").unwrap();
+    write_responses_fixture(&paths, &base);
+    let seed = resumed_query(&paths, temp.path(), &id, "Inspect the fixture").await;
+    assert!(
+        seed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+    requests.lock().unwrap().clear();
+
+    store
+        .db
+        .shard_sql(&id, |db| -> anyhow::Result<()> {
+            use deepseek_code_core::db::message_repo::{insert_tool_call, update_message_content};
+            let assistant = get_messages_by_conversation(db, &id)?
+                .into_iter()
+                .rev()
+                .find(|r| r.role == "assistant")
+                .unwrap();
+            update_message_content(db, &assistant.id, &"a".repeat(103_500))?;
+            for index in 0..12 {
+                let output = if index == 0 {
+                    format!("REVIEW_OLD_TOOL {}", "x".repeat(1100))
+                } else {
+                    format!("READ_RESULT_{index}")
+                };
+                insert_tool_call(
+                    db,
+                    &format!("review_read_{index}"),
+                    &assistant.id,
+                    "Read",
+                    Some("{}"),
+                    Some(&output),
+                    false,
+                    index,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let compact = resumed_query(&paths, temp.path(), &id, "/compact review-focus").await;
+    assert!(
+        compact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    let requests = requests.lock().unwrap();
+    let (summary, native) = requests.split_last().unwrap();
+    let budget = deepseek_code_core::config::OrchestrationConfig::max_retries() as usize + 1;
+    assert_eq!(native.len(), budget);
+    assert!(!summary.0);
+    let (instruction, history) = summary.1.as_array().unwrap().split_last().unwrap();
+    assert!(instruction.to_string().contains("review-focus"));
+    for (is_native, input) in native {
+        assert!(*is_native);
+        assert!(
+            input.as_array().unwrap().as_slice() == history,
+            "native and summary serialized different histories"
+        );
+    }
+    let outputs: Vec<_> = history
+        .iter()
+        .filter(|i| i["type"] == "function_call_output")
+        .collect();
+    assert_eq!(outputs.len(), 12);
+    assert_eq!(
+        outputs[0]["output"],
+        deepseek_code_core::services::compaction::microcompact::CLEARED_TOOL_RESULT
+    );
+    assert_eq!(outputs[11]["output"], "READ_RESULT_11");
+    assert_eq!(
+        deepseek_code_core::services::compaction::count(&store.db, &id)
+            .unwrap()
+            .proven(),
+        1
+    );
+    server.abort();
 }

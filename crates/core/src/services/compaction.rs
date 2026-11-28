@@ -673,7 +673,7 @@ pub async fn summarize_part(
         &prepared.transcript,
     );
     let summary = engine
-        .generate_replay_summary(
+        .generate_replay_compaction(
             db.open_session(id)?,
             provider,
             model,
@@ -682,8 +682,10 @@ pub async fn summarize_part(
             prepared.messages.clone(),
             prepared.boundary.clone(),
             options,
+            false,
         )
-        .await?;
+        .await?
+        .text;
     let result = commit_part(db, id, message_id, part, prepared, &summary)?;
     if let Some(record) = &mut record {
         record.finish_partial(

@@ -662,6 +662,25 @@ async fn check_failure(
             }
         );
     }
+    if failure == Failure::Fallback {
+        let native = calls
+            .iter()
+            .find(|(path, _, _)| path.ends_with("/compact"))
+            .unwrap();
+        let summary = calls
+            .iter()
+            .find(|(path, h, _)| {
+                !path.ends_with("/compact")
+                    && h.get("x-dcl-request-kind")
+                        .is_some_and(|v| v == "compaction")
+            })
+            .unwrap();
+        let (_, prefix) = summary.2["input"].as_array().unwrap().split_last().unwrap();
+        assert_eq!(native.2["input"].as_array().unwrap().as_slice(), prefix);
+        assert!(native.2["input"]
+            .to_string()
+            .contains("BULKY_EVIDENCE_MARKER"));
+    }
     if failure == Failure::SoftLimit {
         let main_indexes: Vec<_> = calls
             .iter()

@@ -455,13 +455,9 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(crate::data_layout::data_root_of);
         let generation = async {
-            let input = if crate::services::compaction::native::supports(&self.provider) {
-                shard
-                    .read(|r| r.model_history(&self.provider.provider.api_format))?
-                    .0
-            } else {
-                self.prepare_main_history()?
-            };
+            let input = self.compaction_history(crate::services::compaction::native::supports(
+                &self.provider,
+            ))?;
             self.generate_auto_compaction(&shard, input, window, &focus)
                 .await
         };
@@ -605,85 +601,116 @@ impl ToolLoopExecutor {
         self.reload_history(&shard)
     }
 
-    /// Generate against the caller's exact cut. The caller owns cancellation
-    /// and commits only after one of the two transports has finished.
+    /// Opaque Responses compaction preserves the stored protocol output, including
+    /// structured tool results. A normal turn may render a shorter CLI preview.
+    pub(in crate::native_engine) fn compaction_history(&self, native: bool) -> Result<Vec<Value>> {
+        if native {
+            multimodal::normalize_messages(&self.messages)
+        } else {
+            self.prepare_main_history()
+        }
+    }
+
+    /// The native endpoint and its fallback serialize the same frozen rows.
+    /// Text-only providers retain their normal turn wire for cache-prefix replay.
+    pub(in crate::native_engine) async fn generate_compaction_snapshot(
+        &self,
+        shard: &crate::db::session_store::SessionDb,
+        mut rows: Vec<Value>,
+        summary_only_wire: Option<super::super::followup::WireRequest>,
+        system: &str,
+        focus: &str,
+        has_main_turn: bool,
+        mut options: super::super::request_options::RequestOptions,
+    ) -> Result<crate::services::compaction::GeneratedSummary> {
+        use crate::services::compaction::{checkpoint::Checkpoint, native};
+        rows.retain(|row| row["origin"] != "memory_change");
+        let selected = shard.scoped_stores();
+        options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
+            shard.clone(),
+        ));
+        let (mut wire, native_result) = match summary_only_wire {
+            Some(wire) => (wire, None),
+            None => {
+                self.remove_compaction_indexes(&mut rows);
+                let wire = self.build_mid_turn_summary_wire(&rows)?;
+                let result = native::generate(
+                    &rows,
+                    shard.id(),
+                    &self.provider,
+                    focus,
+                    Some(selected.data_dir()),
+                    options.clone(),
+                )
+                .await;
+                (wire, Some(result))
+            }
+        };
+        let summary = async {
+            wire.allow_text_summary();
+            let opaque = self.opaque_responses_window(&rows, system, shard.id())?;
+            if opaque.is_some() {
+                rows.remove(0);
+            }
+            let mut checkpoint = Checkpoint::open(&selected, shard.id(), &self.provider, system)?;
+            checkpoint.options = options;
+            super::super::generation::replay::summarize_replay(
+                self.provider.clone(),
+                system,
+                rows,
+                focus,
+                has_main_turn,
+                wire,
+                opaque,
+                &mut checkpoint,
+            )
+            .await
+            .map(Into::into)
+        };
+        match native_result {
+            Some(result) => native::with_summary_fallback(result, summary).await,
+            None => summary.await,
+        }
+    }
+
     async fn generate_auto_compaction<M: serde::Serialize>(
         &self,
         shard: &crate::db::session_store::SessionDb,
-        mut input: Vec<Value>,
+        input: Vec<Value>,
         window: &[M],
         focus: &str,
     ) -> Result<(
         crate::services::compaction::GeneratedSummary,
         Option<super::super::request_recording::CompactionRecord>,
     )> {
-        use crate::services::compaction::{checkpoint::Checkpoint, native, PROMPT};
-        input.retain(|row| row["origin"] != "memory_change");
-        self.remove_compaction_indexes(&mut input);
         let mut options = match self.provider.provider.api_format {
             ApiFormat::Anthropic => self.anthropic_client.request_options.clone(),
             ApiFormat::OpenAI => self.openai_client.request_options.clone(),
         }
         .compaction("auto");
-        options.compaction_metrics = Some(super::super::compaction_metrics::MetricsStore(
-            shard.clone(),
-        ));
         let record = super::super::request_recording::CompactionRecord::start(
             &mut options,
             "auto",
             &serde_json::to_string(&input)?,
         );
-        let operation = async {
-            let native = if native::supports(&self.provider) {
-                Some(
-                    native::generate(
-                        &input,
-                        shard.id(),
-                        &self.provider,
-                        focus,
-                        self.search_config_path
-                            .as_deref()
-                            .and_then(crate::data_layout::data_root_of),
-                        options.clone(),
-                    )
-                    .await,
-                )
-            } else {
-                None
-            };
-            let summary = async {
-                let mut wire = self.build_mid_turn_summary_wire(window)?;
-                wire.allow_text_summary();
-                let opaque = self.opaque_responses_window(&input, PROMPT, shard.id())?;
-                if opaque.is_some() {
-                    input.remove(0);
-                }
-                let selected = shard.scoped_stores();
-                let mut checkpoint =
-                    Checkpoint::open(&selected, shard.id(), &self.provider, PROMPT)?;
-                checkpoint.options = options;
-                super::super::generation::replay::summarize_replay(
-                    self.provider.clone(),
-                    PROMPT,
-                    input,
-                    focus,
-                    true,
-                    wire,
-                    opaque,
-                    &mut checkpoint,
-                )
-                .await
-                .map(Into::into)
-            };
-            match native {
-                Some(result) => native::with_summary_fallback(result, summary).await,
-                None => summary.await,
-            }
+        let summary_only_wire = if crate::services::compaction::native::supports(&self.provider) {
+            None
+        } else {
+            Some(self.build_mid_turn_summary_wire(window)?)
         };
+        let generation = self.generate_compaction_snapshot(
+            shard,
+            input,
+            summary_only_wire,
+            crate::services::compaction::PROMPT,
+            focus,
+            true,
+            options,
+        );
         let generated = tokio::select! {
             biased;
             _ = self.event_tx.closed() => anyhow::bail!("Interrupted during automatic compaction"),
-            result = operation => result,
+            result = generation => result,
         }?;
         Ok((generated, record))
     }

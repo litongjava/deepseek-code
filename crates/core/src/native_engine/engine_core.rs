@@ -583,64 +583,39 @@ impl QueryEngine {
         let (mut history, boundary) =
             shard.read(|r| r.model_history_before(&provider.provider.api_format, before))?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
-        let native = if crate::services::compaction::native::supports(&provider) {
-            let mut native_options = options.clone();
-            native_options.compaction_metrics =
-                Some(super::compaction_metrics::MetricsStore(shard.clone()));
-            Some(
-                crate::services::compaction::native::generate(
-                    &history,
-                    session,
-                    &provider,
-                    instructions,
-                    Some(self.db_manager.data_dir()),
-                    native_options,
-                )
-                .await,
-            )
-        } else {
-            None
-        };
-        let summary = async {
-            if shard
-                .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
-                .is_some_and(|host| host.standalone_frontend)
-            {
-                use crate::db::session_store::settings::{Microcompact, MICROCOMPACT};
-                let boundary = boundary.as_deref().unwrap_or_default();
-                let mut state = shard
-                    .repository()
-                    .preference(MICROCOMPACT)?
-                    .filter(|state| state.boundary == boundary)
-                    .unwrap_or_else(|| Microcompact::for_boundary(boundary));
-                crate::services::compaction::microcompact::replay(
-                    &mut history,
-                    &mut state,
-                    provider.model.context_window,
-                )?;
-            }
-            self.generate_replay_summary(
-                shard,
-                provider,
-                model,
-                system,
-                instructions,
-                history,
-                boundary,
-                options,
-            )
-            .await
-            .map(Into::into)
-        };
-        match native {
-            Some(result) => {
-                crate::services::compaction::native::with_summary_fallback(result, summary).await
-            }
-            None => summary.await,
+        if shard
+            .read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?
+            .is_some_and(|host| host.standalone_frontend)
+        {
+            use crate::db::session_store::settings::{Microcompact, MICROCOMPACT};
+            let boundary = boundary.as_deref().unwrap_or_default();
+            let mut state = shard
+                .repository()
+                .preference(MICROCOMPACT)?
+                .filter(|state| state.boundary == boundary)
+                .unwrap_or_else(|| Microcompact::for_boundary(boundary));
+            crate::services::compaction::microcompact::replay(
+                &mut history,
+                &mut state,
+                provider.model.context_window,
+            )?;
         }
+        let native = crate::services::compaction::native::supports(&provider);
+        self.generate_replay_compaction(
+            shard,
+            provider,
+            model,
+            system,
+            instructions,
+            history,
+            boundary,
+            options,
+            native,
+        )
+        .await
     }
 
-    pub(crate) async fn generate_replay_summary(
+    pub(crate) async fn generate_replay_compaction(
         &self,
         shard: crate::db::session_store::SessionDb,
         provider: super::provider_manager::ResolvedProvider,
@@ -649,48 +624,10 @@ impl QueryEngine {
         instructions: &str,
         history: Vec<Value>,
         boundary: Option<String>,
-        mut options: super::request_options::RequestOptions,
-    ) -> Result<String> {
+        options: super::request_options::RequestOptions,
+        native: bool,
+    ) -> Result<crate::services::compaction::GeneratedSummary> {
         let session = shard.id();
-        let selected = shard.scoped_stores();
-        let mut checkpoint = crate::services::compaction::checkpoint::Checkpoint::open(
-            &selected, session, &provider, system,
-        )?;
-        options.compaction_metrics = Some(super::compaction_metrics::MetricsStore(shard.clone()));
-        checkpoint.options = options;
-        let window = history
-            .first()
-            .filter(|m| m["provider_content"]["compaction"] == true)
-            .map(|boundary| -> Result<_> {
-                let mut body = super::provider_runtime::messages::request(
-                    "openai-responses",
-                    &provider,
-                    &serde_json::Value::Null,
-                    vec![serde_json::from_value(boundary.clone())?],
-                    Some(system),
-                    vec![],
-                    0,
-                )?;
-                anyhow::ensure!(
-                    body["input"] == boundary["provider_content"]["items"]
-                        && body["input"]
-                            .as_array()
-                            .is_some_and(|items| items.iter().any(|i| i["type"] == "compaction"
-                                && i["encrypted_content"]
-                                    .as_str()
-                                    .is_some_and(|v| !v.is_empty()))),
-                    "Cannot replay the saved opaque Responses window; original history retained"
-                );
-                if let Some(key) = super::request_identity::prompt_cache_key(Some(session)) {
-                    body["prompt_cache_key"] = key.into();
-                }
-                Ok(super::followup::WireRequest {
-                    api: "openai-responses".into(),
-                    body,
-                    builtin_vision: Some(false),
-                })
-            })
-            .transpose()?;
         let saved_options =
             shard.read(|r| r.setting(crate::db::session_store::settings::MODEL_REQUEST_OPTIONS))?;
         let has_main_turn = saved_options.is_some();
@@ -728,25 +665,23 @@ impl QueryEngine {
             anyhow::bail!("Cannot prepare a summary request");
         };
         turn.executor.restore_request_context().await?;
-        let mut durable = turn.executor.prepare_main_history()?;
-        durable.retain(|row| row["origin"] != "memory_change");
-        // The saved Responses prefix is already carried in the typed window.
-        if window.is_some() {
-            durable.remove(0);
-        }
-        let mut wire = turn.executor.replay_request().await?;
-        wire.allow_text_summary();
-        super::generation::replay::summarize_replay(
-            provider,
-            system,
-            durable,
-            instructions,
-            has_main_turn,
-            wire,
-            window,
-            &mut checkpoint,
-        )
-        .await
+        let durable = turn.executor.compaction_history(native)?;
+        let summary_only_wire = if native {
+            None
+        } else {
+            Some(turn.executor.replay_request().await?)
+        };
+        turn.executor
+            .generate_compaction_snapshot(
+                &shard,
+                durable,
+                summary_only_wire,
+                system,
+                instructions,
+                has_main_turn,
+                options,
+            )
+            .await
     }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
