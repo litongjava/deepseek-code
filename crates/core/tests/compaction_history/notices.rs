@@ -247,3 +247,41 @@ async fn an_unsearchable_write_diff_keeps_the_normal_write_result() -> anyhow::R
     f.finish().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_tool_attached_delivery_is_not_superseded_by_an_unordered_direct_notice(
+) -> anyhow::Result<()> {
+    use deepseek_code_core::services::input_queue::{QueueMode, QueueOrigin};
+    let f = Fixture::new(128_000).await;
+    f.append("user", "Read the log");
+    let message = f.store.append(&f.id, "assistant", "")?;
+    store_result(
+        &f,
+        &message,
+        "read",
+        "Read",
+        json!({"file_path":"log"}),
+        "valid",
+        0,
+    )?;
+    let notice = |summary| {
+        format!("<task-notification>\n<task-id>one</task-id>\n<summary>{summary}</summary>\n</task-notification>")
+    };
+    f.store
+        .append_prompt(&f.id, &notice("DIRECT_UPDATE"), "task_notification")?;
+    let shard = f.store.db.open_session(&f.id)?;
+    shard.enqueue_cli_input(QueueOrigin::TaskNotification, &notice("LATER_DELIVERY"))?;
+    assert!(shard
+        .delivery_owner()?
+        .next_queue(QueueMode::Steer, Some("read"))?
+        .is_some());
+    f.append("user", "Continue");
+    f.append("assistant", "Reviewed.");
+    f.compact().await?;
+    let wire = f.requests.lock().unwrap()[0]["messages"].to_string();
+    for state in ["DIRECT_UPDATE", "LATER_DELIVERY"] {
+        assert_eq!(wire.matches(state).count(), 1);
+    }
+    f.finish().await;
+    Ok(())
+}

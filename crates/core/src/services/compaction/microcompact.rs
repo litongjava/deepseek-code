@@ -195,28 +195,48 @@ pub(crate) fn consolidate(
 
     // Tool-attached steers replay beside their call. Parallel calls can
     // therefore present receipt-backed notices in reverse delivery order.
-    let mut by_task = HashMap::<String, Vec<(usize, Option<i64>)>>::new();
-    for (i, row) in rows.iter().enumerate() {
-        if let Some((id, _)) = notification(row) {
-            let receipt = match row["id"].as_str() {
-                Some(id) => session.delivery_sequence(id)?,
-                None => None,
-            };
-            by_task.entry(id.to_owned()).or_default().push((i, receipt));
-        }
+    struct Occurrence {
+        index: usize,
+        receipt: Option<i64>,
+        message: Option<i64>,
+    }
+    let mut by_task = HashMap::<String, Vec<Occurrence>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let (Some((task, _)), Some(id)) = (notification(row), row["id"].as_str()) else {
+            continue;
+        };
+        let (receipt, message) = session.notification_sequences(id)?;
+        by_task
+            .entry(task.to_owned())
+            .or_default()
+            .push(Occurrence {
+                index,
+                receipt,
+                message,
+            });
     }
     let mut drop_rows = vec![false; rows.len()];
     for notices in by_task.values() {
-        let &(last, receipt) = notices.last().unwrap();
-        // Legacy transcript messages occupy their original slot. Within
-        // the delivery stream, only the shard's receipt sequence is ordered.
-        let newest = if receipt.is_some() {
-            notices.iter().max_by_key(|(_, seq)| *seq).unwrap().0
-        } else {
-            last
-        };
-        for &(i, _) in notices {
-            if i == newest || i >= active_start {
+        let last_receipt = notices.iter().filter_map(|n| n.receipt).max();
+        let last_message = notices.iter().filter_map(|n| n.message).max();
+        let last_direct = notices
+            .iter()
+            .filter(|n| n.receipt.is_none())
+            .filter_map(|n| n.message)
+            .max();
+        for notice in notices {
+            // Direct transcript appends and delivery receipts have independent
+            // sequences. A message-level delivery belongs to both. Tool-attached
+            // deliveries have no transcript row of their own.
+            let newer_delivery = notice.receipt.is_some_and(|r| Some(r) < last_receipt);
+            let compare_message = if notice.receipt.is_some() {
+                last_direct
+            } else {
+                last_message
+            };
+            let newer_message = notice.message.is_some_and(|m| Some(m) < compare_message);
+            let i = notice.index;
+            if i >= active_start || !(newer_delivery || newer_message) {
                 continue;
             }
             let (_, body) = notification(&rows[i]).unwrap();

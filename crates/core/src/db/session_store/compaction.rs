@@ -47,12 +47,14 @@ impl SessionRead<'_> {
             .exists([])?)
     }
 
-    pub(crate) fn delivery_sequence(&self, id: &str) -> Result<Option<i64>> {
+    pub(crate) fn notification_sequences(&self, id: &str) -> Result<(Option<i64>, Option<i64>)> {
         Ok(self
             .0
-            .prepare_cached("SELECT rowid FROM delivery_receipts WHERE delivery_id=?1")?
-            .query_row([id], |row| row.get(0))
-            .optional()?)
+            .prepare_cached(
+                "SELECT (SELECT rowid FROM delivery_receipts WHERE delivery_id=?1),
+                    (SELECT rowid FROM messages WHERE id=?1)",
+            )?
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
     pub(crate) fn compaction_turn_start(&self, id: &str, origin: Option<&str>) -> Result<bool> {
