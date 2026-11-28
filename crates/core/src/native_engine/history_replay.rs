@@ -696,6 +696,10 @@ impl ToolLoopExecutor {
         mid_turn_managed: bool,
         render: fn(&Self, &[(Vec<String>, Vec<String>)]) -> Result<Vec<M>>,
     ) -> Result<bool> {
+        if let Some(error) = self.deferred_compaction.take() {
+            self.handle_compaction_failure(error.into(), window).await?;
+            return Ok(false);
+        }
         let model = &self.provider.model;
         let limit = model
             .context_window

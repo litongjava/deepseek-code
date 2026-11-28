@@ -2743,14 +2743,16 @@ impl Session {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;
         }
-        if completion.admitted_message.is_none() {
+        let deferred_compaction = if completion.admitted_message.is_none() {
             crate::session_commands::prepare_turn(
                 self,
                 self.context_window().await,
                 execution_lease.clone(),
             )
-            .await?;
-        }
+            .await?
+        } else {
+            None
+        };
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
         // Read the history and its compaction boundary in one store view, so the
@@ -2963,22 +2965,13 @@ impl Session {
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote_interrupts = self.remote_interrupts();
-        let mut request = Box::pin(async {
-            if hook_wake {
-                match execution_lease {
-                    Some(lease) => {
-                        self.engine
-                            .send_hook_wake_with_lease(chat_request, false, lease)
-                            .await
-                    }
-                    None => self.engine.send_hook_wake(chat_request, false).await,
-                }
-            } else {
-                self.engine
-                    .send_with_suggestion_capture(chat_request, execution_lease, suggestion_capture)
-                    .await
-            }
-        });
+        let mut request = Box::pin(self.engine.send_cli_turn(
+            chat_request,
+            hook_wake,
+            execution_lease,
+            if hook_wake { None } else { suggestion_capture },
+            deferred_compaction,
+        ));
         let worker_cancel =
             deepseek_code_core::services::background_sessions::wait_for_cancellation();
         tokio::pin!(worker_cancel);

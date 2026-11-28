@@ -1,7 +1,7 @@
 //! Interactive session settings persisted alongside the shared conversation.
 use deepseek_code_core::db::session_store::{settings, SessionAccess, Stores};
 use crate::session::Session;
-use deepseek_code_core::services::compaction::CompactionTracker;
+use deepseek_code_core::services::compaction::{CompactionTracker, GenerationFailure};
 use anyhow::{ensure, Context, Result};
 use deepseek_code_core::runtime::RuntimePaths;
 #[cfg(test)]
@@ -813,7 +813,11 @@ pub async fn reactive_compact(
 
 /// Run before assembling the next request so the compact boundary is reflected
 /// in model_history. The original transcript remains available to Desktop.
-pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>) -> Result<()> {
+pub async fn prepare_turn(
+    session: &Session,
+    context_window: Option<u32>,
+    lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
+) -> Result<Option<GenerationFailure>> {
     // A request the model queued is honored before this prompt even when the
     // history is below the automatic threshold. It is consumed exactly once.
     let shard=session.selected_session()?;
@@ -821,45 +825,38 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>, lease:
         let claim=shard.delivery_under_lease(lease)?.claim_compaction()?;
         if let Some(claim)=claim {
             crate::compaction::notice("Compacting the conversation as the model requested…");
-            compact_automatic(session, &claim.keep, CompactionTracker::for_claim(&claim)).await?;
-            return Ok(());
+            return defer_generation_failure(
+                compact_automatic(session, &claim.keep, CompactionTracker::for_claim(&claim)).await,
+            );
         }
     }
     let settings = load(&session.store.db, &session.id)?;
     let window = match context_window.filter(|v| *v > 0) {
         Some(window) => window,
         // The default needs a window; an explicit percent asks for one.
-        None if settings.autocompact_percent.is_none() => return Ok(()),
+        None if settings.autocompact_percent.is_none() => return Ok(None),
         None => anyhow::bail!("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model"),
     };
     let Some(threshold) = settings.autocompact_tokens(window as u64) else {
-        return Ok(());
+        return Ok(None);
     };
     let (messages, estimated) = active_history(session)?;
     if messages < 2 || (estimated as u64) < threshold {
-        return Ok(());
+        return Ok(None);
     }
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
-    if let Err(error) = compact_automatic(session, "", CompactionTracker::default()).await {
-        if !error.is::<deepseek_code_core::services::compaction::GenerationFailure>() {
-            return Err(error);
-        }
-        let provider = session.selected_provider().await?;
-        let history = session
-            .store
-            .model_history(&session.id, &provider.provider.api_format)?;
-        let input =
-            deepseek_code_core::native_engine::token_counter::TokenCounter::estimate(&history);
-        // Turn preparation can shrink the output reserve to 4096 tokens.
-        let reserve = provider.model.max_tokens.unwrap_or(8192).min(4096);
-        if input > window.saturating_sub(reserve) as usize {
-            anyhow::bail!("Automatic compaction failed. The history is too large for the next request. Resume and run /compact or select a model with a larger context window. Cause: {error}");
-        }
-        crate::compaction::notice(&format!("{error}. Continuing with the existing context."));
+    defer_generation_failure(compact_automatic(session, "", CompactionTracker::default()).await)
+}
+
+// Only a failed generation can be deferred. Cancellation, stale snapshots,
+// permissions and storage errors keep their existing disposition.
+fn defer_generation_failure(result: Result<()>) -> Result<Option<GenerationFailure>> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(error) => error.downcast::<GenerationFailure>().map(Some),
     }
-    Ok(())
 }
 
 /// Both automatic entries retain the commit outcome across cancellation.

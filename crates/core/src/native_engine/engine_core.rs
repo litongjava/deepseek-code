@@ -10,6 +10,7 @@ use crate::permissions::{
     PermissionContext, PermissionManager, PermissionResult,
 };
 use crate::prefetch::PrefetchEngine;
+use crate::services::compaction::GenerationFailure;
 use crate::skills::SkillsManager;
 use anyhow::Context;
 use anyhow::{anyhow, Result};
@@ -716,7 +717,7 @@ impl QueryEngine {
             top_p: None,
         };
         let std::ops::ControlFlow::Continue(mut turn) = self
-            .prepare_turn(shard.clone(), request, TurnPurpose::Summary)
+            .prepare_turn(shard.clone(), request, TurnPurpose::Summary, None)
             .await?
         else {
             anyhow::bail!("Cannot prepare a summary request");
@@ -972,7 +973,7 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, None, None)
+        self.send_with_origin(request, save_response, false, None, None, None)
             .await
     }
 
@@ -982,7 +983,7 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, None, None)
+        self.send_with_origin(request, save_response, true, None, None, None)
             .await
     }
 
@@ -995,7 +996,7 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, Some(lease), None)
+        self.send_with_origin(request, save_response, false, Some(lease), None, None)
             .await
     }
 
@@ -1006,7 +1007,7 @@ impl QueryEngine {
         save_response: bool,
         lease: std::sync::Arc<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, Some(lease), None)
+        self.send_with_origin(request, save_response, true, Some(lease), None, None)
             .await
     }
 
@@ -1017,8 +1018,29 @@ impl QueryEngine {
         lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
         capture: Option<super::suggestion::SuggestionCapture>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, false, false, lease, capture)
+        self.send_cli_turn(request, false, lease, capture, None)
             .await
+    }
+
+    /// The CLI can reach its compaction threshold before assembling the turn.
+    /// Carry that outcome into the first request's actual context check.
+    pub async fn send_cli_turn(
+        &self,
+        request: ChatRequest,
+        hook_wake: bool,
+        lease: Option<Arc<crate::services::session_messages::ExecutionLease>>,
+        capture: Option<super::suggestion::SuggestionCapture>,
+        deferred_compaction: Option<GenerationFailure>,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        self.send_with_origin(
+            request,
+            false,
+            hook_wake,
+            lease,
+            capture,
+            deferred_compaction,
+        )
+        .await
     }
 
     async fn prepare_turn(
@@ -1026,6 +1048,7 @@ impl QueryEngine {
         selected: crate::db::session_store::SessionDb,
         mut request: ChatRequest,
         purpose: TurnPurpose,
+        deferred_compaction: Option<GenerationFailure>,
     ) -> Result<std::ops::ControlFlow<mpsc::Receiver<EngineEvent>, PreparedTurn>> {
         let replay = matches!(purpose, TurnPurpose::Summary);
         let hook_wake = matches!(purpose, TurnPurpose::HookWake);
@@ -1767,6 +1790,9 @@ impl QueryEngine {
                 // fail when too little is left for a useful answer.
                 let remaining = (context as u64).saturating_sub(estimated);
                 if remaining < 4096 && !replay {
+                    if let Some(error) = deferred_compaction {
+                        anyhow::bail!("Automatic compaction failed. The next request cannot fit. Resume and run /compact or select a model with a larger context window. Cause: {error}");
+                    }
                     anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens");
                 }
                 if remaining >= 4096 {
@@ -1886,6 +1912,7 @@ impl QueryEngine {
         } else {
             self.resource_monitor.clone()
         });
+        executor.deferred_compaction = deferred_compaction;
 
         if let Some(memory) = file_memory {
             executor = executor.with_file_memory(memory);
@@ -1916,6 +1943,7 @@ impl QueryEngine {
         hook_wake: bool,
         execution_lease: Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
         suggestion: Option<super::suggestion::SuggestionCapture>,
+        deferred_compaction: Option<GenerationFailure>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         // Every submission owns the session for its whole attempt. A host that
         // already acquired (CLI, SDK, Desktop SSE) shares that same `Arc`; an
@@ -1962,6 +1990,7 @@ impl QueryEngine {
                 } else {
                     TurnPurpose::Submit
                 },
+                deferred_compaction,
             )
             .await?
         {
@@ -2871,7 +2900,7 @@ mod resource_monitor_tests {
 
         let selected = store.db.open_session(&id).unwrap();
         let flow = engine
-            .prepare_turn(selected, request, TurnPurpose::Submit)
+            .prepare_turn(selected, request, TurnPurpose::Submit, None)
             .await
             .unwrap();
         assert!(matches!(flow, std::ops::ControlFlow::Continue(_)));
