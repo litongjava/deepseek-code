@@ -32,6 +32,7 @@ struct Request {
 struct Fixture {
     malformed_first_fragment: bool,
     reject_turn: bool,
+    request_tool: bool,
     requests: Arc<Mutex<Vec<Request>>>,
 }
 
@@ -57,9 +58,10 @@ async fn reply(
         .join("\n");
     let fragment = text.contains("Summarize this consecutive fragment");
     let turn = text.contains(PENDING);
-    let malformed = {
+    let (malformed, request_tool) = {
         let mut requests = fixture.requests.lock().unwrap();
         let malformed = fixture.malformed_first_fragment && fragment && requests.is_empty();
+        let request_tool = fixture.request_tool && turn && !requests.iter().any(|r| r.turn);
         requests.push(Request {
             fragment,
             turn,
@@ -67,7 +69,7 @@ async fn reply(
             has_original: text.contains(PREFIX),
             has_summary: text.contains(SUMMARY),
         });
-        malformed
+        (malformed, request_tool)
     };
     if turn && fixture.reject_turn {
         return (
@@ -79,6 +81,9 @@ async fn reply(
     let data = if malformed {
         // Valid partial text, then two JSON values inside a single data payload.
         frame(json!({"content":"discarded partial"}), Value::Null) + "data: {}\ndata: {}\n\n"
+    } else if request_tool {
+        let call = json!({"index":0,"id":"read-fixture","type":"function","function":{"name":"Read","arguments":json!({"file_path":"missing.txt"}).to_string()}});
+        frame(json!({"tool_calls":[call]}), json!("tool_calls")) + "data: [DONE]\n\n"
     } else {
         let answer = if turn { REPLY } else { SUMMARY };
         let (first, rest) = answer.split_at(1);
@@ -99,6 +104,7 @@ async fn reply(
 enum Scenario {
     Success,
     Fits,
+    FitsAcrossToolStep,
     TooLarge,
     Rejected,
 }
@@ -113,6 +119,7 @@ async fn scenario(case: Scenario) {
     let state = Fixture {
         malformed_first_fragment: case != Scenario::Success,
         reject_turn: case == Scenario::Rejected,
+        request_tool: case == Scenario::FitsAcrossToolStep,
         ..Fixture::default()
     };
     let requests = state.requests.clone();
@@ -234,11 +241,16 @@ async fn scenario(case: Scenario) {
         assert_eq!(requests.len(), 2);
         assert_eq!(turns.len(), 1);
         assert!(turns[0].has_original && boundaries.is_empty());
-    } else if case == Scenario::Fits {
+    } else if matches!(case, Scenario::Fits | Scenario::FitsAcrossToolStep) {
         assert!(status.success(), "{result}");
         assert_eq!(result["result"], REPLY);
-        assert_eq!(requests.len(), 2);
-        assert_eq!(turns.len(), 1);
+        let expected_turns = if case == Scenario::FitsAcrossToolStep {
+            2
+        } else {
+            1
+        };
+        assert_eq!(requests.len(), 1 + expected_turns);
+        assert_eq!(turns.len(), expected_turns);
         assert!(turns[0].has_original && !turns[0].has_summary);
         assert!(boundaries.is_empty());
         assert!(
@@ -284,6 +296,11 @@ async fn malformed_provider_frame_stops_after_one_fragment_post_and_retains_hist
 #[tokio::test]
 async fn failed_pre_turn_summary_sends_the_original_request_when_it_fits() {
     scenario(Scenario::Fits).await;
+}
+
+#[tokio::test]
+async fn pre_turn_compaction_failure_blocks_an_immediate_mid_turn_retry() {
+    scenario(Scenario::FitsAcrossToolStep).await;
 }
 
 #[tokio::test]
