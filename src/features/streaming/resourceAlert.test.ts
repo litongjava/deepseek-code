@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createStreamCallbacks } from './createStreamCallbacks';
+import { createReconnectSystemCallback, createStreamCallbacks } from './createStreamCallbacks';
 import { nextResourceAlertToast } from './resourceAlert';
 
 vi.mock('../../api', () => ({ getConversation: vi.fn(), getContextSize: vi.fn(), getAttachmentUrl: vi.fn(), compactConversation: vi.fn() }));
@@ -29,6 +29,14 @@ function harness(active = true) {
 }
 
 describe('compaction notices', () => {
+  it('shows one notice when MainContent reconnects to a running turn', () => {
+    const { context, updates } = harness();
+    const onSystem = createReconnectSystemCallback({ ...context, convId: 'test', showResourceAlert: vi.fn() });
+    onSystem('compaction_notice', 'Continuing with the existing context.', {});
+    expect(context.setCompactStatus.mock.calls).toEqual([[{ state: 'notice', message: 'Continuing with the existing context.' }]]);
+    expect(updates()).toBe(0);
+  });
+
   it.each(['onSystemEvents', 'onSystemEventsLight'] as const)('%s shows the notice without changing chat history', callback => {
     const { callbacks, context, updates } = harness();
     callbacks[callback]('compaction_notice', 'Continuing with the existing context.', {});
